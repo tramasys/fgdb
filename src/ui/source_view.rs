@@ -1,0 +1,768 @@
+use super::*;
+
+pub(super) fn dynamic_list(empty_text: &str) -> gtk::Box {
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    list.append(&empty_label(empty_text));
+    list
+}
+
+pub(super) fn build_signal_grid(
+    signals: &'static [(&'static str, &'static str)],
+) -> (gtk::Grid, Vec<(gtk::Button, &'static str, &'static str)>) {
+    let grid = gtk::Grid::builder()
+        .column_homogeneous(true)
+        .column_spacing(2)
+        .row_spacing(2)
+        .hexpand(true)
+        .build();
+    let buttons = signals
+        .iter()
+        .enumerate()
+        .map(|(index, &(signal, description))| {
+            let label = if signal == "all" {
+                "ALL SIGNALS"
+            } else {
+                signal
+            };
+            let button = gtk::Button::with_label(label);
+            button.add_css_class("signal-action");
+            button.set_halign(gtk::Align::Fill);
+            button.set_hexpand(true);
+            button.set_tooltip_text(Some(&format!(
+                "{description}\nClick to add a GDB signal catchpoint"
+            )));
+            grid.attach(&button, (index % 3) as i32, (index / 3) as i32, 1, 1);
+            (button, signal, description)
+        })
+        .collect();
+    (grid, buttons)
+}
+
+pub(super) fn empty_label(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.add_css_class("muted");
+    label.set_halign(gtk::Align::Start);
+    label.set_wrap(true);
+    label.set_margin_start(4);
+    label.set_margin_top(3);
+    label
+}
+
+pub(super) fn clear_box(container: &gtk::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+}
+
+pub(super) fn replace_boxed_store<T: 'static>(
+    store: &gio::ListStore,
+    values: impl IntoIterator<Item = T>,
+) {
+    let values = values
+        .into_iter()
+        .map(glib::BoxedAnyObject::new)
+        .collect::<Vec<_>>();
+    store.splice(0, store.n_items(), &values);
+}
+
+pub(super) fn update_selected_frame_buttons(buttons: &[(u32, gtk::Button)], selected: u32) {
+    for (level, button) in buttons {
+        if *level == selected {
+            button.add_css_class("current-debug-item");
+        } else {
+            button.remove_css_class("current-debug-item");
+        }
+    }
+}
+
+pub(super) fn open_source_document(
+    path: &Path,
+    context: SourceOpenContext<'_>,
+) -> Option<SourceDocument> {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if let Some(document) = context
+        .documents
+        .borrow()
+        .iter()
+        .find(|document| document.path == path)
+        .cloned()
+    {
+        if let Some(page) = context.notebook.page_num(&document.page) {
+            context.notebook.set_current_page(Some(page));
+        }
+        document.view.grab_focus();
+        return Some(document);
+    }
+
+    let contents = std::fs::read_to_string(&path).ok()?;
+    let buffer = build_source_buffer(&contents, Some(&path), context.style_scheme);
+    let view = build_source_view(&buffer);
+    let breakpoint_renderer = build_breakpoint_gutter(
+        &path,
+        context.theme,
+        context.breakpoints,
+        context.insert_handler,
+        context.delete_handler,
+        context.enabled_handler,
+    );
+    sourceview5::prelude::ViewExt::gutter(&view, gtk::TextWindowType::Left)
+        .insert(&breakpoint_renderer, -30);
+    let page = gtk::ScrolledWindow::builder()
+        .child(&view)
+        .hexpand(true)
+        .vexpand(true)
+        .build();
+    connect_breakpoint_gutter_context_click(&page, &view, &breakpoint_renderer);
+    let tab = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    tab.add_css_class("source-tab");
+    let tab_label = gtk::Label::new(Some(&source_tab_title(&path)));
+    tab_label.set_ellipsize(pango::EllipsizeMode::Middle);
+    tab_label.set_width_chars(18);
+    tab_label.set_max_width_chars(32);
+    tab_label.set_tooltip_text(Some(&path.to_string_lossy()));
+    let close = gtk::Button::from_icon_name("window-close-symbolic");
+    close.add_css_class("source-tab-close");
+    close.set_tooltip_text(Some("Close source tab"));
+    tab.append(&tab_label);
+    tab.append(&close);
+
+    let document = SourceDocument {
+        path: path.clone(),
+        buffer,
+        view,
+        page,
+        tab,
+        tab_label,
+        breakpoint_renderer,
+    };
+    connect_source_symbol_navigation(&document, context.symbol_handler);
+
+    if context.documents.borrow().is_empty() {
+        while context.notebook.n_pages() > 0 {
+            context.notebook.remove_page(Some(0));
+        }
+    }
+    let page_number = context
+        .notebook
+        .append_page(&document.page, Some(&document.tab));
+    context.notebook.set_tab_reorderable(&document.page, true);
+    context.documents.borrow_mut().push(document.clone());
+    let notebook_for_close = context.notebook.clone();
+    let documents_for_close = Rc::clone(context.documents);
+    let path_for_close = path;
+    let page_for_close = document.page.clone();
+    let style_scheme_for_close = context.style_scheme.cloned();
+    close.connect_clicked(move |_| {
+        let Some(page_number) = notebook_for_close.page_num(&page_for_close) else {
+            return;
+        };
+        notebook_for_close.remove_page(Some(page_number));
+        let empty = {
+            let mut documents = documents_for_close.borrow_mut();
+            documents.retain(|document| document.path != path_for_close);
+            documents.is_empty()
+        };
+        if empty {
+            append_welcome_source(&notebook_for_close, style_scheme_for_close.as_ref());
+        }
+    });
+
+    context.notebook.set_current_page(Some(page_number));
+    document.view.grab_focus();
+    Some(document)
+}
+
+pub(super) fn build_breakpoint_gutter(
+    path: &Path,
+    theme: &Theme,
+    breakpoints: &Rc<RefCell<Vec<Breakpoint>>>,
+    insert_handler: &Rc<RefCell<Option<BreakpointInsertHandler>>>,
+    delete_handler: &Rc<RefCell<Option<StringSelectionHandler>>>,
+    enabled_handler: &Rc<RefCell<Option<BreakpointEnabledHandler>>>,
+) -> BreakpointGutterRenderer {
+    let path_for_data = path.to_path_buf();
+    let breakpoints_for_data = Rc::clone(breakpoints);
+    let inactive_foreground = gtk::gdk::RGBA::parse(theme.colors.muted).expect("theme color");
+    let disabled_foreground = inactive_foreground;
+    let disabled_background = gtk::gdk::RGBA::parse(theme.colors.raised).expect("theme color");
+    let enabled_foreground = gtk::gdk::RGBA::parse(theme.colors.background).expect("theme color");
+    let enabled_background = gtk::gdk::RGBA::parse(theme.colors.success).expect("theme color");
+    let execution_foreground = gtk::gdk::RGBA::parse(theme.colors.warning).expect("theme color");
+    let path = path.to_path_buf();
+    let breakpoints = Rc::clone(breakpoints);
+    let insert_handler = Rc::clone(insert_handler);
+    let delete_handler = Rc::clone(delete_handler);
+    let enabled_handler = Rc::clone(enabled_handler);
+    let renderer = BreakpointGutterRenderer::new(
+        move |buffer, line| {
+            let source_line = line + 1;
+            let executing = i32::try_from(line).ok().is_some_and(|line| {
+                !buffer
+                    .source_marks_at_line(line, Some(EXECUTION_CATEGORY))
+                    .is_empty()
+            });
+            let breakpoint = breakpoints_for_data
+                .borrow()
+                .iter()
+                .find(|breakpoint| {
+                    breakpoint.line == Some(source_line)
+                        && breakpoint
+                            .source_path()
+                            .is_some_and(|reported| source::paths_match(&path_for_data, reported))
+                })
+                .cloned();
+            let text = if executing {
+                format!("›{source_line:>3}")
+            } else {
+                format!("{source_line:>4}")
+            };
+            match breakpoint {
+                Some(breakpoint) if breakpoint.enabled => LineStyle {
+                    text,
+                    foreground: enabled_foreground,
+                    background: Some(enabled_background),
+                },
+                Some(_) => LineStyle {
+                    text,
+                    foreground: disabled_foreground,
+                    background: Some(disabled_background),
+                },
+                None => LineStyle {
+                    text,
+                    foreground: if executing {
+                        execution_foreground
+                    } else {
+                        inactive_foreground
+                    },
+                    background: None,
+                },
+            }
+        },
+        move |renderer, iter, area, button| {
+            let line = u32::try_from(iter.line() + 1).ok();
+            let existing = breakpoints
+                .borrow()
+                .iter()
+                .find(|breakpoint| {
+                    breakpoint.line == line
+                        && breakpoint
+                            .source_path()
+                            .is_some_and(|reported| source::paths_match(&path, reported))
+                })
+                .cloned();
+            match (button, existing) {
+                (1, Some(breakpoint)) => {
+                    if let Some(handler) = delete_handler.borrow().as_ref() {
+                        handler(breakpoint.command_number().to_owned());
+                    }
+                }
+                (1, None) => {
+                    if let (Some(line), Some(handler)) = (line, insert_handler.borrow().as_ref()) {
+                        handler(path.clone(), line);
+                    }
+                }
+                (3, Some(breakpoint)) => {
+                    open_breakpoint_gutter_menu(
+                        renderer,
+                        area,
+                        breakpoint,
+                        Rc::clone(&enabled_handler),
+                        Rc::clone(&delete_handler),
+                    );
+                }
+                _ => {}
+            }
+        },
+    );
+    renderer.set_tooltip_text(Some(
+        "Left-click to add or delete a breakpoint · Right-click for more actions",
+    ));
+    renderer
+}
+
+pub(super) fn connect_breakpoint_gutter_context_click(
+    page: &gtk::ScrolledWindow,
+    view: &sourceview5::View,
+    renderer: &BreakpointGutterRenderer,
+) {
+    let right_click = gtk::GestureClick::new();
+    right_click.set_button(3);
+    right_click.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let weak_view = view.downgrade();
+    let weak_renderer = renderer.downgrade();
+    right_click.connect_pressed(move |gesture, _presses, x, y| {
+        let (Some(view), Some(renderer)) = (weak_view.upgrade(), weak_renderer.upgrade()) else {
+            return;
+        };
+        if x < 0.0 || x >= f64::from(renderer.width()) {
+            return;
+        }
+        let (_, buffer_y) = view.window_to_buffer_coords(
+            gtk::TextWindowType::Left,
+            x.round() as i32,
+            y.round() as i32,
+        );
+        let (iter, _) = view.line_at_y(buffer_y);
+        let area = gtk::gdk::Rectangle::new(0, y.round() as i32, renderer.width(), 1);
+        renderer.activate_at(&iter, &area, 3);
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+    page.add_controller(right_click);
+}
+
+pub(super) fn open_breakpoint_gutter_menu(
+    renderer: &BreakpointGutterRenderer,
+    area: &gtk::gdk::Rectangle,
+    breakpoint: Breakpoint,
+    enabled_handler: Rc<RefCell<Option<BreakpointEnabledHandler>>>,
+    delete_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
+) {
+    let popover = gtk::Popover::builder()
+        .has_arrow(false)
+        .autohide(true)
+        .build();
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    menu.add_css_class("gutter-breakpoint-menu");
+    let title = gtk::Label::new(Some(&format!(
+        "BREAKPOINT #{}",
+        breakpoint.command_number()
+    )));
+    title.add_css_class("section-title");
+    title.set_halign(gtk::Align::Start);
+    menu.append(&title);
+
+    let toggle = gtk::Button::with_label(if breakpoint.enabled {
+        "Disable"
+    } else {
+        "Enable"
+    });
+    let delete = gtk::Button::with_label("Delete");
+    delete.add_css_class("danger-action");
+    menu.append(&toggle);
+    menu.append(&delete);
+    popover.set_child(Some(&menu));
+    popover.set_parent(renderer);
+    popover.set_pointing_to(Some(area));
+
+    let number = breakpoint.command_number().to_owned();
+    let enable = !breakpoint.enabled;
+    let popover_for_toggle = popover.clone();
+    toggle.connect_clicked(move |_| {
+        if let Some(handler) = enabled_handler.borrow().as_ref() {
+            handler(number.clone(), enable);
+        }
+        popover_for_toggle.popdown();
+    });
+    let number = breakpoint.command_number().to_owned();
+    let popover_for_delete = popover.clone();
+    delete.connect_clicked(move |_| {
+        if let Some(handler) = delete_handler.borrow().as_ref() {
+            handler(number.clone());
+        }
+        popover_for_delete.popdown();
+    });
+    popover.connect_closed(|popover| popover.unparent());
+    popover.popup();
+}
+
+pub(super) fn connect_source_symbol_navigation(
+    document: &SourceDocument,
+    symbol_handler: &Rc<RefCell<Option<StringSelectionHandler>>>,
+) {
+    let link_tag = gtk::TextTag::builder()
+        .name("ctrl-source-link")
+        .underline(pango::Underline::Single)
+        .build();
+    document.buffer.tag_table().add(&link_tag);
+    let highlighted_range = Rc::new(RefCell::new(None::<(i32, i32)>));
+    let control_pressed = Rc::new(Cell::new(false));
+    let pointer_position = Rc::new(Cell::new((0.0, 0.0)));
+
+    let motion = gtk::EventControllerMotion::new();
+    let view_for_motion = document.view.clone();
+    let buffer_for_motion = document.buffer.clone();
+    let tag_for_motion = link_tag.clone();
+    let range_for_motion = Rc::clone(&highlighted_range);
+    let control_for_motion = Rc::clone(&control_pressed);
+    let position_for_motion = Rc::clone(&pointer_position);
+    motion.connect_motion(move |controller, x, y| {
+        position_for_motion.set((x, y));
+        let active = control_for_motion.get()
+            || controller
+                .current_event_state()
+                .contains(gtk::gdk::ModifierType::CONTROL_MASK);
+        update_source_link_highlight(
+            &view_for_motion,
+            &buffer_for_motion,
+            &tag_for_motion,
+            &range_for_motion,
+            x,
+            y,
+            active,
+        );
+    });
+    let view_for_leave = document.view.clone();
+    let buffer_for_leave = document.buffer.clone();
+    let tag_for_leave = link_tag.clone();
+    let range_for_leave = Rc::clone(&highlighted_range);
+    motion.connect_leave(move |_| {
+        clear_source_link_highlight(
+            &view_for_leave,
+            &buffer_for_leave,
+            &tag_for_leave,
+            &range_for_leave,
+        );
+    });
+    document.view.add_controller(motion);
+
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let view_for_press = document.view.clone();
+    let buffer_for_press = document.buffer.clone();
+    let tag_for_press = link_tag.clone();
+    let range_for_press = Rc::clone(&highlighted_range);
+    let control_for_press = Rc::clone(&control_pressed);
+    let position_for_press = Rc::clone(&pointer_position);
+    keys.connect_key_pressed(move |_, key, _, _| {
+        if matches!(key, gtk::gdk::Key::Control_L | gtk::gdk::Key::Control_R) {
+            control_for_press.set(true);
+            let (x, y) = position_for_press.get();
+            update_source_link_highlight(
+                &view_for_press,
+                &buffer_for_press,
+                &tag_for_press,
+                &range_for_press,
+                x,
+                y,
+                true,
+            );
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    let view_for_release = document.view.clone();
+    let buffer_for_release = document.buffer.clone();
+    let tag_for_release = link_tag;
+    let range_for_release = Rc::clone(&highlighted_range);
+    keys.connect_key_released(move |_, key, _, _| {
+        if matches!(key, gtk::gdk::Key::Control_L | gtk::gdk::Key::Control_R) {
+            control_pressed.set(false);
+            clear_source_link_highlight(
+                &view_for_release,
+                &buffer_for_release,
+                &tag_for_release,
+                &range_for_release,
+            );
+        }
+    });
+    document.view.add_controller(keys);
+
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(1);
+    gesture.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let view = document.view.clone();
+    let buffer = document.buffer.clone();
+    let symbol_handler = Rc::clone(symbol_handler);
+    gesture.connect_pressed(move |gesture, _, x, y| {
+        if !gesture
+            .current_event_state()
+            .contains(gtk::gdk::ModifierType::CONTROL_MASK)
+        {
+            return;
+        }
+        let (x, y) = view.window_to_buffer_coords(
+            gtk::TextWindowType::Widget,
+            x.round() as i32,
+            y.round() as i32,
+        );
+        let Some(iter) = view.iter_at_location(x, y) else {
+            return;
+        };
+        let Some(symbol) = source_symbol_at_iter(&buffer, &iter) else {
+            return;
+        };
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        if let Some(handler) = symbol_handler.borrow().as_ref() {
+            handler(symbol);
+        }
+    });
+    document.view.add_controller(gesture);
+}
+
+pub(super) fn source_symbol_at_iter(
+    buffer: &sourceview5::Buffer,
+    iter: &gtk::TextIter,
+) -> Option<String> {
+    source_symbol_span_at_iter(buffer, iter).map(|(symbol, _, _)| symbol)
+}
+
+pub(super) fn source_symbol_span_at_iter(
+    buffer: &sourceview5::Buffer,
+    iter: &gtk::TextIter,
+) -> Option<(String, usize, usize)> {
+    if ["comment", "string"]
+        .iter()
+        .any(|context| buffer.iter_has_context_class(iter, context))
+    {
+        return None;
+    }
+    let start = buffer.iter_at_line(iter.line())?;
+    let mut end = start;
+    end.forward_to_line_end();
+    let line = buffer.text(&start, &end, false);
+    source_symbol_span_at_offset(&line, usize::try_from(iter.line_offset()).ok()?)
+}
+
+#[cfg(test)]
+pub(super) fn source_symbol_at_offset(line: &str, offset: usize) -> Option<String> {
+    source_symbol_span_at_offset(line, offset).map(|(symbol, _, _)| symbol)
+}
+
+pub(super) fn source_symbol_span_at_offset(
+    line: &str,
+    offset: usize,
+) -> Option<(String, usize, usize)> {
+    let characters = line.chars().collect::<Vec<_>>();
+    let offset = offset.min(characters.len());
+    let is_symbol_character =
+        |character: char| character.is_alphanumeric() || matches!(character, '_' | ':' | '$' | '~');
+    if offset < characters.len() && !is_symbol_character(characters[offset]) {
+        return None;
+    }
+    let mut left = offset;
+    while left > 0 && is_symbol_character(characters[left - 1]) {
+        left -= 1;
+    }
+    let mut right = offset;
+    while right < characters.len() && is_symbol_character(characters[right]) {
+        right += 1;
+    }
+    let syntax_right = right;
+    while left < right && characters[left] == ':' {
+        left += 1;
+    }
+    while right > left && characters[right - 1] == ':' {
+        right -= 1;
+    }
+    let symbol = characters[left..right].iter().collect::<String>();
+    if !symbol
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_alphabetic() || matches!(character, '_' | '~'))
+        || !is_callable_source_symbol(&symbol, &characters, syntax_right)
+    {
+        return None;
+    }
+    Some((symbol, left, right))
+}
+
+pub(super) fn is_callable_source_symbol(symbol: &str, line: &[char], mut cursor: usize) -> bool {
+    const NON_CALL_KEYWORDS: &[&str] = &[
+        "if", "for", "while", "switch", "catch", "match", "loop", "sizeof", "alignof", "_Alignof",
+        "typeof", "decltype", "typeid", "return",
+    ];
+    let name = symbol.rsplit("::").next().unwrap_or(symbol);
+    if NON_CALL_KEYWORDS.contains(&name) {
+        return false;
+    }
+    while line
+        .get(cursor)
+        .is_some_and(|character| character.is_whitespace())
+    {
+        cursor += 1;
+    }
+    if line.get(cursor) == Some(&'<') {
+        let mut depth = 0_u32;
+        while let Some(character) = line.get(cursor) {
+            match character {
+                '<' => depth += 1,
+                '>' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        cursor += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        if depth != 0 {
+            return false;
+        }
+        while line
+            .get(cursor)
+            .is_some_and(|character| character.is_whitespace())
+        {
+            cursor += 1;
+        }
+    }
+    line.get(cursor) == Some(&'(')
+}
+
+pub(super) fn update_source_link_highlight(
+    view: &sourceview5::View,
+    buffer: &sourceview5::Buffer,
+    tag: &gtk::TextTag,
+    highlighted_range: &Rc<RefCell<Option<(i32, i32)>>>,
+    x: f64,
+    y: f64,
+    active: bool,
+) {
+    clear_source_link_highlight(view, buffer, tag, highlighted_range);
+    if !active {
+        return;
+    }
+    let (x, y) = view.window_to_buffer_coords(
+        gtk::TextWindowType::Widget,
+        x.round() as i32,
+        y.round() as i32,
+    );
+    let Some(iter) = view.iter_at_location(x, y) else {
+        return;
+    };
+    let Some((_, start, end)) = source_symbol_span_at_iter(buffer, &iter) else {
+        return;
+    };
+    let Some(line_start) = buffer.iter_at_line(iter.line()) else {
+        return;
+    };
+    let Ok(start) = i32::try_from(start) else {
+        return;
+    };
+    let Ok(end) = i32::try_from(end) else {
+        return;
+    };
+    let start = line_start.offset() + start;
+    let end = line_start.offset() + end;
+    let start_iter = buffer.iter_at_offset(start);
+    let end_iter = buffer.iter_at_offset(end);
+    buffer.apply_tag(tag, &start_iter, &end_iter);
+    highlighted_range.replace(Some((start, end)));
+    view.set_cursor_from_name(Some("pointer"));
+}
+
+pub(super) fn clear_source_link_highlight(
+    view: &sourceview5::View,
+    buffer: &sourceview5::Buffer,
+    tag: &gtk::TextTag,
+    highlighted_range: &Rc<RefCell<Option<(i32, i32)>>>,
+) {
+    if let Some((start, end)) = highlighted_range.take() {
+        buffer.remove_tag(
+            tag,
+            &buffer.iter_at_offset(start),
+            &buffer.iter_at_offset(end),
+        );
+    }
+    view.set_cursor_from_name(None);
+}
+
+pub(super) fn source_location_score(symbol: &str, location: &SourceLocation) -> u16 {
+    let symbol = without_generic_arguments(symbol);
+    let function = without_generic_arguments(&location.function);
+    let mut score = if function == symbol {
+        100
+    } else if function == format!("__GI___libc_{symbol}") {
+        98
+    } else if function == format!("__GI_{symbol}") {
+        97
+    } else if function == format!("__libc_{symbol}") {
+        95
+    } else if function == format!("__{symbol}") {
+        90
+    } else if function.ends_with(&format!("::{symbol}")) {
+        85
+    } else if function.contains(&symbol) {
+        40
+    } else if symbol
+        .rsplit("::")
+        .next()
+        .is_some_and(|name| function.ends_with(&format!("::{name}")))
+    {
+        30
+    } else {
+        0
+    };
+    let source_stem = Path::new(&location.file)
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    if source_stem == symbol || symbol.ends_with(&format!("::{source_stem}")) {
+        score += 25;
+    } else if source_stem.contains(&symbol) {
+        score += 10;
+    }
+    score
+}
+
+pub(super) fn without_generic_arguments(symbol: &str) -> String {
+    let mut depth = 0_u32;
+    symbol
+        .chars()
+        .filter(|character| match *character {
+            '<' => {
+                depth = depth.saturating_add(1);
+                false
+            }
+            '>' if depth > 0 => {
+                depth -= 1;
+                false
+            }
+            _ => depth == 0,
+        })
+        .collect()
+}
+
+pub(super) fn compact_function_name(symbol: &str) -> String {
+    if symbol.chars().count() <= 56 || !symbol.contains(['<', '>']) {
+        return symbol.to_owned();
+    }
+
+    let mut compact = String::with_capacity(symbol.len().min(80));
+    let mut depth = 0_u32;
+    for character in symbol.chars() {
+        match character {
+            '<' => {
+                if depth == 0 {
+                    compact.push('<');
+                    compact.push('…');
+                }
+                depth = depth.saturating_add(1);
+            }
+            '>' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    compact.push('>');
+                }
+            }
+            _ if depth == 0 => compact.push(character),
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        compact
+    } else {
+        symbol.to_owned()
+    }
+}
+
+pub(super) fn scroll_source_document(document: &SourceDocument, line: u32) {
+    let Ok(line) = i32::try_from(line.saturating_sub(1)) else {
+        return;
+    };
+    let Some(mut iter) = document.buffer.iter_at_line(line) else {
+        return;
+    };
+    document.buffer.place_cursor(&iter);
+    let view = document.view.clone();
+    gtk::glib::idle_add_local_once(move || {
+        view.scroll_to_iter(&mut iter, 0.15, true, 0.0, 0.35);
+    });
+}
+
+pub(super) fn source_tab_title(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("source")
+        .to_owned()
+}

@@ -11,16 +11,11 @@ pub struct LaunchConfig {
 impl LaunchConfig {
     pub fn from_process() -> Result<Self, shell_words::ParseError> {
         let target_arguments = env::args().skip(1).collect();
-        let gdb_executable = env::var("FGDB_GDB")
-            .or_else(|_| env::var("GDB_UI_GDB"))
-            .unwrap_or_else(|_| String::from("gdb"));
-        let gdb_startup_arguments = env::var("FGDB_GDB_ARGS")
-            .or_else(|_| env::var("GDB_UI_GDB_ARGS"))
-            .ok()
-            .map_or_else(
-                || Ok(Vec::new()),
-                |arguments| shell_words::split(&arguments),
-            )?;
+        let gdb_executable = env::var("FGDB_GDB").unwrap_or_else(|_| String::from("gdb"));
+        let gdb_startup_arguments = env::var("FGDB_GDB_ARGS").ok().map_or_else(
+            || Ok(Vec::new()),
+            |arguments| shell_words::split(&arguments),
+        )?;
         let working_directory = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         Ok(Self {
