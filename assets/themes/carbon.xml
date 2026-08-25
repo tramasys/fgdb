@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<style-scheme id="carbon" name="Carbon" version="1.0" parent-scheme="Adwaita-dark">
+  <author>fgdb contributors</author>
+  <description>Compact near-black debugger theme</description>
+
+  <color name="bg" value="#000000"/>
+  <color name="gutter" value="#080808"/>
+  <color name="current" value="#151515"/>
+  <color name="selection" value="#343026"/>
+  <color name="fg" value="#dedede"/>
+  <color name="muted" value="#7d7d7d"/>
+  <color name="faint" value="#484848"/>
+  <color name="accent" value="#b8c2cc"/>
+  <color name="red" value="#cf7777"/>
+  <color name="green" value="#88b89a"/>
+  <color name="yellow" value="#d0b56f"/>
+  <color name="blue" value="#8da8c3"/>
+  <color name="purple" value="#aa94b0"/>
+  <color name="cyan" value="#82aeb3"/>
+
+  <style name="text" foreground="fg" background="bg"/>
+  <style name="selection" foreground="fg" background="selection"/>
+  <style name="selection-unfocused" foreground="fg" background="#29261f"/>
+  <style name="cursor" foreground="accent"/>
+  <style name="secondary-cursor" foreground="muted"/>
+  <style name="current-line" background="current"/>
+  <style name="line-numbers" foreground="muted" background="gutter"/>
+  <style name="line-numbers-border" background="#2b2b2b"/>
+  <style name="current-line-number" foreground="accent" background="current" bold="true"/>
+  <style name="bracket-match" foreground="accent" background="#292929" bold="true"/>
+  <style name="bracket-mismatch" foreground="red" underline="error"/>
+  <style name="right-margin" foreground="faint" background="bg"/>
+  <style name="draw-spaces" foreground="faint"/>
+
+  <style name="def:comment" foreground="muted" italic="true"/>
+  <style name="def:doc-comment-element" foreground="green"/>
+  <style name="def:string" foreground="green"/>
+  <style name="def:character" foreground="green"/>
+  <style name="def:special-char" foreground="cyan"/>
+  <style name="def:number" foreground="yellow"/>
+  <style name="def:boolean" foreground="yellow"/>
+  <style name="def:constant" foreground="yellow"/>
+  <style name="def:statement" foreground="blue" bold="true"/>
+  <style name="def:type" foreground="cyan"/>
+  <style name="def:preprocessor" foreground="purple"/>
+  <style name="def:function" foreground="accent"/>
+  <style name="def:identifier" foreground="fg"/>
+  <style name="def:note" foreground="blue"/>
+  <style name="def:warning" foreground="yellow"/>
+  <style name="def:error" foreground="red"/>
+</style-scheme>

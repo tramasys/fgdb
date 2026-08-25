@@ -1,0 +1,24 @@
+[package]
+name = "fgdb"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "A native, terminal-friendly GDB frontend"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11.4", features = ["v4_22"] }
+glib-unix = "0.22.8"
+nix = { version = "0.31.3", features = ["fs", "term"] }
+shell-words = "1.1.1"
+sourceview5 = { version = "0.11.2", features = ["gtk_v4_18", "v5_18"] }
+vte4 = { version = "0.10.0", features = ["gtk_v4_18", "v0_84"] }
+
+[profile.release]
+lto = "thin"
+strip = "debuginfo"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

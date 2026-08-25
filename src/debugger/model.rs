@@ -1,0 +1,869 @@
+use super::mi::{MiListItem, MiRecord, MiResult, MiValue, result_field};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackFrame {
+    pub level: u32,
+    pub address: String,
+    pub function: String,
+    pub architecture: Option<String>,
+    pub file: Option<String>,
+    pub fullname: Option<String>,
+    pub line: Option<u32>,
+}
+
+impl StackFrame {
+    pub fn source_path(&self) -> Option<&str> {
+        self.fullname.as_deref().or(self.file.as_deref())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Variable {
+    pub name: String,
+    pub value: String,
+    pub type_name: Option<String>,
+    pub varobj: Option<String>,
+    pub num_children: usize,
+    pub has_more: bool,
+}
+
+impl Variable {
+    pub fn is_pointer(&self) -> bool {
+        self.type_name
+            .as_deref()
+            .is_some_and(|type_name| type_name.contains('*') || type_name.starts_with('&'))
+    }
+
+    pub fn can_expand(&self) -> bool {
+        self.varobj.is_some()
+            && (self.num_children > 0
+                || (self.is_pointer()
+                    && !matches!(
+                        self.value.trim(),
+                        "0" | "0x0" | "nullptr" | "<not available>" | "<optimized out>"
+                    )))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Register {
+    pub name: String,
+    pub value: String,
+    pub pointer_chain: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum MemoryKind {
+    Code,
+    Heap,
+    Stack,
+    Writable,
+    ReadOnly,
+    Rwx,
+    String,
+    #[default]
+    None,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryBlock {
+    pub begin: u64,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFile {
+    pub file: String,
+    pub fullname: Option<String>,
+    pub line: u32,
+}
+
+impl SourceFile {
+    pub fn source_path(&self) -> &str {
+        self.fullname.as_deref().unwrap_or(&self.file)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StackEntry {
+    pub address: u64,
+    pub offset: usize,
+    pub index: usize,
+    pub value: String,
+    pub pointer_chain: Vec<String>,
+    pub address_registers: Vec<String>,
+    pub value_registers: Vec<String>,
+    pub return_frame: Option<u32>,
+    pub memory_kind: MemoryKind,
+    pub region: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ThreadInfo {
+    pub id: String,
+    pub target_id: String,
+    pub name: Option<String>,
+    pub state: String,
+    pub core: Option<String>,
+    pub frame: Option<StackFrame>,
+    pub pc_symbol: Option<String>,
+    pub current: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Instruction {
+    pub address: String,
+    pub function: String,
+    pub offset: String,
+    pub opcodes: Option<String>,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Breakpoint {
+    pub number: String,
+    pub kind: String,
+    pub enabled: bool,
+    pub condition: Option<String>,
+    pub address: Option<String>,
+    pub function: Option<String>,
+    pub file: Option<String>,
+    pub fullname: Option<String>,
+    pub line: Option<u32>,
+    pub original_location: Option<String>,
+}
+
+impl Breakpoint {
+    pub fn source_path(&self) -> Option<&str> {
+        self.fullname.as_deref().or(self.file.as_deref())
+    }
+
+    pub fn is_watchpoint(&self) -> bool {
+        self.kind.contains("watchpoint")
+    }
+
+    pub fn is_catchpoint(&self) -> bool {
+        self.kind.contains("catchpoint")
+    }
+
+    pub fn command_number(&self) -> &str {
+        self.number
+            .split_once('.')
+            .map_or(self.number.as_str(), |(root, _)| root)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceLocation {
+    pub function: String,
+    pub file: String,
+    pub fullname: Option<String>,
+    pub line: u32,
+}
+
+impl SourceLocation {
+    pub fn source_path(&self) -> &str {
+        self.fullname.as_deref().unwrap_or(&self.file)
+    }
+}
+
+pub fn stack_frames(record: &MiRecord) -> Vec<StackFrame> {
+    record
+        .field("stack")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| match item {
+            MiListItem::Result(result) if result.name == "frame" => result.value.as_tuple(),
+            MiListItem::Value(MiValue::Tuple(tuple)) => Some(tuple.as_slice()),
+            _ => None,
+        })
+        .filter_map(stack_frame)
+        .collect()
+}
+
+pub fn current_frame(record: &MiRecord) -> Option<StackFrame> {
+    record
+        .field("frame")
+        .and_then(MiValue::as_tuple)
+        .and_then(stack_frame)
+}
+
+pub fn variables(record: &MiRecord) -> Vec<Variable> {
+    record
+        .field("variables")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .filter_map(|tuple| {
+            Some(Variable {
+                name: constant(tuple, "name")?.to_owned(),
+                value: constant(tuple, "value")
+                    .unwrap_or("<not available>")
+                    .to_owned(),
+                type_name: owned_constant(tuple, "type"),
+                varobj: None,
+                num_children: 0,
+                has_more: false,
+            })
+        })
+        .collect()
+}
+
+pub fn variable_object(record: &MiRecord, display_name: &str) -> Option<Variable> {
+    Some(Variable {
+        name: display_name.to_owned(),
+        value: record
+            .field("value")
+            .and_then(MiValue::as_const)
+            .unwrap_or("<not available>")
+            .to_owned(),
+        type_name: record
+            .field("type")
+            .and_then(MiValue::as_const)
+            .map(str::to_owned),
+        varobj: Some(record.field("name")?.as_const()?.to_owned()),
+        num_children: record
+            .field("numchild")
+            .and_then(MiValue::as_const)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0),
+        has_more: record.field("has_more").and_then(MiValue::as_const) == Some("1"),
+    })
+}
+
+pub fn variable_children(record: &MiRecord) -> Vec<Variable> {
+    record
+        .field("children")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .filter_map(|tuple| {
+            let expression = constant(tuple, "exp").or_else(|| constant(tuple, "name"))?;
+            Some(Variable {
+                name: variable_child_name(expression),
+                value: constant(tuple, "value")
+                    .unwrap_or("<not available>")
+                    .to_owned(),
+                type_name: owned_constant(tuple, "type"),
+                varobj: owned_constant(tuple, "name"),
+                num_children: constant(tuple, "numchild")
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
+                has_more: constant(tuple, "has_more") == Some("1"),
+            })
+        })
+        .collect()
+}
+
+fn variable_child_name(expression: &str) -> String {
+    if !expression.is_empty()
+        && expression
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        format!("[{expression}]")
+    } else {
+        expression.to_owned()
+    }
+}
+
+pub fn variable_path_expression(record: &MiRecord) -> Option<String> {
+    record
+        .field("path_expr")
+        .and_then(MiValue::as_const)
+        .map(str::to_owned)
+}
+
+pub fn register_names(record: &MiRecord) -> Vec<String> {
+    record
+        .field("register-names")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| match item {
+            MiListItem::Value(value) => value.as_const(),
+            MiListItem::Result(_) => None,
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+pub fn compact_register_numbers(names: &[String]) -> Vec<usize> {
+    let has_64_bit_x86_registers = names
+        .iter()
+        .any(|name| matches!(name.as_str(), "rax" | "rip"));
+    let preferred = names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| {
+            is_primary_register(name) && !(has_64_bit_x86_registers && is_32_bit_x86_register(name))
+        })
+        .map(|(number, _)| number)
+        .collect::<Vec<_>>();
+    if !preferred.is_empty() {
+        let vector_prefix = if names.iter().any(|name| vector_register(name, "zmm")) {
+            "zmm"
+        } else if names.iter().any(|name| vector_register(name, "ymm")) {
+            "ymm"
+        } else {
+            "xmm"
+        };
+        return names
+            .iter()
+            .enumerate()
+            .filter(|(number, name)| {
+                preferred.contains(number)
+                    || vector_register(name, vector_prefix)
+                    || floating_point_register(name)
+            })
+            .map(|(number, _)| number)
+            .take(96)
+            .collect();
+    }
+
+    names
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| !name.is_empty() && !is_vector_register(name))
+        .map(|(number, _)| number)
+        .take(64)
+        .collect()
+}
+
+fn vector_register(name: &str, prefix: &str) -> bool {
+    name.strip_prefix(prefix).is_some_and(|index| {
+        !index.is_empty() && index.chars().all(|character| character.is_ascii_digit())
+    })
+}
+
+fn floating_point_register(name: &str) -> bool {
+    matches!(
+        name,
+        "fctrl" | "fstat" | "ftag" | "fiseg" | "fioff" | "foseg" | "fooff" | "fop" | "mxcsr"
+    ) || vector_register(name, "st")
+}
+
+fn is_32_bit_x86_register(name: &str) -> bool {
+    matches!(
+        name,
+        "eax" | "ebx" | "ecx" | "edx" | "esp" | "ebp" | "esi" | "edi" | "eip"
+    )
+}
+
+fn is_primary_register(name: &str) -> bool {
+    matches!(
+        name,
+        "rax"
+            | "rbx"
+            | "rcx"
+            | "rdx"
+            | "rsp"
+            | "rbp"
+            | "rsi"
+            | "rdi"
+            | "rip"
+            | "r8"
+            | "r9"
+            | "r10"
+            | "r11"
+            | "r12"
+            | "r13"
+            | "r14"
+            | "r15"
+            | "eflags"
+            | "rflags"
+            | "cs"
+            | "ss"
+            | "ds"
+            | "es"
+            | "fs"
+            | "gs"
+            | "fs_base"
+            | "gs_base"
+            | "eax"
+            | "ebx"
+            | "ecx"
+            | "edx"
+            | "esp"
+            | "ebp"
+            | "esi"
+            | "edi"
+            | "eip"
+            | "cpsr"
+    )
+}
+
+fn is_vector_register(name: &str) -> bool {
+    [
+        "st", "mm", "xmm", "ymm", "zmm", "v", "q", "d", "s", "h", "b",
+    ]
+    .iter()
+    .any(|prefix| {
+        name.strip_prefix(prefix).is_some_and(|suffix| {
+            suffix
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit())
+        })
+    })
+}
+
+pub fn registers(record: &MiRecord, names: &[String]) -> Vec<Register> {
+    record
+        .field("register-values")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .filter_map(|tuple| {
+            let number = constant(tuple, "number")?.parse::<usize>().ok()?;
+            let name = names.get(number)?.to_owned();
+            if name.is_empty() {
+                return None;
+            }
+            Some(Register {
+                name,
+                value: constant(tuple, "value")
+                    .unwrap_or("<not available>")
+                    .to_owned(),
+                pointer_chain: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+pub fn evaluated_value(record: &MiRecord) -> Option<String> {
+    record
+        .field("value")
+        .and_then(MiValue::as_const)
+        .map(str::to_owned)
+}
+
+pub fn inferior_pid(record: &MiRecord) -> Option<u32> {
+    record
+        .field("groups")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .find_map(|tuple| constant(tuple, "pid").and_then(|pid| pid.parse().ok()))
+}
+
+pub fn memory_block(record: &MiRecord) -> Option<MemoryBlock> {
+    let tuple = record
+        .field("memory")
+        .and_then(MiValue::as_list)?
+        .iter()
+        .filter_map(tuple_from_item)
+        .next()?;
+    let begin = parse_hex(constant(tuple, "begin")?)?;
+    let contents = constant(tuple, "contents")?;
+    let (pairs, remainder) = contents.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return None;
+    }
+    let bytes = pairs
+        .iter()
+        .map(|pair| {
+            std::str::from_utf8(pair)
+                .ok()
+                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(MemoryBlock { begin, bytes })
+}
+
+fn parse_hex(value: &str) -> Option<u64> {
+    u64::from_str_radix(value.strip_prefix("0x")?, 16).ok()
+}
+
+pub fn threads(record: &MiRecord) -> Vec<ThreadInfo> {
+    let current = record
+        .field("current-thread-id")
+        .and_then(MiValue::as_const);
+    record
+        .field("threads")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .filter_map(|tuple| {
+            let id = constant(tuple, "id")?.to_owned();
+            Some(ThreadInfo {
+                current: current == Some(id.as_str()),
+                id,
+                target_id: constant(tuple, "target-id").unwrap_or("unknown").to_owned(),
+                name: owned_constant(tuple, "name"),
+                state: constant(tuple, "state").unwrap_or("unknown").to_owned(),
+                core: owned_constant(tuple, "core"),
+                frame: result_field(tuple, "frame")
+                    .and_then(MiValue::as_tuple)
+                    .and_then(stack_frame),
+                pc_symbol: None,
+            })
+        })
+        .collect()
+}
+
+pub fn instructions(record: &MiRecord) -> Vec<Instruction> {
+    record
+        .field("asm_insns")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .filter_map(|tuple| {
+            Some(Instruction {
+                address: constant(tuple, "address")?.to_owned(),
+                function: constant(tuple, "func-name").unwrap_or("??").to_owned(),
+                offset: constant(tuple, "offset").unwrap_or("0").to_owned(),
+                opcodes: owned_constant(tuple, "opcodes"),
+                text: constant(tuple, "inst")?.to_owned(),
+            })
+        })
+        .collect()
+}
+
+pub fn breakpoints(record: &MiRecord) -> Vec<Breakpoint> {
+    let Some(table) = record.field("BreakpointTable").and_then(MiValue::as_tuple) else {
+        return Vec::new();
+    };
+    result_field(table, "body")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .flat_map(expand_breakpoint)
+        .collect()
+}
+
+pub fn inserted_breakpoints(record: &MiRecord) -> Vec<Breakpoint> {
+    record
+        .field("bkpt")
+        .and_then(MiValue::as_tuple)
+        .map(expand_breakpoint)
+        .unwrap_or_default()
+}
+
+pub fn executable_source_lines(record: &MiRecord) -> Vec<u32> {
+    let mut lines = record
+        .field("lines")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .filter_map(|tuple| constant(tuple, "line")?.parse().ok())
+        .filter(|line| *line > 0)
+        .collect::<Vec<_>>();
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+}
+
+pub fn source_locations(record: &MiRecord) -> Vec<SourceLocation> {
+    let Some(symbols) = record.field("symbols").and_then(MiValue::as_tuple) else {
+        return Vec::new();
+    };
+    result_field(symbols, "debug")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .flat_map(|file| {
+            let filename = constant(file, "filename").unwrap_or("source").to_owned();
+            let fullname = owned_constant(file, "fullname");
+            result_field(file, "symbols")
+                .and_then(MiValue::as_list)
+                .into_iter()
+                .flatten()
+                .filter_map(tuple_from_item)
+                .filter_map(move |symbol| {
+                    Some(SourceLocation {
+                        function: constant(symbol, "name")?.to_owned(),
+                        file: filename.clone(),
+                        fullname: fullname.clone(),
+                        line: constant(symbol, "line")?.parse().ok()?,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+pub fn current_source(record: &MiRecord) -> Option<SourceFile> {
+    Some(SourceFile {
+        file: record.field("file")?.as_const()?.to_owned(),
+        fullname: record
+            .field("fullname")
+            .and_then(MiValue::as_const)
+            .map(str::to_owned),
+        line: record.field("line")?.as_const()?.parse().ok()?,
+    })
+}
+
+fn expand_breakpoint(tuple: &[MiResult]) -> Vec<Breakpoint> {
+    let parent = breakpoint(tuple);
+    let mut locations: Vec<_> = result_field(tuple, "locations")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .filter_map(breakpoint)
+        .collect();
+    if locations.is_empty() {
+        parent.into_iter().collect()
+    } else {
+        if let Some(parent) = parent {
+            for location in &mut locations {
+                if location.condition.is_none() {
+                    location.condition.clone_from(&parent.condition);
+                }
+                if location.original_location.is_none() {
+                    location
+                        .original_location
+                        .clone_from(&parent.original_location);
+                }
+            }
+        }
+        locations
+    }
+}
+
+fn breakpoint(tuple: &[MiResult]) -> Option<Breakpoint> {
+    Some(Breakpoint {
+        number: constant(tuple, "number")?.to_owned(),
+        kind: constant(tuple, "type").unwrap_or("breakpoint").to_owned(),
+        enabled: constant(tuple, "enabled") != Some("n"),
+        condition: owned_constant(tuple, "cond"),
+        address: owned_constant(tuple, "addr"),
+        function: owned_constant(tuple, "func"),
+        file: owned_constant(tuple, "file"),
+        fullname: owned_constant(tuple, "fullname"),
+        line: constant(tuple, "line").and_then(|line| line.parse().ok()),
+        original_location: owned_constant(tuple, "original-location")
+            .or_else(|| owned_constant(tuple, "what"))
+            .or_else(|| owned_constant(tuple, "exp")),
+    })
+}
+
+fn stack_frame(tuple: &[MiResult]) -> Option<StackFrame> {
+    Some(StackFrame {
+        level: constant(tuple, "level")?.parse().ok()?,
+        address: constant(tuple, "addr").unwrap_or("?").to_owned(),
+        function: constant(tuple, "func").unwrap_or("??").to_owned(),
+        architecture: owned_constant(tuple, "arch"),
+        file: owned_constant(tuple, "file"),
+        fullname: owned_constant(tuple, "fullname"),
+        line: constant(tuple, "line").and_then(|line| line.parse().ok()),
+    })
+}
+
+fn tuple_from_item(item: &MiListItem) -> Option<&[MiResult]> {
+    match item {
+        MiListItem::Value(MiValue::Tuple(tuple)) => Some(tuple),
+        MiListItem::Result(result) => result.value.as_tuple(),
+        MiListItem::Value(MiValue::Const(_) | MiValue::List(_)) => None,
+    }
+}
+
+fn constant<'a>(tuple: &'a [MiResult], name: &str) -> Option<&'a str> {
+    result_field(tuple, name).and_then(MiValue::as_const)
+}
+
+fn owned_constant(tuple: &[MiResult], name: &str) -> Option<String> {
+    constant(tuple, name).map(str::to_owned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        breakpoints, compact_register_numbers, current_source, inferior_pid, inserted_breakpoints,
+        instructions, memory_block, register_names, registers, source_locations, stack_frames,
+        threads, variable_children, variable_object, variable_path_expression, variables,
+    };
+    use crate::debugger::mi::parse_record;
+
+    #[test]
+    fn converts_debugger_models() {
+        let frames = stack_frames(
+            &parse_record(r#"1^done,stack=[frame={level="0",addr="0x12",func="main",file="a.c",fullname="/tmp/a.c",line="9"}]"#).unwrap(),
+        );
+        assert_eq!(frames[0].function, "main");
+        assert_eq!(frames[0].line, Some(9));
+
+        let locals =
+            variables(&parse_record(r#"2^done,variables=[{name="answer",value="42"}]"#).unwrap());
+        assert_eq!(locals[0].value, "42");
+
+        let names =
+            register_names(&parse_record(r#"3^done,register-names=["rax","rbx"]"#).unwrap());
+        let values = registers(
+            &parse_record(r#"4^done,register-values=[{number="1",value="0xff"}]"#).unwrap(),
+            &names,
+        );
+        assert_eq!(values[0].name, "rbx");
+        assert_eq!(
+            compact_register_numbers(&[
+                String::from("rax"),
+                String::from("xmm0"),
+                String::from("rip"),
+                String::from("eax"),
+                String::new(),
+            ]),
+            [0, 1, 2]
+        );
+        assert_eq!(
+            compact_register_numbers(&[
+                String::from("rax"),
+                String::from("xmm0"),
+                String::from("ymm0"),
+                String::from("zmm0"),
+                String::from("st0"),
+                String::from("mxcsr"),
+            ]),
+            [0, 3, 4, 5]
+        );
+
+        let thread_list = threads(&parse_record(r#"5^done,threads=[{id="1",target-id="Thread 1",name="main",state="stopped",core="3",frame={level="0",addr="0x12",func="main"}}],current-thread-id="1""#).unwrap());
+        assert!(thread_list[0].current);
+        assert_eq!(thread_list[0].core.as_deref(), Some("3"));
+
+        let disassembly = instructions(&parse_record(r#"6^done,asm_insns=[{address="0x12",func-name="main",offset="0",opcodes="90",inst="nop"}]"#).unwrap());
+        assert_eq!(disassembly[0].text, "nop");
+
+        let process = parse_record(
+            r#"7^done,groups=[{id="i1",type="process",pid="1234",executable="/tmp/a"}]"#,
+        )
+        .unwrap();
+        assert_eq!(inferior_pid(&process), Some(1234));
+
+        let memory = memory_block(
+            &parse_record(
+                r#"8^done,memory=[{begin="0x1000",offset="0x0",end="0x1004",contents="0102feff"}]"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(memory.begin, 0x1000);
+        assert_eq!(memory.bytes, [1, 2, 0xfe, 0xff]);
+    }
+
+    #[test]
+    fn converts_breakpoint_table() {
+        let record = parse_record(r#"5^done,BreakpointTable={nr_rows="1",body=[bkpt={number="1",type="breakpoint",disp="keep",enabled="y",addr="0x1",func="main",file="a.c",fullname="/tmp/a.c",line="12",cond="count == 4",original-location="main"}]}"#).unwrap();
+        let parsed_breakpoints = breakpoints(&record);
+        assert_eq!(parsed_breakpoints.len(), 1);
+        assert_eq!(parsed_breakpoints[0].number, "1");
+        assert_eq!(parsed_breakpoints[0].kind, "breakpoint");
+        assert_eq!(parsed_breakpoints[0].line, Some(12));
+        assert_eq!(
+            parsed_breakpoints[0].condition.as_deref(),
+            Some("count == 4")
+        );
+        let mut child_location = parsed_breakpoints[0].clone();
+        child_location.number = String::from("4.2");
+        assert_eq!(child_location.command_number(), "4");
+
+        let watchpoints = breakpoints(&parse_record(r#"6^done,BreakpointTable={nr_rows="1",body=[bkpt={number="2",type="hw watchpoint",disp="keep",enabled="y",what="counter",cond="counter > 3"}]}"#).unwrap());
+        assert!(watchpoints[0].is_watchpoint());
+        assert_eq!(watchpoints[0].original_location.as_deref(), Some("counter"));
+        assert_eq!(watchpoints[0].condition.as_deref(), Some("counter > 3"));
+    }
+
+    #[test]
+    fn converts_inserted_breakpoints_and_executable_lines() {
+        let inserted = inserted_breakpoints(
+            &parse_record(
+                r#"8^done,bkpt={number="3",type="breakpoint",enabled="y",addr="0x401100",func="main",file="main.c",fullname="/tmp/main.c",line="12"}"#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(inserted.len(), 1);
+        assert_eq!(inserted[0].number, "3");
+        assert_eq!(inserted[0].line, Some(12));
+
+        assert_eq!(
+            super::executable_source_lines(
+                &parse_record(
+                    r#"9^done,lines=[{pc="0x1",line="12"},{pc="0x2",line="10"},{pc="0x3",line="12"},{pc="0x4",line="0"}]"#,
+                )
+                .unwrap()
+            ),
+            [10, 12]
+        );
+    }
+
+    #[test]
+    fn converts_typed_variable_objects_and_children() {
+        let root = parse_record(
+            r#"10^done,name="var1",numchild="2",value="{x = 1, nested = {...}}",type="struct Demo",has_more="0""#,
+        )
+        .unwrap();
+        let root = variable_object(&root, "demo").unwrap();
+        assert_eq!(root.name, "demo");
+        assert_eq!(root.type_name.as_deref(), Some("struct Demo"));
+        assert_eq!(root.varobj.as_deref(), Some("var1"));
+        assert_eq!(root.num_children, 2);
+        assert!(root.can_expand());
+
+        let children = variable_children(
+            &parse_record(
+                r#"11^done,numchild="2",children=[child={name="var1.x",exp="x",numchild="0",type="int",value="1"},child={name="var1.nested",exp="nested",numchild="1",type="struct Inner",value="{...}",has_more="0"}],has_more="0""#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].name, "x");
+        assert_eq!(children[0].type_name.as_deref(), Some("int"));
+        assert_eq!(children[1].varobj.as_deref(), Some("var1.nested"));
+        assert!(children[1].can_expand());
+
+        let array_children = variable_children(
+            &parse_record(
+                r#"13^done,numchild="1",children=[child={name="var3.0",exp="0",numchild="0",type="int",value="7"}],has_more="0""#,
+            )
+            .unwrap(),
+        );
+        assert_eq!(array_children[0].name, "[0]");
+
+        let path = parse_record(r#"12^done,path_expr="demo.next""#).unwrap();
+        assert_eq!(
+            variable_path_expression(&path).as_deref(),
+            Some("demo.next")
+        );
+
+        let null_pointer = super::Variable {
+            name: String::from("pointer"),
+            value: String::from("0x0"),
+            type_name: Some(String::from("Demo *")),
+            varobj: Some(String::from("var2")),
+            num_children: 0,
+            has_more: false,
+        };
+        assert!(!null_pointer.can_expand());
+    }
+
+    #[test]
+    fn converts_symbol_source_locations() {
+        let record = parse_record(r#"7^done,symbols={debug=[{filename="src/main.rs",fullname="/tmp/src/main.rs",symbols=[{line="14",name="demo::run",type="void ()",description="void demo::run();"}]}]}"#).unwrap();
+        let locations = source_locations(&record);
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].function, "demo::run");
+        assert_eq!(locations[0].source_path(), "/tmp/src/main.rs");
+        assert_eq!(locations[0].line, 14);
+    }
+
+    #[test]
+    fn converts_current_executable_source() {
+        let record = parse_record(
+            r#"8^done,line="4",file="src/main.c",fullname="/tmp/project/src/main.c",macro-info="0""#,
+        )
+        .unwrap();
+        let source = current_source(&record).unwrap();
+        assert_eq!(source.source_path(), "/tmp/project/src/main.c");
+        assert_eq!(source.line, 4);
+    }
+}
