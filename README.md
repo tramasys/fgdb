@@ -11,14 +11,17 @@ A native GDB frontend built with Rust, GTK4, GtkSourceView, and VTE. It keeps a 
 - Syntax-highlighted, reorderable source tabs with per-file scroll and cursor state
 - Multi-file picker, DevTools-style clickable breakpoint line numbers with enabled/disabled states, and Ctrl-click source-symbol navigation with link highlighting and definition ranking through GDB debug info
 - Automatic initial-source detection from executable debug information, source-tab navigation, and a current-instruction arrow when GDB stops
-- Live call stack, threads, typed expandable variable trees with explicit loading/error rows, compact signal-catchpoint controls with custom POSIX signals, instruction context, conditional breakpoints, hardware watchpoints, and category-safe bulk deletion controls
+- Live call stack, detailed threads, loaded-module/symbol status, typed expandable variable trees with explicit loading/error rows, compact signal and C++/Rust/process catchpoint controls, instruction context, conditional breakpoints, hardware watchpoints, and category-safe bulk deletion controls
 - Branch/call classification, guessed x86-64 call arguments, and memory previews for the current instruction
+- EFLAGS/RFLAGS-based x86 branch prediction and common Linux x86-64 syscall/ABI argument decoding
+- A categorized GEF tools menu for `xinfo`, `telescope`, `dt`, syscall arguments, future calls, memory maps, binary protections, unwind data, TLS, stack canaries, GOT/PLT, deeper heap inspection, errno, fork behavior, file descriptors, and the ELF auxiliary vector; results stay in the real terminal session
+- Truly lazy expandable locals with full-name click targets, keyboard expansion, and no child queries until a value is opened
 - Grouped GEF-style general, segment, vector, and floating-point registers with symbols, pointer chains, ASCII hints, loop detection, and decoded flags
 - Click-to-edit scalar registers, a bitwise flags editor, and typed per-lane SIMD editors for integer and floating-point views
 - Scoped, bounded automatic value previews that avoid scanning large strings or arrays while preserving the terminal's GDB/GEF print settings
 - Persistent memory watches with independently selectable address, raw-value, and decoded-value columns, byte/word/pointer views, and a native `/proc` memory map
 - Native GEF-style context for code, source, stack memory, threads, and trace/backtrace data
-- Draggable workspace columns, a vertically resizable locals/instructions split, a collapsible session panel, and a terminal visibility toggle
+- Draggable workspace columns, a vertically resizable locals/instructions split, remembered window size and pane positions across launches, a collapsible session panel, and a terminal visibility toggle
 - Resizable and reorderable instruction columns for full addresses, opcodes, operands, bytes, and symbols
 - Centralized theme tokens and terminal palette
 - Optional Vulkan-backed GTK renderer

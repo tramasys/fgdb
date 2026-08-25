@@ -10,12 +10,18 @@ use gtk::{gio, glib, pango, prelude::*};
 use sourceview5::prelude::*;
 use vte4::prelude::*;
 
+mod layout;
+mod value;
+
+use value::{architecture_pointer_bits, integer_decimal_value};
+
 use crate::{
     breakpoint_gutter::{BreakpointGutterRenderer, LineStyle},
     config::LaunchConfig,
     debugger::{
-        Breakpoint, Instruction, MemoryBlock, MemoryKind, MiClient, Register, SourceFile,
-        SourceLocation, StackEntry, StackFrame, ThreadInfo, Variable, context::MemoryRegion,
+        Breakpoint, Instruction, MemoryBlock, MemoryKind, MiClient, Register, SharedLibrary,
+        SourceFile, SourceLocation, StackEntry, StackFrame, ThreadInfo, Variable,
+        context::MemoryRegion,
     },
     source,
     theme::Theme,
@@ -76,16 +82,94 @@ const MORE_SIGNALS: &[(&str, &str)] = &[
 type FrameSelectionHandler = Rc<dyn Fn(u32)>;
 type StringSelectionHandler = Rc<dyn Fn(String)>;
 type VariableAssignmentHandler = Rc<dyn Fn(Variable, String)>;
-type VariableChildrenHandler = Rc<dyn Fn(Variable)>;
+type VariableChildrenHandler = Rc<dyn Fn(Variable, usize)>;
 type VectorAssignmentHandler = Rc<dyn Fn(String, String, Vec<(usize, String)>)>;
 type BreakpointConditionHandler = Rc<dyn Fn(String, Option<String>)>;
 type BreakpointEnabledHandler = Rc<dyn Fn(String, bool)>;
 type BreakpointBulkDeleteHandler = Rc<dyn Fn(Vec<String>)>;
 type BreakpointInsertHandler = Rc<dyn Fn(PathBuf, u32)>;
 type SignalCatchpointHandler = Rc<dyn Fn(String, Option<String>)>;
+type EventCatchpointHandler = Rc<dyn Fn(EventCatchpoint, Option<String>)>;
 type WatchpointInsertHandler = Rc<dyn Fn(String, WatchpointAccess)>;
 type MemoryWatchHandler = Rc<dyn Fn(u64, String, usize)>;
 type InstructionMemoryHandler = Rc<dyn Fn(String)>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EventCatchpoint {
+    CxxThrow,
+    CxxCatch,
+    RustPanic,
+    Exec,
+    Fork,
+    Syscall,
+}
+
+impl EventCatchpoint {
+    const ALL: [(Self, &'static str, &'static str); 6] = [
+        (
+            Self::CxxThrow,
+            "C++ throw",
+            "Stop when a C++ exception is thrown",
+        ),
+        (
+            Self::CxxCatch,
+            "C++ catch",
+            "Stop when a C++ exception is caught",
+        ),
+        (
+            Self::RustPanic,
+            "Rust panic",
+            "Stop at Rust's panic runtime entry point",
+        ),
+        (Self::Exec, "exec", "Stop when the inferior calls exec"),
+        (Self::Fork, "fork", "Stop when the inferior forks"),
+        (
+            Self::Syscall,
+            "syscall",
+            "Stop at every system call; this can trigger very frequently",
+        ),
+    ];
+
+    pub(crate) const fn command(self) -> &'static str {
+        match self {
+            Self::CxxThrow => "catch throw",
+            Self::CxxCatch => "catch catch",
+            Self::RustPanic => "break rust_panic",
+            Self::Exec => "catch exec",
+            Self::Fork => "catch fork",
+            Self::Syscall => "catch syscall",
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::CxxThrow => "C++ throw",
+            Self::CxxCatch => "C++ catch",
+            Self::RustPanic => "Rust panic",
+            Self::Exec => "exec",
+            Self::Fork => "fork",
+            Self::Syscall => "syscall",
+        }
+    }
+
+    fn matches(self, breakpoint: &Breakpoint) -> bool {
+        match self {
+            Self::CxxThrow => breakpoint.catch_type.as_deref() == Some("throw"),
+            Self::CxxCatch => breakpoint.catch_type.as_deref() == Some("catch"),
+            Self::RustPanic => {
+                !breakpoint.is_catchpoint()
+                    && breakpoint
+                        .original_location
+                        .as_deref()
+                        .or(breakpoint.function.as_deref())
+                        .is_some_and(|name| name == "rust_panic")
+            }
+            Self::Exec => breakpoint.catch_type.as_deref() == Some("exec"),
+            Self::Fork => breakpoint.catch_type.as_deref() == Some("fork"),
+            Self::Syscall => breakpoint.catch_type.as_deref() == Some("syscall"),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct InstructionRowData {
@@ -106,6 +190,8 @@ struct VariableNode {
     children: gio::ListStore,
     children_loaded: Rc<Cell<bool>>,
     children_loading: Rc<Cell<bool>>,
+    expansion_observer_attached: Rc<Cell<bool>>,
+    load_more: Option<(Variable, usize)>,
     placeholder: bool,
 }
 
@@ -116,6 +202,8 @@ impl VariableNode {
             children: gio::ListStore::new::<glib::BoxedAnyObject>(),
             children_loaded: Rc::new(Cell::new(false)),
             children_loading: Rc::new(Cell::new(false)),
+            expansion_observer_attached: Rc::new(Cell::new(false)),
+            load_more: None,
             placeholder: false,
         }
     }
@@ -133,6 +221,36 @@ impl VariableNode {
             children: gio::ListStore::new::<glib::BoxedAnyObject>(),
             children_loaded: Rc::new(Cell::new(true)),
             children_loading: Rc::new(Cell::new(false)),
+            expansion_observer_attached: Rc::new(Cell::new(true)),
+            load_more: None,
+            placeholder: true,
+        }
+    }
+
+    fn load_more(parent: Variable, next: usize) -> Self {
+        let remaining = parent.num_children.saturating_sub(next);
+        let detail = if remaining == 0 {
+            String::from("more children are available")
+        } else {
+            format!(
+                "{remaining} child{} remaining",
+                if remaining == 1 { "" } else { "ren" }
+            )
+        };
+        Self {
+            variable: Variable {
+                name: String::from("Load more…"),
+                value: detail,
+                type_name: None,
+                varobj: None,
+                num_children: 0,
+                has_more: false,
+            },
+            children: gio::ListStore::new::<glib::BoxedAnyObject>(),
+            children_loaded: Rc::new(Cell::new(true)),
+            children_loading: Rc::new(Cell::new(false)),
+            expansion_observer_attached: Rc::new(Cell::new(true)),
+            load_more: Some((parent, next)),
             placeholder: true,
         }
     }
@@ -202,6 +320,16 @@ struct MemoryWatchView {
     output_addresses: gtk::Label,
     output_values: gtk::Label,
     output_decoded: gtk::Label,
+}
+
+#[derive(Clone)]
+struct StackWordInspector {
+    root: gtk::Box,
+    address: gtk::Label,
+    raw: gtk::Label,
+    interpretation: gtk::Label,
+    role: gtk::Label,
+    region: gtk::Label,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -358,7 +486,9 @@ pub struct Ui {
     pub next_instruction_button: gtk::Button,
     pub step_instruction_button: gtk::Button,
     pub finish_button: gtk::Button,
-    pub until_button: gtk::MenuButton,
+    pub until_button: gtk::ToggleButton,
+    until_popover: gtk::Popover,
+    pub gef_tools_button: gtk::ToggleButton,
     pub status_label: gtk::Label,
     pub status_detail: gtk::Label,
     debug_state_panels: Vec<gtk::Widget>,
@@ -371,11 +501,13 @@ pub struct Ui {
     frame_buttons: Rc<RefCell<Vec<(u32, gtk::Button)>>>,
     selected_frame_level: Rc<Cell<u32>>,
     threads_list: gtk::Box,
+    modules_list: gtk::Box,
     locals_store: gio::ListStore,
     locals_selection: gtk::SingleSelection,
     locals_view: gtk::ColumnView,
     locals_empty: gtk::Label,
     locals_edit_button: gtk::Button,
+    target_pointer_bits: Rc<Cell<u32>>,
     instructions_title: gtk::Label,
     instructions_store: gio::ListStore,
     instructions_selection: gtk::SingleSelection,
@@ -395,6 +527,8 @@ pub struct Ui {
     breakpoints_list: gtk::Box,
     delete_all_breakpoints_button: gtk::Button,
     delete_all_watchpoints_button: gtk::Button,
+    delete_all_catchpoints_button: gtk::Button,
+    event_catchpoint_buttons: Vec<(gtk::Button, EventCatchpoint)>,
     watchpoint_expression: gtk::Entry,
     watchpoint_access: gtk::DropDown,
     watchpoint_add_button: gtk::Button,
@@ -417,9 +551,11 @@ pub struct Ui {
     memory_format: gtk::DropDown,
     memory_add_button: gtk::Button,
     memory_watch_handler: Rc<RefCell<Option<MemoryWatchHandler>>>,
+    layout: layout::Persistence,
     breakpoints: Rc<RefCell<Vec<Breakpoint>>>,
     previous_registers: Rc<RefCell<HashMap<String, String>>>,
-    register_refresh_generation: Rc<Cell<u64>>,
+    stop_refresh_generation: Rc<Cell<u64>>,
+    thread_refresh_generation: Rc<Cell<u64>>,
     breakpoint_refresh_generation: Rc<Cell<u64>>,
     command_pending: Rc<Cell<bool>>,
     source_roots: Rc<Vec<PathBuf>>,
@@ -435,6 +571,7 @@ pub struct Ui {
     breakpoint_enabled_handler: Rc<RefCell<Option<BreakpointEnabledHandler>>>,
     breakpoint_bulk_delete_handler: Rc<RefCell<Option<BreakpointBulkDeleteHandler>>>,
     signal_catchpoint_handler: Rc<RefCell<Option<SignalCatchpointHandler>>>,
+    event_catchpoint_handler: Rc<RefCell<Option<EventCatchpointHandler>>>,
     watchpoint_insert_handler: Rc<RefCell<Option<WatchpointInsertHandler>>>,
     source_symbol_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
     thread_stop_reason: Rc<RefCell<Option<String>>>,
@@ -455,7 +592,9 @@ struct Topbar {
     next_instruction_button: gtk::Button,
     step_instruction_button: gtk::Button,
     finish_button: gtk::Button,
-    until_button: gtk::MenuButton,
+    until_button: gtk::ToggleButton,
+    until_popover: gtk::Popover,
+    gef_tools_button: gtk::ToggleButton,
     until_actions: Vec<(gtk::Button, &'static str)>,
     until_condition_entry: gtk::Entry,
     until_condition_button: gtk::Button,
@@ -464,11 +603,13 @@ struct Topbar {
 
 struct Workspace {
     root: gtk::Paned,
+    layout_panes: Vec<layout::Pane>,
     terminal_panel: gtk::Box,
     status_detail: gtk::Label,
     debug_state_panels: Vec<gtk::Widget>,
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
+    modules_list: gtk::Box,
     locals_store: gio::ListStore,
     locals_selection: gtk::SingleSelection,
     locals_view: gtk::ColumnView,
@@ -489,6 +630,8 @@ struct Workspace {
     breakpoints_list: gtk::Box,
     delete_all_breakpoints_button: gtk::Button,
     delete_all_watchpoints_button: gtk::Button,
+    delete_all_catchpoints_button: gtk::Button,
+    event_catchpoint_buttons: Vec<(gtk::Button, EventCatchpoint)>,
     watchpoint_expression: gtk::Entry,
     watchpoint_access: gtk::DropDown,
     watchpoint_add_button: gtk::Button,
@@ -509,6 +652,7 @@ struct Workspace {
 
 struct Inspector {
     root: gtk::Notebook,
+    context_split: gtk::Paned,
     status_detail: gtk::Label,
     stale_panels: Vec<gtk::Widget>,
     locals_store: gio::ListStore,
@@ -531,6 +675,8 @@ struct Inspector {
     breakpoints_list: gtk::Box,
     delete_all_breakpoints_button: gtk::Button,
     delete_all_watchpoints_button: gtk::Button,
+    delete_all_catchpoints_button: gtk::Button,
+    event_catchpoint_buttons: Vec<(gtk::Button, EventCatchpoint)>,
     watchpoint_expression: gtk::Entry,
     watchpoint_access: gtk::DropDown,
     watchpoint_add_button: gtk::Button,
@@ -553,6 +699,7 @@ struct LeftSidebar {
     root: gtk::Box,
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
+    modules_list: gtk::Box,
 }
 
 impl Ui {
@@ -563,10 +710,12 @@ impl Ui {
             .default_width(1380)
             .default_height(820)
             .build();
+        window.add_css_class("fgdb-window");
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("debugger-root");
-        let topbar = build_topbar(config);
+        let terminal = build_terminal(theme);
+        let topbar = build_topbar(config, &window, &terminal);
         window.set_titlebar(Some(&topbar.root));
 
         let source_style_scheme = theme.source_style_scheme();
@@ -574,14 +723,15 @@ impl Ui {
         let source_documents = Rc::new(RefCell::new(Vec::new()));
         let breakpoints = Rc::new(RefCell::new(Vec::new()));
         let variable_children_handler = Rc::new(RefCell::new(None));
+        let target_pointer_bits = Rc::new(Cell::new(usize::BITS));
 
-        let terminal = build_terminal(theme);
         let workspace = build_workspace(
             config,
             theme,
             &source_notebook,
             &terminal,
             &variable_children_handler,
+            &target_pointer_bits,
         );
         root.append(&workspace.root);
         root.append(&workspace.status_detail);
@@ -590,6 +740,7 @@ impl Ui {
             .terminal_toggle_button
             .connect_toggled(move |button| terminal_panel.set_visible(button.is_active()));
         window.set_child(Some(&root));
+        let layout = layout::Persistence::install(&window, workspace.layout_panes.clone());
 
         let ui = Self {
             window,
@@ -604,6 +755,8 @@ impl Ui {
             step_instruction_button: topbar.step_instruction_button,
             finish_button: topbar.finish_button,
             until_button: topbar.until_button,
+            until_popover: topbar.until_popover,
+            gef_tools_button: topbar.gef_tools_button,
             status_label: topbar.status_label,
             status_detail: workspace.status_detail,
             debug_state_panels: workspace.debug_state_panels,
@@ -616,11 +769,13 @@ impl Ui {
             frame_buttons: Rc::new(RefCell::new(Vec::new())),
             selected_frame_level: Rc::new(Cell::new(0)),
             threads_list: workspace.threads_list,
+            modules_list: workspace.modules_list,
             locals_store: workspace.locals_store,
             locals_selection: workspace.locals_selection,
             locals_view: workspace.locals_view,
             locals_empty: workspace.locals_empty,
             locals_edit_button: workspace.locals_edit_button,
+            target_pointer_bits,
             instructions_title: workspace.instructions_title,
             instructions_store: workspace.instructions_store,
             instructions_selection: workspace.instructions_selection,
@@ -640,6 +795,8 @@ impl Ui {
             breakpoints_list: workspace.breakpoints_list,
             delete_all_breakpoints_button: workspace.delete_all_breakpoints_button,
             delete_all_watchpoints_button: workspace.delete_all_watchpoints_button,
+            delete_all_catchpoints_button: workspace.delete_all_catchpoints_button,
+            event_catchpoint_buttons: workspace.event_catchpoint_buttons,
             watchpoint_expression: workspace.watchpoint_expression,
             watchpoint_access: workspace.watchpoint_access,
             watchpoint_add_button: workspace.watchpoint_add_button,
@@ -662,9 +819,11 @@ impl Ui {
             memory_format: workspace.memory_format,
             memory_add_button: workspace.memory_add_button,
             memory_watch_handler: Rc::new(RefCell::new(None)),
+            layout,
             breakpoints,
             previous_registers: Rc::new(RefCell::new(HashMap::new())),
-            register_refresh_generation: Rc::new(Cell::new(0)),
+            stop_refresh_generation: Rc::new(Cell::new(0)),
+            thread_refresh_generation: Rc::new(Cell::new(0)),
             breakpoint_refresh_generation: Rc::new(Cell::new(0)),
             command_pending: Rc::new(Cell::new(false)),
             source_roots: Rc::new(source::roots(config)),
@@ -680,6 +839,7 @@ impl Ui {
             breakpoint_enabled_handler: Rc::new(RefCell::new(None)),
             breakpoint_bulk_delete_handler: Rc::new(RefCell::new(None)),
             signal_catchpoint_handler: Rc::new(RefCell::new(None)),
+            event_catchpoint_handler: Rc::new(RefCell::new(None)),
             watchpoint_insert_handler: Rc::new(RefCell::new(None)),
             source_symbol_handler: Rc::new(RefCell::new(None)),
             thread_stop_reason: Rc::new(RefCell::new(None)),
@@ -693,8 +853,13 @@ impl Ui {
         ui.connect_memory_controls();
         ui.connect_watchpoint_controls();
         ui.connect_breakpoint_bulk_controls();
+        ui.connect_event_catchpoint_controls();
         ui.connect_keyboard_shortcuts();
         ui
+    }
+
+    pub fn save_layout(&self) {
+        self.layout.save();
     }
 
     pub fn connect_debug_controls(self: &Rc<Self>, client: &Rc<MiClient>) {
@@ -756,10 +921,10 @@ impl Ui {
         for (button, command) in &self.until_actions {
             let client = Rc::clone(client);
             let command = *command;
-            let until_button = self.until_button.clone();
+            let until_popover = self.until_popover.clone();
             let weak_ui = Rc::downgrade(self);
             button.connect_clicked(move |_| {
-                until_button.popdown();
+                until_popover.popdown();
                 let Some(ui) = weak_ui.upgrade() else {
                     return;
                 };
@@ -776,14 +941,14 @@ impl Ui {
         }
         let condition_client = Rc::clone(client);
         let condition_entry = self.until_condition_entry.clone();
-        let until_button = self.until_button.clone();
+        let until_popover = self.until_popover.clone();
         let weak_ui = Rc::downgrade(self);
         self.until_condition_button.connect_clicked(move |_| {
             let condition = condition_entry.text().trim().to_owned();
             if condition.is_empty() {
                 return;
             }
-            until_button.popdown();
+            until_popover.popdown();
             let command = format!("exec-until cond {condition}");
             let command = format!(
                 "-interpreter-exec console {}",
@@ -972,6 +1137,8 @@ impl Ui {
         self.step_instruction_button.set_sensitive(can_move);
         self.finish_button.set_sensitive(can_move);
         self.until_button.set_sensitive(can_move);
+        self.gef_tools_button
+            .set_sensitive(ready && !running && !pending);
         self.locals_view.set_sensitive(can_move);
         self.locals_edit_button.set_sensitive(
             can_move
@@ -989,12 +1156,23 @@ impl Ui {
         for (button, _, _) in &self.signal_buttons {
             button.set_sensitive(can_edit_stop_points);
         }
+        for (button, _) in &self.event_catchpoint_buttons {
+            button.set_sensitive(can_edit_stop_points);
+        }
         self.signal_entry.set_sensitive(can_edit_stop_points);
         self.signal_add_button.set_sensitive(
             can_edit_stop_points && normalized_signal_name(&self.signal_entry.text()).is_some(),
         );
         self.delete_all_signal_catchpoints_button.set_sensitive(
-            can_edit_stop_points && breakpoints.iter().any(Breakpoint::is_catchpoint),
+            can_edit_stop_points && breakpoints.iter().any(Breakpoint::is_signal_catchpoint),
+        );
+        self.delete_all_catchpoints_button.set_sensitive(
+            can_edit_stop_points
+                && breakpoints.iter().any(|breakpoint| {
+                    EventCatchpoint::ALL
+                        .iter()
+                        .any(|(event, _, _)| event.matches(breakpoint))
+                }),
         );
         self.delete_all_breakpoints_button.set_sensitive(
             can_edit_stop_points
@@ -1037,7 +1215,7 @@ impl Ui {
             .replace(Some(Rc::new(handler)));
     }
 
-    pub fn set_variable_children_handler(&self, handler: impl Fn(Variable) + 'static) {
+    pub fn set_variable_children_handler(&self, handler: impl Fn(Variable, usize) + 'static) {
         self.variable_children_handler
             .replace(Some(Rc::new(handler)));
     }
@@ -1078,6 +1256,14 @@ impl Ui {
             .replace(Some(Rc::new(handler)));
     }
 
+    pub fn set_event_catchpoint_handler(
+        &self,
+        handler: impl Fn(EventCatchpoint, Option<String>) + 'static,
+    ) {
+        self.event_catchpoint_handler
+            .replace(Some(Rc::new(handler)));
+    }
+
     pub fn set_signal_catchpoint_handler(
         &self,
         handler: impl Fn(String, Option<String>) + 'static,
@@ -1113,23 +1299,27 @@ impl Ui {
         }
 
         for frame in frames {
-            let location = frame.line.map_or_else(
+            let location_text = frame.line.map_or_else(
                 || frame.address.clone(),
                 |line| {
                     format!(
                         "{}:{line}",
-                        frame.file.as_deref().unwrap_or(frame.address.as_str())
+                        frame.source_path().unwrap_or(frame.address.as_str())
                     )
                 },
             );
             let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            let function = gtk::Label::new(Some(&format!("#{}  {}", frame.level, frame.function)));
+            let displayed_function = compact_function_name(&frame.function);
+            let function =
+                gtk::Label::new(Some(&format!("#{}  {displayed_function}", frame.level)));
             function.set_halign(gtk::Align::Start);
             function.set_ellipsize(pango::EllipsizeMode::End);
-            let location = gtk::Label::new(Some(&location));
+            function.set_tooltip_text(Some(&frame.function));
+            let location = gtk::Label::new(Some(&location_text));
             location.add_css_class("muted");
             location.set_halign(gtk::Align::Start);
             location.set_ellipsize(pango::EllipsizeMode::Middle);
+            location.set_tooltip_text(Some(&location_text));
             row.append(&function);
             row.append(&location);
             let button = gtk::Button::builder().child(&row).build();
@@ -1156,7 +1346,10 @@ impl Ui {
     }
 
     pub fn show_locals(&self, variables: &[Variable]) {
-        self.locals_store.remove_all();
+        replace_boxed_store(
+            &self.locals_store,
+            variables.iter().cloned().map(VariableNode::new),
+        );
         self.locals_selection
             .set_selected(gtk::INVALID_LIST_POSITION);
         if variables.is_empty() {
@@ -1164,72 +1357,106 @@ impl Ui {
             self.locals_edit_button.set_sensitive(false);
         } else {
             self.locals_empty.set_visible(false);
-            for variable in variables {
-                self.locals_store
-                    .append(&glib::BoxedAnyObject::new(VariableNode::new(
-                        variable.clone(),
-                    )));
-            }
             self.locals_selection.set_selected(0);
             self.locals_edit_button.set_sensitive(true);
         }
     }
 
     pub fn show_locals_for_refresh(&self, generation: u64, variables: &[Variable]) {
-        if self.register_refresh_generation.get() == generation {
+        if self.is_stop_refresh_current(generation) {
             self.show_locals(variables);
         }
     }
 
-    pub fn show_variable_children(&self, parent: &str, variables: &[Variable]) {
-        let Some(node) = find_variable_node(&self.locals_store, parent) else {
-            return;
+    pub fn show_variable_children_page(
+        &self,
+        parent: &Variable,
+        from: usize,
+        variables: &[Variable],
+        has_more: bool,
+    ) -> bool {
+        let Some(parent_name) = parent.varobj.as_deref() else {
+            return false;
         };
-        node.children.remove_all();
-        for variable in variables {
-            node.children
-                .append(&glib::BoxedAnyObject::new(VariableNode::new(
-                    variable.clone(),
-                )));
+        let Some(node) = find_variable_node(&self.locals_store, parent_name) else {
+            return false;
+        };
+        if from != 0 {
+            remove_load_more_rows(&node.children);
+        }
+        let mut additions = variables
+            .iter()
+            .cloned()
+            .map(VariableNode::new)
+            .map(glib::BoxedAnyObject::new)
+            .collect::<Vec<_>>();
+        if has_more {
+            additions.push(glib::BoxedAnyObject::new(VariableNode::load_more(
+                parent.clone(),
+                from.saturating_add(variables.len()),
+            )));
+        }
+        if from == 0 {
+            node.children.splice(0, node.children.n_items(), &additions);
+        } else {
+            node.children.extend_from_slice(&additions);
         }
         node.children_loading.set(false);
         node.children_loaded.set(true);
+        true
+    }
+
+    pub fn show_variable_children(&self, parent: &str, variables: &[Variable]) -> bool {
+        let Some(node) = find_variable_node(&self.locals_store, parent) else {
+            return false;
+        };
+        let parent = node.variable.clone();
+        self.show_variable_children_page(&parent, 0, variables, false)
+    }
+
+    pub fn has_variable_object(&self, varobj: &str) -> bool {
+        find_variable_node(&self.locals_store, varobj).is_some()
     }
 
     pub fn show_variable_children_error(&self, parent: &str, error: &str) {
         let Some(node) = find_variable_node(&self.locals_store, parent) else {
             return;
         };
-        node.children.remove_all();
-        node.children
-            .append(&glib::BoxedAnyObject::new(VariableNode::placeholder(
+        node.children.splice(
+            0,
+            node.children.n_items(),
+            &[glib::BoxedAnyObject::new(VariableNode::placeholder(
                 "unavailable",
                 error,
-            )));
+            ))],
+        );
         node.children_loading.set(false);
         node.children_loaded.set(true);
     }
 
     pub fn variable_object_names(&self) -> Vec<String> {
-        (0..self.locals_store.n_items())
-            .filter_map(|position| {
-                let item = self
-                    .locals_store
-                    .item(position)?
-                    .downcast::<glib::BoxedAnyObject>()
-                    .ok()?;
-                item.borrow::<VariableNode>().variable.varobj.clone()
-            })
-            .collect()
+        let mut names = Vec::new();
+        collect_variable_object_roots(&self.locals_store, None, &mut names);
+        names
     }
 
     fn connect_local_activation(&self) {
         let window = self.window.clone();
         let selection = self.locals_selection.clone();
         let handler = Rc::clone(&self.variable_assignment_handler);
+        let children_handler = Rc::clone(&self.variable_children_handler);
         self.locals_view.connect_activate(move |_, position| {
-            if let Some(variable) = variable_at(&selection, position) {
-                open_variable_editor(&window, variable, Rc::clone(&handler));
+            let Some((row, node)) = variable_node_at(&selection, position) else {
+                return;
+            };
+            if node.load_more.is_some() {
+                request_next_variable_page_if_needed(&node, &children_handler);
+            } else if !node.placeholder {
+                if row.is_expandable() {
+                    row.set_expanded(!row.is_expanded());
+                } else {
+                    open_variable_editor(&window, node.variable, Rc::clone(&handler));
+                }
             }
         });
 
@@ -1324,10 +1551,14 @@ impl Ui {
             name.set_halign(gtk::Align::Start);
             name.set_ellipsize(pango::EllipsizeMode::End);
             let detail_widget = thread_detail_widget(thread, reason);
-            detail_widget.set_tooltip_text(Some(&format!(
-                "{}\nGDB target: {}",
-                detail, thread.target_id
-            )));
+            let full_symbol = thread.frame.as_ref().map(|frame| frame.function.as_str());
+            detail_widget.set_tooltip_text(Some(&match full_symbol {
+                Some(symbol) => format!(
+                    "{detail}\nFull symbol: {symbol}\nGDB target: {}",
+                    thread.target_id
+                ),
+                None => format!("{detail}\nGDB target: {}", thread.target_id),
+            }));
             row.append(&heading);
             row.append(&name);
             row.append(&detail_widget);
@@ -1347,13 +1578,88 @@ impl Ui {
         }
     }
 
+    pub fn show_modules(&self, modules: &[SharedLibrary]) {
+        clear_box(&self.modules_list);
+        if modules.is_empty() {
+            self.modules_list
+                .append(&empty_label("No shared libraries loaded"));
+            return;
+        }
+
+        for module in modules {
+            let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            row.add_css_class("module-row");
+            let heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            let name = Path::new(&module.target_name)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&module.target_name);
+            let name = gtk::Label::new(Some(name));
+            name.add_css_class("module-name");
+            name.set_halign(gtk::Align::Start);
+            name.set_hexpand(true);
+            name.set_ellipsize(pango::EllipsizeMode::End);
+            let symbol_state = gtk::Label::new(Some(if module.symbols_loaded {
+                "SYMBOLS"
+            } else {
+                "NO SYMBOLS"
+            }));
+            symbol_state.add_css_class("module-symbol-state");
+            symbol_state.add_css_class(if module.symbols_loaded {
+                "module-symbols-loaded"
+            } else {
+                "module-symbols-missing"
+            });
+            heading.append(&name);
+            heading.append(&symbol_state);
+
+            let range = match (&module.from, &module.to) {
+                (Some(from), Some(to)) => format!("{from}–{to}"),
+                _ => String::from("address range unavailable"),
+            };
+            let range = gtk::Label::new(Some(&range));
+            range.add_css_class("module-range");
+            range.set_halign(gtk::Align::Start);
+            range.set_selectable(true);
+            let path = module.host_name.as_deref().unwrap_or(&module.target_name);
+            let path_label = gtk::Label::new(Some(path));
+            path_label.add_css_class("module-path");
+            path_label.set_halign(gtk::Align::Start);
+            path_label.set_ellipsize(pango::EllipsizeMode::Middle);
+            path_label.set_selectable(true);
+            path_label.set_tooltip_text(Some(&format!(
+                "Target: {}\nHost: {}",
+                module.target_name, path
+            )));
+            row.append(&heading);
+            row.append(&range);
+            row.append(&path_label);
+            self.modules_list.append(&row);
+        }
+    }
+
+    pub fn start_thread_refresh(&self) -> u64 {
+        let generation = self.thread_refresh_generation.get().wrapping_add(1);
+        self.thread_refresh_generation.set(generation);
+        generation
+    }
+
+    pub fn show_threads_for_refresh(&self, generation: u64, threads: &[ThreadInfo]) {
+        if self.is_thread_refresh_current(generation) {
+            self.show_threads(threads);
+        }
+    }
+
+    pub fn is_thread_refresh_current(&self, generation: u64) -> bool {
+        self.thread_refresh_generation.get() == generation
+    }
+
     pub fn show_instructions(
         &self,
         instructions: &[Instruction],
         pc: &str,
         architecture: Option<&str>,
     ) {
-        self.instructions_store.remove_all();
         self.instructions_selection
             .set_selected(gtk::INVALID_LIST_POSITION);
         let title = architecture.map_or_else(
@@ -1371,6 +1677,7 @@ impl Ui {
             self.instruction_flow.set_visible(true);
             self.instruction_arguments.set_visible(false);
             self.instruction_memory.set_visible(false);
+            self.update_control_sensitivity();
             return;
         }
         self.instructions_empty.set_visible(false);
@@ -1381,43 +1688,56 @@ impl Ui {
         self.current_instruction
             .replace(instructions.get(current).cloned());
         let start = current.saturating_sub(3);
-        let mut selected = None;
-        for instruction in instructions.iter().skip(start).take(9) {
-            let current = addresses_equal(&instruction.address, pc);
-            let position = self.instructions_store.n_items();
-            if current {
-                selected = Some(position);
-            }
-            self.instructions_store
-                .append(&glib::BoxedAnyObject::new(InstructionRowData {
-                    instruction: instruction.clone(),
-                    current,
-                }));
-        }
+        let rows = instructions
+            .iter()
+            .skip(start)
+            .take(9)
+            .map(|instruction| InstructionRowData {
+                instruction: instruction.clone(),
+                current: addresses_equal(&instruction.address, pc),
+            })
+            .collect::<Vec<_>>();
+        let selected = rows
+            .iter()
+            .position(|row| row.current)
+            .map(|index| index as u32);
+        replace_boxed_store(&self.instructions_store, rows);
         if let Some(selected) = selected {
             self.instructions_selection.set_selected(selected);
         }
         self.update_instruction_insight();
+        self.update_control_sensitivity();
     }
 
     fn update_instruction_insight(&self) {
         let Some(instruction) = self.current_instruction.borrow().clone() else {
             return;
         };
-        let flow = instruction_flow_description(&instruction);
+        let registers = self.latest_registers.borrow();
+        let branch_taken = conditional_branch_taken(&instruction, &registers);
+        let flow = instruction_flow_description(&instruction, &registers);
         self.instruction_flow.set_text(&flow);
         self.instruction_flow.set_tooltip_text(Some(&flow));
         self.instruction_flow.set_visible(true);
+        self.instruction_flow.remove_css_class("branch-taken");
+        self.instruction_flow.remove_css_class("branch-not-taken");
+        if let Some(taken) = branch_taken {
+            self.instruction_flow.add_css_class(if taken {
+                "branch-taken"
+            } else {
+                "branch-not-taken"
+            });
+        }
 
-        let arguments = guessed_call_arguments(&instruction, &self.latest_registers.borrow());
+        let arguments = instruction_arguments_description(&instruction, &registers);
         self.instruction_arguments
             .set_visible(!arguments.is_empty());
         self.instruction_arguments.set_text(&arguments);
         self.instruction_arguments
             .set_tooltip_text((!arguments.is_empty()).then_some(arguments.as_str()));
 
-        let expression =
-            instruction_memory_expression(&instruction, &self.latest_registers.borrow());
+        let expression = instruction_memory_expression(&instruction, &registers);
+        drop(registers);
         let mut current = self.current_instruction_memory_expression.borrow_mut();
         if current.as_ref() == expression.as_ref() {
             return;
@@ -1495,8 +1815,10 @@ impl Ui {
 
     pub fn show_registers(&self, registers: &[Register]) {
         for group in &self.register_groups {
-            group.store.remove_all();
             group.panel.set_visible(false);
+            if registers.is_empty() {
+                group.store.remove_all();
+            }
         }
         if registers.is_empty() {
             self.registers_empty.set_visible(true);
@@ -1522,62 +1844,66 @@ impl Ui {
                 });
                 populate_register_group(group, grouped, &previous, ring);
             }
-            drop(previous);
-            let mut previous = self.previous_registers.borrow_mut();
-            previous.clear();
-            previous.reserve(registers.len());
-            previous.extend(
-                registers
-                    .iter()
-                    .map(|register| (register.name.clone(), register.value.clone())),
-            );
         }
-        self.latest_registers.replace(registers.to_vec());
+        let values_changed = {
+            let latest = self.latest_registers.borrow();
+            !same_register_values(&latest, registers)
+        };
+        if values_changed {
+            self.latest_registers.replace(registers.to_vec());
+        }
         self.update_instruction_insight();
     }
 
-    pub fn start_register_refresh(&self) -> u64 {
-        let generation = self.register_refresh_generation.get().wrapping_add(1);
-        self.register_refresh_generation.set(generation);
+    pub fn start_stop_refresh(&self) -> u64 {
+        let latest = self.latest_registers.borrow();
+        let mut previous = self.previous_registers.borrow_mut();
+        previous.clear();
+        previous.reserve(latest.len());
+        previous.extend(
+            latest
+                .iter()
+                .map(|register| (register.name.clone(), register.value.clone())),
+        );
+        drop(previous);
+        drop(latest);
+        let generation = self.stop_refresh_generation.get().wrapping_add(1);
+        self.stop_refresh_generation.set(generation);
         generation
     }
 
+    pub fn is_stop_refresh_current(&self, generation: u64) -> bool {
+        self.stop_refresh_generation.get() == generation
+    }
+
     pub fn show_registers_for_refresh(&self, generation: u64, registers: &[Register]) {
-        if self.register_refresh_generation.get() == generation {
+        if self.is_stop_refresh_current(generation) {
             self.show_registers(registers);
         }
     }
 
     pub fn show_stack(&self, entries: &[StackEntry]) {
-        self.stack_store.remove_all();
+        replace_boxed_store(&self.stack_store, entries.iter().cloned());
         if entries.is_empty() {
             self.stack_empty.set_visible(true);
             return;
         }
         self.stack_empty.set_visible(false);
-        for entry in entries {
-            self.stack_store
-                .append(&glib::BoxedAnyObject::new(entry.clone()));
-        }
     }
 
     pub fn show_stack_for_refresh(&self, generation: u64, entries: &[StackEntry]) {
-        if self.register_refresh_generation.get() == generation {
+        if self.is_stop_refresh_current(generation) {
             self.show_stack(entries);
         }
     }
 
     pub fn show_memory_regions_for_refresh(&self, generation: u64, regions: &[MemoryRegion]) {
-        if self.register_refresh_generation.get() != generation {
+        if !self.is_stop_refresh_current(generation) {
             return;
         }
-        self.memory_region_store.remove_all();
+        replace_boxed_store(&self.memory_region_store, regions.iter().cloned());
         self.memory_regions.replace(regions.to_vec());
         self.memory_regions_empty.set_visible(regions.is_empty());
-        for region in regions {
-            self.memory_region_store
-                .append(&glib::BoxedAnyObject::new(region.clone()));
-        }
     }
 
     fn connect_memory_controls(&self) {
@@ -1682,6 +2008,17 @@ impl Ui {
             });
         let breakpoints = Rc::clone(&self.breakpoints);
         let handler = Rc::clone(&self.breakpoint_bulk_delete_handler);
+        self.delete_all_catchpoints_button
+            .connect_clicked(move |_| {
+                let numbers = event_catchpoint_command_numbers(&breakpoints.borrow());
+                if !numbers.is_empty()
+                    && let Some(handler) = handler.borrow().as_ref()
+                {
+                    handler(numbers);
+                }
+            });
+        let breakpoints = Rc::clone(&self.breakpoints);
+        let handler = Rc::clone(&self.breakpoint_bulk_delete_handler);
         self.delete_all_signal_catchpoints_button
             .connect_clicked(move |_| {
                 let numbers = signal_catchpoint_command_numbers(&breakpoints.borrow());
@@ -1691,6 +2028,20 @@ impl Ui {
                     handler(numbers);
                 }
             });
+    }
+
+    fn connect_event_catchpoint_controls(&self) {
+        for (button, event) in &self.event_catchpoint_buttons {
+            let event = *event;
+            let breakpoints = Rc::clone(&self.breakpoints);
+            let handler = Rc::clone(&self.event_catchpoint_handler);
+            button.connect_clicked(move |_| {
+                let existing = event_catchpoint_command_number(&breakpoints.borrow(), event);
+                if let Some(handler) = handler.borrow().as_ref() {
+                    handler(event, existing);
+                }
+            });
+        }
     }
 
     pub fn refresh_memory_watches(&self) {
@@ -1754,6 +2105,12 @@ impl Ui {
                         .or(breakpoint.function.as_deref())
                         .or(breakpoint.address.as_deref())
                         .unwrap_or("unresolved expression")
+                } else if breakpoint.is_catchpoint() {
+                    breakpoint
+                        .original_location
+                        .as_deref()
+                        .or(breakpoint.catch_type.as_deref())
+                        .unwrap_or("event")
                 } else {
                     breakpoint
                         .function
@@ -1762,10 +2119,15 @@ impl Ui {
                         .or(breakpoint.address.as_deref())
                         .unwrap_or("unresolved")
                 };
-                let location = match (breakpoint.file.as_deref(), breakpoint.line) {
+                let location = match (breakpoint.source_path(), breakpoint.line) {
                     (Some(file), Some(line)) => format!("{file}:{line}"),
                     _ if breakpoint.is_watchpoint() => breakpoint.kind.clone(),
-                    _ if breakpoint.is_catchpoint() => String::from("signal catchpoint"),
+                    _ if breakpoint.is_catchpoint() => {
+                        breakpoint.catch_type.as_deref().map_or_else(
+                            || String::from("event catchpoint"),
+                            |kind| format!("{kind} catchpoint"),
+                        )
+                    }
                     _ => breakpoint
                         .address
                         .clone()
@@ -1799,10 +2161,12 @@ impl Ui {
                 } else {
                     "Enable this stop point"
                 }));
-                let heading = gtk::Label::new(Some(&format!("{kind}  {name}")));
+                let heading_text = format!("{kind}  {}", compact_function_name(name));
+                let heading = gtk::Label::new(Some(&heading_text));
                 heading.set_halign(gtk::Align::Start);
                 heading.set_ellipsize(pango::EllipsizeMode::End);
                 heading.set_hexpand(true);
+                heading.set_tooltip_text(Some(&format!("{kind}  {name}")));
                 let condition_button = gtk::Button::with_label(if breakpoint.condition.is_some() {
                     "Edit condition"
                 } else {
@@ -1818,10 +2182,13 @@ impl Ui {
                 heading_row.append(&heading);
                 heading_row.append(&condition_button);
                 heading_row.append(&delete_button);
-                let location = gtk::Label::new(Some(&location));
+                let location_text = location;
+                let location = gtk::Label::new(Some(&location_text));
                 location.add_css_class("muted");
                 location.set_halign(gtk::Align::Start);
                 location.set_ellipsize(pango::EllipsizeMode::Middle);
+                location.set_selectable(true);
+                location.set_tooltip_text(Some(&location_text));
                 row.append(&heading_row);
                 row.append(&location);
                 if let Some(condition) = breakpoint.condition.as_deref() {
@@ -1872,6 +2239,23 @@ impl Ui {
                 button.set_tooltip_text(Some(&format!(
                     "{description}\nClick to add a GDB signal catchpoint"
                 )));
+            }
+        }
+        for (button, event) in &self.event_catchpoint_buttons {
+            if let Some(number) = event_catchpoint_command_number(&breakpoints, *event) {
+                button.add_css_class("signal-caught");
+                button.set_tooltip_text(Some(&format!(
+                    "{} catchpoint #{number} is active; click to remove it",
+                    event.label()
+                )));
+            } else {
+                button.remove_css_class("signal-caught");
+                let description = EventCatchpoint::ALL
+                    .iter()
+                    .find(|(candidate, _, _)| candidate == event)
+                    .map(|(_, _, description)| *description)
+                    .unwrap_or("Click to add this catchpoint");
+                button.set_tooltip_text(Some(description));
             }
         }
         for document in self.source_documents.borrow().iter() {
@@ -2010,6 +2394,13 @@ impl Ui {
     pub fn show_execution_location(&self, frame: &StackFrame) {
         self.clear_execution_location();
         self.selected_frame_level.set(frame.level);
+        if let Some(bits) = frame
+            .architecture
+            .as_deref()
+            .and_then(architecture_pointer_bits)
+        {
+            self.target_pointer_bits.set(bits);
+        }
         update_selected_frame_buttons(&self.frame_buttons.borrow(), frame.level);
         let (Some(reported_path), Some(line)) = (frame.source_path(), frame.line) else {
             return;
@@ -2045,13 +2436,16 @@ impl Ui {
             .file
             .as_deref()
             .unwrap_or(path.as_os_str().to_str().unwrap_or("source"));
-        document
-            .tab_label
-            .set_text(&format!("{source_name}:{line} · {}", frame.function));
+        document.tab_label.set_text(&format!(
+            "{source_name}:{line} · {}",
+            compact_function_name(&frame.function)
+        ));
         document.tab.add_css_class("executing-source-tab");
-        document
-            .tab_label
-            .set_tooltip_text(Some(&path.to_string_lossy()));
+        document.tab_label.set_tooltip_text(Some(&format!(
+            "{}\n{}",
+            path.to_string_lossy(),
+            frame.function
+        )));
         let Ok(line) = i32::try_from(line.saturating_sub(1)) else {
             return;
         };
@@ -2091,10 +2485,12 @@ impl Ui {
     }
 
     pub fn clear_debugger_state(&self) {
-        self.start_register_refresh();
+        self.start_stop_refresh();
+        self.start_thread_refresh();
         self.clear_execution_location();
         self.show_frames(&[]);
         self.show_threads(&[]);
+        self.show_modules(&[]);
         self.show_locals(&[]);
         self.show_registers(&[]);
         self.show_stack(&[]);
@@ -2225,12 +2621,14 @@ impl Ui {
     }
 }
 
-fn build_topbar(config: &LaunchConfig) -> Topbar {
+fn build_topbar(
+    config: &LaunchConfig,
+    window: &gtk::ApplicationWindow,
+    terminal: &vte4::Terminal,
+) -> Topbar {
     let topbar = gtk::HeaderBar::new();
     topbar.add_css_class("topbar");
-    topbar.set_show_title_buttons(true);
-    topbar.set_use_native_controls(false);
-    topbar.set_decoration_layout(Some(":minimize,maximize,close"));
+    topbar.set_show_title_buttons(false);
 
     let title_group = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     title_group.add_css_class("titlebar-identity");
@@ -2267,6 +2665,8 @@ fn build_topbar(config: &LaunchConfig) -> Topbar {
     terminal_toggle.set_active(true);
     terminal_toggle.set_tooltip_text(Some("Show or hide the interactive GDB terminal"));
     leading.append(&terminal_toggle);
+    let gef_tools = build_gef_tools_menu(terminal, &terminal_toggle);
+    leading.append(&gef_tools);
     topbar.pack_start(&leading);
 
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -2275,12 +2675,12 @@ fn build_topbar(config: &LaunchConfig) -> Topbar {
     let next = control_button("Next", "Step over the current source line · F10", false);
     let step = control_button("Step", "Step into the current source line · F11", false);
     let next_instruction = control_button(
-        "Next inst",
+        "Nexti",
         "Execute one machine instruction, stepping over calls · Ctrl+F10",
         false,
     );
     let step_instruction = control_button(
-        "Step inst",
+        "Stepi",
         "Execute one machine instruction, stepping into calls · Ctrl+F11",
         false,
     );
@@ -2299,6 +2699,8 @@ fn build_topbar(config: &LaunchConfig) -> Topbar {
         ("Next call", "exec-until call"),
         ("Next return", "exec-until ret"),
         ("Next syscall", "exec-until syscall"),
+        ("Next indirect branch", "exec-until indirect-branch"),
+        ("Next call / jump / return", "exec-until all-branch"),
         ("Memory access", "exec-until memaccess"),
         ("User code", "exec-until user-code"),
         ("libc code", "exec-until libc-code"),
@@ -2327,10 +2729,7 @@ fn build_topbar(config: &LaunchConfig) -> Topbar {
     until_condition_button.add_css_class("inline-action");
     until_menu.append(&until_condition_button);
     until_popover.set_child(Some(&until_menu));
-    let until = gtk::MenuButton::builder()
-        .label("Until")
-        .popover(&until_popover)
-        .build();
+    let until = header_popup_button("Until", &until_popover);
     until.add_css_class("debug-control");
     until.set_tooltip_text(Some("Run until a selected control-flow or memory event"));
     until.set_sensitive(false);
@@ -2348,6 +2747,30 @@ fn build_topbar(config: &LaunchConfig) -> Topbar {
     trailing.add_css_class("titlebar-actions");
     trailing.append(&controls);
     trailing.append(&status);
+    let window_controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    window_controls.add_css_class("window-controls");
+
+    let minimize = window_control_button("−", "Minimize", "minimize");
+    let maximize = window_control_button("□", "Maximize or restore", "maximize");
+    let close = window_control_button("×", "Close", "close");
+
+    let controlled_window = window.clone();
+    minimize.connect_clicked(move |_| controlled_window.minimize());
+    let controlled_window = window.clone();
+    maximize.connect_clicked(move |_| {
+        if controlled_window.is_maximized() {
+            controlled_window.unmaximize();
+        } else {
+            controlled_window.maximize();
+        }
+    });
+    let controlled_window = window.clone();
+    close.connect_clicked(move |_| controlled_window.close());
+
+    window_controls.append(&minimize);
+    window_controls.append(&maximize);
+    window_controls.append(&close);
+    trailing.append(&window_controls);
     topbar.pack_end(&trailing);
 
     Topbar {
@@ -2363,11 +2786,223 @@ fn build_topbar(config: &LaunchConfig) -> Topbar {
         step_instruction_button: step_instruction,
         finish_button: finish,
         until_button: until,
+        until_popover,
+        gef_tools_button: gef_tools,
         until_actions,
         until_condition_entry,
         until_condition_button,
         status_label: status,
     }
+}
+
+fn build_gef_tools_menu(
+    terminal: &vte4::Terminal,
+    terminal_toggle: &gtk::ToggleButton,
+) -> gtk::ToggleButton {
+    let popover = gtk::Popover::new();
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    menu.add_css_class("gef-tools-menu");
+    menu.append(&section_title("GEF / LOW-LEVEL TOOLS"));
+    let tools = gtk::Notebook::new();
+    tools.add_css_class("gef-tools-tabs");
+    for (title, commands) in [
+        (
+            "Context",
+            &[
+                ("Current instruction", "xinfo $pc", "xinfo $pc"),
+                ("Function arguments", "dumpargs", "dumpargs"),
+                ("Current syscall", "syscall-args", "syscall-args"),
+                ("Future calls", "future-calls", "future-calls"),
+                ("Entire stack frame", "stack-frame", "stack-frame"),
+            ][..],
+        ),
+        (
+            "Process",
+            &[
+                ("Virtual memory map", "vmmap", "vmmap"),
+                ("Open file descriptors", "fds", "fds"),
+                ("ELF auxiliary vector", "auxv", "auxv"),
+                ("Current errno", "errno", "errno"),
+                ("Thread-local storage", "tls", "tls"),
+                ("Fork following", "follow", "follow"),
+            ][..],
+        ),
+        (
+            "Binary",
+            &[
+                ("Binary protections", "checksec", "checksec"),
+                ("GOT / PLT", "got", "got"),
+                ("Stack canary", "canary", "canary"),
+                (
+                    "Exception unwind data",
+                    "dwarf-exception-handler",
+                    "dwarf-exception-handler",
+                ),
+                ("Dynamic section", "dynamic", "dynamic"),
+                ("Runtime link map", "link-map", "link-map"),
+            ][..],
+        ),
+        (
+            "Heap",
+            &[
+                ("Compact bins", "heap bins-simple", "heap bins-simple"),
+                ("Heap arenas", "heap arenas", "heap arenas"),
+                ("Heap chunks", "heap chunks", "heap chunks"),
+                ("Top chunk", "heap top", "heap top"),
+                ("Parsed heap", "heap parse", "heap parse"),
+            ][..],
+        ),
+    ] {
+        let page = build_gef_tool_page(commands, terminal, terminal_toggle, &popover);
+        tools.append_page(&page, Some(&gtk::Label::new(Some(title))));
+    }
+    menu.append(&tools);
+
+    menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let expression_row = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+    let expression = gtk::Entry::builder()
+        .placeholder_text("address or expression")
+        .hexpand(true)
+        .build();
+    expression.set_tooltip_text(Some(
+        "Address, expression, or type for xinfo, telescope, and dt",
+    ));
+    let inspect = gtk::Button::with_label("xinfo");
+    let telescope = gtk::Button::with_label("telescope");
+    let data_type = gtk::Button::with_label("dt");
+    for button in [&inspect, &telescope, &data_type] {
+        button.add_css_class("inline-action");
+    }
+    expression_row.append(&expression);
+    expression_row.append(&inspect);
+    expression_row.append(&telescope);
+    expression_row.append(&data_type);
+    menu.append(&expression_row);
+
+    let submit = |prefix: &'static str| {
+        let terminal = terminal.clone();
+        let terminal_toggle = terminal_toggle.clone();
+        let popover = popover.clone();
+        let expression = expression.clone();
+        Rc::new(move || {
+            let expression = expression.text().replace(['\r', '\n'], " ");
+            let expression = expression.trim();
+            if expression.is_empty() {
+                return;
+            }
+            run_terminal_command(
+                &terminal,
+                &terminal_toggle,
+                &popover,
+                &format!("{prefix} {expression}"),
+            );
+        })
+    };
+    let inspect_submit = submit("xinfo");
+    let submit_for_button = Rc::clone(&inspect_submit);
+    inspect.connect_clicked(move |_| submit_for_button());
+    let submit_for_button = submit("telescope");
+    telescope.connect_clicked(move |_| submit_for_button());
+    let submit_for_button = submit("dt");
+    data_type.connect_clicked(move |_| submit_for_button());
+    expression.connect_activate(move |_| inspect_submit());
+
+    popover.set_child(Some(&menu));
+    let button = header_popup_button("GEF tools", &popover);
+    button.add_css_class("debug-control");
+    button.set_tooltip_text(Some(
+        "Run useful bata24/GEF investigations in this debugger's terminal",
+    ));
+    button.set_sensitive(false);
+    button
+}
+
+fn build_gef_tool_page(
+    commands: &[(&'static str, &'static str, &'static str)],
+    terminal: &vte4::Terminal,
+    terminal_toggle: &gtk::ToggleButton,
+    popover: &gtk::Popover,
+) -> gtk::Box {
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    for (label, detail, command) in commands {
+        let button = gef_tool_button(label, detail);
+        connect_gef_tool(&button, terminal, terminal_toggle, popover, command);
+        page.append(&button);
+    }
+    page
+}
+
+fn header_popup_button(label: &str, popover: &gtk::Popover) -> gtk::ToggleButton {
+    let button = gtk::ToggleButton::with_label(label);
+    button.set_focus_on_click(false);
+    popover.set_parent(&button);
+    popover.set_position(gtk::PositionType::Bottom);
+    let popover_for_toggle = popover.clone();
+    button.connect_toggled(move |button| {
+        if button.is_active() {
+            popover_for_toggle.popup();
+        } else {
+            popover_for_toggle.popdown();
+        }
+    });
+    let weak_button = button.downgrade();
+    popover.connect_closed(move |_| {
+        if let Some(button) = weak_button.upgrade()
+            && button.is_active()
+        {
+            button.set_active(false);
+        }
+    });
+    button
+}
+
+fn gef_tool_button(label: &str, detail: &str) -> gtk::Button {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let label = gtk::Label::new(Some(label));
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+    let detail = gtk::Label::new(Some(detail));
+    detail.add_css_class("gef-command");
+    detail.set_halign(gtk::Align::End);
+    row.append(&label);
+    row.append(&detail);
+    gtk::Button::builder().child(&row).build()
+}
+
+fn connect_gef_tool(
+    button: &gtk::Button,
+    terminal: &vte4::Terminal,
+    terminal_toggle: &gtk::ToggleButton,
+    popover: &gtk::Popover,
+    command: &'static str,
+) {
+    let terminal = terminal.clone();
+    let terminal_toggle = terminal_toggle.clone();
+    let popover = popover.clone();
+    button.connect_clicked(move |_| {
+        run_terminal_command(&terminal, &terminal_toggle, &popover, command);
+    });
+}
+
+fn run_terminal_command(
+    terminal: &vte4::Terminal,
+    terminal_toggle: &gtk::ToggleButton,
+    popover: &gtk::Popover,
+    command: &str,
+) {
+    terminal_toggle.set_active(true);
+    popover.popdown();
+    terminal.feed_child(format!("\u{15}{command}\n").as_bytes());
+    terminal.grab_focus();
+}
+
+fn window_control_button(label: &str, tooltip: &str, class: &str) -> gtk::Button {
+    let button = gtk::Button::with_label(label);
+    button.add_css_class("window-control");
+    button.add_css_class(class);
+    button.set_focus_on_click(false);
+    button.set_tooltip_text(Some(tooltip));
+    button
 }
 
 fn build_workspace(
@@ -2376,6 +3011,7 @@ fn build_workspace(
     source_notebook: &gtk::Notebook,
     terminal: &vte4::Terminal,
     variable_children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
+    target_pointer_bits: &Rc<Cell<u32>>,
 ) -> Workspace {
     let workspace = gtk::Paned::new(gtk::Orientation::Horizontal);
     workspace.add_css_class("workspace-columns");
@@ -2383,7 +3019,7 @@ fn build_workspace(
     workspace.set_position(980);
     workspace.set_shrink_start_child(false);
     workspace.set_resize_start_child(true);
-    let inspector = build_inspector(variable_children_handler);
+    let inspector = build_inspector(variable_children_handler, target_pointer_bits);
     workspace.set_end_child(Some(&inspector.root));
 
     let navigation_and_editor = gtk::Paned::new(gtk::Orientation::Horizontal);
@@ -2403,15 +3039,23 @@ fn build_workspace(
     let terminal_panel = build_terminal_panel(terminal);
     main_and_terminal.set_end_child(Some(&terminal_panel));
     workspace.set_start_child(Some(&main_and_terminal));
+    let layout_panes = vec![
+        layout::Pane::new("workspace_inspector", &workspace),
+        layout::Pane::new("navigation_source", &navigation_and_editor),
+        layout::Pane::new("workspace_terminal", &main_and_terminal),
+        layout::Pane::new("locals_instructions", &inspector.context_split),
+    ];
     let mut debug_state_panels = inspector.stale_panels.clone();
     debug_state_panels.push(left_sidebar.root.clone().upcast());
     Workspace {
         root: workspace,
+        layout_panes,
         terminal_panel,
         status_detail: inspector.status_detail,
         debug_state_panels,
         call_stack_list: left_sidebar.call_stack_list,
         threads_list: left_sidebar.threads_list,
+        modules_list: left_sidebar.modules_list,
         locals_store: inspector.locals_store,
         locals_selection: inspector.locals_selection,
         locals_view: inspector.locals_view,
@@ -2432,6 +3076,8 @@ fn build_workspace(
         breakpoints_list: inspector.breakpoints_list,
         delete_all_breakpoints_button: inspector.delete_all_breakpoints_button,
         delete_all_watchpoints_button: inspector.delete_all_watchpoints_button,
+        delete_all_catchpoints_button: inspector.delete_all_catchpoints_button,
+        event_catchpoint_buttons: inspector.event_catchpoint_buttons,
         watchpoint_expression: inspector.watchpoint_expression,
         watchpoint_access: inspector.watchpoint_access,
         watchpoint_add_button: inspector.watchpoint_add_button,
@@ -2475,21 +3121,30 @@ fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSidebar {
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
+    let modules_list = dynamic_list("Modules appear after the inferior starts");
+    let modules_scrolled = gtk::ScrolledWindow::builder()
+        .child(&modules_list)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
     let navigation = gtk::Notebook::new();
     navigation.add_css_class("sidebar-tabs");
     navigation.set_vexpand(true);
     navigation.append_page(&stack_scrolled, Some(&gtk::Label::new(Some("Call Stack"))));
     navigation.append_page(&threads_scrolled, Some(&gtk::Label::new(Some("Threads"))));
+    navigation.append_page(&modules_scrolled, Some(&gtk::Label::new(Some("Modules"))));
     sidebar.append(&navigation);
     LeftSidebar {
         root: sidebar,
         call_stack_list,
         threads_list,
+        modules_list,
     }
 }
 
 fn build_inspector(
     variable_children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
+    target_pointer_bits: &Rc<Cell<u32>>,
 ) -> Inspector {
     let notebook = gtk::Notebook::new();
     notebook.set_size_request(260, -1);
@@ -2504,7 +3159,7 @@ fn build_inspector(
     detail.set_ellipsize(pango::EllipsizeMode::Middle);
     detail.set_single_line_mode(true);
     let (locals_view, locals_store, locals_selection) =
-        build_locals_view(variable_children_handler);
+        build_locals_view(variable_children_handler, target_pointer_bits);
     let locals_empty = empty_label("Values appear when the target is paused");
     let locals_scrolled = gtk::ScrolledWindow::builder()
         .child(&locals_view)
@@ -2532,10 +3187,10 @@ fn build_inspector(
     let locals_title = section_title("LOCALS / ARGUMENTS");
     locals_title.set_hexpand(true);
     locals_header.append(&locals_title);
-    let locals_hint = gtk::Label::new(Some("Enter / double-click"));
+    let locals_hint = gtk::Label::new(Some("Click name to expand"));
     locals_hint.add_css_class("muted");
     locals_hint.set_tooltip_text(Some(
-        "Single-click selects, the chevron expands, and Enter or double-click edits",
+        "Click an expandable name or its chevron to open it. Double-click a scalar to edit; the Edit button works for every selected value.",
     ));
     locals_header.append(&locals_hint);
     let locals_edit_button = gtk::Button::with_label("Edit");
@@ -2587,8 +3242,8 @@ fn build_inspector(
     let stack_page = gtk::Box::new(gtk::Orientation::Vertical, 2);
     stack_page.add_css_class("sidebar");
     stack_page.append(&build_context_legend());
-    stack_page.append(&section_title("STACK MEMORY"));
-    let (stack_view, stack_store) = build_stack_view();
+    stack_page.append(&section_title("STACK"));
+    let (stack_view, stack_store, stack_word_inspector) = build_stack_view();
     let stack_empty = empty_label("Stack values appear when the target is paused");
     let stack_scrolled = gtk::ScrolledWindow::builder()
         .child(&stack_view)
@@ -2597,6 +3252,7 @@ fn build_inspector(
         .build();
     stack_page.append(&stack_empty);
     stack_page.append(&stack_scrolled);
+    stack_page.append(&stack_word_inspector.root);
 
     let memory_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
     memory_page.add_css_class("sidebar");
@@ -2690,10 +3346,37 @@ fn build_inspector(
     delete_all_watchpoints_button
         .set_tooltip_text(Some("Delete all watchpoints, preserving breakpoints"));
     delete_all_watchpoints_button.set_sensitive(false);
+    let delete_all_catchpoints_button = gtk::Button::with_label("Delete all CPs");
+    delete_all_catchpoints_button.add_css_class("inline-action");
+    delete_all_catchpoints_button.add_css_class("danger-action");
+    delete_all_catchpoints_button.set_tooltip_text(Some(
+        "Delete event catchpoints, preserving signal catchpoints",
+    ));
+    delete_all_catchpoints_button.set_sensitive(false);
     breakpoint_bulk_actions.append(&delete_all_breakpoints_button);
     breakpoint_bulk_actions.append(&delete_all_watchpoints_button);
+    breakpoint_bulk_actions.append(&delete_all_catchpoints_button);
     breakpoints_page.append(&breakpoint_bulk_actions);
     breakpoints_page.append(&breakpoints_scrolled);
+    breakpoints_page.append(&section_title("QUICK CATCHPOINTS"));
+    let event_catchpoint_grid = gtk::Grid::builder()
+        .column_spacing(2)
+        .row_spacing(2)
+        .column_homogeneous(true)
+        .build();
+    let event_catchpoint_buttons = EventCatchpoint::ALL
+        .into_iter()
+        .enumerate()
+        .map(|(index, (event, label, tooltip))| {
+            let button = gtk::Button::with_label(label);
+            button.add_css_class("signal-action");
+            button.set_tooltip_text(Some(tooltip));
+            button.set_sensitive(false);
+            event_catchpoint_grid.attach(&button, (index % 3) as i32, (index / 3) as i32, 1, 1);
+            (button, event)
+        })
+        .collect::<Vec<_>>();
+    breakpoints_page.append(&event_catchpoint_grid);
     breakpoints_page.append(&section_title("ADD WATCHPOINT"));
     let watchpoint_controls = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     let watchpoint_expression = gtk::Entry::builder()
@@ -2792,6 +3475,7 @@ fn build_inspector(
     ];
     Inspector {
         root: notebook,
+        context_split: context,
         status_detail: detail,
         stale_panels,
         locals_store,
@@ -2814,6 +3498,8 @@ fn build_inspector(
         breakpoints_list,
         delete_all_breakpoints_button,
         delete_all_watchpoints_button,
+        delete_all_catchpoints_button,
+        event_catchpoint_buttons,
         watchpoint_expression,
         watchpoint_access,
         watchpoint_add_button,
@@ -2835,6 +3521,7 @@ fn build_inspector(
 
 fn build_locals_view(
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
+    target_pointer_bits: &Rc<Cell<u32>>,
 ) -> (gtk::ColumnView, gio::ListStore, gtk::SingleSelection) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let tree = gtk::TreeListModel::new(store.clone(), false, false, |item| {
@@ -2854,14 +3541,27 @@ fn build_locals_view(
     view.set_single_click_activate(false);
     view.set_reorderable(true);
 
-    view.append_column(&local_name_column(children_handler));
-    view.append_column(&local_text_column("TYPE", 155, false, LocalColumn::Type));
-    view.append_column(&local_text_column("VALUE", 190, false, LocalColumn::Value));
+    view.append_column(&local_name_column(&selection, children_handler));
+    view.append_column(&local_text_column(
+        "TYPE",
+        155,
+        false,
+        LocalColumn::Type,
+        Rc::clone(target_pointer_bits),
+    ));
+    view.append_column(&local_text_column(
+        "VALUE",
+        190,
+        false,
+        LocalColumn::Value,
+        Rc::clone(target_pointer_bits),
+    ));
     view.append_column(&local_text_column(
         "DETAILS",
         300,
         true,
         LocalColumn::Details,
+        Rc::clone(target_pointer_bits),
     ));
     (view, store, selection)
 }
@@ -3108,52 +3808,46 @@ fn memory_watch_column(css_class: &str, tooltip: &str) -> gtk::Label {
 }
 
 fn format_memory_watch(begin: u64, bytes: &[u8], format: MemoryWatchFormat) -> MemoryWatchText {
+    use std::fmt::Write as _;
+
     let chunk_size = match format {
         MemoryWatchFormat::Words => 4,
         MemoryWatchFormat::Bytes | MemoryWatchFormat::Pointers => 8,
     };
-    let chunks = bytes.chunks(chunk_size).collect::<Vec<_>>();
-    let addresses = chunks
-        .iter()
-        .enumerate()
-        .map(|(index, _)| format!("0x{:016x}", begin + (index * chunk_size) as u64))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let values = chunks
-        .iter()
-        .map(|chunk| match format {
-            MemoryWatchFormat::Bytes => chunk
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<Vec<_>>()
-                .join(" "),
-            MemoryWatchFormat::Words => <[u8; 4]>::try_from(*chunk).map_or_else(
-                |_| format_memory_bytes(chunk),
-                |chunk| format!("0x{:08x}", u32::from_le_bytes(chunk)),
-            ),
-            MemoryWatchFormat::Pointers => <[u8; 8]>::try_from(*chunk).map_or_else(
-                |_| format_memory_bytes(chunk),
-                |chunk| format!("0x{:016x}", u64::from_le_bytes(chunk)),
-            ),
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let decoded = chunks
-        .iter()
-        .map(|chunk| {
-            chunk
-                .iter()
-                .map(|byte| {
-                    if byte.is_ascii_graphic() || *byte == b' ' {
-                        char::from(*byte)
-                    } else {
-                        '·'
-                    }
-                })
-                .collect::<String>()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let line_count = bytes.len().div_ceil(chunk_size);
+    let mut addresses = String::with_capacity(line_count * 19);
+    let mut values = String::with_capacity(bytes.len() * 3 + line_count);
+    let mut decoded = String::with_capacity(bytes.len() + line_count);
+    for (index, chunk) in bytes.chunks(chunk_size).enumerate() {
+        if index != 0 {
+            addresses.push('\n');
+            values.push('\n');
+            decoded.push('\n');
+        }
+        let _ = write!(addresses, "0x{:016x}", begin + (index * chunk_size) as u64);
+        match format {
+            MemoryWatchFormat::Bytes => push_hex_bytes(&mut values, chunk),
+            MemoryWatchFormat::Words => match <[u8; 4]>::try_from(chunk) {
+                Ok(chunk) => {
+                    let _ = write!(values, "0x{:08x}", u32::from_le_bytes(chunk));
+                }
+                Err(_) => push_hex_bytes(&mut values, chunk),
+            },
+            MemoryWatchFormat::Pointers => match <[u8; 8]>::try_from(chunk) {
+                Ok(chunk) => {
+                    let _ = write!(values, "0x{:016x}", u64::from_le_bytes(chunk));
+                }
+                Err(_) => push_hex_bytes(&mut values, chunk),
+            },
+        }
+        decoded.extend(chunk.iter().map(|byte| {
+            if byte.is_ascii_graphic() || *byte == b' ' {
+                char::from(*byte)
+            } else {
+                '·'
+            }
+        }));
+    }
     MemoryWatchText {
         addresses,
         values,
@@ -3161,18 +3855,24 @@ fn format_memory_watch(begin: u64, bytes: &[u8], format: MemoryWatchFormat) -> M
     }
 }
 
-fn format_memory_bytes(bytes: &[u8]) -> String {
-    bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<Vec<_>>()
-        .join(" ")
+fn push_hex_bytes(output: &mut String, bytes: &[u8]) {
+    use std::fmt::Write as _;
+
+    for (index, byte) in bytes.iter().enumerate() {
+        if index != 0 {
+            output.push(' ');
+        }
+        let _ = write!(output, "{byte:02x}");
+    }
 }
 
 fn local_name_column(
+    selection: &gtk::SingleSelection,
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
+    let selection = selection.clone();
+    let children_handler_for_setup = Rc::clone(children_handler);
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -3182,8 +3882,43 @@ fn local_name_column(
         label.add_css_class("local-name");
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
+        label.set_hexpand(true);
         let expander = gtk::TreeExpander::new();
+        expander.set_hexpand(true);
         expander.set_child(Some(&label));
+
+        let click = gtk::GestureClick::new();
+        click.set_button(gtk::gdk::BUTTON_PRIMARY);
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let expander_for_click = expander.clone();
+        let selection = selection.clone();
+        let children_handler = Rc::clone(&children_handler_for_setup);
+        click.connect_pressed(move |gesture, presses, _, _| {
+            if presses != 1 {
+                return;
+            }
+            let Some(row) = expander_for_click.list_row() else {
+                return;
+            };
+            let node = row
+                .item()
+                .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+                .map(|item| item.borrow::<VariableNode>().clone());
+            let Some(node) = node else {
+                return;
+            };
+            if !row.is_expandable() && node.load_more.is_none() {
+                return;
+            }
+            selection.set_selected(row.position());
+            if row.is_expandable() {
+                row.set_expanded(!row.is_expanded());
+            } else {
+                request_next_variable_page_if_needed(&node, &children_handler);
+            }
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        label.add_controller(click);
         item.set_child(Some(&expander));
     });
     let children_handler = Rc::clone(children_handler);
@@ -3206,34 +3941,41 @@ fn local_name_column(
         };
         expander.set_list_row(Some(&row));
         label.set_text(&node.variable.name);
+        let expandable = node.variable.can_expand();
+        if expandable && !node.expansion_observer_attached.replace(true) {
+            let node = node.clone();
+            let children_handler = Rc::clone(&children_handler);
+            row.connect_expanded_notify(move |row| {
+                if row.is_expanded() {
+                    request_variable_children_if_needed(&node, &children_handler);
+                }
+            });
+        }
+        let load_more = node.load_more.is_some();
+        if expandable || load_more {
+            label.add_css_class("local-expandable");
+            label.set_cursor_from_name(Some("pointer"));
+        } else {
+            label.remove_css_class("local-expandable");
+            label.set_cursor(None);
+        }
         let tooltip = if node.placeholder {
             format!("{}\n{}", node.variable.name, node.variable.value)
         } else {
             variable_tooltip(&node.variable)
         };
         label.set_tooltip_text(Some(&tooltip));
-        if node.placeholder {
+        label.remove_css_class("local-load-more");
+        if load_more {
+            label.remove_css_class("muted");
+            label.remove_css_class("local-name");
+            label.add_css_class("local-load-more");
+        } else if node.placeholder {
             label.remove_css_class("local-name");
             label.add_css_class("muted");
         } else {
             label.remove_css_class("muted");
             label.add_css_class("local-name");
-        }
-        if node.variable.can_expand()
-            && !node.children_loaded.get()
-            && !node.children_loading.replace(true)
-        {
-            node.children
-                .append(&glib::BoxedAnyObject::new(VariableNode::placeholder(
-                    "loading…",
-                    "waiting for GDB",
-                )));
-            if let Some(handler) = children_handler.borrow().as_ref() {
-                handler(node.variable.clone());
-            } else {
-                node.children.remove_all();
-                node.children_loading.set(false);
-            }
         }
     });
     let column = gtk::ColumnViewColumn::new(Some("NAME / EXPRESSION"), Some(factory));
@@ -3242,11 +3984,49 @@ fn local_name_column(
     column
 }
 
+fn request_variable_children_if_needed(
+    node: &VariableNode,
+    children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
+) {
+    if node.children_loaded.get() || node.children_loading.replace(true) {
+        return;
+    }
+    node.children
+        .append(&glib::BoxedAnyObject::new(VariableNode::placeholder(
+            "loading…",
+            "waiting for GDB",
+        )));
+    if let Some(handler) = children_handler.borrow().as_ref() {
+        handler(node.variable.clone(), 0);
+    } else {
+        node.children.remove_all();
+        node.children_loading.set(false);
+    }
+}
+
+fn request_next_variable_page_if_needed(
+    node: &VariableNode,
+    children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
+) {
+    let Some((parent, from)) = node.load_more.as_ref() else {
+        return;
+    };
+    if node.children_loading.replace(true) {
+        return;
+    }
+    if let Some(handler) = children_handler.borrow().as_ref() {
+        handler(parent.clone(), *from);
+    } else {
+        node.children_loading.set(false);
+    }
+}
+
 fn local_text_column(
     title: &str,
     width: i32,
     expand: bool,
     column: LocalColumn,
+    target_pointer_bits: Rc<Cell<u32>>,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(move |_, object| {
@@ -3281,15 +4061,19 @@ fn local_text_column(
         let node = data.borrow::<VariableNode>();
         let variable = &node.variable;
         let (value, details) = variable_value_parts(&variable.value);
-        let text = match column {
-            LocalColumn::Type => variable.type_name.as_deref().unwrap_or("<unknown>"),
-            LocalColumn::Value => value,
-            LocalColumn::Details => details,
-        };
-        label.set_text(text);
         label.remove_css_class("local-details-error");
-        if column == LocalColumn::Details && details.starts_with("<error:") {
-            label.add_css_class("local-details-error");
+        match column {
+            LocalColumn::Type => {
+                label.set_text(variable.type_name.as_deref().unwrap_or("<unknown>"));
+            }
+            LocalColumn::Value => label.set_text(value),
+            LocalColumn::Details => {
+                let decoded = variable_details(variable, value, details, target_pointer_bits.get());
+                label.set_text(&decoded);
+                if decoded.contains("<error:") {
+                    label.add_css_class("local-details-error");
+                }
+            }
         }
         if node.placeholder {
             label.add_css_class("muted");
@@ -3333,9 +4117,30 @@ fn variable_value_parts(value: &str) -> (&str, &str) {
     }
 }
 
+fn variable_details(
+    variable: &Variable,
+    value: &str,
+    details: &str,
+    target_pointer_bits: u32,
+) -> String {
+    let Some(decimal) = integer_decimal_value(variable, value, target_pointer_bits) else {
+        return details.to_owned();
+    };
+    if details.is_empty() {
+        decimal
+    } else {
+        format!("{decimal}  ·  {details}")
+    }
+}
+
 fn variable_tooltip(variable: &Variable) -> String {
+    let interaction = if variable.can_expand() {
+        "Click the name or press Enter to expand; use Edit to change the value"
+    } else {
+        "Double-click or press Enter to edit"
+    };
     format!(
-        "{}  {}\n{}\n{} child{}\nDouble-click or press Enter to edit",
+        "{}  {}\n{}\n{} child{}\n{interaction}",
         variable.type_name.as_deref().unwrap_or("<unknown type>"),
         variable.name,
         variable.value,
@@ -3364,25 +4169,54 @@ fn build_instruction_view() -> (gtk::ColumnView, gio::ListStore, gtk::SingleSele
     ));
 
     for column in [
-        instruction_column("ADDRESS", 170, false, "instruction-address", |row| {
-            let marker = if row.current { "›" } else { " " };
-            format!("{marker} {}", full_address(&row.instruction.address))
-        }),
-        instruction_column("OPCODE", 72, false, "instruction-mnemonic", |row| {
-            split_instruction(&row.instruction.text).0.to_owned()
-        }),
-        instruction_column("OPERANDS", 180, true, "instruction-operands", |row| {
-            split_instruction(&row.instruction.text).1.to_owned()
-        }),
-        instruction_column("BYTES", 130, false, "instruction-opcodes", |row| {
-            row.instruction
-                .opcodes
-                .clone()
-                .unwrap_or_else(|| String::from("unavailable"))
-        }),
-        instruction_column("SYMBOL", 140, false, "instruction-symbol", |row| {
-            instruction_symbol(&row.instruction)
-        }),
+        instruction_column(
+            "ADDRESS",
+            170,
+            false,
+            "instruction-address",
+            &selection,
+            |row| {
+                let marker = if row.current { "›" } else { " " };
+                format!("{marker} {}", full_address(&row.instruction.address))
+            },
+        ),
+        instruction_column(
+            "OPCODE",
+            72,
+            false,
+            "instruction-mnemonic",
+            &selection,
+            |row| split_instruction(&row.instruction.text).0.to_owned(),
+        ),
+        instruction_column(
+            "OPERANDS",
+            180,
+            true,
+            "instruction-operands",
+            &selection,
+            |row| split_instruction(&row.instruction.text).1.to_owned(),
+        ),
+        instruction_column(
+            "BYTES",
+            130,
+            false,
+            "instruction-opcodes",
+            &selection,
+            |row| {
+                row.instruction
+                    .opcodes
+                    .clone()
+                    .unwrap_or_else(|| String::from("unavailable"))
+            },
+        ),
+        instruction_column(
+            "SYMBOL",
+            140,
+            false,
+            "instruction-symbol",
+            &selection,
+            |row| instruction_symbol(&row.instruction),
+        ),
     ] {
         view.append_column(&column);
     }
@@ -3462,6 +4296,7 @@ fn register_column(
         label.add_css_class(register_column_css(column));
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
+        label.set_selectable(!matches!(column, RegisterColumn::Name));
         item.set_child(Some(&label));
     });
     factory.connect_bind(move |_, object| {
@@ -3476,7 +4311,7 @@ fn register_column(
         };
         let data = data.borrow::<RegisterRowData>();
         reset_semantic_css(&label);
-        if data.changed {
+        if data.changed && matches!(column, RegisterColumn::Name) {
             label.add_css_class("modified-register");
         }
         let semantic_class = register_value_css(&data.register);
@@ -3518,10 +4353,12 @@ fn register_column(
     column_view
 }
 
-fn build_stack_view() -> (gtk::ColumnView, gio::ListStore) {
+fn build_stack_view() -> (gtk::ColumnView, gio::ListStore, StackWordInspector) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-    let selection = gtk::NoSelection::new(Some(store.clone()));
-    let view = gtk::ColumnView::new(Some(selection));
+    let selection = gtk::SingleSelection::new(Some(store.clone()));
+    selection.set_autoselect(true);
+    selection.set_can_unselect(false);
+    let view = gtk::ColumnView::new(Some(selection.clone()));
     view.add_css_class("debug-table");
     view.add_css_class("stack-table");
     view.set_vexpand(true);
@@ -3536,9 +4373,100 @@ fn build_stack_view() -> (gtk::ColumnView, gio::ListStore) {
         ("REFERENCES", 155, false, StackColumn::References),
         ("REGION", 210, false, StackColumn::Region),
     ] {
-        view.append_column(&stack_column(title, width, expand, column));
+        view.append_column(&stack_column(title, width, expand, column, &selection));
     }
-    (view, store)
+    let inspector = build_stack_word_inspector();
+    let inspector_for_selection = inspector.clone();
+    selection.connect_selected_item_notify(move |selection| {
+        let Some(data) = selection
+            .selected_item()
+            .and_downcast::<glib::BoxedAnyObject>()
+        else {
+            inspector_for_selection.clear();
+            return;
+        };
+        inspector_for_selection.show(&data.borrow::<StackEntry>());
+    });
+    (view, store, inspector)
+}
+
+fn build_stack_word_inspector() -> StackWordInspector {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    root.add_css_class("stack-word-inspector");
+    root.append(&section_title("SELECTED WORD"));
+    let grid = gtk::Grid::builder()
+        .column_spacing(8)
+        .row_spacing(1)
+        .build();
+    let address = stack_inspector_row(&grid, 0, "ADDRESS");
+    let raw = stack_inspector_row(&grid, 1, "RAW");
+    let interpretation = stack_inspector_row(&grid, 2, "INTERPRETATION");
+    let role = stack_inspector_row(&grid, 3, "ROLE");
+    let region = stack_inspector_row(&grid, 4, "REGION");
+    for value in [&interpretation, &role, &region] {
+        value.set_ellipsize(pango::EllipsizeMode::None);
+        value.set_wrap(true);
+        value.set_wrap_mode(pango::WrapMode::Char);
+    }
+    root.append(&grid);
+    let inspector = StackWordInspector {
+        root,
+        address,
+        raw,
+        interpretation,
+        role,
+        region,
+    };
+    inspector.clear();
+    inspector
+}
+
+fn stack_inspector_row(grid: &gtk::Grid, row: i32, title: &str) -> gtk::Label {
+    let title = gtk::Label::new(Some(title));
+    title.add_css_class("stack-inspector-key");
+    title.set_halign(gtk::Align::Start);
+    grid.attach(&title, 0, row, 1, 1);
+    let value = gtk::Label::new(None);
+    value.add_css_class("stack-inspector-value");
+    value.set_halign(gtk::Align::Start);
+    value.set_hexpand(true);
+    value.set_selectable(true);
+    value.set_ellipsize(pango::EllipsizeMode::Middle);
+    grid.attach(&value, 1, row, 1, 1);
+    value
+}
+
+impl StackWordInspector {
+    fn clear(&self) {
+        self.address.set_text("Select a stack word");
+        self.raw.set_text("");
+        self.interpretation.set_text("");
+        self.role.set_text("");
+        self.region.set_text("");
+        reset_semantic_css(&self.interpretation);
+    }
+
+    fn show(&self, entry: &StackEntry) {
+        self.address.set_text(&format!(
+            "0x{:016x}  ·  SP+0x{:x}  ·  word {}",
+            entry.address, entry.offset, entry.index
+        ));
+        self.address.set_tooltip_text(Some(&self.address.text()));
+        self.raw.set_text(&entry.value);
+        self.raw.set_tooltip_text(Some(&entry.value));
+        let interpretation = stack_entry_text(entry);
+        self.interpretation.set_text(&interpretation);
+        self.interpretation.set_tooltip_text(Some(&interpretation));
+        reset_semantic_css(&self.interpretation);
+        self.interpretation
+            .add_css_class(memory_kind_css(entry.memory_kind));
+        let role = stack_word_role(entry);
+        self.role.set_text(&role);
+        self.role.set_tooltip_text(Some(&role));
+        let region = entry.region.as_deref().unwrap_or("unmapped / scalar");
+        self.region.set_text(region);
+        self.region.set_tooltip_text(Some(region));
+    }
 }
 
 fn stack_column(
@@ -3546,8 +4474,10 @@ fn stack_column(
     width: i32,
     expand: bool,
     column: StackColumn,
+    selection: &gtk::SingleSelection,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
+    let selection = selection.clone();
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -3558,6 +4488,13 @@ fn stack_column(
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
         label.set_selectable(true);
+        let click = gtk::GestureClick::new();
+        let item_for_click = item.clone();
+        let selection = selection.clone();
+        click.connect_pressed(move |_, _, _, _| {
+            selection.set_selected(item_for_click.position());
+        });
+        label.add_controller(click);
         item.set_child(Some(&label));
     });
     factory.connect_bind(move |_, object| {
@@ -3643,9 +4580,11 @@ fn instruction_column(
     width: i32,
     expand: bool,
     class: &'static str,
+    selection: &gtk::SingleSelection,
     text: fn(&InstructionRowData) -> String,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
+    let selection = selection.clone();
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -3655,6 +4594,16 @@ fn instruction_column(
         label.add_css_class(class);
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
+        label.set_selectable(true);
+        label.set_cursor_from_name(Some("text"));
+        let click = gtk::GestureClick::new();
+        click.set_button(gtk::gdk::BUTTON_PRIMARY);
+        let item_for_click = item.clone();
+        let selection = selection.clone();
+        click.connect_pressed(move |_, _, _, _| {
+            selection.set_selected(item_for_click.position());
+        });
+        label.add_controller(click);
         item.set_child(Some(&label));
     });
     factory.connect_bind(move |_, object| {
@@ -3668,12 +4617,17 @@ fn instruction_column(
             return;
         };
         let data = data.borrow::<InstructionRowData>();
+        if data.current {
+            label.add_css_class("current-instruction-cell");
+        } else {
+            label.remove_css_class("current-instruction-cell");
+        }
         label.set_text(&text(&data));
         label.set_tooltip_text(Some(&format!(
-            "{} · {}\n{}\nClick or press Enter to add an instruction breakpoint",
+            "{} · {}\n{}\nSelect text to copy; press Enter or double-click outside a text selection to toggle an instruction breakpoint",
             data.instruction.address,
             data.instruction.text,
-            instruction_symbol(&data.instruction),
+            instruction_symbol_full(&data.instruction),
         )));
     });
     let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
@@ -3825,17 +4779,16 @@ fn populate_register_group<'a>(
     previous: &HashMap<String, String>,
     ring: Option<u64>,
 ) {
-    let mut count = 0_i32;
-    for register in registers {
-        count += 1;
-        group
-            .store
-            .append(&glib::BoxedAnyObject::new(RegisterRowData {
-                register: register.clone(),
-                changed: register_changed(register, previous),
-                ring,
-            }));
-    }
+    let rows = registers
+        .into_iter()
+        .map(|register| RegisterRowData {
+            register: register.clone(),
+            changed: register_changed(register, previous),
+            ring,
+        })
+        .collect::<Vec<_>>();
+    let count = rows.len() as i32;
+    replace_boxed_store(&group.store, rows);
     if count == 0 {
         return;
     }
@@ -3874,18 +4827,25 @@ fn register_changed(register: &Register, previous: &HashMap<String, String>) -> 
         .is_some_and(|value| value != &register.value)
 }
 
+fn same_register_values(left: &[Register], right: &[Register]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| left.name == right.name && left.value == right.value)
+}
+
 fn register_value_css(register: &Register) -> &'static str {
     if matches!(register.name.as_str(), "rip" | "eip") {
         "memory-code"
     } else if matches!(register.name.as_str(), "rsp" | "rbp" | "esp" | "ebp") {
         "memory-stack"
-    } else if register
-        .pointer_chain
-        .iter()
-        .skip(1)
-        .filter_map(|value| hex_value(value))
-        .any(|value| ascii_annotation(value).is_some_and(|annotation| !annotation.starts_with('(')))
-    {
+    } else if register.pointer_chain.iter().skip(1).any(|value| {
+        value.contains('"')
+            || hex_value(value).is_some_and(|value| {
+                ascii_annotation(value).is_some_and(|annotation| !annotation.starts_with('('))
+            })
+    }) {
         "memory-string"
     } else if matches!(register.name.as_str(), "fs_base" | "gs_base")
         || register
@@ -4238,6 +5198,49 @@ fn stack_references(entry: &StackEntry) -> String {
     references.join(" · ")
 }
 
+fn stack_word_role(entry: &StackEntry) -> String {
+    let mut roles = vec![memory_kind_label(entry.memory_kind).to_owned()];
+    if !entry.address_registers.is_empty() {
+        roles.push(format!(
+            "addressed by {}",
+            entry
+                .address_registers
+                .iter()
+                .map(|name| format!("${name}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !entry.value_registers.is_empty() {
+        roles.push(format!(
+            "value held by {}",
+            entry
+                .value_registers
+                .iter()
+                .map(|name| format!("${name}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if let Some(frame) = entry.return_frame {
+        roles.push(format!("return address for frame #{frame}"));
+    }
+    roles.join("  ·  ")
+}
+
+const fn memory_kind_label(kind: MemoryKind) -> &'static str {
+    match kind {
+        MemoryKind::Code => "CODE POINTER",
+        MemoryKind::Heap => "HEAP POINTER",
+        MemoryKind::Stack => "STACK POINTER",
+        MemoryKind::Writable => "WRITABLE POINTER",
+        MemoryKind::ReadOnly => "READ-ONLY POINTER",
+        MemoryKind::Rwx => "RWX POINTER",
+        MemoryKind::String => "ASCII / STRING",
+        MemoryKind::None => "SCALAR / UNKNOWN",
+    }
+}
+
 fn stack_tooltip(entry: &StackEntry) -> String {
     let anchors = entry
         .address_registers
@@ -4379,7 +5382,7 @@ fn thread_metadata(thread: &ThreadInfo, stop_reason: Option<&str>) -> String {
             .clone()
             .or_else(|| (frame.function != "??").then(|| format!("<{}>", frame.function)))
     {
-        metadata.push(symbol);
+        metadata.push(compact_function_name(&symbol));
     }
     if let Some(core) = thread.core.as_deref() {
         metadata.push(format!("core:{core}"));
@@ -4402,7 +5405,7 @@ fn split_instruction(instruction: &str) -> (&str, &str) {
     }
 }
 
-fn instruction_flow_description(instruction: &Instruction) -> String {
+fn instruction_flow_description(instruction: &Instruction, registers: &[Register]) -> String {
     let (mnemonic, operands) = split_instruction(&instruction.text);
     let mnemonic = mnemonic.to_ascii_lowercase();
     let (kind, detail) = if mnemonic.starts_with("call") {
@@ -4414,7 +5417,14 @@ fn instruction_flow_description(instruction: &Instruction) -> String {
     } else if mnemonic == "jmp" || mnemonic.starts_with("jmp") {
         ("JUMP", operands)
     } else if mnemonic.starts_with('j') || mnemonic.starts_with("loop") {
-        ("BRANCH", operands)
+        let decision = conditional_branch_taken(instruction, registers).map(|taken| {
+            if taken {
+                "BRANCH · TAKEN"
+            } else {
+                "BRANCH · NOT TAKEN"
+            }
+        });
+        (decision.unwrap_or("BRANCH"), operands)
     } else {
         ("FLOW", "sequential")
     };
@@ -4425,8 +5435,11 @@ fn instruction_flow_description(instruction: &Instruction) -> String {
     }
 }
 
-fn guessed_call_arguments(instruction: &Instruction, registers: &[Register]) -> String {
+fn instruction_arguments_description(instruction: &Instruction, registers: &[Register]) -> String {
     let mnemonic = split_instruction(&instruction.text).0.to_ascii_lowercase();
+    if matches!(mnemonic.as_str(), "syscall" | "sysenter") {
+        return syscall_arguments_description(registers);
+    }
     if !mnemonic.starts_with("call") {
         return String::new();
     }
@@ -4443,6 +5456,152 @@ fn guessed_call_arguments(instruction: &Instruction, registers: &[Register]) -> 
         String::new()
     } else {
         format!("ARGS  {}", arguments.join("  "))
+    }
+}
+
+fn conditional_branch_taken(instruction: &Instruction, registers: &[Register]) -> Option<bool> {
+    let mnemonic = split_instruction(&instruction.text).0.to_ascii_lowercase();
+    let flags =
+        register_number(registers, "rflags").or_else(|| register_number(registers, "eflags"));
+    let flag = |bit: u8| flags.map(|flags| flags & (1_u64 << bit) != 0);
+    let carry = || flag(0);
+    let parity = || flag(2);
+    let zero = || flag(6);
+    let sign = || flag(7);
+    let overflow = || flag(11);
+    match mnemonic.as_str() {
+        "jo" => overflow(),
+        "jno" => overflow().map(|value| !value),
+        "jb" | "jc" | "jnae" => carry(),
+        "jae" | "jnb" | "jnc" => carry().map(|value| !value),
+        "je" | "jz" => zero(),
+        "jne" | "jnz" => zero().map(|value| !value),
+        "jbe" | "jna" => Some(carry()? || zero()?),
+        "ja" | "jnbe" => Some(!carry()? && !zero()?),
+        "js" => sign(),
+        "jns" => sign().map(|value| !value),
+        "jp" | "jpe" => parity(),
+        "jnp" | "jpo" => parity().map(|value| !value),
+        "jl" | "jnge" => Some(sign()? != overflow()?),
+        "jge" | "jnl" => Some(sign()? == overflow()?),
+        "jle" | "jng" => Some(zero()? || sign()? != overflow()?),
+        "jg" | "jnle" => Some(!zero()? && sign()? == overflow()?),
+        "jcxz" => register_number(registers, "cx")
+            .or_else(|| register_number(registers, "ecx"))
+            .or_else(|| register_number(registers, "rcx"))
+            .map(|value| value & 0xffff == 0),
+        "jecxz" => register_number(registers, "ecx")
+            .or_else(|| register_number(registers, "rcx"))
+            .map(|value| value & 0xffff_ffff == 0),
+        "jrcxz" => register_number(registers, "rcx").map(|value| value == 0),
+        "loop" | "loope" | "loopz" | "loopne" | "loopnz" => {
+            let counter =
+                register_number(registers, "rcx").or_else(|| register_number(registers, "ecx"))?;
+            let repeats = counter.wrapping_sub(1) != 0;
+            match mnemonic.as_str() {
+                "loope" | "loopz" => Some(repeats && zero()?),
+                "loopne" | "loopnz" => Some(repeats && !zero()?),
+                _ => Some(repeats),
+            }
+        }
+        _ => None,
+    }
+}
+
+fn register_number(registers: &[Register], name: &str) -> Option<u64> {
+    registers
+        .iter()
+        .find(|register| register.name == name)
+        .and_then(|register| hex_value(&register.value))
+}
+
+fn syscall_arguments_description(registers: &[Register]) -> String {
+    let Some(number) = register_number(registers, "rax") else {
+        return String::from("SYSCALL  number unavailable");
+    };
+    let (name, argument_names) = syscall_signature(number);
+    let values = ["rdi", "rsi", "rdx", "r10", "r8", "r9"]
+        .iter()
+        .zip(argument_names.iter())
+        .filter_map(|(register_name, argument_name)| {
+            registers
+                .iter()
+                .find(|register| register.name == *register_name)
+                .map(|register| format!("{argument_name}={}", register_primary_value(register)))
+        })
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        format!("SYSCALL  #{number} {name}")
+    } else {
+        format!("SYSCALL  #{number} {name}({})", values.join(", "))
+    }
+}
+
+fn syscall_signature(number: u64) -> (&'static str, &'static [&'static str]) {
+    match number {
+        0 => ("read", &["fd", "buf", "count"]),
+        1 => ("write", &["fd", "buf", "count"]),
+        2 => ("open", &["path", "flags", "mode"]),
+        3 => ("close", &["fd"]),
+        8 => ("lseek", &["fd", "offset", "whence"]),
+        9 => ("mmap", &["addr", "length", "prot", "flags", "fd", "offset"]),
+        10 => ("mprotect", &["addr", "length", "prot"]),
+        11 => ("munmap", &["addr", "length"]),
+        12 => ("brk", &["addr"]),
+        13 => (
+            "rt_sigaction",
+            &["signal", "action", "old_action", "sigset_size"],
+        ),
+        14 => ("rt_sigprocmask", &["how", "set", "old_set", "sigset_size"]),
+        16 => ("ioctl", &["fd", "request", "argument"]),
+        17 => ("pread64", &["fd", "buf", "count", "offset"]),
+        18 => ("pwrite64", &["fd", "buf", "count", "offset"]),
+        19 => ("readv", &["fd", "iov", "iov_count"]),
+        20 => ("writev", &["fd", "iov", "iov_count"]),
+        21 => ("access", &["path", "mode"]),
+        32 => ("dup", &["old_fd"]),
+        33 => ("dup2", &["old_fd", "new_fd"]),
+        39 => ("getpid", &[]),
+        41 => ("socket", &["domain", "type", "protocol"]),
+        42 => ("connect", &["fd", "address", "length"]),
+        43 => ("accept", &["fd", "address", "length"]),
+        56 => (
+            "clone",
+            &["flags", "stack", "parent_tid", "child_tid", "tls"],
+        ),
+        57 => ("fork", &[]),
+        58 => ("vfork", &[]),
+        59 => ("execve", &["path", "argv", "envp"]),
+        60 => ("exit", &["status"]),
+        61 => ("wait4", &["pid", "status", "options", "usage"]),
+        62 => ("kill", &["pid", "signal"]),
+        72 => ("fcntl", &["fd", "command", "argument"]),
+        80 => ("chdir", &["path"]),
+        87 => ("unlink", &["path"]),
+        158 => ("arch_prctl", &["code", "address"]),
+        186 => ("gettid", &[]),
+        202 => (
+            "futex",
+            &[
+                "address",
+                "operation",
+                "value",
+                "timeout",
+                "address2",
+                "value3",
+            ],
+        ),
+        231 => ("exit_group", &["status"]),
+        257 => ("openat", &["dir_fd", "path", "flags", "mode"]),
+        262 => ("newfstatat", &["dir_fd", "path", "stat", "flags"]),
+        263 => ("unlinkat", &["dir_fd", "path", "flags"]),
+        273 => ("set_robust_list", &["head", "length"]),
+        318 => ("getrandom", &["buf", "count", "flags"]),
+        332 => ("statx", &["dir_fd", "path", "flags", "mask", "statx"]),
+        435 => ("clone3", &["arguments", "size"]),
+        436 => ("close_range", &["first", "last", "flags"]),
+        437 => ("openat2", &["dir_fd", "path", "how", "size"]),
+        _ => ("unknown", &["arg0", "arg1", "arg2", "arg3", "arg4", "arg5"]),
     }
 }
 
@@ -4512,7 +5671,7 @@ fn compact_memory_preview(bytes: &[u8]) -> String {
     format!("{hex}  |{ascii}|")
 }
 
-fn instruction_symbol(instruction: &Instruction) -> String {
+fn instruction_symbol_full(instruction: &Instruction) -> String {
     let offset = instruction.offset.parse::<u64>().unwrap_or(0);
     if offset == 0 {
         format!("<{}>", instruction.function)
@@ -4521,15 +5680,35 @@ fn instruction_symbol(instruction: &Instruction) -> String {
     }
 }
 
+fn instruction_symbol(instruction: &Instruction) -> String {
+    compact_function_name(&instruction_symbol_full(instruction))
+}
+
 fn variable_at(selection: &gtk::SingleSelection, position: u32) -> Option<Variable> {
+    variable_row_at(selection, position).map(|(_, variable)| variable)
+}
+
+fn variable_row_at(
+    selection: &gtk::SingleSelection,
+    position: u32,
+) -> Option<(gtk::TreeListRow, Variable)> {
+    variable_node_at(selection, position)
+        .and_then(|(row, node)| (!node.placeholder).then_some((row, node.variable)))
+}
+
+fn variable_node_at(
+    selection: &gtk::SingleSelection,
+    position: u32,
+) -> Option<(gtk::TreeListRow, VariableNode)> {
     selection
         .item(position)
         .and_then(|item| item.downcast::<gtk::TreeListRow>().ok())
-        .and_then(|row| row.item())
-        .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
-        .and_then(|item| {
+        .and_then(|row| {
+            let item = row
+                .item()
+                .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())?;
             let node = item.borrow::<VariableNode>();
-            (!node.placeholder).then(|| node.variable.clone())
+            Some((row, node.clone()))
         })
 }
 
@@ -4548,6 +5727,48 @@ fn find_variable_node(store: &gio::ListStore, varobj: &str) -> Option<VariableNo
         }
     }
     None
+}
+
+fn collect_variable_object_roots(
+    store: &gio::ListStore,
+    owner: Option<&str>,
+    names: &mut Vec<String>,
+) {
+    for position in 0..store.n_items() {
+        let Some(item) = store
+            .item(position)
+            .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+        else {
+            continue;
+        };
+        let node = item.borrow::<VariableNode>();
+        let mut child_owner = owner.map(str::to_owned);
+        if let Some(name) = &node.variable.varobj {
+            let belongs_to_owner = owner.is_some_and(|owner| {
+                name == owner
+                    || name
+                        .strip_prefix(owner)
+                        .is_some_and(|suffix| suffix.starts_with('.'))
+            });
+            if !belongs_to_owner {
+                names.push(name.clone());
+                child_owner = Some(name.clone());
+            }
+        }
+        collect_variable_object_roots(&node.children, child_owner.as_deref(), names);
+    }
+}
+
+fn remove_load_more_rows(store: &gio::ListStore) {
+    for position in (0..store.n_items()).rev() {
+        let is_load_more = store
+            .item(position)
+            .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+            .is_some_and(|item| item.borrow::<VariableNode>().load_more.is_some());
+        if is_load_more {
+            store.remove(position);
+        }
+    }
 }
 
 fn open_variable_editor(
@@ -5025,6 +6246,14 @@ fn clear_box(container: &gtk::Box) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
+}
+
+fn replace_boxed_store<T: 'static>(store: &gio::ListStore, values: impl IntoIterator<Item = T>) {
+    let values = values
+        .into_iter()
+        .map(glib::BoxedAnyObject::new)
+        .collect::<Vec<_>>();
+    store.splice(0, store.n_items(), &values);
 }
 
 fn update_selected_frame_buttons(buttons: &[(u32, gtk::Button)], selected: u32) {
@@ -5666,6 +6895,39 @@ fn without_generic_arguments(symbol: &str) -> String {
         .collect()
 }
 
+fn compact_function_name(symbol: &str) -> String {
+    if symbol.chars().count() <= 56 || !symbol.contains(['<', '>']) {
+        return symbol.to_owned();
+    }
+
+    let mut compact = String::with_capacity(symbol.len().min(80));
+    let mut depth = 0_u32;
+    for character in symbol.chars() {
+        match character {
+            '<' => {
+                if depth == 0 {
+                    compact.push('<');
+                    compact.push('…');
+                }
+                depth = depth.saturating_add(1);
+            }
+            '>' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    compact.push('>');
+                }
+            }
+            _ if depth == 0 => compact.push(character),
+            _ => {}
+        }
+    }
+    if depth == 0 {
+        compact
+    } else {
+        symbol.to_owned()
+    }
+}
+
 fn scroll_source_document(document: &SourceDocument, line: u32) {
     let Ok(line) = i32::try_from(line.saturating_sub(1)) else {
         return;
@@ -5693,7 +6955,11 @@ fn breakpoint_command_numbers(breakpoints: &[Breakpoint], watchpoints: bool) -> 
         if watchpoints {
             breakpoint.is_watchpoint()
         } else {
-            !breakpoint.is_watchpoint() && !breakpoint.is_catchpoint()
+            !breakpoint.is_watchpoint()
+                && !breakpoint.is_catchpoint()
+                && !EventCatchpoint::ALL
+                    .iter()
+                    .any(|(event, _, _)| event.matches(breakpoint))
         }
     }) {
         let number = breakpoint.command_number();
@@ -5708,7 +6974,7 @@ fn signal_catchpoint_command_numbers(breakpoints: &[Breakpoint]) -> Vec<String> 
     let mut numbers = Vec::new();
     for breakpoint in breakpoints
         .iter()
-        .filter(|breakpoint| breakpoint.is_catchpoint())
+        .filter(|breakpoint| breakpoint.is_signal_catchpoint())
     {
         let number = breakpoint.command_number();
         if !numbers.iter().any(|existing| existing == number) {
@@ -5716,6 +6982,31 @@ fn signal_catchpoint_command_numbers(breakpoints: &[Breakpoint]) -> Vec<String> 
         }
     }
     numbers
+}
+
+fn event_catchpoint_command_numbers(breakpoints: &[Breakpoint]) -> Vec<String> {
+    let mut numbers = Vec::new();
+    for breakpoint in breakpoints.iter().filter(|breakpoint| {
+        EventCatchpoint::ALL
+            .iter()
+            .any(|(event, _, _)| event.matches(breakpoint))
+    }) {
+        let number = breakpoint.command_number();
+        if !numbers.iter().any(|existing| existing == number) {
+            numbers.push(number.to_owned());
+        }
+    }
+    numbers
+}
+
+fn event_catchpoint_command_number(
+    breakpoints: &[Breakpoint],
+    event: EventCatchpoint,
+) -> Option<String> {
+    breakpoints
+        .iter()
+        .find(|breakpoint| event.matches(breakpoint))
+        .map(|breakpoint| breakpoint.command_number().to_owned())
 }
 
 fn breakpoint_command_number_at_address(
@@ -5762,7 +7053,7 @@ fn signal_catchpoint_command_number(breakpoints: &[Breakpoint], signal: &str) ->
     breakpoints
         .iter()
         .find(|breakpoint| {
-            breakpoint.is_catchpoint()
+            breakpoint.is_signal_catchpoint()
                 && breakpoint
                     .original_location
                     .as_deref()
@@ -5820,7 +7111,7 @@ fn connect_execution_button(
     });
 }
 
-fn issue_execution_command(ui: &Ui, client: &MiClient, command: &str, detail: &str) {
+pub(crate) fn issue_execution_command(ui: &Ui, client: &MiClient, command: &str, detail: &str) {
     match client.send(command) {
         Ok(_) => {
             ui.set_command_pending(true);
@@ -5880,16 +7171,18 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        MemoryWatchFormat, VectorLaneFormat, breakpoint_command_number_at_address,
-        breakpoint_command_numbers, flags_markup, format_memory_watch, format_register_value,
-        full_address, guessed_call_arguments, instruction_flow_description,
-        instruction_memory_expression, normalized_signal_name, register_value_css,
-        set_breakpoint_enabled, signal_catchpoint_command_number,
+        EventCatchpoint, MemoryWatchFormat, VectorLaneFormat, architecture_pointer_bits,
+        breakpoint_command_number_at_address, breakpoint_command_numbers, compact_function_name,
+        event_catchpoint_command_number, event_catchpoint_command_numbers, flags_markup,
+        format_memory_watch, format_register_value, full_address,
+        instruction_arguments_description, instruction_flow_description,
+        instruction_memory_expression, integer_decimal_value, normalized_signal_name,
+        register_value_css, set_breakpoint_enabled, signal_catchpoint_command_number,
         signal_catchpoint_command_numbers, source_location_score, source_symbol_at_offset,
-        source_tab_title, stop_reason_label, thread_os_id, variable_value_parts,
+        source_tab_title, stop_reason_label, thread_os_id, variable_details, variable_value_parts,
         vector_field_values, without_generic_arguments,
     };
-    use crate::debugger::{Breakpoint, Instruction, Register, SourceLocation};
+    use crate::debugger::{Breakpoint, Instruction, Register, SourceLocation, Variable};
 
     #[test]
     fn formats_pointer_words_and_ascii_previews() {
@@ -5924,6 +7217,96 @@ mod tests {
             ("{x = 1, y = 2}", "")
         );
         assert_eq!(variable_value_parts("0x1"), ("0x1", ""));
+
+        let integer = |type_name: &str, value: &str| Variable {
+            name: String::from("value"),
+            value: value.to_owned(),
+            type_name: Some(type_name.to_owned()),
+            varobj: None,
+            num_children: 0,
+            has_more: false,
+        };
+        let details = |variable: &Variable, value: &str, annotation: &str| {
+            variable_details(variable, value, annotation, 64)
+        };
+        assert_eq!(details(&integer("int", "0x2a"), "0x2a", ""), "42");
+        assert_eq!(
+            details(&integer("char", "0x41 'A'"), "0x41", "'A'"),
+            "65  ·  'A'"
+        );
+        assert_eq!(details(&integer("__time_t", "-0x1"), "-0x1", ""), "-1");
+        assert_eq!(
+            details(&integer("int", "0xffffffff"), "0xffffffff", ""),
+            "-1"
+        );
+        assert_eq!(
+            details(&integer("unsigned int", "0xffffffff"), "0xffffffff", ""),
+            "4294967295"
+        );
+        assert_eq!(details(&integer("int", "0xff"), "0xff", ""), "255");
+        assert_eq!(details(&integer("i8", "0xff"), "0xff", ""), "-1");
+        assert_eq!(details(&integer("void *", "0x2a"), "0x2a", ""), "");
+        assert_eq!(details(&integer("double", "0x2a"), "0x2a", ""), "");
+    }
+
+    #[test]
+    fn decodes_rust_c_and_cpp_integer_types() {
+        let decimal = |type_name: &str, value: &str, pointer_bits| {
+            let variable = Variable {
+                name: String::from("value"),
+                value: value.to_owned(),
+                type_name: Some(type_name.to_owned()),
+                varobj: None,
+                num_children: 0,
+                has_more: false,
+            };
+            integer_decimal_value(&variable, value, pointer_bits)
+        };
+
+        assert_eq!(
+            decimal("i128", "0xffffffffffffffffffffffffffffffff", 64),
+            Some("-1".into())
+        );
+        assert_eq!(
+            decimal("u128", "0xffffffffffffffffffffffffffffffff", 64),
+            Some("340282366920938463463374607431768211455".into())
+        );
+        assert_eq!(
+            decimal("usize", "0xffffffffffffffff", 64),
+            Some("18446744073709551615".into())
+        );
+        assert_eq!(decimal("isize", "0xffffffff", 32), Some("-1".into()));
+        assert_eq!(
+            decimal("const signed short int", "0xffff", 64),
+            Some("-1".into())
+        );
+        assert_eq!(
+            decimal("long unsigned int", "0xffffffffffffffff", 64),
+            Some("18446744073709551615".into())
+        );
+        assert_eq!(
+            decimal("std::uint_least16_t", "0xffff", 64),
+            Some("65535".into())
+        );
+        assert_eq!(
+            decimal("int_fast16_t", "0xffffffffffffffff", 64),
+            Some("-1".into())
+        );
+        assert_eq!(
+            decimal("unsigned __int64", "0xffffffffffffffff", 64),
+            Some("18446744073709551615".into())
+        );
+        assert_eq!(
+            decimal("__int128", "0xffffffffffffffffffffffffffffffff", 64),
+            Some("-1".into())
+        );
+        assert_eq!(
+            decimal("unsigned _BitInt(17)", "0x1ffff", 64),
+            Some("131071".into())
+        );
+        assert_eq!(decimal("_BitInt(17)", "0x1ffff", 64), Some("-1".into()));
+        assert_eq!(architecture_pointer_bits("i386:x86-64"), Some(64));
+        assert_eq!(architecture_pointer_bits("i386"), Some(32));
     }
 
     #[test]
@@ -6029,10 +7412,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            instruction_flow_description(&instruction),
+            instruction_flow_description(&instruction, &registers),
             "CALL  →  0x402000 <mmap@plt>"
         );
-        let arguments = guessed_call_arguments(&instruction, &registers);
+        let arguments = instruction_arguments_description(&instruction, &registers);
         assert!(arguments.contains("$rdi=0x0000000000000000"));
         assert!(arguments.contains("$r9=0x0000000000000005"));
 
@@ -6050,6 +7433,46 @@ mod tests {
             instruction_memory_expression(&memory_instruction, &with_rbp).as_deref(),
             Some("($rbp-0x10)")
         );
+    }
+
+    #[test]
+    fn predicts_x86_branches_and_decodes_linux_syscalls() {
+        let branch = Instruction {
+            address: String::from("0x401000"),
+            function: String::from("main"),
+            offset: String::from("12"),
+            opcodes: Some(String::from("75 0a")),
+            text: String::from("jne 0x40100c <main+0x1c>"),
+        };
+        let flags = Register {
+            name: String::from("eflags"),
+            value: String::from("0x246"),
+            pointer_chain: Vec::new(),
+        };
+        assert_eq!(
+            instruction_flow_description(&branch, std::slice::from_ref(&flags)),
+            "BRANCH · NOT TAKEN  →  0x40100c <main+0x1c>"
+        );
+
+        let syscall = Instruction {
+            text: String::from("syscall"),
+            ..branch
+        };
+        let registers = [
+            ("rax", "0x1"),
+            ("rdi", "0x2"),
+            ("rsi", "0x7fff0000"),
+            ("rdx", "0x20"),
+        ]
+        .map(|(name, value)| Register {
+            name: name.to_owned(),
+            value: value.to_owned(),
+            pointer_chain: Vec::new(),
+        });
+        let arguments = instruction_arguments_description(&syscall, &registers);
+        assert!(arguments.starts_with("SYSCALL  #1 write("));
+        assert!(arguments.contains("fd=0x0000000000000002"));
+        assert!(arguments.contains("count=0x0000000000000020"));
     }
 
     #[test]
@@ -6128,6 +7551,11 @@ mod tests {
         assert!(
             source_location_score("malloc", &malloc) > source_location_score("malloc", &cleanup)
         );
+
+        let verbose =
+            "alloc::vec::Vec<alloc::boxed::Box<dyn core::fmt::Debug>, alloc::alloc::Global>::push";
+        assert_eq!(compact_function_name(verbose), "alloc::vec::Vec<…>::push");
+        assert_eq!(compact_function_name("core::ptr::read"), "core::ptr::read");
     }
 
     #[test]
@@ -6137,6 +7565,7 @@ mod tests {
             kind: kind.to_owned(),
             enabled: true,
             condition: None,
+            catch_type: None,
             address: None,
             function: None,
             file: None,
@@ -6144,7 +7573,7 @@ mod tests {
             line: None,
             original_location: None,
         };
-        let stop_points = [
+        let stop_points = vec![
             stop_point("1.1", "breakpoint"),
             stop_point("1.2", "breakpoint"),
             stop_point("2", "hw watchpoint"),
@@ -6152,10 +7581,28 @@ mod tests {
                 original_location: Some(String::from("SIGSEGV")),
                 ..stop_point("3", "catchpoint")
             },
+            Breakpoint {
+                catch_type: Some(String::from("throw")),
+                original_location: Some(String::from("exception throw")),
+                ..stop_point("4", "catchpoint")
+            },
+            Breakpoint {
+                original_location: Some(String::from("rust_panic")),
+                ..stop_point("5", "breakpoint")
+            },
         ];
         assert_eq!(breakpoint_command_numbers(&stop_points, false), ["1"]);
         assert_eq!(breakpoint_command_numbers(&stop_points, true), ["2"]);
         assert_eq!(signal_catchpoint_command_numbers(&stop_points), ["3"]);
+        assert_eq!(event_catchpoint_command_numbers(&stop_points), ["4", "5"]);
+        assert_eq!(
+            event_catchpoint_command_number(&stop_points, EventCatchpoint::CxxThrow).as_deref(),
+            Some("4")
+        );
+        assert_eq!(
+            event_catchpoint_command_number(&stop_points, EventCatchpoint::RustPanic).as_deref(),
+            Some("5")
+        );
         assert_eq!(
             signal_catchpoint_command_number(&stop_points, "segv").as_deref(),
             Some("3")

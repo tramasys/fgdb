@@ -109,6 +109,7 @@ struct ScopedMiRequest {
     token: u64,
     command: String,
     response: Option<MiRecord>,
+    is_current: Box<dyn Fn() -> bool>,
     handler: ResponseHandler,
 }
 
@@ -188,10 +189,11 @@ impl MiClient {
         Ok(token)
     }
 
-    pub fn request_with_print_limit(
+    pub fn request_with_print_limit_when(
         &self,
         command: &str,
         elements: usize,
+        is_current: impl Fn() -> bool + 'static,
         handler: impl FnOnce(&MiClient, MiRecord) + 'static,
     ) -> io::Result<u64> {
         let token = self.allocate_token();
@@ -200,8 +202,13 @@ impl MiClient {
             token,
             command,
             response: None,
+            is_current: Box::new(is_current),
             handler: Box::new(handler),
         };
+        if !(request.is_current)() {
+            (request.handler)(self, error_record("request superseded"));
+            return Ok(token);
+        }
         if self.scoped_request.borrow().is_some() || !self.scoped_queue.borrow().is_empty() {
             self.scoped_queue.borrow_mut().push_back(request);
         } else if let Err(failure) = self.start_scoped_request(request) {
@@ -226,6 +233,10 @@ impl MiClient {
             let Some(request) = self.scoped_queue.borrow_mut().pop_front() else {
                 return;
             };
+            if !(request.is_current)() {
+                (request.handler)(self, error_record("request superseded"));
+                continue;
+            }
             if let Err(failure) = self.start_scoped_request(request) {
                 let (error, request) = *failure;
                 (request.handler)(self, error_record(&error.to_string()));

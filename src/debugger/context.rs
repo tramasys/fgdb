@@ -78,7 +78,6 @@ pub(crate) fn build_stack_entries(
     memory
         .bytes
         .chunks_exact(word_size)
-        .take(8)
         .enumerate()
         .map(|(index, bytes)| {
             let mut word = [0_u8; 8];
@@ -97,6 +96,11 @@ pub(crate) fn build_stack_entries(
                 .find(|frame| pointer_address(&frame.address) == Some(value))
                 .map(|frame| frame.level);
             let region = region_for_address(regions, value);
+            let memory_kind = if region.is_none() && looks_like_string_word(value) {
+                MemoryKind::String
+            } else {
+                region.map_or(MemoryKind::None, |region| region.kind)
+            };
             StackEntry {
                 address,
                 offset: index * word_size,
@@ -106,7 +110,7 @@ pub(crate) fn build_stack_entries(
                 address_registers,
                 value_registers,
                 return_frame,
-                memory_kind: region.map_or(MemoryKind::None, |region| region.kind),
+                memory_kind,
                 region: region.map(region_description),
             }
         })
@@ -238,5 +242,31 @@ mod tests {
         assert_eq!(entries[0].value_registers, ["rsi"]);
         assert_eq!(entries[0].return_frame, Some(1));
         assert_eq!(entries[0].memory_kind, MemoryKind::Code);
+    }
+
+    #[test]
+    fn builds_the_full_requested_stack_window_and_marks_inline_ascii() {
+        let words = [
+            u64::from_le_bytes(*b"ABCDEFGH"),
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            11,
+        ];
+        let memory = MemoryBlock {
+            begin: 0x7fff_0000,
+            bytes: words.into_iter().flat_map(u64::to_le_bytes).collect(),
+        };
+        let entries = build_stack_entries(&memory, 8, &[], &[], &[]);
+        assert_eq!(entries.len(), words.len());
+        assert_eq!(entries[0].memory_kind, MemoryKind::String);
+        assert_eq!(entries[11].offset, 88);
     }
 }

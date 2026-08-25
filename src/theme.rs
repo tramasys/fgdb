@@ -118,11 +118,18 @@ impl Theme {
     text-shadow: none;
 }}
 
-window,
+window.fgdb-window,
+window.fgdb-window:backdrop,
+window.fgdb-window.csd,
+window.fgdb-window.csd:backdrop,
+window.fgdb-window.solid-csd,
+window.fgdb-window.solid-csd:backdrop,
 .debugger-root {{
     background: @app_bg;
     color: @app_fg;
     font-size: 12px;
+    border: 0;
+    box-shadow: none;
 }}
 
 headerbar.topbar {{
@@ -131,6 +138,9 @@ headerbar.topbar {{
     background: @app_bg;
     background-image: none;
     box-shadow: none;
+    border-top: 0;
+    border-left: 0;
+    border-right: 0;
     border-bottom: 1px solid @app_border;
 }}
 
@@ -138,13 +148,13 @@ headerbar.topbar .titlebar-identity {{ padding: 0 8px; }}
 
 headerbar.topbar .titlebar-actions {{ min-height: 33px; }}
 
-headerbar.topbar windowcontrols {{
+headerbar.topbar .window-controls {{
     margin: 0;
     padding: 0;
     border-spacing: 0;
 }}
 
-headerbar.topbar windowcontrols button {{
+headerbar.topbar button.window-control {{
     min-width: 42px;
     min-height: 33px;
     margin: 0;
@@ -152,21 +162,24 @@ headerbar.topbar windowcontrols button {{
     color: @app_muted;
     background: transparent;
     border: 0;
+    font-family: sans-serif;
+    font-size: 15px;
+    font-weight: 400;
 }}
 
-headerbar.topbar windowcontrols button:hover,
-headerbar.topbar windowcontrols button:focus-visible {{
+headerbar.topbar button.window-control:hover,
+headerbar.topbar button.window-control:focus-visible {{
     color: @app_fg;
     background: @app_raised;
 }}
 
-headerbar.topbar windowcontrols button:active {{
+headerbar.topbar button.window-control:active {{
     color: @app_fg;
     background: alpha(@app_fg, 0.18);
 }}
 
-headerbar.topbar windowcontrols button.close:hover,
-headerbar.topbar windowcontrols button.close:active {{
+headerbar.topbar button.window-control.close:hover,
+headerbar.topbar button.window-control.close:active {{
     color: @app_bg;
     background: @app_danger;
 }}
@@ -310,13 +323,13 @@ button.stack-frame:nth-child(odd),
 }}
 
 button.stack-frame.current-debug-item {{
-    background: alpha(@app_warning, 0.17);
+    background: alpha(@app_accent, 0.16);
 }}
 
 button.stack-frame:hover {{ background: alpha(@app_fg, 0.11); }}
 
 button.stack-frame.current-debug-item:hover {{
-    background: alpha(@app_warning, 0.24);
+    background: alpha(@app_accent, 0.23);
 }}
 
 .thread-heading {{
@@ -330,6 +343,23 @@ button.stack-frame.current-debug-item:hover {{
     color: @app_muted;
     font-size: 11px;
 }}
+
+.module-row {{
+    padding: 3px 4px;
+    border-bottom: 1px solid @app_border;
+}}
+
+.module-row:hover {{ background: @app_raised; }}
+.module-name {{ color: @app_fg; }}
+.module-range,
+.module-path {{ color: @app_muted; font-size: 10px; }}
+.module-symbol-state {{
+    padding: 0 3px;
+    font-size: 9px;
+    font-weight: 700;
+}}
+.module-symbols-loaded {{ color: @app_success; }}
+.module-symbols-missing {{ color: @app_warning; }}
 
 button.instruction-row {{
     min-height: 34px;
@@ -385,6 +415,11 @@ button.instruction-row.current-instruction:hover {{
 .instruction-insight-line:nth-child(1) {{ color: @app_accent_hover; }}
 .instruction-insight-line:nth-child(2) {{ color: @app_warning; }}
 .instruction-insight-line:nth-child(3) {{ color: @app_success; }}
+.instruction-insight-line.branch-taken {{
+    color: @app_success;
+    font-weight: 700;
+}}
+.instruction-insight-line.branch-not-taken {{ color: @app_muted; }}
 
 .instruction-cell {{
     min-height: 22px;
@@ -433,8 +468,10 @@ columnview.debug-table row:hover {{
 
 columnview.debug-table row:selected {{
     color: @app_fg;
-    background: alpha(@app_warning, 0.17);
+    background: alpha(@app_accent, 0.16);
 }}
+
+.current-instruction-cell {{ background: alpha(@app_accent, 0.08); }}
 
 .debug-table-cell {{
     min-height: 22px;
@@ -450,8 +487,24 @@ columnview.debug-table row:selected {{
 .local-value {{ color: @app_fg; }}
 .local-details {{ color: @app_muted; }}
 .local-details-error {{ color: @app_danger; }}
+.local-load-more {{
+    color: @app_accent_hover;
+    font-weight: 700;
+}}
 
-.locals-table treeexpander {{ padding-left: 1px; }}
+.locals-table treeexpander {{
+    min-height: 28px;
+    padding-left: 2px;
+}}
+
+.locals-table treeexpander > label.local-name {{
+    min-height: 24px;
+    padding: 2px 6px 2px 4px;
+}}
+
+.locals-table treeexpander > label.local-expandable:hover {{
+    background: alpha(@app_accent, 0.10);
+}}
 
 .vector-lane-index {{
     min-width: 28px;
@@ -497,14 +550,7 @@ window.vector-editor dropdown > button {{
 
 .modified-register {{
     color: @app_warning;
-    background: alpha(@app_warning, 0.08);
 }}
-
-.register-row.register-changed {{
-    background: alpha(@app_warning, 0.10);
-}}
-
-.register-row.register-changed .register-value {{ color: @app_warning; }}
 
 .stack-memory-row {{
     min-height: 42px;
@@ -523,6 +569,26 @@ window.vector-editor dropdown > button {{
 .stack-region {{ color: @app_muted; }}
 
 .stack-references {{ color: @app_accent_hover; }}
+
+.stack-word-inspector {{
+    min-height: 112px;
+    padding: 4px 5px 5px;
+    background: @app_bg;
+    border-top: 1px solid @app_border;
+}}
+
+.stack-word-inspector grid {{ margin-top: 2px; }}
+
+.stack-inspector-key {{
+    min-width: 92px;
+    color: @app_muted;
+    font-size: 10px;
+}}
+
+.stack-inspector-value {{
+    min-height: 18px;
+    color: @app_fg;
+}}
 
 .legend-swatch {{ font-size: 10px; }}
 .legend-modified {{ color: @app_warning; }}
@@ -580,6 +646,58 @@ window.vector-editor dropdown > button {{
     min-width: 230px;
     padding: 5px;
     background: @app_surface;
+}}
+
+.gef-tools-menu {{
+    min-width: 300px;
+    padding: 1px;
+    background: @app_surface;
+}}
+
+.gef-tools-menu > button {{
+    min-height: 18px;
+    padding: 0 3px;
+}}
+
+.gef-tools-menu > separator {{ margin: 0; }}
+
+.gef-tools-menu entry {{
+    min-height: 19px;
+    padding: 0 3px;
+    color: @app_fg;
+    background: @app_bg;
+    border: 1px solid @app_border;
+}}
+
+.gef-tools-menu entry:focus {{ border-color: @app_accent; }}
+
+.gef-tools-tabs > header {{
+    min-height: 20px;
+    background: @app_bg;
+    border-bottom: 1px solid @app_border;
+}}
+
+.gef-tools-tabs > header > tabs > tab {{
+    min-height: 19px;
+    padding: 0 5px;
+    border: 0;
+    border-bottom: 1px solid transparent;
+}}
+
+.gef-tools-tabs > header > tabs > tab:checked {{
+    color: @app_fg;
+    background: @app_raised;
+    border-bottom-color: @app_accent;
+}}
+
+.gef-tools-tabs > stack > box > button {{
+    min-height: 18px;
+    padding: 0 3px;
+}}
+
+.gef-command {{
+    color: @app_muted;
+    font-size: 10px;
 }}
 
 .gutter-breakpoint-menu {{
@@ -646,7 +764,7 @@ button:focus-visible {{
 button:active,
 button:checked {{
     color: @app_fg;
-    background: alpha(@app_warning, 0.17);
+    background: alpha(@app_accent, 0.17);
     background-image: none;
     border: 0;
     outline: none;
@@ -818,6 +936,30 @@ notebook > header > tabs > tab:checked {{
 notebook > header > tabs > tab:hover {{
     color: @app_fg;
     background: @app_raised;
+}}
+
+/* Keep debugger category tabs distinct without making the data rows roomy. */
+notebook.panel > header > tabs,
+notebook.sidebar-tabs > header > tabs,
+notebook.gef-tools-tabs > header > tabs {{
+    padding: 1px 2px;
+}}
+
+notebook.panel > header > tabs > tab,
+notebook.sidebar-tabs > header > tabs > tab,
+notebook.gef-tools-tabs > header > tabs > tab {{
+    margin: 1px;
+}}
+
+notebook.panel > header > tabs > tab,
+notebook.sidebar-tabs > header > tabs > tab {{
+    padding-left: 8px;
+    padding-right: 8px;
+}}
+
+notebook.gef-tools-tabs > header > tabs > tab {{
+    padding-left: 6px;
+    padding-right: 6px;
 }}
 
 notebook > header > tabs > arrow {{

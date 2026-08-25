@@ -17,11 +17,14 @@ use crate::{
         launch_gdb,
     },
     theme::Theme,
-    ui::{Ui, WatchpointAccess},
+    ui::{EventCatchpoint, Ui, WatchpointAccess},
 };
 
 const MAX_POINTER_CHAIN_DEPTH: usize = 3;
 const AUTOMATIC_PRINT_ELEMENTS: usize = 128;
+const VARIABLE_CHILD_PAGE_SIZE: usize = 128;
+const STACK_WORD_COUNT: usize = 32;
+const POINTER_STRING_PREVIEW_ELEMENTS: usize = 4096;
 
 struct RegisterRefresh {
     ui: Weak<Ui>,
@@ -279,6 +282,33 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+    ui.set_event_catchpoint_handler(move |event, existing| {
+        let Some(client) = weak_client.upgrade() else {
+            return;
+        };
+        let (command, detail) = existing.map_or_else(
+            || {
+                let command = if event == EventCatchpoint::RustPanic {
+                    String::from("-break-insert -f rust_panic")
+                } else {
+                    format!(
+                        "-interpreter-exec console {}",
+                        crate::debugger::quote(event.command())
+                    )
+                };
+                (command, format!("Added the {} stop point", event.label()))
+            },
+            |number| {
+                (
+                    format!("-break-delete {number}"),
+                    format!("Removed stop point #{number}"),
+                )
+            },
+        );
+        mutate_breakpoint(weak_ui.clone(), &client, command, detail);
+    });
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
     ui.set_breakpoint_condition_handler(move |number, condition| {
         let Some(client) = weak_client.upgrade() else {
             return;
@@ -440,11 +470,11 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
-    ui.set_variable_children_handler(move |variable| {
+    ui.set_variable_children_handler(move |variable, from| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
-        request_variable_children(weak_ui, client, variable);
+        request_variable_children(weak_ui, client, variable, from);
     });
 
     let weak_ui = Rc::downgrade(&ui);
@@ -459,7 +489,9 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     // application shutdown without introducing a widget/signal reference cycle.
     let retained_ui = Rc::new(RefCell::new(Some(ui)));
     application.connect_shutdown(move |_| {
-        retained_ui.borrow_mut().take();
+        if let Some(ui) = retained_ui.borrow_mut().take() {
+            ui.save_layout();
+        }
     });
 }
 
@@ -491,6 +523,11 @@ fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEvent) {
             ui.set_debug_state_stale(true);
             ui.set_inferior_started(true);
             ui.set_thread_stop_reason(None);
+            // Any queued stop-state responses now describe the previous stop.
+            // Invalidating them also prevents recursive pointer enrichment from
+            // issuing more MI work while the inferior is running.
+            ui.start_stop_refresh();
+            ui.start_thread_refresh();
             ui.clear_execution_location();
             ui.set_status(
                 "Running",
@@ -561,11 +598,13 @@ fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
         return;
     };
     current_ui.clear_execution_location();
-    let generation = current_ui.start_register_refresh();
+    let generation = current_ui.start_stop_refresh();
     for varobj in current_ui.variable_object_names() {
-        let _ = client.send(&format!("-var-delete {}", crate::debugger::quote(&varobj)));
+        delete_variable_object(client, &varobj);
     }
     drop(current_ui);
+
+    refresh_modules(ui, client, generation);
 
     let stack_inputs = Rc::new(RefCell::new(StackInputs {
         ui: ui.clone(),
@@ -578,6 +617,9 @@ fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     let stack_inputs_for_frames = Rc::clone(&stack_inputs);
     if client
         .request("-stack-list-frames 0 24", move |client, record| {
+            if !stop_refresh_is_current(&weak_ui, generation) {
+                return;
+            }
             let frames = if record.is_done() {
                 crate::debugger::stack_frames(&record)
             } else {
@@ -602,6 +644,9 @@ fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
 
     let weak_ui = ui.clone();
     let _ = client.request("-stack-info-frame", move |client, record| {
+        if !stop_refresh_is_current(&weak_ui, generation) {
+            return;
+        }
         if record.is_done()
             && let (Some(ui), Some(frame)) =
                 (weak_ui.upgrade(), crate::debugger::current_frame(&record))
@@ -613,7 +658,8 @@ fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
             let _ = client.request(
                 "-data-disassemble -a $pc --opcodes bytes -- 0",
                 move |_, record| {
-                    if record.is_done()
+                    if stop_refresh_is_current(&weak_ui, generation)
+                        && record.is_done()
                         && let Some(ui) = weak_ui.upgrade()
                     {
                         ui.show_instructions(
@@ -628,9 +674,11 @@ fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     });
 
     let weak_ui = ui.clone();
-    let _ = client.request_with_print_limit(
+    let weak_ui_for_guard = ui.clone();
+    let _ = client.request_with_print_limit_when(
         "-stack-list-variables --simple-values",
         AUTOMATIC_PRINT_ELEMENTS,
+        move || stop_refresh_is_current(&weak_ui_for_guard, generation),
         move |client, record| {
             if record.is_done() {
                 refresh_variable_objects(
@@ -659,6 +707,9 @@ fn refresh_registers(
     let stack_inputs_for_names = Rc::clone(&stack_inputs);
     if client
         .request("-data-list-register-names", move |client, record| {
+            if !stop_refresh_is_current(&weak_ui, generation) {
+                return;
+            }
             if !record.is_done() {
                 finish_empty_register_refresh(
                     &weak_ui,
@@ -692,6 +743,9 @@ fn refresh_registers(
             let stack_inputs_for_values = Rc::clone(&stack_inputs_for_names);
             if client
                 .request(&command, move |client, record| {
+                    if !stop_refresh_is_current(&weak_ui_for_values, generation) {
+                        return;
+                    }
                     if !record.is_done() {
                         finish_empty_register_refresh(
                             &weak_ui_for_values,
@@ -731,10 +785,13 @@ fn refresh_variable_objects(
     generation: u64,
     variables: Vec<Variable>,
 ) {
+    if let Some(ui) = ui.upgrade() {
+        ui.show_locals_for_refresh(generation, &variables);
+    }
     if variables.is_empty() {
-        if let Some(ui) = ui.upgrade() {
-            ui.show_locals_for_refresh(generation, &[]);
-        }
+        return;
+    }
+    if !variables.iter().any(Variable::needs_variable_object) {
         return;
     }
     let state = Rc::new(RefCell::new(VariableRefresh {
@@ -747,15 +804,26 @@ fn refresh_variable_objects(
 }
 
 fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<VariableRefresh>>) {
+    let (ui, generation) = {
+        let state = state.borrow();
+        (state.ui.clone(), state.generation)
+    };
+    if !stop_refresh_is_current(&ui, generation) {
+        discard_variable_refresh(client, &state);
+        return;
+    }
     let next = {
         let mut state = state.borrow_mut();
-        if state.next_index >= state.variables.len() {
-            None
-        } else {
+        while state.next_index < state.variables.len()
+            && !state.variables[state.next_index].needs_variable_object()
+        {
+            state.next_index += 1;
+        }
+        (state.next_index < state.variables.len()).then(|| {
             let index = state.next_index;
             state.next_index += 1;
-            Some((index, state.variables[index].name.clone()))
-        }
+            (index, state.variables[index].name.clone())
+        })
     };
     let Some((index, display_name)) = next else {
         let (ui, generation, variables) = {
@@ -773,39 +841,105 @@ fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<VariableRef
     };
     let command = format!("-var-create - * {}", crate::debugger::quote(&display_name));
     let state_for_response = Rc::clone(&state);
+    let state_for_guard = Rc::clone(&state);
     if client
-        .request_with_print_limit(&command, AUTOMATIC_PRINT_ELEMENTS, move |client, record| {
-            if record.is_done()
-                && let Some(variable) = crate::debugger::variable_object(&record, &display_name)
-            {
-                state_for_response.borrow_mut().variables[index] = variable;
-            }
-            request_next_variable_object(client, state_for_response);
-        })
+        .request_with_print_limit_when(
+            &command,
+            AUTOMATIC_PRINT_ELEMENTS,
+            move || {
+                let state = state_for_guard.borrow();
+                stop_refresh_is_current(&state.ui, state.generation)
+            },
+            move |client, record| {
+                let variable = record
+                    .is_done()
+                    .then(|| crate::debugger::variable_object(&record, &display_name))
+                    .flatten();
+                let (ui, generation) = {
+                    let state = state_for_response.borrow();
+                    (state.ui.clone(), state.generation)
+                };
+                if !stop_refresh_is_current(&ui, generation) {
+                    if let Some(varobj) = variable
+                        .as_ref()
+                        .and_then(|variable| variable.varobj.as_deref())
+                    {
+                        delete_variable_object(client, varobj);
+                    }
+                    discard_variable_refresh(client, &state_for_response);
+                    return;
+                }
+                if let Some(variable) = variable {
+                    state_for_response.borrow_mut().variables[index] = variable;
+                }
+                request_next_variable_object(client, state_for_response);
+            },
+        )
         .is_err()
     {
         request_next_variable_object(client, state);
     }
 }
 
-fn request_variable_children(ui: Weak<Ui>, client: Rc<MiClient>, variable: Variable) {
+fn stop_refresh_is_current(ui: &Weak<Ui>, generation: u64) -> bool {
+    ui.upgrade()
+        .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+}
+
+fn delete_variable_object(client: &MiClient, varobj: &str) {
+    let command = format!("-var-delete {}", crate::debugger::quote(varobj));
+    // Parent deletion can legitimately remove child objects also present in
+    // the expanded UI tree, so consume any resulting errors locally.
+    let _ = client.request(&command, |_, _| {});
+}
+
+fn discard_variable_refresh(client: &MiClient, state: &Rc<RefCell<VariableRefresh>>) {
+    let state = state.borrow();
+    for varobj in state
+        .variables
+        .iter()
+        .filter_map(|variable| variable.varobj.as_deref())
+    {
+        delete_variable_object(client, varobj);
+    }
+}
+
+fn request_variable_children(ui: Weak<Ui>, client: Rc<MiClient>, variable: Variable, from: usize) {
     let Some(varobj) = variable.varobj.clone() else {
         return;
     };
     if variable.num_children > 0 {
+        let to = from.saturating_add(VARIABLE_CHILD_PAGE_SIZE);
         let command = format!(
-            "-var-list-children --all-values {}",
-            crate::debugger::quote(&varobj)
+            "-var-list-children --all-values {} {from} {to}",
+            crate::debugger::quote(&varobj),
         );
         let ui_for_response = ui.clone();
+        let ui_for_guard = ui.clone();
         let varobj_for_response = varobj.clone();
-        if let Err(error) =
-            client.request_with_print_limit(&command, AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
+        let varobj_for_guard = varobj.clone();
+        let variable_for_response = variable.clone();
+        if let Err(error) = client.request_with_print_limit_when(
+            &command,
+            AUTOMATIC_PRINT_ELEMENTS,
+            move || {
+                ui_for_guard
+                    .upgrade()
+                    .is_some_and(|ui| ui.has_variable_object(&varobj_for_guard))
+            },
+            move |_, record| {
                 if let Some(ui) = ui_for_response.upgrade() {
                     if record.is_done() {
-                        ui.show_variable_children(
-                            &varobj_for_response,
-                            &crate::debugger::variable_children(&record),
+                        let children = crate::debugger::variable_children(&record);
+                        let next = from.saturating_add(children.len());
+                        let has_more = !children.is_empty()
+                            && (crate::debugger::variable_children_have_more(&record)
+                                || next < variable_for_response.num_children);
+                        ui.show_variable_children_page(
+                            &variable_for_response,
+                            from,
+                            &children,
+                            has_more,
                         );
                     } else {
                         ui.show_variable_children_error(
@@ -816,8 +950,8 @@ fn request_variable_children(ui: Weak<Ui>, client: Rc<MiClient>, variable: Varia
                         );
                     }
                 }
-            })
-            && let Some(ui) = ui.upgrade()
+            },
+        ) && let Some(ui) = ui.upgrade()
         {
             ui.show_variable_children_error(&varobj, &error.to_string());
         }
@@ -854,14 +988,29 @@ fn request_variable_children(ui: Weak<Ui>, client: Rc<MiClient>, variable: Varia
                 "-var-create - * {}",
                 crate::debugger::quote(&format!("*({path})"))
             );
+            if !ui_for_path
+                .upgrade()
+                .is_some_and(|ui| ui.has_variable_object(&varobj_for_path))
+            {
+                return;
+            }
             let ui_for_dereference = ui_for_path.clone();
+            let ui_for_guard = ui_for_path.clone();
             let varobj_for_dereference = varobj_for_path.clone();
+            let varobj_for_guard = varobj_for_path.clone();
             let ui_for_request_error = ui_for_path.clone();
             let varobj_for_request_error = varobj_for_path.clone();
             if client_for_path
-                .request_with_print_limit(&command, AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
-                    if let Some(ui) = ui_for_dereference.upgrade() {
-                        if let Some(child) = record
+                .request_with_print_limit_when(
+                    &command,
+                    AUTOMATIC_PRINT_ELEMENTS,
+                    move || {
+                        ui_for_guard
+                            .upgrade()
+                            .is_some_and(|ui| ui.has_variable_object(&varobj_for_guard))
+                    },
+                    move |client, record| {
+                        let child = record
                             .is_done()
                             .then(|| {
                                 crate::debugger::variable_object(
@@ -869,10 +1018,18 @@ fn request_variable_children(ui: Weak<Ui>, client: Rc<MiClient>, variable: Varia
                                     &format!("*{display_name}"),
                                 )
                             })
-                            .flatten()
-                        {
-                            ui.show_variable_children(&varobj_for_dereference, &[child]);
-                        } else {
+                            .flatten();
+                        if let Some(child) = child {
+                            let attached = ui_for_dereference.upgrade().is_some_and(|ui| {
+                                ui.show_variable_children(
+                                    &varobj_for_dereference,
+                                    std::slice::from_ref(&child),
+                                )
+                            });
+                            if !attached && let Some(varobj) = child.varobj.as_deref() {
+                                delete_variable_object(client, varobj);
+                            }
+                        } else if let Some(ui) = ui_for_dereference.upgrade() {
                             ui.show_variable_children_error(
                                 &varobj_for_dereference,
                                 record
@@ -880,8 +1037,8 @@ fn request_variable_children(ui: Weak<Ui>, client: Rc<MiClient>, variable: Varia
                                     .unwrap_or("GDB cannot dereference this pointer"),
                             );
                         }
-                    }
-                })
+                    },
+                )
                 .is_err()
                 && let Some(ui) = ui_for_request_error.upgrade()
             {
@@ -912,6 +1069,9 @@ fn finish_empty_register_refresh(
 }
 
 fn enrich_registers(ui: Weak<Ui>, client: &MiClient, generation: u64, registers: Vec<Register>) {
+    if !stop_refresh_is_current(&ui, generation) {
+        return;
+    }
     let indices = registers
         .iter()
         .enumerate()
@@ -942,6 +1102,13 @@ fn request_register_chain(
     register_index: usize,
     depth: usize,
 ) {
+    let (ui, generation) = {
+        let state = refresh.borrow();
+        (state.ui.clone(), state.generation)
+    };
+    if !stop_refresh_is_current(&ui, generation) {
+        return;
+    }
     let name = refresh.borrow().registers[register_index].name.clone();
     let expression = pointer_expression(&name, depth);
     let command = format!(
@@ -951,16 +1118,25 @@ fn request_register_chain(
     let refresh_for_handler = Rc::clone(&refresh);
     if client
         .request(&command, move |client, record| {
+            let (ui, generation) = {
+                let state = refresh_for_handler.borrow();
+                (state.ui.clone(), state.generation)
+            };
+            if !stop_refresh_is_current(&ui, generation) {
+                return;
+            }
             let value = record
                 .is_done()
                 .then(|| crate::debugger::evaluated_value(&record))
                 .flatten();
             let mut continue_chain = false;
+            let mut string_address = None;
             if let Some(value) = value
                 && let Some(address) = pointer_address(&value)
             {
                 let mut state = refresh_for_handler.borrow_mut();
-                let chain = &mut state.registers[register_index].pointer_chain;
+                let register = &mut state.registers[register_index];
+                let chain = &mut register.pointer_chain;
                 if chain
                     .iter()
                     .filter_map(|previous| pointer_address(previous))
@@ -969,11 +1145,20 @@ fn request_register_chain(
                     chain.push(String::from("[loop detected]"));
                 } else {
                     chain.push(value);
-                    continue_chain = address != 0 && depth < MAX_POINTER_CHAIN_DEPTH;
+                    string_address = register_string_address(register, address, depth);
+                    continue_chain =
+                        string_address.is_none() && address != 0 && depth < MAX_POINTER_CHAIN_DEPTH;
                 }
             }
 
-            if continue_chain {
+            if let Some(address) = string_address {
+                request_register_string(
+                    client,
+                    Rc::clone(&refresh_for_handler),
+                    register_index,
+                    address,
+                );
+            } else if continue_chain {
                 request_register_chain(
                     client,
                     Rc::clone(&refresh_for_handler),
@@ -984,6 +1169,78 @@ fn request_register_chain(
                 complete_register_sequence(&refresh_for_handler);
             }
         })
+        .is_err()
+    {
+        complete_register_sequence(&refresh);
+    }
+}
+
+fn register_string_address(register: &Register, decoded_word: u64, depth: usize) -> Option<u64> {
+    if depth == 0
+        || matches!(register.name.as_str(), "rip" | "eip")
+        || !looks_like_string_word(decoded_word)
+    {
+        return None;
+    }
+    register
+        .pointer_chain
+        .len()
+        .checked_sub(2)
+        .and_then(|index| register.pointer_chain.get(index))
+        .filter(|value| !value.contains('<'))
+        .and_then(|value| pointer_address(value))
+}
+
+fn request_register_string(
+    client: &MiClient,
+    refresh: Rc<RefCell<RegisterRefresh>>,
+    register_index: usize,
+    address: u64,
+) {
+    let (ui, generation) = {
+        let state = refresh.borrow();
+        (state.ui.clone(), state.generation)
+    };
+    if !stop_refresh_is_current(&ui, generation) {
+        return;
+    }
+    let expression = format!("(char*)0x{address:x}");
+    let command = format!(
+        "-data-evaluate-expression {}",
+        crate::debugger::quote(&expression)
+    );
+    let refresh_for_handler = Rc::clone(&refresh);
+    let refresh_for_guard = Rc::clone(&refresh);
+    if client
+        .request_with_print_limit_when(
+            &command,
+            POINTER_STRING_PREVIEW_ELEMENTS,
+            move || {
+                let state = refresh_for_guard.borrow();
+                stop_refresh_is_current(&state.ui, state.generation)
+            },
+            move |_, record| {
+                let (ui, generation) = {
+                    let state = refresh_for_handler.borrow();
+                    (state.ui.clone(), state.generation)
+                };
+                if !stop_refresh_is_current(&ui, generation) {
+                    return;
+                }
+                if let Some(value) = record
+                    .is_done()
+                    .then(|| crate::debugger::evaluated_value(&record))
+                    .flatten()
+                    .filter(|value| value.contains('"'))
+                {
+                    let mut state = refresh_for_handler.borrow_mut();
+                    let chain = &mut state.registers[register_index].pointer_chain;
+                    chain.pop();
+                    chain.push(value);
+                }
+                complete_register_sequence(&refresh_for_handler);
+            },
+        )
         .is_err()
     {
         complete_register_sequence(&refresh);
@@ -1037,9 +1294,15 @@ fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, client: &MiC
     let Some((ui, generation, registers, frames)) = inputs else {
         return;
     };
+    if !stop_refresh_is_current(&ui, generation) {
+        return;
+    }
     let ui_for_request = ui.clone();
     if client
         .request("-list-thread-groups", move |client, record| {
+            if !stop_refresh_is_current(&ui, generation) {
+                return;
+            }
             let regions = crate::debugger::inferior_pid(&record)
                 .map(read_memory_regions)
                 .unwrap_or_default();
@@ -1066,16 +1329,22 @@ fn request_stack_memory(
     frames: Vec<StackFrame>,
     regions: Vec<MemoryRegion>,
 ) {
+    if !stop_refresh_is_current(&ui, generation) {
+        return;
+    }
     let is_64_bit = registers.iter().any(|register| register.name == "rsp");
     let stack_register = if is_64_bit { "rsp" } else { "esp" };
     let word_size = if is_64_bit { 8 } else { 4 };
     let command = format!(
         "-data-read-memory-bytes ${stack_register} {}",
-        word_size * 8
+        word_size * STACK_WORD_COUNT
     );
     let ui_for_request = ui.clone();
     if client
         .request(&command, move |client, record| {
+            if !stop_refresh_is_current(&ui, generation) {
+                return;
+            }
             let Some(memory) = crate::debugger::memory_block(&record) else {
                 if let Some(ui) = ui.upgrade() {
                     ui.show_stack_for_refresh(generation, &[]);
@@ -1102,10 +1371,18 @@ fn enrich_stack(
     entries: Vec<StackEntry>,
     stack_register: &'static str,
 ) {
+    if !stop_refresh_is_current(&ui, generation) {
+        return;
+    }
     let indices = entries
         .iter()
         .enumerate()
-        .filter(|(_, entry)| pointer_address(&entry.value).is_some_and(|value| value != 0))
+        .filter(|(_, entry)| {
+            pointer_address(&entry.value).is_some_and(|value| value != 0)
+                && (entry.region.is_some()
+                    || !entry.value_registers.is_empty()
+                    || entry.return_frame.is_some())
+        })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
     if indices.is_empty() {
@@ -1129,6 +1406,13 @@ fn request_stack_chain(
     stack_register: &'static str,
     depth: usize,
 ) {
+    let (ui, generation) = {
+        let state = refresh.borrow();
+        (state.ui.clone(), state.generation)
+    };
+    if !stop_refresh_is_current(&ui, generation) {
+        return;
+    }
     let offset = refresh.borrow().entries[entry_index].offset;
     let expression = stack_pointer_expression(stack_register, offset, depth);
     let command = format!(
@@ -1138,16 +1422,25 @@ fn request_stack_chain(
     let refresh_for_handler = Rc::clone(&refresh);
     if client
         .request(&command, move |client, record| {
+            let (ui, generation) = {
+                let state = refresh_for_handler.borrow();
+                (state.ui.clone(), state.generation)
+            };
+            if !stop_refresh_is_current(&ui, generation) {
+                return;
+            }
             let value = record
                 .is_done()
                 .then(|| crate::debugger::evaluated_value(&record))
                 .flatten();
             let mut continue_chain = false;
+            let mut string_address = None;
             if let Some(value) = value
                 && let Some(address) = pointer_address(&value)
             {
                 let mut state = refresh_for_handler.borrow_mut();
-                let chain = &mut state.entries[entry_index].pointer_chain;
+                let entry = &mut state.entries[entry_index];
+                let chain = &mut entry.pointer_chain;
                 if chain
                     .iter()
                     .filter_map(|previous| pointer_address(previous))
@@ -1156,10 +1449,19 @@ fn request_stack_chain(
                     chain.push(String::from("[loop detected]"));
                 } else {
                     chain.push(value);
-                    continue_chain = address != 0 && depth < MAX_POINTER_CHAIN_DEPTH;
+                    string_address = stack_string_address(entry, address, depth);
+                    continue_chain =
+                        string_address.is_none() && address != 0 && depth < MAX_POINTER_CHAIN_DEPTH;
                 }
             }
-            if continue_chain {
+            if let Some(address) = string_address {
+                request_stack_string(
+                    client,
+                    Rc::clone(&refresh_for_handler),
+                    entry_index,
+                    address,
+                );
+            } else if continue_chain {
                 request_stack_chain(
                     client,
                     Rc::clone(&refresh_for_handler),
@@ -1171,6 +1473,78 @@ fn request_stack_chain(
                 complete_stack_sequence(&refresh_for_handler);
             }
         })
+        .is_err()
+    {
+        complete_stack_sequence(&refresh);
+    }
+}
+
+fn stack_string_address(entry: &StackEntry, decoded_word: u64, depth: usize) -> Option<u64> {
+    if depth == 0
+        || !looks_like_string_word(decoded_word)
+        || matches!(entry.memory_kind, MemoryKind::Code | MemoryKind::Rwx)
+    {
+        return None;
+    }
+    entry
+        .pointer_chain
+        .len()
+        .checked_sub(2)
+        .and_then(|index| entry.pointer_chain.get(index))
+        .and_then(|value| pointer_address(value))
+}
+
+fn request_stack_string(
+    client: &MiClient,
+    refresh: Rc<RefCell<StackRefresh>>,
+    entry_index: usize,
+    address: u64,
+) {
+    let (ui, generation) = {
+        let state = refresh.borrow();
+        (state.ui.clone(), state.generation)
+    };
+    if !stop_refresh_is_current(&ui, generation) {
+        return;
+    }
+    let expression = format!("(char*)0x{address:x}");
+    let command = format!(
+        "-data-evaluate-expression {}",
+        crate::debugger::quote(&expression)
+    );
+    let refresh_for_handler = Rc::clone(&refresh);
+    let refresh_for_guard = Rc::clone(&refresh);
+    if client
+        .request_with_print_limit_when(
+            &command,
+            POINTER_STRING_PREVIEW_ELEMENTS,
+            move || {
+                let state = refresh_for_guard.borrow();
+                stop_refresh_is_current(&state.ui, state.generation)
+            },
+            move |_, record| {
+                let (ui, generation) = {
+                    let state = refresh_for_handler.borrow();
+                    (state.ui.clone(), state.generation)
+                };
+                if !stop_refresh_is_current(&ui, generation) {
+                    return;
+                }
+                if let Some(value) = record
+                    .is_done()
+                    .then(|| crate::debugger::evaluated_value(&record))
+                    .flatten()
+                    .filter(|value| value.contains('"'))
+                {
+                    let mut state = refresh_for_handler.borrow_mut();
+                    let entry = &mut state.entries[entry_index];
+                    entry.pointer_chain.pop();
+                    entry.pointer_chain.push(value);
+                    entry.memory_kind = MemoryKind::String;
+                }
+                complete_stack_sequence(&refresh_for_handler);
+            },
+        )
         .is_err()
     {
         complete_stack_sequence(&refresh);
@@ -1454,18 +1828,28 @@ fn refresh_breakpoints(ui: &Weak<Ui>, client: &MiClient) {
 }
 
 fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+    let generation = current_ui.start_thread_refresh();
+    drop(current_ui);
     let weak_ui = ui.clone();
     let _ = client.request("-thread-info", move |client, record| {
         if !record.is_done() {
             return;
         }
         let threads = crate::debugger::threads(&record);
-        if let Some(ui) = weak_ui.upgrade() {
-            if !threads.is_empty() {
-                ui.set_inferior_started(true);
-            }
-            ui.show_threads(&threads);
+        let Some(ui) = weak_ui.upgrade() else {
+            return;
+        };
+        if !ui.is_thread_refresh_current(generation) {
+            return;
         }
+        if !threads.is_empty() {
+            ui.set_inferior_started(true);
+        }
+        ui.show_threads_for_refresh(generation, &threads);
+        drop(ui);
         if !threads.iter().any(|thread| thread.current) {
             return;
         }
@@ -1490,10 +1874,26 @@ fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
                     thread.pc_symbol = Some(symbol);
                 }
                 if let Some(ui) = weak_ui.upgrade() {
-                    ui.show_threads(&threads);
+                    ui.show_threads_for_refresh(generation, &threads);
                 }
             },
         );
+    });
+}
+
+fn refresh_modules(ui: &Weak<Ui>, client: &MiClient, generation: u64) {
+    let weak_ui = ui.clone();
+    let _ = client.request("-file-list-shared-libraries", move |_, record| {
+        if stop_refresh_is_current(&weak_ui, generation)
+            && let Some(ui) = weak_ui.upgrade()
+        {
+            let modules = if record.is_done() {
+                crate::debugger::shared_libraries(&record)
+            } else {
+                Vec::new()
+            };
+            ui.show_modules(&modules);
+        }
     });
 }
 
@@ -1722,9 +2122,11 @@ fn handle_session_event(ui: &Weak<Ui>, event: SessionEvent) {
 #[cfg(test)]
 mod tests {
     use super::{
-        assignment_expression, parse_gdb_integer, pointer_expression, source_symbol_pattern,
-        stack_pointer_expression, symbol_annotation, vector_assignment_expression,
+        assignment_expression, parse_gdb_integer, pointer_expression, register_string_address,
+        source_symbol_pattern, stack_pointer_expression, stack_string_address, symbol_annotation,
+        vector_assignment_expression,
     };
+    use crate::debugger::{MemoryKind, Register, StackEntry};
 
     #[test]
     fn builds_pointer_chain_expressions() {
@@ -1735,6 +2137,49 @@ mod tests {
             stack_pointer_expression("rsp", 8, 1),
             "*(void**)(*(void**)($rsp+0x8))"
         );
+    }
+
+    #[test]
+    fn finds_the_pointer_behind_an_inline_stack_string_preview() {
+        let mut entry = StackEntry {
+            address: 0x7fff_0000,
+            offset: 0,
+            index: 0,
+            value: String::from("0x7fff1000"),
+            pointer_chain: vec![
+                String::from("0x7fff1000"),
+                String::from("0x415242494c5f444c"),
+            ],
+            address_registers: vec![String::from("rsp")],
+            value_registers: Vec::new(),
+            return_frame: None,
+            memory_kind: MemoryKind::Stack,
+            region: Some(String::from("rw-p · [stack]")),
+        };
+        let word = u64::from_le_bytes(*b"LD_LIBRA");
+        assert_eq!(stack_string_address(&entry, word, 1), Some(0x7fff_1000));
+        entry.memory_kind = MemoryKind::Code;
+        assert_eq!(stack_string_address(&entry, word, 1), None);
+    }
+
+    #[test]
+    fn finds_the_pointer_behind_an_inline_register_string_preview() {
+        let word = u64::from_le_bytes(*b"LD_LIBRA");
+        let mut register = Register {
+            name: String::from("rsp"),
+            value: String::from("0x7fffffffc5f0"),
+            pointer_chain: vec![
+                String::from("0x7fffffffc5f0"),
+                String::from("0x7ffff7feedf6"),
+                format!("0x{word:x}"),
+            ],
+        };
+        assert_eq!(
+            register_string_address(&register, word, 2),
+            Some(0x7fff_f7fe_edf6)
+        );
+        register.name = String::from("rip");
+        assert_eq!(register_string_address(&register, word, 2), None);
     }
 
     #[test]

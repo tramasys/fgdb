@@ -29,9 +29,10 @@ pub struct Variable {
 
 impl Variable {
     pub fn is_pointer(&self) -> bool {
-        self.type_name
-            .as_deref()
-            .is_some_and(|type_name| type_name.contains('*') || type_name.starts_with('&'))
+        self.type_name.as_deref().is_some_and(|type_name| {
+            let type_name = type_name.trim();
+            type_name.contains('*') || type_name.starts_with('&') || type_name.ends_with('&')
+        })
     }
 
     pub fn can_expand(&self) -> bool {
@@ -42,6 +43,13 @@ impl Variable {
                         self.value.trim(),
                         "0" | "0x0" | "nullptr" | "<not available>" | "<optimized out>"
                     )))
+    }
+
+    /// Scalar values returned by `-stack-list-variables --simple-values` are
+    /// already complete and can be assigned by expression. Reserve GDB
+    /// variable objects for values that can actually benefit from expansion.
+    pub fn needs_variable_object(&self) -> bool {
+        self.is_pointer() || self.value == "<not available>"
     }
 }
 
@@ -111,6 +119,15 @@ pub struct ThreadInfo {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SharedLibrary {
+    pub target_name: String,
+    pub host_name: Option<String>,
+    pub symbols_loaded: bool,
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Instruction {
     pub address: String,
     pub function: String,
@@ -131,6 +148,7 @@ pub struct Breakpoint {
     pub fullname: Option<String>,
     pub line: Option<u32>,
     pub original_location: Option<String>,
+    pub catch_type: Option<String>,
 }
 
 impl Breakpoint {
@@ -144,6 +162,14 @@ impl Breakpoint {
 
     pub fn is_catchpoint(&self) -> bool {
         self.kind.contains("catchpoint")
+    }
+
+    pub fn is_signal_catchpoint(&self) -> bool {
+        self.is_catchpoint()
+            && (self.catch_type.as_deref() == Some("signal")
+                || self.original_location.as_deref().is_some_and(|location| {
+                    location.starts_with("SIG") || location == "<any signal>"
+                }))
     }
 
     pub fn command_number(&self) -> &str {
@@ -258,6 +284,10 @@ pub fn variable_children(record: &MiRecord) -> Vec<Variable> {
         .collect()
 }
 
+pub fn variable_children_have_more(record: &MiRecord) -> bool {
+    record.field("has_more").and_then(MiValue::as_const) == Some("1")
+}
+
 fn variable_child_name(expression: &str) -> String {
     if !expression.is_empty()
         && expression
@@ -315,7 +345,7 @@ pub fn compact_register_numbers(names: &[String]) -> Vec<usize> {
             .iter()
             .enumerate()
             .filter(|(number, name)| {
-                preferred.contains(number)
+                preferred.binary_search(number).is_ok()
                     || vector_register(name, vector_prefix)
                     || floating_point_register(name)
             })
@@ -527,6 +557,30 @@ pub fn instructions(record: &MiRecord) -> Vec<Instruction> {
         .collect()
 }
 
+pub fn shared_libraries(record: &MiRecord) -> Vec<SharedLibrary> {
+    record
+        .field("shared-libraries")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .filter_map(|tuple| {
+            let range = result_field(tuple, "ranges")
+                .and_then(MiValue::as_list)
+                .into_iter()
+                .flatten()
+                .find_map(tuple_from_item);
+            Some(SharedLibrary {
+                target_name: constant(tuple, "target-name")?.to_owned(),
+                host_name: owned_constant(tuple, "host-name"),
+                symbols_loaded: constant(tuple, "symbols-loaded") == Some("1"),
+                from: range.and_then(|range| owned_constant(range, "from")),
+                to: range.and_then(|range| owned_constant(range, "to")),
+            })
+        })
+        .collect()
+}
+
 pub fn breakpoints(record: &MiRecord) -> Vec<Breakpoint> {
     let Some(table) = record.field("BreakpointTable").and_then(MiValue::as_tuple) else {
         return Vec::new();
@@ -626,6 +680,9 @@ fn expand_breakpoint(tuple: &[MiResult]) -> Vec<Breakpoint> {
                         .original_location
                         .clone_from(&parent.original_location);
                 }
+                if location.catch_type.is_none() {
+                    location.catch_type.clone_from(&parent.catch_type);
+                }
             }
         }
         locations
@@ -646,6 +703,7 @@ fn breakpoint(tuple: &[MiResult]) -> Option<Breakpoint> {
         original_location: owned_constant(tuple, "original-location")
             .or_else(|| owned_constant(tuple, "what"))
             .or_else(|| owned_constant(tuple, "exp")),
+        catch_type: owned_constant(tuple, "catch-type"),
     })
 }
 
@@ -681,8 +739,9 @@ fn owned_constant(tuple: &[MiResult], name: &str) -> Option<String> {
 mod tests {
     use super::{
         breakpoints, compact_register_numbers, current_source, inferior_pid, inserted_breakpoints,
-        instructions, memory_block, register_names, registers, source_locations, stack_frames,
-        threads, variable_children, variable_object, variable_path_expression, variables,
+        instructions, memory_block, register_names, registers, shared_libraries, source_locations,
+        stack_frames, threads, variable_children, variable_children_have_more, variable_object,
+        variable_path_expression, variables,
     };
     use crate::debugger::mi::parse_record;
 
@@ -697,6 +756,19 @@ mod tests {
         let locals =
             variables(&parse_record(r#"2^done,variables=[{name="answer",value="42"}]"#).unwrap());
         assert_eq!(locals[0].value, "42");
+        assert!(!locals[0].needs_variable_object());
+
+        let expandable = variables(
+            &parse_record(
+                r#"2^done,variables=[{name="state",type="Demo"},{name="next",type="Demo *",value="0x12"}]"#,
+            )
+            .unwrap(),
+        );
+        assert!(
+            expandable
+                .iter()
+                .all(|variable| variable.needs_variable_object())
+        );
 
         let names =
             register_names(&parse_record(r#"3^done,register-names=["rax","rbx"]"#).unwrap());
@@ -733,6 +805,12 @@ mod tests {
 
         let disassembly = instructions(&parse_record(r#"6^done,asm_insns=[{address="0x12",func-name="main",offset="0",opcodes="90",inst="nop"}]"#).unwrap());
         assert_eq!(disassembly[0].text, "nop");
+
+        let libraries = shared_libraries(&parse_record(r#"6^done,shared-libraries=[{target-name="/usr/lib/libc.so.6",host-name="/usr/lib/libc.so.6",symbols-loaded="1",ranges=[{from="0x7000",to="0x9000"}]}]"#).unwrap());
+        assert_eq!(libraries.len(), 1);
+        assert_eq!(libraries[0].target_name, "/usr/lib/libc.so.6");
+        assert!(libraries[0].symbols_loaded);
+        assert_eq!(libraries[0].from.as_deref(), Some("0x7000"));
 
         let process = parse_record(
             r#"7^done,groups=[{id="i1",type="process",pid="1234",executable="/tmp/a"}]"#,
@@ -771,6 +849,11 @@ mod tests {
         assert!(watchpoints[0].is_watchpoint());
         assert_eq!(watchpoints[0].original_location.as_deref(), Some("counter"));
         assert_eq!(watchpoints[0].condition.as_deref(), Some("counter > 3"));
+
+        let catchpoints = breakpoints(&parse_record(r#"7^done,BreakpointTable={body=[bkpt={number="3",type="catchpoint",enabled="y",what="exception throw",catch-type="throw"},bkpt={number="4",type="catchpoint",enabled="y",what="SIGSEGV",catch-type="signal"}]}"#).unwrap());
+        assert_eq!(catchpoints[0].catch_type.as_deref(), Some("throw"));
+        assert!(!catchpoints[0].is_signal_catchpoint());
+        assert!(catchpoints[1].is_signal_catchpoint());
     }
 
     #[test]
@@ -809,12 +892,23 @@ mod tests {
         assert_eq!(root.num_children, 2);
         assert!(root.can_expand());
 
-        let children = variable_children(
+        let reference = variable_object(
             &parse_record(
-                r#"11^done,numchild="2",children=[child={name="var1.x",exp="x",numchild="0",type="int",value="1"},child={name="var1.nested",exp="nested",numchild="1",type="struct Inner",value="{...}",has_more="0"}],has_more="0""#,
+                r#"10^done,name="var2",numchild="0",value="@0x12",type="const Demo &",has_more="0""#,
             )
             .unwrap(),
-        );
+            "reference",
+        )
+        .unwrap();
+        assert!(reference.is_pointer());
+        assert!(reference.needs_variable_object());
+
+        let children_record = parse_record(
+            r#"11^done,numchild="2",children=[child={name="var1.x",exp="x",numchild="0",type="int",value="1"},child={name="var1.nested",exp="nested",numchild="1",type="struct Inner",value="{...}",has_more="0"}],has_more="1""#,
+        )
+        .unwrap();
+        assert!(variable_children_have_more(&children_record));
+        let children = variable_children(&children_record);
         assert_eq!(children.len(), 2);
         assert_eq!(children[0].name, "x");
         assert_eq!(children[0].type_name.as_deref(), Some("int"));
