@@ -17,6 +17,23 @@ const KERNEL_PAGE_NAMES: [&str; 11] = [
     "limits",
     "process-tree",
 ];
+const KERNEL_OVERVIEW_DISCLOSURES: [(&str, &str, bool); 7] = [
+    ("PROCESS", "kernel.overview.process", true),
+    (
+        "MEMORY ACCOUNTING",
+        "kernel.overview.memory-accounting",
+        false,
+    ),
+    ("SCHEDULER", "kernel.overview.scheduler", false),
+    ("SECURITY", "kernel.overview.security", false),
+    ("I/O ACCOUNTING", "kernel.overview.io-accounting", false),
+    (
+        "NAMESPACES / CGROUPS",
+        "kernel.overview.namespaces-cgroups",
+        false,
+    ),
+    ("RUNTIME / ABI", "kernel.overview.runtime-abi", false),
+];
 
 #[derive(Clone, Copy)]
 enum MappingColumn {
@@ -144,9 +161,7 @@ enum ProcessColumn {
     Threads,
 }
 
-pub(super) fn build_kernel_view(
-    refresh_handler: &Rc<RefCell<Option<KernelRefreshHandler>>>,
-) -> KernelView {
+pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_size_request(-1, 0);
     root.add_css_class("sidebar");
@@ -188,7 +203,21 @@ pub(super) fn build_kernel_view(
     let page_switcher = gtk::StackSwitcher::new();
     page_switcher.add_css_class("kernel-tabs");
     page_switcher.set_stack(Some(&pages));
-    let (overview, overview_store) = build_overview();
+    let overview_section_handler: KernelSectionHandler = {
+        let section_handler = Rc::clone(bindings.section_handler);
+        Rc::new(move |section, expanded| {
+            let Some(preference_key) = kernel_overview_preference_key(section) else {
+                return;
+            };
+            if let Some(handler) = section_handler.borrow().as_ref() {
+                handler(preference_key, expanded);
+            }
+        })
+    };
+    let (overview, overview_store) = build_overview(
+        kernel_overview_collapsed(bindings.remembered_disclosures),
+        Some(overview_section_handler),
+    );
     pages.add_titled(&overview, Some("overview"), "Overview");
 
     let (
@@ -210,7 +239,7 @@ pub(super) fn build_kernel_view(
     let (mappings, mapping_store, mapping_count, mappings_empty) = build_mappings();
     pages.add_titled(&mappings, Some("mappings"), "Maps");
 
-    let (resources, resource_store) = build_overview();
+    let (resources, resource_store) = build_overview(HashSet::new(), None);
     pages.add_titled(&resources, Some("resources"), "Resources");
 
     let (threads, thread_store, thread_count, threads_empty) = build_threads();
@@ -257,6 +286,7 @@ pub(super) fn build_kernel_view(
         update_kernel_page_navigation(pages, &previous_for_page, &next_for_page, &scroll_for_page);
         let pages = pages.clone();
         glib::idle_add_local_once(move || {
+            clear_label_selections(&pages);
             if let Some(child) = pages.visible_child() {
                 child.queue_resize();
                 child.queue_allocate();
@@ -269,7 +299,7 @@ pub(super) fn build_kernel_view(
     });
     update_kernel_page_navigation(&pages, &previous_page, &next_page, &page_switcher_scroll);
 
-    let handler = Rc::clone(refresh_handler);
+    let handler = Rc::clone(bindings.refresh_handler);
     refresh_button.connect_clicked(move |_| {
         if let Some(handler) = handler.borrow().as_ref() {
             handler();
@@ -388,9 +418,28 @@ fn update_kernel_page_navigation(
     });
 }
 
-fn build_overview() -> (gtk::ScrolledWindow, gio::ListStore) {
+fn kernel_overview_preference_key(section: &str) -> Option<&'static str> {
+    KERNEL_OVERVIEW_DISCLOSURES
+        .iter()
+        .find_map(|(label, key, _)| (*label == section).then_some(*key))
+}
+
+fn kernel_overview_collapsed(remembered: &HashMap<String, bool>) -> HashSet<String> {
+    KERNEL_OVERVIEW_DISCLOSURES
+        .iter()
+        .filter_map(|(section, key, default_expanded)| {
+            let expanded = remembered.get(*key).copied().unwrap_or(*default_expanded);
+            (!expanded).then(|| (*section).to_owned())
+        })
+        .collect()
+}
+
+fn build_overview(
+    initial_collapsed: HashSet<String>,
+    section_handler: Option<KernelSectionHandler>,
+) -> (gtk::ScrolledWindow, gio::ListStore) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-    let collapsed = Rc::new(RefCell::new(HashSet::<String>::new()));
+    let collapsed = Rc::new(RefCell::new(initial_collapsed));
     let collapsed_for_filter = Rc::clone(&collapsed);
     let filter = gtk::CustomFilter::new(move |object| {
         let Some(data) = object.downcast_ref::<glib::BoxedAnyObject>() else {
@@ -405,6 +454,7 @@ fn build_overview() -> (gtk::ScrolledWindow, gio::ListStore) {
     selection.set_can_unselect(true);
     let factory = gtk::SignalListItemFactory::new();
     let collapsed_for_setup = Rc::clone(&collapsed);
+    let section_handler_for_setup = section_handler.clone();
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -422,7 +472,7 @@ fn build_overview() -> (gtk::ScrolledWindow, gio::ListStore) {
         value.add_css_class("kernel-fact-value");
         value.set_halign(gtk::Align::Start);
         value.set_hexpand(true);
-        value.set_selectable(true);
+        enable_stable_text_selection(&value);
         value.set_ellipsize(pango::EllipsizeMode::None);
         row.append(&key);
         row.append(&value);
@@ -432,6 +482,7 @@ fn build_overview() -> (gtk::ScrolledWindow, gio::ListStore) {
         let item_for_click = item.clone();
         let collapsed = Rc::clone(&collapsed_for_setup);
         let filter = filter.clone();
+        let section_handler = section_handler_for_setup.clone();
         click.connect_pressed(move |gesture, presses, _, _| {
             if presses != 1 {
                 return;
@@ -452,12 +503,26 @@ fn build_overview() -> (gtk::ScrolledWindow, gio::ListStore) {
                     true
                 }
             };
+            if let Some(handler) = section_handler.as_ref() {
+                handler(&data.section_key, !now_collapsed);
+            }
             if let Some(row) = item_for_click.child().and_downcast::<gtk::Box>()
                 && let Some(key) = row.first_child().and_downcast::<gtk::Label>()
             {
+                if now_collapsed {
+                    row.remove_css_class("kernel-section-expanded");
+                    row.add_css_class("kernel-section-collapsed");
+                } else {
+                    row.remove_css_class("kernel-section-collapsed");
+                    row.add_css_class("kernel-section-expanded");
+                }
                 key.set_text(&format!(
                     "{} {}",
-                    if now_collapsed { "›" } else { "▾" },
+                    if now_collapsed {
+                        DISCLOSURE_COLLAPSED_ICON
+                    } else {
+                        DISCLOSURE_EXPANDED_ICON
+                    },
                     data.label
                 ));
                 key.set_tooltip_text(Some(if now_collapsed {
@@ -490,8 +555,17 @@ fn build_overview() -> (gtk::ScrolledWindow, gio::ListStore) {
         let Some(value) = key.next_sibling().and_downcast::<gtk::Label>() else {
             return;
         };
+        clear_label_selection(&value);
         if data.section {
             row.add_css_class("kernel-section-heading");
+            let collapsed = collapsed_for_bind.borrow().contains(&data.section_key);
+            if collapsed {
+                row.remove_css_class("kernel-section-expanded");
+                row.add_css_class("kernel-section-collapsed");
+            } else {
+                row.remove_css_class("kernel-section-collapsed");
+                row.add_css_class("kernel-section-expanded");
+            }
             key.remove_css_class("muted");
             key.add_css_class("section-title");
             key.set_width_chars(-1);
@@ -502,6 +576,8 @@ fn build_overview() -> (gtk::ScrolledWindow, gio::ListStore) {
             row.set_cursor_from_name(Some("pointer"));
         } else {
             row.remove_css_class("kernel-section-heading");
+            row.remove_css_class("kernel-section-collapsed");
+            row.remove_css_class("kernel-section-expanded");
             key.remove_css_class("section-title");
             key.add_css_class("muted");
             key.set_width_chars(KERNEL_FACT_LABEL_MIN_WIDTH);
@@ -515,7 +591,11 @@ fn build_overview() -> (gtk::ScrolledWindow, gio::ListStore) {
             let collapsed = collapsed_for_bind.borrow().contains(&data.section_key);
             key.set_text(&format!(
                 "{} {}",
-                if collapsed { "›" } else { "▾" },
+                if collapsed {
+                    DISCLOSURE_COLLAPSED_ICON
+                } else {
+                    DISCLOSURE_EXPANDED_ICON
+                },
                 data.label
             ));
             key.set_tooltip_text(Some(if collapsed {
@@ -548,7 +628,7 @@ fn build_changes() -> (
     gtk::Label,
     gtk::Label,
 ) {
-    let (totals, change_store) = build_overview();
+    let (totals, change_store) = build_overview(HashSet::new(), None);
     let totals_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let totals_title = section_title("PROCESS DELTAS SINCE PREVIOUS SNAPSHOT");
     totals_title.add_css_class("kernel-memory-subtitle");
@@ -576,7 +656,7 @@ fn build_changes() -> (
     search.set_valign(gtk::Align::Center);
     let count = gtk::Label::new(Some("Capture another snapshot to compare mappings"));
     count.add_css_class("muted");
-    count.set_selectable(true);
+    enable_stable_text_selection(&count);
     count.set_hexpand(true);
     count.set_halign(gtk::Align::End);
     count.set_valign(gtk::Align::Center);
@@ -719,11 +799,11 @@ fn build_signals() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     controls.add_css_class("kernel-table-controls");
     let count = gtk::Label::new(Some("No snapshot"));
     count.add_css_class("muted");
-    count.set_selectable(true);
+    enable_stable_text_selection(&count);
     count.set_hexpand(true);
     count.set_halign(gtk::Align::Start);
     let active_only = gtk::ToggleButton::with_label("Active only");
-    active_only.add_css_class("inline-action");
+    active_only.add_css_class("kernel-signal-filter");
     active_only.set_active(false);
     active_only.set_tooltip_text(Some(
         "Show only signals that are pending, blocked, ignored, or caught",
@@ -809,7 +889,7 @@ fn table_summary(page: &gtk::Box) -> gtk::Label {
     count.add_css_class("kernel-table-summary");
     count.add_css_class("muted");
     count.set_halign(gtk::Align::Start);
-    count.set_selectable(true);
+    enable_stable_text_selection(&count);
     page.append(&count);
     count
 }
@@ -851,12 +931,6 @@ fn build_memory() -> (
     gtk::Label,
 ) {
     let summary_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let summary_title = section_title("MEMORY SUMMARY");
-    summary_title.add_css_class("kernel-memory-subtitle");
-    summary_title.set_halign(gtk::Align::Fill);
-    summary_title.set_xalign(0.0);
-    summary_page.append(&summary_title);
-
     let summary_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
     summary_content.add_css_class("kernel-memory-summary");
     summary_content.set_vexpand(true);
@@ -865,7 +939,7 @@ fn build_memory() -> (
     meta.add_css_class("muted");
     meta.set_halign(gtk::Align::Start);
     meta.set_xalign(0.0);
-    meta.set_selectable(true);
+    enable_stable_text_selection(&meta);
     summary_content.append(&meta);
 
     let unit_grid = gtk::Grid::new();
@@ -963,7 +1037,7 @@ fn build_memory() -> (
     explanation.set_halign(gtk::Align::Start);
     explanation.set_xalign(0.0);
     explanation.set_wrap(true);
-    explanation.set_selectable(true);
+    enable_stable_text_selection(&explanation);
     private_page.append(&explanation);
     let (private_summary_grid, private_summary) = build_private_summary();
     private_page.append(&private_summary_grid);
@@ -1107,7 +1181,7 @@ fn build_private_summary() -> (gtk::Grid, KernelPrivateSummaryView) {
         value.set_halign(gtk::Align::Start);
         value.set_xalign(0.0);
         value.set_wrap(true);
-        value.set_selectable(true);
+        enable_stable_text_selection(&value);
         cell.append(&title);
         cell.append(&value);
         grid.attach(&cell, column as i32, 0, 1, 1);
@@ -1135,7 +1209,7 @@ fn memory_unit_label(text: &str, class: &str, width: i32, xalign: f32) -> gtk::L
     label.set_max_width_chars(width);
     label.set_halign(gtk::Align::Fill);
     label.set_xalign(xalign);
-    label.set_selectable(true);
+    enable_stable_text_selection(&label);
     label
 }
 
@@ -1150,7 +1224,7 @@ fn build_mappings() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     search.add_css_class("kernel-table-search");
     let count = gtk::Label::new(Some("No snapshot"));
     count.add_css_class("muted");
-    count.set_selectable(true);
+    enable_stable_text_selection(&count);
     controls.append(&search);
     controls.append(&count);
     page.append(&controls);
@@ -1942,7 +2016,7 @@ fn table_column(
         label.add_css_class("debug-table-cell");
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::Middle);
-        label.set_selectable(true);
+        enable_stable_text_selection(&label);
         item.set_child(Some(&label));
     });
     factory.connect_bind(move |_, object| {
@@ -1955,6 +2029,7 @@ fn table_column(
         ) else {
             return;
         };
+        clear_label_selection(&label);
         bind(&data, &label);
     });
     let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
@@ -2472,7 +2547,7 @@ fn populate_warnings(container: &gtk::Box, warnings: &[String]) {
         label.set_halign(gtk::Align::Start);
         label.set_xalign(0.0);
         label.set_wrap(true);
-        label.set_selectable(true);
+        enable_stable_text_selection(&label);
         container.append(&label);
     }
 }
@@ -2573,6 +2648,22 @@ impl Ui {
 #[cfg(test)]
 mod memory_view_tests {
     use super::*;
+
+    #[test]
+    fn overview_disclosures_default_to_process_only_and_restore_overrides() {
+        let defaults = kernel_overview_collapsed(&HashMap::new());
+        assert!(!defaults.contains("PROCESS"));
+        assert_eq!(defaults.len(), KERNEL_OVERVIEW_DISCLOSURES.len() - 1);
+
+        let remembered = HashMap::from([
+            (String::from("kernel.overview.process"), false),
+            (String::from("kernel.overview.scheduler"), true),
+        ]);
+        let restored = kernel_overview_collapsed(&remembered);
+        assert!(restored.contains("PROCESS"));
+        assert!(!restored.contains("SCHEDULER"));
+        assert!(restored.contains("SECURITY"));
+    }
 
     #[test]
     fn formats_page_counts_and_safe_memory_ratios() {

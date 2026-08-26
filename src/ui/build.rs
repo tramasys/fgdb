@@ -416,7 +416,7 @@ pub(super) fn build_workspace(
     terminal: &vte4::Terminal,
     variable_children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
     target_pointer_bits: &Rc<Cell<u32>>,
-    kernel_refresh_handler: &Rc<RefCell<Option<KernelRefreshHandler>>>,
+    kernel_view_bindings: &KernelViewBindings<'_>,
 ) -> Workspace {
     let workspace = gtk::Paned::new(gtk::Orientation::Horizontal);
     workspace.add_css_class("workspace-columns");
@@ -427,7 +427,7 @@ pub(super) fn build_workspace(
     let inspector = build_inspector(
         variable_children_handler,
         target_pointer_bits,
-        kernel_refresh_handler,
+        kernel_view_bindings,
     );
     workspace.set_end_child(Some(&inspector.root));
 
@@ -551,6 +551,11 @@ pub(super) fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSi
     navigation.append_page(&stack_scrolled, Some(&gtk::Label::new(Some("Call Stack"))));
     navigation.append_page(&threads_scrolled, Some(&gtk::Label::new(Some("Threads"))));
     navigation.append_page(&modules_scrolled, Some(&gtk::Label::new(Some("Modules"))));
+    let navigation_for_selection = navigation.clone();
+    navigation.connect_switch_page(move |_, _, _| {
+        let navigation = navigation_for_selection.clone();
+        glib::idle_add_local_once(move || clear_label_selections(&navigation));
+    });
     sidebar.append(&navigation);
     LeftSidebar {
         root: sidebar,
@@ -563,7 +568,7 @@ pub(super) fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSi
 pub(super) fn build_inspector(
     variable_children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
     target_pointer_bits: &Rc<Cell<u32>>,
-    kernel_refresh_handler: &Rc<RefCell<Option<KernelRefreshHandler>>>,
+    kernel_view_bindings: &KernelViewBindings<'_>,
 ) -> Inspector {
     let notebook = gtk::Notebook::new();
     notebook.set_size_request(260, 0);
@@ -632,11 +637,14 @@ pub(super) fn build_inspector(
     instructions_header.add_css_class("subpanel-header");
     instructions_header.append(&instructions_title);
     instructions_panel.append(&instructions_header);
-    let instruction_insight = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let instruction_insight = gtk::Box::new(gtk::Orientation::Vertical, 2);
     instruction_insight.add_css_class("instruction-insight");
     let instruction_flow = insight_label("Flow information appears at a branch or call");
+    instruction_flow.add_css_class("instruction-flow-insight");
     let instruction_arguments = insight_label("");
+    instruction_arguments.add_css_class("instruction-arguments-insight");
     let instruction_memory = insight_label("");
+    instruction_memory.add_css_class("instruction-memory-insight");
     instruction_insight.append(&instruction_flow);
     instruction_insight.append(&instruction_arguments);
     instruction_insight.append(&instruction_memory);
@@ -687,7 +695,6 @@ pub(super) fn build_inspector(
 
     let registers_page = gtk::Box::new(gtk::Orientation::Vertical, 2);
     registers_page.add_css_class("sidebar");
-    registers_page.append(&section_title("REGISTERS"));
     let (registers_view, register_groups) = build_register_view();
     let registers_empty = empty_label("Values appear when the target is paused");
     let registers_scrolled = gtk::ScrolledWindow::builder()
@@ -701,7 +708,6 @@ pub(super) fn build_inspector(
     let stack_page = gtk::Box::new(gtk::Orientation::Vertical, 2);
     stack_page.add_css_class("sidebar");
     stack_page.append(&build_context_legend());
-    stack_page.append(&section_title("STACK"));
     let (stack_view, stack_store, stack_word_inspector) = build_stack_view();
     let stack_empty = empty_label("Stack values appear when the target is paused");
     let stack_scrolled = gtk::ScrolledWindow::builder()
@@ -779,7 +785,6 @@ pub(super) fn build_inspector(
 
     let breakpoints_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
     breakpoints_page.add_css_class("sidebar");
-    breakpoints_page.append(&section_title("BREAKPOINTS / WATCHPOINTS"));
     let hint = gtk::Label::new(Some(
         "Click the source gutter to add a breakpoint. Conditions are shown on each row.",
     ));
@@ -916,7 +921,7 @@ pub(super) fn build_inspector(
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
-    let kernel_view = build_kernel_view(kernel_refresh_handler);
+    let kernel_view = build_kernel_view(kernel_view_bindings);
 
     notebook.append_page(&state, Some(&gtk::Label::new(Some("Context"))));
     notebook.append_page(
@@ -933,7 +938,17 @@ pub(super) fn build_inspector(
     notebook.append_page(&signals_page, Some(&gtk::Label::new(Some("Signals"))));
     let kernel_page =
         notebook.append_page(&kernel_view.root, Some(&gtk::Label::new(Some("Kernel"))));
-    connect_kernel_tab_visibility(&notebook, kernel_page, &kernel_view, kernel_refresh_handler);
+    let notebook_for_selection = notebook.clone();
+    notebook.connect_switch_page(move |_, _, _| {
+        let notebook = notebook_for_selection.clone();
+        glib::idle_add_local_once(move || clear_label_selections(&notebook));
+    });
+    connect_kernel_tab_visibility(
+        &notebook,
+        kernel_page,
+        &kernel_view,
+        kernel_view_bindings.refresh_handler,
+    );
     let stale_panels = vec![
         state.clone().upcast(),
         expression_watches_page.clone().upcast(),

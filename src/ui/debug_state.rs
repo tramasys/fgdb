@@ -400,13 +400,13 @@ impl Ui {
             let range = gtk::Label::new(Some(&range));
             range.add_css_class("module-range");
             range.set_halign(gtk::Align::Start);
-            range.set_selectable(true);
+            enable_stable_text_selection(&range);
             let path = module.host_name.as_deref().unwrap_or(&module.target_name);
             let path_label = gtk::Label::new(Some(path));
             path_label.add_css_class("module-path");
             path_label.set_halign(gtk::Align::Start);
             path_label.set_ellipsize(pango::EllipsizeMode::Middle);
-            path_label.set_selectable(true);
+            enable_stable_text_selection(&path_label);
             path_label.set_tooltip_text(Some(&format!(
                 "Target: {}\nHost: {}",
                 module.target_name, path
@@ -984,7 +984,7 @@ impl Ui {
                 location.add_css_class("muted");
                 location.set_halign(gtk::Align::Start);
                 location.set_ellipsize(pango::EllipsizeMode::Middle);
-                location.set_selectable(true);
+                enable_stable_text_selection(&location);
                 location.set_tooltip_text(Some(&location_text));
                 row.append(&heading_row);
                 row.append(&location);
@@ -1006,7 +1006,7 @@ impl Ui {
                     let metadata = gtk::Label::new(Some(&metadata.join("  ·  ")));
                     metadata.add_css_class("breakpoint-metadata");
                     metadata.set_halign(gtk::Align::Start);
-                    metadata.set_selectable(true);
+                    enable_stable_text_selection(&metadata);
                     row.append(&metadata);
                 }
                 if let Some(condition) = breakpoint.condition.as_deref() {

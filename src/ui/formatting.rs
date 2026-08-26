@@ -392,7 +392,11 @@ pub(super) fn build_disclosure_with_content(
     root.add_css_class("disclosure");
     root.add_css_class(class);
     let heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    let arrow = gtk::Label::new(Some(if expanded { "⌄" } else { "›" }));
+    let arrow = gtk::Label::new(Some(if expanded {
+        DISCLOSURE_EXPANDED_ICON
+    } else {
+        DISCLOSURE_COLLAPSED_ICON
+    }));
     arrow.add_css_class("disclosure-arrow");
     arrow.set_width_chars(1);
     arrow.set_xalign(0.5);
@@ -405,6 +409,11 @@ pub(super) fn build_disclosure_with_content(
     heading.append(&title);
     let button = gtk::Button::builder().child(&heading).build();
     button.add_css_class("disclosure-header");
+    button.add_css_class(if expanded {
+        "disclosure-expanded"
+    } else {
+        "disclosure-collapsed"
+    });
     button.set_halign(gtk::Align::Fill);
     button.set_focus_on_click(false);
     button.set_tooltip_text(Some(if expanded {
@@ -420,7 +429,18 @@ pub(super) fn build_disclosure_with_content(
     button.connect_clicked(move |_| {
         let reveal = !content_for_click.is_visible();
         content_for_click.set_visible(reveal);
-        arrow.set_text(if reveal { "⌄" } else { "›" });
+        arrow.set_text(if reveal {
+            DISCLOSURE_EXPANDED_ICON
+        } else {
+            DISCLOSURE_COLLAPSED_ICON
+        });
+        if reveal {
+            button_for_click.remove_css_class("disclosure-collapsed");
+            button_for_click.add_css_class("disclosure-expanded");
+        } else {
+            button_for_click.remove_css_class("disclosure-expanded");
+            button_for_click.add_css_class("disclosure-collapsed");
+        }
         button_for_click.set_tooltip_text(Some(if reveal {
             "Collapse section"
         } else {
@@ -686,7 +706,7 @@ pub(super) fn instruction_flow_description(
     if detail.is_empty() {
         kind.to_owned()
     } else {
-        format!("{kind}  →  {detail}")
+        format!("{kind}  ▶  {detail}")
     }
 }
 

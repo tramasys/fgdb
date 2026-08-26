@@ -412,25 +412,51 @@ button.instruction-row.current-instruction:hover {{
 .instruction-operands {{ color: @app_fg; }}
 
 .instruction-insight {{
-    padding: 2px 4px;
-    background: alpha(@app_fg, 0.035);
+    padding: 4px 5px;
+    background: alpha(@app_fg, 0.025);
+    border-top: 1px solid alpha(@app_fg, 0.05);
     border-bottom: 1px solid @app_border;
 }}
 
 .instruction-insight-line {{
-    min-height: 18px;
+    min-height: 24px;
+    padding: 3px 7px;
     color: @app_muted;
-    font-size: 10px;
+    font-size: 11px;
+    background: @app_surface;
+    border-left: 2px solid @app_border;
 }}
 
-.instruction-insight-line:nth-child(1) {{ color: @app_accent_hover; }}
-.instruction-insight-line:nth-child(2) {{ color: @app_warning; }}
-.instruction-insight-line:nth-child(3) {{ color: @app_success; }}
+.instruction-flow-insight {{
+    color: @app_accent_hover;
+    font-weight: 700;
+    background: alpha(@app_accent, 0.10);
+    border-left-color: @app_accent;
+}}
+
+.instruction-arguments-insight {{
+    color: @app_fg;
+    background: alpha(@app_warning, 0.055);
+    border-left-color: alpha(@app_warning, 0.70);
+}}
+
+.instruction-memory-insight {{
+    color: @app_fg;
+    background: alpha(@app_success, 0.055);
+    border-left-color: alpha(@app_success, 0.70);
+}}
+
 .instruction-insight-line.branch-taken {{
     color: @app_success;
     font-weight: 700;
+    background: alpha(@app_success, 0.10);
+    border-left-color: @app_success;
 }}
-.instruction-insight-line.branch-not-taken {{ color: @app_muted; }}
+.instruction-insight-line.branch-not-taken {{
+    color: @app_muted;
+    background: alpha(@app_fg, 0.035);
+    border-left-color: @app_muted;
+}}
 
 .instruction-cell {{
     min-height: 22px;
@@ -482,8 +508,6 @@ columnview.debug-table row:selected {{
     background: alpha(@app_accent, 0.16);
 }}
 
-.current-instruction-cell {{ background: alpha(@app_accent, 0.08); }}
-
 .debug-table-cell {{
     min-height: 22px;
     padding: 2px 4px;
@@ -530,16 +554,34 @@ window.vector-editor dropdown > button {{
     border: 1px solid @app_border;
 }}
 
-.register-section {{
-    min-height: 20px;
-    margin: 0;
-    padding: 0 4px;
-    background: @app_raised;
-}}
-
 .register-group-panel {{
     background: @app_surface;
     border: 0;
+}}
+
+.register-disclosure > button.disclosure-header {{
+    min-height: 24px;
+    padding: 3px 6px 3px 5px;
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.10);
+    border-top: 1px solid alpha(@app_accent, 0.22);
+    border-bottom: 1px solid alpha(@app_accent, 0.22);
+    border-left: 2px solid alpha(@app_accent, 0.48);
+}}
+
+.register-disclosure > button.disclosure-header .section-title {{
+    color: @app_accent_hover;
+    font-weight: 800;
+}}
+
+.register-disclosure > button.disclosure-header.disclosure-expanded {{
+    background: alpha(@app_accent, 0.17);
+    border-left-color: @app_accent_hover;
+}}
+
+.register-disclosure > button.disclosure-header:hover {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.24);
 }}
 
 .register-row {{
@@ -832,6 +874,32 @@ button.inline-action {{
 }}
 
 button.inline-action.danger-action {{ color: @app_danger; }}
+
+button.kernel-signal-filter {{
+    min-height: 21px;
+    padding: 0 7px;
+    color: @app_muted;
+    background: transparent;
+    box-shadow: inset 2px 0 transparent;
+}}
+
+button.kernel-signal-filter:hover,
+button.kernel-signal-filter:focus-visible {{
+    color: @app_fg;
+    background: alpha(@app_fg, 0.08);
+}}
+
+button.kernel-signal-filter:checked {{
+    color: @app_success;
+    background: alpha(@app_success, 0.17);
+    box-shadow: inset 2px 0 @app_success;
+}}
+
+button.kernel-signal-filter:checked:hover,
+button.kernel-signal-filter:checked:focus-visible {{
+    color: @app_success;
+    background: alpha(@app_success, 0.24);
+}}
 
 button.signal-action {{
     min-height: 21px;
@@ -1276,14 +1344,25 @@ listview.kernel-overview-list > row:selected .muted {{ color: @app_fg; }}
 
 .kernel-section-heading {{
     min-height: 24px;
-    padding: 3px 5px;
-    border-top: 1px solid alpha(@app_fg, 0.07);
-    border-bottom: 1px solid alpha(@app_fg, 0.07);
-    background: alpha(@app_fg, 0.025);
+    padding: 3px 6px 3px 5px;
+    border-top: 1px solid alpha(@app_accent, 0.22);
+    border-bottom: 1px solid alpha(@app_accent, 0.22);
+    border-left: 2px solid alpha(@app_accent, 0.48);
+    background: alpha(@app_accent, 0.10);
+}}
+
+.kernel-section-heading .section-title {{
+    color: @app_accent_hover;
+    font-weight: 800;
+}}
+
+.kernel-section-heading.kernel-section-expanded {{
+    border-left-color: @app_accent_hover;
+    background: alpha(@app_accent, 0.17);
 }}
 
 listview.kernel-overview-list > row:hover .kernel-section-heading {{
-    background: alpha(@app_accent, 0.12);
+    background: alpha(@app_accent, 0.24);
 }}
 
 .kernel-warnings {{

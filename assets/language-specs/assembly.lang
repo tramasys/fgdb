@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<language id="assembly" _name="Assembly" version="2.0" _section="Source">
+  <metadata>
+    <property name="mimetypes">text/x-asm;text/x-assembly</property>
+    <property name="globs">*.s;*.S;*.asm;*.nasm;*.masm</property>
+    <property name="line-comment-start">;</property>
+  </metadata>
+
+  <styles>
+    <style id="comment" name="Comment" map-to="def:comment"/>
+    <style id="string" name="String" map-to="def:string"/>
+    <style id="preprocessor" name="Preprocessor" map-to="def:preprocessor"/>
+    <style id="directive" name="Directive" map-to="def:preprocessor"/>
+    <style id="instruction" name="Instruction" map-to="def:statement"/>
+    <style id="register" name="Register" map-to="def:type"/>
+    <style id="label" name="Label" map-to="def:function"/>
+    <style id="number" name="Number" map-to="def:number"/>
+    <style id="constant" name="Constant" map-to="def:constant"/>
+  </styles>
+
+  <default-regex-options case-sensitive="false"/>
+
+  <definitions>
+    <context id="string" style-ref="string" end-at-line-end="true" class="string">
+      <start>"</start>
+      <end>"</end>
+      <include>
+        <context ref="def:escape"/>
+      </include>
+    </context>
+
+    <context id="character" style-ref="string" end-at-line-end="true" class="string">
+      <start>'</start>
+      <end>'</end>
+      <include>
+        <context ref="def:escape"/>
+      </include>
+    </context>
+
+    <context id="semicolon-comment" style-ref="comment" end-at-line-end="true">
+      <start>;</start>
+      <include>
+        <context ref="def:in-comment"/>
+      </include>
+    </context>
+
+    <context id="slash-comment" style-ref="comment" end-at-line-end="true">
+      <start>//</start>
+      <include>
+        <context ref="def:in-comment"/>
+      </include>
+    </context>
+
+    <context id="hash-comment" style-ref="comment" end-at-line-end="true">
+      <start extended="true">
+        ^\s*\#(?!\s*(include|define|undef|if|ifdef|ifndef|elif|else|endif|error|warning|pragma|line)\b)
+      </start>
+      <include>
+        <context ref="def:in-comment"/>
+      </include>
+    </context>
+
+    <context id="preprocessor" style-ref="preprocessor" end-at-line-end="true">
+      <start extended="true">
+        ^\s*\#\s*(include|define|undef|if|ifdef|ifndef|elif|else|endif|error|warning|pragma|line)\b
+      </start>
+      <include>
+        <context ref="def:line-continue"/>
+        <context ref="string"/>
+        <context ref="def:c-like-comment"/>
+        <context ref="def:c-like-comment-multiline"/>
+      </include>
+    </context>
+
+    <context id="label-definition">
+      <match extended="true">
+        ^\s*([._$a-z][\w.$@]*|[0-9]+):
+      </match>
+      <include>
+        <context sub-pattern="1" style-ref="label"/>
+      </include>
+    </context>
+
+    <context id="directive" style-ref="directive">
+      <match>(?&lt;![\w.])\.[a-z_][\w.]*</match>
+    </context>
+
+    <context id="named-directives" style-ref="directive">
+      <keyword>align</keyword>
+      <keyword>bits</keyword>
+      <keyword>common</keyword>
+      <keyword>cpu</keyword>
+      <keyword>default</keyword>
+      <keyword>end</keyword>
+      <keyword>ends</keyword>
+      <keyword>equ</keyword>
+      <keyword>extern</keyword>
+      <keyword>global</keyword>
+      <keyword>group</keyword>
+      <keyword>import</keyword>
+      <keyword>include</keyword>
+      <keyword>label</keyword>
+      <keyword>macro</keyword>
+      <keyword>org</keyword>
+      <keyword>proc</keyword>
+      <keyword>section</keyword>
+      <keyword>segment</keyword>
+      <keyword>struc</keyword>
+      <keyword>use16</keyword>
+      <keyword>use32</keyword>
+      <keyword>use64</keyword>
+    </context>
+
+    <context id="nasm-preprocessor" style-ref="preprocessor">
+      <match>%(?:define|idefine|undef|include|pathsearch|depend|use|assign|iassign|defstr|deftok|strlen|substr|macro|imacro|endmacro|rotate|rep|endrep|if|elif|else|endif|ifdef|ifndef|ifmacro|ifnmacro|error|warning|fatal|pragma|line|arg|local|stacksize)\b</match>
+    </context>
+
+    <context id="instruction-line">
+      <match extended="true">
+        ^\s*(?:([._$a-z][\w.$@]*|[0-9]+):\s*)?([a-z][a-z0-9_.]*)\b
+      </match>
+      <include>
+        <context sub-pattern="1" style-ref="label"/>
+        <context sub-pattern="2" style-ref="instruction"/>
+      </include>
+    </context>
+
+    <context id="register" style-ref="register">
+      <match extended="true">
+        (?&lt;![\w])%?(?:
+          (?:r(?:1[0-5]|[0-9])(?:[bwd])?) |
+          (?:[re]?(?:ax|bx|cx|dx|si|di|bp|sp)) |
+          (?:[abcd][lh]|[sd]il|[bs]pl|rip|eip|ip) |
+          (?:[cdefgs]s|[cdefgs]s_base|[er]?flags|mxcsr) |
+          (?:cr[0-9]+|dr[0-9]+|st(?:\([0-7]\)|[0-7])|mm[0-7]) |
+          (?:(?:x|y|z)mm(?:[12]?[0-9]|3[01])|k[0-7]|bnd[0-3]) |
+          (?:[xw](?:[12]?[0-9]|3[01])|[bhsdqvzp](?:[12]?[0-9]|3[01])(?:\.[0-9]+[bhsdq])?) |
+          (?:wsp|xzr|wzr|fp|lr|pc|nzcv|fpsr|fpcr) |
+          (?:r1[0-5]|r[0-9]|cpsr|spsr) |
+          (?:zero|ra|gp|tp|t[0-6]|s(?:[0-9]|1[01])|a[0-7]|ft(?:[0-9]|1[01])|fs(?:[0-9]|1[01])|fa[0-7])
+        )(?![\w])
+      </match>
+    </context>
+
+    <context id="relocation" style-ref="constant">
+      <match>(?:@(?:plt|got|gotpcrel|tlsgd|tlsld|gottpoff)|%(?:hi|lo|pcrel_hi|pcrel_lo|got_pcrel_hi|tprel_hi|tprel_lo))\b</match>
+    </context>
+
+    <context id="number" style-ref="number">
+      <match extended="true">
+        (?&lt;![\w.])(?:
+          0x[0-9a-f]+ |
+          [0-9a-f]+h\b |
+          0b[01]+ |
+          [01]+b\b |
+          0o[0-7]+ |
+          [0-7]+[oq]\b |
+          (?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)
+        )(?![\w.])
+      </match>
+    </context>
+
+    <context id="assembly">
+      <include>
+        <context ref="string"/>
+        <context ref="character"/>
+        <context ref="def:c-like-comment"/>
+        <context ref="def:c-like-comment-multiline"/>
+        <context ref="semicolon-comment"/>
+        <context ref="slash-comment"/>
+        <context ref="hash-comment"/>
+        <context ref="preprocessor"/>
+        <context ref="label-definition"/>
+        <context ref="instruction-line"/>
+        <context ref="directive"/>
+        <context ref="named-directives"/>
+        <context ref="nasm-preprocessor"/>
+        <context ref="register"/>
+        <context ref="relocation"/>
+        <context ref="number"/>
+      </include>
+    </context>
+  </definitions>
+</language>

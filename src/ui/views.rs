@@ -1,5 +1,36 @@
 use super::*;
 
+pub(super) fn enable_stable_text_selection(label: &gtk::Label) {
+    label.set_selectable(true);
+    // Gtk list factories recycle labels, and GtkLabel otherwise preserves its
+    // character selection across a text replacement onto an unrelated row.
+    label.connect_label_notify(clear_label_selection);
+}
+
+pub(super) fn clear_label_selections(root: &impl IsA<gtk::Widget>) {
+    clear_widget_label_selections(root.as_ref());
+}
+
+fn clear_widget_label_selections(widget: &gtk::Widget) {
+    if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+        clear_label_selection(label);
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        child = current.next_sibling();
+        clear_widget_label_selections(&current);
+    }
+}
+
+pub(super) fn clear_label_selection(label: &gtk::Label) {
+    if label
+        .selection_bounds()
+        .is_some_and(|(start, end)| start != end)
+    {
+        label.select_region(0, 0);
+    }
+}
+
 pub(super) fn build_locals_view(
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
     target_pointer_bits: &Rc<Cell<u32>>,
@@ -50,10 +81,14 @@ pub(super) fn build_locals_view(
 pub(super) fn insight_label(placeholder: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(placeholder));
     label.add_css_class("instruction-insight-line");
-    label.set_halign(gtk::Align::Start);
+    label.set_halign(gtk::Align::Fill);
     label.set_xalign(0.0);
+    label.set_hexpand(true);
+    label.set_wrap(true);
+    label.set_wrap_mode(pango::WrapMode::WordChar);
+    label.set_lines(2);
     label.set_ellipsize(pango::EllipsizeMode::End);
-    label.set_selectable(true);
+    enable_stable_text_selection(&label);
     label.set_visible(!placeholder.is_empty());
     label
 }
@@ -94,7 +129,7 @@ pub(super) fn memory_region_column(
         label.add_css_class("debug-table-cell");
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::Middle);
-        label.set_selectable(true);
+        enable_stable_text_selection(&label);
         item.set_child(Some(&label));
     });
     factory.connect_bind(move |_, object| {
@@ -107,6 +142,7 @@ pub(super) fn memory_region_column(
         ) else {
             return;
         };
+        clear_label_selection(&label);
         let region = data.borrow::<MemoryRegion>();
         reset_semantic_css(&label);
         label.add_css_class(memory_kind_css(region.kind));
@@ -285,7 +321,7 @@ pub(super) fn memory_watch_column(css_class: &str, tooltip: &str) -> gtk::Label 
     label.set_valign(gtk::Align::Start);
     label.set_xalign(0.0);
     label.set_yalign(0.0);
-    label.set_selectable(true);
+    enable_stable_text_selection(&label);
     label.set_tooltip_text(Some(tooltip));
     label
 }
@@ -529,7 +565,7 @@ pub(super) fn local_text_column(
         });
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
-        label.set_selectable(true);
+        enable_stable_text_selection(&label);
         item.set_child(Some(&label));
     });
     factory.connect_bind(move |_, object| {
@@ -547,6 +583,7 @@ pub(super) fn local_text_column(
         };
         let node = data.borrow::<VariableNode>();
         let variable = &node.variable;
+        clear_label_selection(&label);
         let (value, details) = variable_value_parts(&variable.value);
         label.remove_css_class("local-details-error");
         match column {
@@ -725,15 +762,16 @@ pub(super) fn build_register_view() -> (gtk::Box, Vec<RegisterGroupView>) {
         ("OTHER", RegisterGroupKind::Other),
     ] {
         let (view, store) = build_register_group_table();
-        let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let expanded = matches!(
+            kind,
+            RegisterGroupKind::General
+                | RegisterGroupKind::Bases
+                | RegisterGroupKind::Flags
+                | RegisterGroupKind::Segments
+        );
+        let panel = build_disclosure(title, &view, expanded, "register-disclosure");
         panel.add_css_class("register-group-panel");
         panel.set_visible(false);
-        let title_label = section_title(title);
-        title_label.add_css_class("register-section");
-        title_label.set_hexpand(true);
-        title_label.set_xalign(0.0);
-        panel.append(&title_label);
-        panel.append(&view);
         content.append(&panel);
         groups.push(RegisterGroupView {
             kind,
@@ -783,7 +821,9 @@ pub(super) fn register_column(
         label.add_css_class(register_column_css(column));
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
-        label.set_selectable(!matches!(column, RegisterColumn::Name));
+        if !matches!(column, RegisterColumn::Name) {
+            enable_stable_text_selection(&label);
+        }
         item.set_child(Some(&label));
     });
     factory.connect_bind(move |_, object| {
@@ -796,6 +836,7 @@ pub(super) fn register_column(
         ) else {
             return;
         };
+        clear_label_selection(&label);
         let data = data.borrow::<RegisterRowData>();
         reset_semantic_css(&label);
         if data.changed && matches!(column, RegisterColumn::Name) {
@@ -920,7 +961,7 @@ pub(super) fn stack_inspector_row(grid: &gtk::Grid, row: i32, title: &str) -> gt
     value.add_css_class("stack-inspector-value");
     value.set_halign(gtk::Align::Start);
     value.set_hexpand(true);
-    value.set_selectable(true);
+    enable_stable_text_selection(&value);
     value.set_ellipsize(pango::EllipsizeMode::Middle);
     grid.attach(&value, 1, row, 1, 1);
     value
@@ -977,7 +1018,7 @@ pub(super) fn stack_column(
         label.add_css_class(stack_column_css(column));
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
-        label.set_selectable(true);
+        enable_stable_text_selection(&label);
         let click = gtk::GestureClick::new();
         let item_for_click = item.clone();
         let selection = selection.clone();
@@ -997,6 +1038,7 @@ pub(super) fn stack_column(
         ) else {
             return;
         };
+        clear_label_selection(&label);
         let entry = data.borrow::<StackEntry>();
         reset_semantic_css(&label);
         let text = match column {
@@ -1084,7 +1126,7 @@ pub(super) fn instruction_column(
         label.add_css_class(class);
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
-        label.set_selectable(true);
+        enable_stable_text_selection(&label);
         label.set_cursor_from_name(Some("text"));
         let click = gtk::GestureClick::new();
         click.set_button(gtk::gdk::BUTTON_PRIMARY);
@@ -1106,12 +1148,8 @@ pub(super) fn instruction_column(
         ) else {
             return;
         };
+        clear_label_selection(&label);
         let data = data.borrow::<InstructionRowData>();
-        if data.current {
-            label.add_css_class("current-instruction-cell");
-        } else {
-            label.remove_css_class("current-instruction-cell");
-        }
         label.set_text(&text(&data));
         label.set_tooltip_text(Some(&format!(
             "{} · {}\n{}\nSelect text to copy; press Enter or double-click outside a text selection to toggle an instruction breakpoint",
@@ -1187,6 +1225,14 @@ pub(super) fn build_source_buffer(
     style_scheme: Option<&sourceview5::StyleScheme>,
 ) -> sourceview5::Buffer {
     let manager = sourceview5::LanguageManager::default();
+    let bundled_languages = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/language-specs");
+    if !manager
+        .search_path()
+        .iter()
+        .any(|path| path.as_str() == bundled_languages)
+    {
+        manager.prepend_search_path(bundled_languages);
+    }
     let language = path.map_or_else(
         || manager.language("c"),
         |path| manager.guess_language(Some(path), None),

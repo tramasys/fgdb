@@ -42,6 +42,8 @@ use crate::{
 };
 
 const EXECUTION_CATEGORY: &str = "execution";
+const DISCLOSURE_EXPANDED_ICON: &str = "▾";
+const DISCLOSURE_COLLAPSED_ICON: &str = "›";
 const GENERAL_REGISTERS: &[&str] = &[
     "rax", "rbx", "rcx", "rdx", "rsp", "rbp", "rsi", "rdi", "rip", "r8", "r9", "r10", "r11", "r12",
     "r13", "r14", "r15", "eax", "ebx", "ecx", "edx", "esp", "ebp", "esi", "edi", "eip",
@@ -113,6 +115,13 @@ type WatchpointInsertHandler = Rc<dyn Fn(String, WatchpointAccess)>;
 type MemoryWatchHandler = Rc<dyn Fn(u64, String, usize)>;
 type InstructionMemoryHandler = Rc<dyn Fn(String)>;
 type KernelRefreshHandler = Rc<dyn Fn()>;
+type KernelSectionHandler = Rc<dyn Fn(&str, bool)>;
+
+struct KernelViewBindings<'a> {
+    refresh_handler: &'a Rc<RefCell<Option<KernelRefreshHandler>>>,
+    remembered_disclosures: &'a HashMap<String, bool>,
+    section_handler: &'a Rc<RefCell<Option<KernelSectionHandler>>>,
+}
 
 #[derive(Clone)]
 struct ValueEditorHandlers {
@@ -1269,7 +1278,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             instruction_flow_description(&instruction, &registers),
-            "CALL  →  0x402000 <mmap@plt>"
+            "CALL  ▶  0x402000 <mmap@plt>"
         );
         let arguments = instruction_arguments_description(&instruction, &registers);
         assert!(arguments.contains("$rdi=0x0000000000000000"));
@@ -1307,7 +1316,7 @@ mod tests {
         };
         assert_eq!(
             instruction_flow_description(&branch, std::slice::from_ref(&flags)),
-            "BRANCH · NOT TAKEN  →  0x40100c <main+0x1c>"
+            "BRANCH · NOT TAKEN  ▶  0x40100c <main+0x1c>"
         );
 
         let syscall = Instruction {

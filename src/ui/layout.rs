@@ -10,10 +10,23 @@ use std::{
 
 use gtk::{glib, prelude::*};
 
+use super::KernelSectionHandler;
+
 const SAVE_DELAY: Duration = Duration::from_millis(350);
 const MIN_WINDOW_WIDTH: i32 = 320;
 const MIN_WINDOW_HEIGHT: i32 = 200;
 const MAX_WINDOW_DIMENSION: i32 = 32_768;
+const DISCLOSURE_PREFIX: &str = "disclosure.";
+
+fn layout_path() -> PathBuf {
+    glib::user_config_dir().join("fgdb/layout.conf")
+}
+
+pub(super) fn remembered_disclosures() -> HashMap<String, bool> {
+    fs::read_to_string(layout_path())
+        .map(|contents| parse_layout(&contents).disclosures)
+        .unwrap_or_default()
+}
 
 #[derive(Clone)]
 pub(super) struct Pane {
@@ -35,7 +48,7 @@ pub(super) struct Persistence(Rc<State>);
 
 impl Persistence {
     pub(super) fn install(window: &gtk::ApplicationWindow, panes: Vec<Pane>) -> Self {
-        let path = glib::user_config_dir().join("fgdb/layout.conf");
+        let path = layout_path();
         let remembered = fs::read_to_string(&path)
             .map(|contents| parse_layout(&contents))
             .unwrap_or_default();
@@ -101,6 +114,15 @@ impl Persistence {
     pub(super) fn save(&self) {
         self.0.save_now();
     }
+
+    pub(super) fn disclosure_handler(&self) -> KernelSectionHandler {
+        let weak_state = Rc::downgrade(&self.0);
+        Rc::new(move |key, expanded| {
+            if let Some(state) = weak_state.upgrade() {
+                state.set_disclosure(key, expanded);
+            }
+        })
+    }
 }
 
 struct State {
@@ -116,6 +138,16 @@ struct State {
 }
 
 impl State {
+    fn set_disclosure(self: &Rc<Self>, key: &str, expanded: bool) {
+        self.remembered
+            .borrow_mut()
+            .disclosures
+            .insert(key.to_owned(), expanded);
+        if self.ready_to_save.get() {
+            self.schedule_save();
+        }
+    }
+
     fn start_restore(self: &Rc<Self>) {
         if self.restore_started.replace(true) {
             return;
@@ -269,6 +301,7 @@ struct WindowGeometry {
 struct RememberedLayout {
     window: Option<WindowGeometry>,
     panes: HashMap<String, PanePosition>,
+    disclosures: HashMap<String, bool>,
 }
 
 fn scale_position(saved: PanePosition, minimum: i32, maximum: i32) -> i32 {
@@ -313,6 +346,14 @@ fn parse_layout(contents: &str) -> RememberedLayout {
             }
             continue;
         }
+        if let Some(key) = key.trim().strip_prefix(DISCLOSURE_PREFIX) {
+            if !key.is_empty()
+                && let Some(expanded) = parse_bool(geometry.trim())
+            {
+                remembered.disclosures.insert(key.to_owned(), expanded);
+            }
+            continue;
+        }
         let Some((position, extent)) = geometry.split_once(',') else {
             continue;
         };
@@ -339,7 +380,7 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> io::Result<()> {
-    let mut contents = String::from("# fgdb layout v2\n");
+    let mut contents = String::from("# fgdb layout v3\n");
     if let Some(window) = remembered.window {
         writeln!(
             contents,
@@ -361,6 +402,12 @@ fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> i
         )
         .expect("writing to a String cannot fail");
     }
+    let mut disclosures = remembered.disclosures.iter().collect::<Vec<_>>();
+    disclosures.sort_unstable_by_key(|(key, _)| *key);
+    for (key, expanded) in disclosures {
+        writeln!(contents, "{DISCLOSURE_PREFIX}{key}={}", u8::from(*expanded))
+            .expect("writing to a String cannot fail");
+    }
 
     let parent = path.parent().expect("the layout path has a parent");
     fs::create_dir_all(parent)?;
@@ -376,7 +423,7 @@ mod tests {
     #[test]
     fn parses_valid_layout_entries_and_ignores_malformed_ones() {
         let parsed = parse_layout(
-            "# layout\nwindow=1440,900,1\nworkspace_inspector=980,1375\nbroken=nope\nnegative=-1,100\n",
+            "# layout\nwindow=1440,900,1\nworkspace_inspector=980,1375\ndisclosure.kernel.overview.process=1\ndisclosure.kernel.overview.scheduler=0\ndisclosure.invalid=maybe\nbroken=nope\nnegative=-1,100\n",
         );
 
         assert_eq!(
@@ -398,6 +445,15 @@ mod tests {
         );
         assert!(!parsed.panes.contains_key("broken"));
         assert!(!parsed.panes.contains_key("negative"));
+        assert_eq!(
+            parsed.disclosures.get("kernel.overview.process"),
+            Some(&true)
+        );
+        assert_eq!(
+            parsed.disclosures.get("kernel.overview.scheduler"),
+            Some(&false)
+        );
+        assert!(!parsed.disclosures.contains_key("invalid"));
     }
 
     #[test]

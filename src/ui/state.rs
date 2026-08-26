@@ -22,7 +22,14 @@ impl Ui {
         let breakpoints = Rc::new(RefCell::new(Vec::new()));
         let variable_children_handler = Rc::new(RefCell::new(None));
         let kernel_refresh_handler = Rc::new(RefCell::new(None));
+        let kernel_section_handler = Rc::new(RefCell::new(None));
+        let remembered_disclosures = layout::remembered_disclosures();
         let target_pointer_bits = Rc::new(Cell::new(usize::BITS));
+        let kernel_view_bindings = KernelViewBindings {
+            refresh_handler: &kernel_refresh_handler,
+            remembered_disclosures: &remembered_disclosures,
+            section_handler: &kernel_section_handler,
+        };
 
         let workspace = build_workspace(
             config,
@@ -31,7 +38,7 @@ impl Ui {
             &terminal,
             &variable_children_handler,
             &target_pointer_bits,
-            &kernel_refresh_handler,
+            &kernel_view_bindings,
         );
         root.append(&workspace.root);
         root.append(&workspace.status_detail);
@@ -47,6 +54,7 @@ impl Ui {
             });
         window.set_child(Some(&root));
         let layout = layout::Persistence::install(&window, workspace.layout_panes.clone());
+        kernel_section_handler.replace(Some(layout.disclosure_handler()));
 
         let ui = Self {
             window,
