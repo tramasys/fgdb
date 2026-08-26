@@ -299,6 +299,7 @@ impl Ui {
     }
 
     pub fn show_threads(&self, threads: &[ThreadInfo]) {
+        self.kernel_view.set_tls_thread(threads);
         clear_box(&self.threads_list);
         if threads.is_empty() {
             self.threads_list

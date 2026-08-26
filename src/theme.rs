@@ -1386,6 +1386,49 @@ listview.kernel-overview-list > row:hover .kernel-section-heading {{
     font-weight: 700;
 }}
 
+.kernel-tls-table label.debug-table-cell {{
+    min-height: 22px;
+}}
+
+.kernel-tls-metadata-header {{
+    min-height: 27px;
+    padding: 1px 4px 1px 6px;
+    background: @app_raised;
+    border-bottom: 1px solid @app_border;
+}}
+
+stackswitcher.kernel-tls-tabs {{
+    padding: 0;
+    background: transparent;
+}}
+
+stackswitcher.kernel-tls-tabs button {{
+    min-height: 23px;
+    margin: 1px;
+    padding: 1px 8px;
+    color: @app_muted;
+    background: transparent;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+}}
+
+stackswitcher.kernel-tls-tabs button:hover {{
+    color: @app_fg;
+    background: alpha(@app_fg, 0.06);
+}}
+
+stackswitcher.kernel-tls-tabs button:checked {{
+    color: @app_fg;
+    font-weight: 700;
+    background: alpha(@app_fg, 0.10);
+}}
+
+.kernel-tls-empty {{
+    padding: 18px;
+    color: @app_muted;
+}}
+
 .kernel-process-target {{
     color: @app_accent;
     font-weight: 700;

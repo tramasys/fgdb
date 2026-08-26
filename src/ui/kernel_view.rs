@@ -4,8 +4,9 @@ const MIN_MAPPING_DELTA_HEIGHT: i32 = 190;
 const PRIVATE_CATEGORY_TABLE_HEIGHT: i32 = 205;
 const KERNEL_FACT_LABEL_MIN_WIDTH: i32 = 28;
 const KERNEL_FACT_LABEL_MAX_WIDTH: i32 = 42;
-const KERNEL_PAGE_NAMES: [&str; 11] = [
+const KERNEL_PAGE_NAMES: [&str; 12] = [
     "overview",
+    "tls",
     "memory",
     "private-memory",
     "changes",
@@ -161,6 +162,28 @@ enum ProcessColumn {
     Threads,
 }
 
+#[derive(Clone, Copy)]
+enum TlsModuleColumn {
+    Role,
+    Module,
+    Template,
+    Initialized,
+    Total,
+    Alignment,
+    Symbols,
+    Path,
+}
+
+#[derive(Clone, Copy)]
+enum TlsSymbolColumn {
+    Module,
+    Name,
+    Offset,
+    Size,
+    Binding,
+    Path,
+}
+
 pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_size_request(-1, 0);
@@ -221,6 +244,19 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     pages.add_titled(&overview, Some("overview"), "Overview");
 
     let (
+        tls,
+        tls_runtime_store,
+        tls_module_store,
+        tls_module_count,
+        tls_modules_empty,
+        tls_symbol_store,
+        tls_symbol_count,
+        tls_symbols_empty,
+        tls_metadata,
+    ) = build_tls();
+    pages.add_titled(&tls, Some("tls"), "TLS");
+
+    let (
         memory,
         private_memory,
         memory_store,
@@ -275,10 +311,10 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     page_navigation.append(&next_page);
     root.append(&page_navigation);
     root.append(&pages);
-    let pages_for_previous = pages.clone();
-    previous_page.connect_clicked(move |_| select_relative_kernel_page(&pages_for_previous, -1));
-    let pages_for_next = pages.clone();
-    next_page.connect_clicked(move |_| select_relative_kernel_page(&pages_for_next, 1));
+    let scroll_for_previous = page_switcher_scroll.clone();
+    previous_page.connect_clicked(move |_| scroll_kernel_tabs(&scroll_for_previous, -1.0));
+    let scroll_for_next = page_switcher_scroll.clone();
+    next_page.connect_clicked(move |_| scroll_kernel_tabs(&scroll_for_next, 1.0));
     let previous_for_page = previous_page.clone();
     let next_for_page = next_page.clone();
     let scroll_for_page = page_switcher_scroll.clone();
@@ -297,6 +333,17 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
             pages.queue_draw();
         });
     });
+    let adjustment = page_switcher_scroll.hadjustment();
+    let previous_for_adjustment = previous_page.clone();
+    let next_for_adjustment = next_page.clone();
+    adjustment.connect_value_changed(move |adjustment| {
+        update_kernel_tab_arrows(adjustment, &previous_for_adjustment, &next_for_adjustment);
+    });
+    let previous_for_range = previous_page.clone();
+    let next_for_range = next_page.clone();
+    adjustment.connect_changed(move |adjustment| {
+        update_kernel_tab_arrows(adjustment, &previous_for_range, &next_for_range);
+    });
     update_kernel_page_navigation(&pages, &previous_page, &next_page, &page_switcher_scroll);
 
     let handler = Rc::clone(bindings.refresh_handler);
@@ -305,6 +352,9 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
             handler();
         }
     });
+
+    let tls_runtime = Rc::new(RefCell::new(KernelTlsRuntime::default()));
+    replace_boxed_store(&tls_runtime_store, tls_runtime_rows(&tls_runtime.borrow()));
 
     KernelView {
         root,
@@ -318,6 +368,15 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
         previous_snapshot: Rc::new(RefCell::new(None)),
         overview_store,
         resource_store,
+        tls_runtime_store,
+        tls_runtime,
+        tls_module_store,
+        tls_module_count,
+        tls_modules_empty,
+        tls_symbol_store,
+        tls_symbol_count,
+        tls_symbols_empty,
+        tls_metadata,
         change_store,
         mapping_change_store,
         mapping_change_count,
@@ -374,23 +433,26 @@ pub(super) fn connect_kernel_tab_visibility(
     });
 }
 
-fn select_relative_kernel_page(pages: &gtk::Stack, delta: i32) {
-    let current = pages
-        .visible_child_name()
-        .as_deref()
-        .and_then(|name| {
-            KERNEL_PAGE_NAMES
-                .iter()
-                .position(|candidate| *candidate == name)
-        })
-        .unwrap_or(0);
-    let last = KERNEL_PAGE_NAMES.len().saturating_sub(1);
-    let next = if delta < 0 {
-        current.saturating_sub(delta.unsigned_abs() as usize)
-    } else {
-        current.saturating_add(delta as usize).min(last)
-    };
-    pages.set_visible_child_name(KERNEL_PAGE_NAMES[next]);
+fn scroll_kernel_tabs(scroll: &gtk::ScrolledWindow, direction: f64) {
+    let adjustment = scroll.hadjustment();
+    let lower = adjustment.lower();
+    let upper = (adjustment.upper() - adjustment.page_size()).max(lower);
+    let step = (adjustment.page_size() * 0.7).max(80.0);
+    adjustment.set_value((adjustment.value() + direction * step).clamp(lower, upper));
+}
+
+fn update_kernel_tab_arrows(
+    adjustment: &gtk::Adjustment,
+    previous: &gtk::Button,
+    next: &gtk::Button,
+) {
+    let overflow = adjustment.upper() - adjustment.lower() > adjustment.page_size() + 1.0;
+    previous.set_visible(overflow);
+    next.set_visible(overflow);
+    previous.set_sensitive(overflow && adjustment.value() > adjustment.lower() + 1.0);
+    next.set_sensitive(
+        overflow && adjustment.value() + adjustment.page_size() < adjustment.upper() - 1.0,
+    );
 }
 
 fn update_kernel_page_navigation(
@@ -408,13 +470,25 @@ fn update_kernel_page_navigation(
                 .position(|candidate| *candidate == name)
         })
         .unwrap_or(0);
-    previous.set_sensitive(index > 0);
-    next.set_sensitive(index + 1 < KERNEL_PAGE_NAMES.len());
     let adjustment = scroll.hadjustment();
+    update_kernel_tab_arrows(&adjustment, previous, next);
+    let previous = previous.clone();
+    let next = next.clone();
     glib::idle_add_local_once(move || {
-        let range = (adjustment.upper() - adjustment.page_size() - adjustment.lower()).max(0.0);
-        let fraction = index as f64 / KERNEL_PAGE_NAMES.len().saturating_sub(1).max(1) as f64;
-        adjustment.set_value(adjustment.lower() + range * fraction);
+        let lower = adjustment.lower();
+        let upper = adjustment.upper();
+        let page_size = adjustment.page_size();
+        let approximate_tab_width = (upper - lower) / KERNEL_PAGE_NAMES.len().max(1) as f64;
+        let tab_start = lower + approximate_tab_width * index as f64;
+        let tab_end = tab_start + approximate_tab_width;
+        let visible_start = adjustment.value();
+        let visible_end = visible_start + page_size;
+        if tab_start < visible_start {
+            adjustment.set_value(tab_start.max(lower));
+        } else if tab_end > visible_end {
+            adjustment.set_value((tab_end - page_size).min((upper - page_size).max(lower)));
+        }
+        update_kernel_tab_arrows(&adjustment, &previous, &next);
     });
 }
 
@@ -619,6 +693,169 @@ fn build_overview(
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
     (scrolled, store)
+}
+
+#[allow(clippy::type_complexity)]
+fn build_tls() -> (
+    gtk::Box,
+    gio::ListStore,
+    gio::ListStore,
+    gtk::Label,
+    gtk::Label,
+    gio::ListStore,
+    gtk::Label,
+    gtk::Label,
+    gtk::Stack,
+) {
+    let runtime_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let runtime_title = section_title("RUNTIME TLS");
+    runtime_title.add_css_class("kernel-memory-subtitle");
+    runtime_title.set_halign(gtk::Align::Fill);
+    runtime_title.set_xalign(0.0);
+    runtime_page.append(&runtime_title);
+    let (runtime, runtime_store) = build_overview(HashSet::new(), None);
+    runtime.set_vexpand(false);
+    runtime.set_min_content_height(1);
+    runtime.set_max_content_height(260);
+    runtime.set_propagate_natural_height(true);
+    runtime_page.append(&runtime);
+
+    let modules_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    let module_count = gtk::Label::new(Some("No snapshot"));
+    module_count.add_css_class("kernel-table-summary");
+    module_count.add_css_class("muted");
+    module_count.set_halign(gtk::Align::Start);
+    enable_stable_text_selection(&module_count);
+    modules_page.append(&module_count);
+    let module_store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let module_selection = gtk::SingleSelection::new(Some(module_store.clone()));
+    module_selection.set_autoselect(false);
+    module_selection.set_can_unselect(true);
+    let module_view = gtk::ColumnView::new(Some(module_selection));
+    module_view.add_css_class("debug-table");
+    module_view.add_css_class("kernel-tls-table");
+    module_view.set_vexpand(true);
+    module_view.set_reorderable(true);
+    for (title, width, expand, column) in [
+        ("ROLE", 125, false, TlsModuleColumn::Role),
+        ("MODULE", 190, false, TlsModuleColumn::Module),
+        ("TEMPLATE VADDR", 175, false, TlsModuleColumn::Template),
+        ("INITIALIZED", 110, false, TlsModuleColumn::Initialized),
+        ("TOTAL", 110, false, TlsModuleColumn::Total),
+        ("ALIGN", 85, false, TlsModuleColumn::Alignment),
+        ("TLS SYMBOLS", 110, false, TlsModuleColumn::Symbols),
+        ("PATH", 420, true, TlsModuleColumn::Path),
+    ] {
+        module_view.append_column(&tls_module_column(title, width, expand, column));
+    }
+    let modules_empty = empty_label("No loaded ELF module declares a PT_TLS template");
+    append_table(&modules_page, &module_view, &modules_empty);
+
+    let symbols_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    let symbol_controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    symbol_controls.add_css_class("kernel-table-controls");
+    let symbol_count = gtk::Label::new(Some("No snapshot"));
+    symbol_count.add_css_class("kernel-table-summary");
+    symbol_count.add_css_class("muted");
+    symbol_count.set_hexpand(true);
+    symbol_count.set_halign(gtk::Align::Start);
+    enable_stable_text_selection(&symbol_count);
+    let search = gtk::SearchEntry::builder()
+        .placeholder_text("Filter TLS symbol, module, or path")
+        .width_request(280)
+        .build();
+    search.add_css_class("kernel-table-search");
+    symbol_controls.append(&symbol_count);
+    symbol_controls.append(&search);
+    symbols_page.append(&symbol_controls);
+    let symbol_store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let query = Rc::new(RefCell::new(String::new()));
+    let query_for_filter = Rc::clone(&query);
+    let filter = gtk::CustomFilter::new(move |object| {
+        let Some(data) = object.downcast_ref::<glib::BoxedAnyObject>() else {
+            return false;
+        };
+        let row = data.borrow::<KernelTlsSymbolRow>();
+        let query = query_for_filter.borrow();
+        query.is_empty()
+            || format!("{} {} {}", row.module, row.symbol.name, row.path)
+                .to_ascii_lowercase()
+                .contains(&*query)
+    });
+    let filtered = gtk::FilterListModel::new(Some(symbol_store.clone()), Some(filter.clone()));
+    let symbol_selection = gtk::SingleSelection::new(Some(filtered));
+    symbol_selection.set_autoselect(false);
+    symbol_selection.set_can_unselect(true);
+    let symbol_view = gtk::ColumnView::new(Some(symbol_selection));
+    symbol_view.add_css_class("debug-table");
+    symbol_view.add_css_class("kernel-tls-table");
+    symbol_view.set_vexpand(true);
+    symbol_view.set_reorderable(true);
+    for (title, width, expand, column) in [
+        ("MODULE", 190, false, TlsSymbolColumn::Module),
+        ("SYMBOL", 260, false, TlsSymbolColumn::Name),
+        ("TEMPLATE OFFSET", 175, false, TlsSymbolColumn::Offset),
+        ("SIZE", 100, false, TlsSymbolColumn::Size),
+        ("BINDING", 90, false, TlsSymbolColumn::Binding),
+        ("PATH", 420, true, TlsSymbolColumn::Path),
+    ] {
+        symbol_view.append_column(&tls_symbol_column(title, width, expand, column));
+    }
+    let symbols_empty = empty_label("No named TLS symbols are available");
+    append_table(&symbols_page, &symbol_view, &symbols_empty);
+    search.connect_search_changed(move |search| {
+        query.replace(search.text().trim().to_ascii_lowercase());
+        filter.changed(gtk::FilterChange::Different);
+    });
+
+    let metadata_pages = gtk::Stack::new();
+    metadata_pages.set_vexpand(true);
+    metadata_pages.set_vhomogeneous(false);
+    metadata_pages.set_transition_type(gtk::StackTransitionType::None);
+    metadata_pages.add_titled(&modules_page, Some("modules"), "Modules");
+    metadata_pages.add_titled(&symbols_page, Some("symbols"), "Symbols");
+    let metadata_switcher = gtk::StackSwitcher::new();
+    metadata_switcher.add_css_class("kernel-tls-tabs");
+    metadata_switcher.set_stack(Some(&metadata_pages));
+    let metadata_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    metadata_header.add_css_class("kernel-tls-metadata-header");
+    let metadata_title = section_title("ELF TLS METADATA");
+    metadata_title.set_hexpand(true);
+    metadata_header.append(&metadata_title);
+    metadata_header.append(&metadata_switcher);
+    let metadata_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    metadata_content.append(&metadata_header);
+    metadata_content.append(&metadata_pages);
+    let metadata_empty = empty_label(
+        "No loaded ELF module declares a PT_TLS template\nRuntime thread-pointer information remains available above",
+    );
+    metadata_empty.add_css_class("kernel-tls-empty");
+    metadata_empty.set_justify(gtk::Justification::Center);
+    metadata_empty.set_halign(gtk::Align::Center);
+    metadata_empty.set_valign(gtk::Align::Center);
+    metadata_empty.set_vexpand(true);
+    let metadata = gtk::Stack::new();
+    metadata.set_vexpand(true);
+    metadata.set_vhomogeneous(false);
+    metadata.set_transition_type(gtk::StackTransitionType::None);
+    metadata.add_named(&metadata_content, Some("content"));
+    metadata.add_named(&metadata_empty, Some("empty"));
+    metadata.set_visible_child_name("empty");
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.add_css_class("kernel-tls-split");
+    page.append(&runtime_page);
+    page.append(&metadata);
+    (
+        page,
+        runtime_store,
+        module_store,
+        module_count,
+        modules_empty,
+        symbol_store,
+        symbol_count,
+        symbols_empty,
+        metadata,
+    )
 }
 
 fn build_changes() -> (
@@ -1982,6 +2219,87 @@ fn process_column(
     })
 }
 
+fn tls_module_column(
+    title: &str,
+    width: i32,
+    expand: bool,
+    column: TlsModuleColumn,
+) -> gtk::ColumnViewColumn {
+    table_column(title, width, expand, move |object, label| {
+        let module = object.borrow::<KernelTlsModule>();
+        reset_kernel_css(label);
+        let text = match column {
+            TlsModuleColumn::Role => module.role.clone(),
+            TlsModuleColumn::Module => module.module.clone(),
+            TlsModuleColumn::Template => format!("0x{:016x}", module.template_address),
+            TlsModuleColumn::Initialized => crate::kernel::format_bytes(module.initialized_bytes),
+            TlsModuleColumn::Total => crate::kernel::format_bytes(module.total_bytes),
+            TlsModuleColumn::Alignment => crate::kernel::format_bytes(module.alignment),
+            TlsModuleColumn::Symbols => module.symbol_count.to_string(),
+            TlsModuleColumn::Path => module.path.clone(),
+        };
+        if matches!(
+            column,
+            TlsModuleColumn::Template
+                | TlsModuleColumn::Initialized
+                | TlsModuleColumn::Total
+                | TlsModuleColumn::Alignment
+                | TlsModuleColumn::Symbols
+        ) {
+            label.add_css_class("kernel-numeric");
+        }
+        label.set_xalign(if matches!(column, TlsModuleColumn::Symbols) {
+            1.0
+        } else {
+            0.0
+        });
+        label.set_text(&text);
+        label.set_tooltip_text(Some(&format!(
+            "{} · ELF PT_TLS template vaddr 0x{:x} · {} initialized / {} total · alignment {} · {} symbol(s)\n{}",
+            module.module,
+            module.template_address,
+            crate::kernel::format_bytes(module.initialized_bytes),
+            crate::kernel::format_bytes(module.total_bytes),
+            crate::kernel::format_bytes(module.alignment),
+            module.symbol_count,
+            module.path,
+        )));
+    })
+}
+
+fn tls_symbol_column(
+    title: &str,
+    width: i32,
+    expand: bool,
+    column: TlsSymbolColumn,
+) -> gtk::ColumnViewColumn {
+    table_column(title, width, expand, move |object, label| {
+        let row = object.borrow::<KernelTlsSymbolRow>();
+        reset_kernel_css(label);
+        let text = match column {
+            TlsSymbolColumn::Module => row.module.clone(),
+            TlsSymbolColumn::Name => row.symbol.name.clone(),
+            TlsSymbolColumn::Offset => format!("0x{:016x}", row.symbol.offset),
+            TlsSymbolColumn::Size => crate::kernel::format_bytes(row.symbol.size),
+            TlsSymbolColumn::Binding => row.symbol.binding.clone(),
+            TlsSymbolColumn::Path => row.path.clone(),
+        };
+        if matches!(column, TlsSymbolColumn::Offset | TlsSymbolColumn::Size) {
+            label.add_css_class("kernel-numeric");
+        }
+        label.set_xalign(0.0);
+        label.set_text(&text);
+        label.set_tooltip_text(Some(&format!(
+            "{} · template-relative offset 0x{:x} · {} · {}\n{}",
+            row.symbol.name,
+            row.symbol.offset,
+            crate::kernel::format_bytes(row.symbol.size),
+            row.symbol.binding,
+            row.path,
+        )));
+    })
+}
+
 fn mark(active: bool) -> String {
     if active {
         String::from("●")
@@ -2098,6 +2416,53 @@ impl KernelView {
         )));
         replace_boxed_store(&self.overview_store, overview_rows(snapshot));
         replace_boxed_store(&self.resource_store, resource_rows(snapshot));
+        replace_boxed_store(&self.tls_module_store, snapshot.tls_modules.iter().cloned());
+        let tls_symbols = snapshot
+            .tls_modules
+            .iter()
+            .flat_map(|module| {
+                module
+                    .symbols
+                    .iter()
+                    .cloned()
+                    .map(|symbol| KernelTlsSymbolRow {
+                        module: module.module.clone(),
+                        path: module.path.clone(),
+                        symbol,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let known_tls_symbols = snapshot
+            .tls_modules
+            .iter()
+            .map(|module| module.symbol_count)
+            .sum::<usize>();
+        self.tls_module_count.set_text(&format!(
+            "{} ELF module(s) with static TLS templates",
+            snapshot.tls_modules.len()
+        ));
+        self.tls_module_count.set_tooltip_text(Some(
+            "ELF PT_TLS template addresses describe module metadata, not live per-thread addresses",
+        ));
+        self.tls_symbol_count
+            .set_text(&if known_tls_symbols == tls_symbols.len() {
+                format!("{known_tls_symbols} named TLS symbol(s)")
+            } else {
+                format!(
+                    "{} of {known_tls_symbols} named TLS symbol(s) shown",
+                    tls_symbols.len()
+                )
+            });
+        self.tls_modules_empty
+            .set_visible(snapshot.tls_modules.is_empty());
+        self.tls_symbols_empty.set_visible(tls_symbols.is_empty());
+        self.tls_metadata
+            .set_visible_child_name(if snapshot.tls_modules.is_empty() {
+                "empty"
+            } else {
+                "content"
+            });
+        replace_boxed_store(&self.tls_symbol_store, tls_symbols);
         replace_boxed_store(&self.change_store, change_rows(snapshot));
         replace_boxed_store(
             &self.mapping_change_store,
@@ -2242,6 +2607,42 @@ impl KernelView {
             .set_visible(snapshot.process_tree.is_empty());
     }
 
+    pub(super) fn set_tls_thread(&self, threads: &[ThreadInfo]) {
+        self.tls_runtime.borrow_mut().thread =
+            threads.iter().find(|thread| thread.current).map(|thread| {
+                let name = thread.name.as_deref().unwrap_or("unnamed");
+                format!("GDB #{} · {} · {name}", thread.id, thread.target_id)
+            });
+        self.rebuild_tls_runtime();
+    }
+
+    fn set_tls_runtime(
+        &self,
+        register: Option<&str>,
+        base: Option<u64>,
+        mapping: Option<&str>,
+        bytes: &[u8],
+        error: Option<&str>,
+    ) {
+        let thread = self.tls_runtime.borrow().thread.clone();
+        self.tls_runtime.replace(KernelTlsRuntime {
+            thread,
+            register: register.map(str::to_owned),
+            base,
+            mapping: mapping.map(str::to_owned),
+            bytes: bytes.to_vec(),
+            error: error.map(str::to_owned),
+        });
+        self.rebuild_tls_runtime();
+    }
+
+    fn rebuild_tls_runtime(&self) {
+        replace_boxed_store(
+            &self.tls_runtime_store,
+            tls_runtime_rows(&self.tls_runtime.borrow()),
+        );
+    }
+
     fn clear(&self, status: &str) {
         self.status.set_text(status);
         self.status.set_tooltip_text(None);
@@ -2249,6 +2650,8 @@ impl KernelView {
         self.warnings.set_visible(false);
         self.overview_store.remove_all();
         self.resource_store.remove_all();
+        self.tls_module_store.remove_all();
+        self.tls_symbol_store.remove_all();
         self.change_store.remove_all();
         self.mapping_change_store.remove_all();
         self.memory_store.remove_all();
@@ -2261,6 +2664,12 @@ impl KernelView {
         self.process_store.remove_all();
         self.previous_snapshot.replace(None);
         self.thread_count.set_text("No snapshot");
+        self.tls_module_count.set_text("No snapshot");
+        self.tls_module_count.set_tooltip_text(None);
+        self.tls_symbol_count.set_text("No snapshot");
+        self.tls_modules_empty.set_visible(true);
+        self.tls_symbols_empty.set_visible(true);
+        self.tls_metadata.set_visible_child_name("empty");
         self.mapping_change_count
             .set_text("Capture another snapshot to compare mappings");
         self.mapping_change_count.set_tooltip_text(None);
@@ -2281,7 +2690,128 @@ impl KernelView {
         self.descriptors_empty.set_visible(true);
         self.limits_empty.set_visible(true);
         self.processes_empty.set_visible(true);
+        self.tls_runtime.replace(KernelTlsRuntime::default());
+        self.rebuild_tls_runtime();
     }
+}
+
+fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
+    let section = String::from("SELECTED THREAD");
+    let mut rows = vec![KernelOverviewRow {
+        section: true,
+        section_key: section.clone(),
+        label: section.clone(),
+        value: String::new(),
+    }];
+    rows.push(KernelOverviewRow {
+        section: false,
+        section_key: section.clone(),
+        label: String::from("Thread"),
+        value: runtime
+            .thread
+            .clone()
+            .unwrap_or_else(|| String::from("Current GDB thread")),
+    });
+    let Some(register) = runtime.register.as_deref() else {
+        rows.push(KernelOverviewRow {
+            section: false,
+            section_key: section,
+            label: String::from("Status"),
+            value: runtime.error.clone().unwrap_or_else(|| {
+                String::from("Waiting for a supported thread-pointer register at a stopped target")
+            }),
+        });
+        return rows;
+    };
+    let base = runtime.base.unwrap_or_default();
+    rows.extend([
+        KernelOverviewRow {
+            section: false,
+            section_key: section.clone(),
+            label: String::from("Thread pointer"),
+            value: format!("${register} = 0x{base:016x}"),
+        },
+        KernelOverviewRow {
+            section: false,
+            section_key: section.clone(),
+            label: String::from("Mapping"),
+            value: runtime
+                .mapping
+                .clone()
+                .unwrap_or_else(|| String::from("No readable mapping contains the thread pointer")),
+        },
+    ]);
+    if let Some(error) = runtime.error.as_deref() {
+        rows.push(KernelOverviewRow {
+            section: false,
+            section_key: section,
+            label: String::from("Live block"),
+            value: error.to_owned(),
+        });
+        return rows;
+    }
+    if runtime.bytes.is_empty() {
+        rows.push(KernelOverviewRow {
+            section: false,
+            section_key: section,
+            label: String::from("Live block"),
+            value: String::from("No live TLS bytes available"),
+        });
+        return rows;
+    }
+
+    let abi_section = if register == "fs_base" {
+        "GLIBC X86-64 TCB HEAD"
+    } else {
+        "THREAD-POINTER WORDS"
+    };
+    rows.push(KernelOverviewRow {
+        section: true,
+        section_key: String::from(abi_section),
+        label: String::from(abi_section),
+        value: String::new(),
+    });
+    if register == "fs_base" {
+        for (label, offset, size) in [
+            ("TCB pointer", 0usize, 8usize),
+            ("Dynamic thread vector (DTV)", 8, 8),
+            ("Self pointer", 16, 8),
+            ("Multiple-threads flag", 24, 4),
+            ("Gscope flag", 28, 4),
+            ("Sysinfo", 32, 8),
+            ("Stack canary", 40, 8),
+            ("Pointer guard", 48, 8),
+            ("vgetcpu cache", 56, 8),
+            ("Feature flags", 64, 4),
+        ] {
+            if let Some(value) = tls_little_endian_value(&runtime.bytes, offset, size) {
+                rows.push(KernelOverviewRow {
+                    section: false,
+                    section_key: String::from(abi_section),
+                    label: format!("{label} (+0x{offset:x})"),
+                    value: format!("0x{value:0width$x}", width = size * 2),
+                });
+            }
+        }
+    } else {
+        for (index, bytes) in runtime.bytes.as_chunks::<8>().0.iter().take(10).enumerate() {
+            let value = u64::from_le_bytes(*bytes);
+            rows.push(KernelOverviewRow {
+                section: false,
+                section_key: String::from(abi_section),
+                label: format!("Word +0x{:x}", index * 8),
+                value: format!("0x{value:016x}"),
+            });
+        }
+    }
+    rows
+}
+
+fn tls_little_endian_value(bytes: &[u8], offset: usize, size: usize) -> Option<u64> {
+    let bytes = bytes.get(offset..offset.checked_add(size)?)?;
+    let mut value = [0_u8; 8];
+    value.get_mut(..size)?.copy_from_slice(bytes);
+    Some(u64::from_le_bytes(value))
 }
 
 fn update_memory_summary(
@@ -2553,6 +3083,42 @@ fn populate_warnings(container: &gtk::Box, warnings: &[String]) {
 }
 
 impl Ui {
+    pub fn show_tls_runtime_for_refresh(
+        &self,
+        generation: u64,
+        register: &str,
+        base: u64,
+        mapping: Option<&str>,
+        result: Result<&MemoryBlock, &str>,
+    ) {
+        if !self.is_stop_refresh_current(generation) {
+            return;
+        }
+        match result {
+            Ok(memory) => self.kernel_view.set_tls_runtime(
+                Some(register),
+                Some(base),
+                mapping,
+                &memory.bytes,
+                None,
+            ),
+            Err(error) => self.kernel_view.set_tls_runtime(
+                Some(register),
+                Some(base),
+                mapping,
+                &[],
+                Some(error),
+            ),
+        }
+    }
+
+    pub fn show_tls_runtime_unavailable_for_refresh(&self, generation: u64, error: &str) {
+        if self.is_stop_refresh_current(generation) {
+            self.kernel_view
+                .set_tls_runtime(None, None, None, &[], Some(error));
+        }
+    }
+
     pub fn set_kernel_refresh_handler(&self, handler: impl Fn() + 'static) {
         self.kernel_refresh_handler.replace(Some(Rc::new(handler)));
     }
@@ -2682,5 +3248,28 @@ mod memory_view_tests {
         assert_eq!(ratio(1, 4), 0.25);
         assert_eq!(ratio(4, 0), 0.0);
         assert_eq!(ratio(8, 4), 1.0);
+    }
+
+    #[test]
+    fn decodes_x86_64_glibc_thread_control_block_fields() {
+        let mut bytes = vec![0_u8; 80];
+        bytes[8..16].copy_from_slice(&0x1234_u64.to_le_bytes());
+        bytes[40..48].copy_from_slice(&0xfeed_face_cafe_beef_u64.to_le_bytes());
+        let runtime = KernelTlsRuntime {
+            thread: Some(String::from("GDB #1")),
+            register: Some(String::from("fs_base")),
+            base: Some(0x7fff_0000),
+            mapping: Some(String::from("rw-p")),
+            bytes,
+            error: None,
+        };
+
+        let rows = tls_runtime_rows(&runtime);
+        assert!(rows.iter().any(|row| {
+            row.label == "Dynamic thread vector (DTV) (+0x8)" && row.value == "0x0000000000001234"
+        }));
+        assert!(rows.iter().any(|row| {
+            row.label == "Stack canary (+0x28)" && row.value == "0xfeedfacecafebeef"
+        }));
     }
 }

@@ -19,6 +19,7 @@ cargo run -- target/debug-fixtures/c-page-target
 | `c-allocation-target` | `c_allocation_checkpoint` | Plain `malloc`/`calloc` allocations and a one-MiB anonymous mapping progressing from reserved to sparse, fully resident and reclaimed |
 | `c-memory-target` | `c_memory_checkpoint` | Anonymous/shared mappings, a guard page, heap data, memfd, pipes, UNIX sockets, eventfd and epoll |
 | `c-page-target` | `c_page_checkpoint` | Three page-lifecycle stops: sparse residency, soft-dirty pages, shared/private file pages, `mlock`, huge-page advice and reclaim |
+| `c-tls-target` | `c_tls_checkpoint` | Per-thread initialized and zero-filled TLS, aggregate TLS objects, thread-pointer bases and distinct values across named pthreads |
 | `c-thread-target` | `c_threads_checkpoint` | Named pthreads in futex/poll waits, per-thread signal masks, a pending signal and atomic values |
 | `c-process-target` | `c_process_checkpoint` | Fork catchpoints and a live parent/child/grandchild hierarchy |
 | `cpp-debug-target` | `debugger_checkpoint` | Integer families, STL containers, structs, pointer cycles, watchpoints, threads, signals and exceptions |
@@ -50,3 +51,9 @@ Set `break c_page_checkpoint`, then continue through all three hits:
 At each stop, inspect **Kernel → Changes** for deltas and **Kernel → Maps** for RSS/PSS, NUMA placement, VM flags and pagemap samples. The fixture resets its own soft-dirty tracking through `/proc/self/clear_refs`; failure to do so is intentionally non-fatal on restricted systems.
 
 The default targets use `-O0`, full debug information, frame pointers and disabled C/C++ inlining. The `-o2` variants deliberately retain optimization. Override `CC`, `CXX`, `RUSTC`, or the corresponding flags to compare toolchains and DWARF versions.
+
+## Thread-local storage fixture
+
+Set `break c_tls_checkpoint` and run to the `threads-ready` stop. The main thread and two named workers remain alive with different copies of the initialized TLS scalars, string buffer, aggregate object and 4 KiB zero-filled block. Switch GDB threads, then compare the variables with **Kernel → TLS** and the `$fs_base` or `$gs_base` register.
+
+Continue once to the `main-mutated` stop to verify that the selected thread's live TLS values change without affecting either worker. The executable itself declares a `PT_TLS` template, so its module and named symbols also exercise the ELF metadata tables.

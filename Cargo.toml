@@ -7,6 +7,7 @@ description = "A native, terminal-friendly GDB frontend"
 autoexamples = false
 
 [dependencies]
+goblin = { version = "0.10.7", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 gtk = { package = "gtk4", version = "0.11.4", features = ["v4_22"] }
 glib-unix = "0.22.8"
 nix = { version = "0.31.3", features = ["fs", "term"] }

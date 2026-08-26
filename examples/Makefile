@@ -13,6 +13,7 @@ C_TARGETS := \
 	$(TARGET_DIR)/c-allocation-target \
 	$(TARGET_DIR)/c-memory-target \
 	$(TARGET_DIR)/c-page-target \
+	$(TARGET_DIR)/c-tls-target \
 	$(TARGET_DIR)/c-thread-target \
 	$(TARGET_DIR)/c-process-target
 CXX_TARGETS := \
@@ -41,6 +42,9 @@ $(TARGET_DIR)/c-page-target: c_page_target.c | $(TARGET_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@
 
 $(TARGET_DIR)/c-thread-target: c_thread_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -pthread -o $@
+
+$(TARGET_DIR)/c-tls-target: c_tls_target.c | $(TARGET_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -pthread -o $@
 
 $(TARGET_DIR)/c-process-target: c_process_target.c | $(TARGET_DIR)

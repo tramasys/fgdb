@@ -775,6 +775,7 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
                 current_ui.refresh_memory_watches();
                 current_ui.refresh_kernel_after_stop();
             }
+            request_tls_runtime(&ui, client, generation, &registers, &regions);
             request_stack_memory(ui, client, generation, registers, frames, regions);
         })
         .is_err()
@@ -783,6 +784,82 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
         ui.show_stack_for_refresh(generation, &[]);
         ui.show_memory_regions_for_refresh(generation, &[]);
         ui.refresh_memory_watches();
+    }
+}
+
+fn request_tls_runtime(
+    ui: &Weak<Ui>,
+    client: &MiClient,
+    generation: u64,
+    registers: &[Register],
+    regions: &[MemoryRegion],
+) {
+    const TLS_READ_BYTES: usize = 80;
+    let Some((register, base)) = ["fs_base", "gs_base"].into_iter().find_map(|name| {
+        registers
+            .iter()
+            .find(|register| register.name == name)
+            .and_then(|register| pointer_address(&register.value))
+            .filter(|address| *address != 0)
+            .map(|address| (name, address))
+    }) else {
+        if let Some(ui) = ui.upgrade() {
+            ui.show_tls_runtime_unavailable_for_refresh(
+                generation,
+                "This target did not expose a non-zero fs_base or gs_base register",
+            );
+        }
+        return;
+    };
+    let mapping = regions
+        .iter()
+        .find(|region| region.contains(base))
+        .map(MemoryRegion::description);
+    let command = format!("-data-read-memory-bytes ${register} {TLS_READ_BYTES}");
+    let ui_for_response = ui.clone();
+    let ui_for_error = ui.clone();
+    let mapping_for_response = mapping.clone();
+    if client
+        .request(&command, move |_, record| {
+            if !stop_refresh_is_current(&ui_for_response, generation) {
+                return;
+            }
+            let memory = record
+                .is_done()
+                .then(|| crate::debugger::memory_block(&record))
+                .flatten();
+            if let Some(ui) = ui_for_response.upgrade() {
+                if let Some(memory) = memory.as_ref() {
+                    ui.show_tls_runtime_for_refresh(
+                        generation,
+                        register,
+                        base,
+                        mapping_for_response.as_deref(),
+                        Ok(memory),
+                    );
+                } else {
+                    ui.show_tls_runtime_for_refresh(
+                        generation,
+                        register,
+                        base,
+                        mapping_for_response.as_deref(),
+                        Err(record
+                            .error_message()
+                            .unwrap_or("GDB could not read the live TLS block")),
+                    );
+                }
+            }
+        })
+        .is_err()
+        && let Some(ui) = ui_for_error.upgrade()
+    {
+        ui.show_tls_runtime_for_refresh(
+            generation,
+            register,
+            base,
+            mapping.as_deref(),
+            Err("The MI channel is unavailable"),
+        );
     }
 }
 

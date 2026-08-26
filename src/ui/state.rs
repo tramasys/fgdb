@@ -2,9 +2,14 @@ use super::*;
 
 impl Ui {
     pub fn build(application: &gtk::Application, config: &LaunchConfig, theme: &Theme) -> Self {
+        if let Some(display) = gtk::gdk::Display::default() {
+            gtk::IconTheme::for_display(&display).add_search_path(crate::ICON_SEARCH_PATH);
+        }
+        gtk::Window::set_default_icon_name(crate::APPLICATION_ID);
         let window = gtk::ApplicationWindow::builder()
             .application(application)
             .title("fgdb")
+            .icon_name(crate::APPLICATION_ID)
             .default_width(1380)
             .default_height(820)
             .build();

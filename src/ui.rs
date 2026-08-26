@@ -36,6 +36,7 @@ use crate::{
     kernel::{
         KernelFileDescriptor, KernelLimit, KernelMapping, KernelMappingChange,
         KernelMemoryCategory, KernelProcess, KernelSignal, KernelSnapshot, KernelThread,
+        KernelTlsModule, KernelTlsSymbol,
     },
     source,
     theme::Theme,
@@ -409,6 +410,15 @@ struct KernelView {
     previous_snapshot: Rc<RefCell<Option<KernelSnapshot>>>,
     overview_store: gio::ListStore,
     resource_store: gio::ListStore,
+    tls_runtime_store: gio::ListStore,
+    tls_runtime: Rc<RefCell<KernelTlsRuntime>>,
+    tls_module_store: gio::ListStore,
+    tls_module_count: gtk::Label,
+    tls_modules_empty: gtk::Label,
+    tls_symbol_store: gio::ListStore,
+    tls_symbol_count: gtk::Label,
+    tls_symbols_empty: gtk::Label,
+    tls_metadata: gtk::Stack,
     change_store: gio::ListStore,
     mapping_change_store: gio::ListStore,
     mapping_change_count: gtk::Label,
@@ -445,6 +455,23 @@ struct KernelOverviewRow {
     section_key: String,
     label: String,
     value: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct KernelTlsRuntime {
+    thread: Option<String>,
+    register: Option<String>,
+    base: Option<u64>,
+    mapping: Option<String>,
+    bytes: Vec<u8>,
+    error: Option<String>,
+}
+
+#[derive(Clone)]
+struct KernelTlsSymbolRow {
+    module: String,
+    path: String,
+    symbol: KernelTlsSymbol,
 }
 
 #[derive(Clone)]

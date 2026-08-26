@@ -9,6 +9,9 @@ mod ui;
 
 use gtk::prelude::*;
 
+pub(crate) const APPLICATION_ID: &str = "dev.fgdb.Fgdb";
+pub(crate) const ICON_SEARCH_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/icons");
+
 fn main() -> gtk::glib::ExitCode {
     let launch_config = match config::LaunchConfig::from_process() {
         Ok(configuration) => configuration,
@@ -18,7 +21,7 @@ fn main() -> gtk::glib::ExitCode {
         }
     };
     let application = gtk::Application::builder()
-        .application_id("dev.fgdb.Fgdb")
+        .application_id(APPLICATION_ID)
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
 

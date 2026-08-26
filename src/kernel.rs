@@ -4,6 +4,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod elf;
 mod memory;
 mod process;
 mod resources;
@@ -32,6 +33,7 @@ pub(crate) struct KernelSnapshot {
     pub constraints: Vec<KernelFact>,
     pub runtime: Vec<KernelFact>,
     pub advanced: Vec<KernelFact>,
+    pub tls_modules: Vec<KernelTlsModule>,
     pub mappings: Vec<KernelMapping>,
     pub mapping_changes: Vec<KernelMappingChange>,
     pub mapping_summary: Vec<KernelFact>,
@@ -44,6 +46,27 @@ pub(crate) struct KernelSnapshot {
     pub comparison_ready: bool,
     identity: Option<u64>,
     metrics: KernelMetrics,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KernelTlsModule {
+    pub module: String,
+    pub path: String,
+    pub role: String,
+    pub template_address: u64,
+    pub initialized_bytes: u64,
+    pub total_bytes: u64,
+    pub alignment: u64,
+    pub symbol_count: usize,
+    pub symbols: Vec<KernelTlsSymbol>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct KernelTlsSymbol {
+    pub name: String,
+    pub offset: u64,
+    pub size: u64,
+    pub binding: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -331,6 +354,7 @@ fn read_snapshot_from(root: &Path, pid: u32) -> Result<KernelSnapshot, String> {
     memory::populate_memory(&mut snapshot, root, &status);
     memory::populate_numa(&mut snapshot, root);
     memory::populate_page_samples(&mut snapshot, root);
+    elf::populate_tls_metadata(&mut snapshot, root);
     process::populate_scheduler(&mut snapshot, root, &status, stat.as_ref());
     process::populate_security(&mut snapshot, root, &status);
     process::populate_io(&mut snapshot, root);

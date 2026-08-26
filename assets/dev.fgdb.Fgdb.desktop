@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=fgdb
+Comment=Native GDB frontend
+Exec=fgdb
+Icon=dev.fgdb.Fgdb
+Terminal=false
+Categories=Development;Debugger;
+StartupNotify=true
