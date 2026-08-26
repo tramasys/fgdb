@@ -1,5 +1,12 @@
 use super::*;
 
+#[derive(Clone)]
+struct SourceGutterMenuHandlers {
+    jump: Rc<RefCell<Option<SourceJumpHandler>>>,
+    enabled: Rc<RefCell<Option<BreakpointEnabledHandler>>>,
+    delete: Rc<RefCell<Option<StringSelectionHandler>>>,
+}
+
 pub(super) fn dynamic_list(empty_text: &str) -> gtk::Box {
     let list = gtk::Box::new(gtk::Orientation::Vertical, 1);
     list.append(&empty_label(empty_text));
@@ -102,6 +109,7 @@ pub(super) fn open_source_document(
         context.theme,
         context.breakpoints,
         context.insert_handler,
+        context.jump_handler,
         context.delete_handler,
         context.enabled_handler,
     );
@@ -177,6 +185,7 @@ pub(super) fn build_breakpoint_gutter(
     theme: &Theme,
     breakpoints: &Rc<RefCell<Vec<Breakpoint>>>,
     insert_handler: &Rc<RefCell<Option<BreakpointInsertHandler>>>,
+    jump_handler: &Rc<RefCell<Option<SourceJumpHandler>>>,
     delete_handler: &Rc<RefCell<Option<StringSelectionHandler>>>,
     enabled_handler: &Rc<RefCell<Option<BreakpointEnabledHandler>>>,
 ) -> BreakpointGutterRenderer {
@@ -191,8 +200,14 @@ pub(super) fn build_breakpoint_gutter(
     let path = path.to_path_buf();
     let breakpoints = Rc::clone(breakpoints);
     let insert_handler = Rc::clone(insert_handler);
+    let jump_handler = Rc::clone(jump_handler);
     let delete_handler = Rc::clone(delete_handler);
     let enabled_handler = Rc::clone(enabled_handler);
+    let menu_handlers = SourceGutterMenuHandlers {
+        jump: jump_handler,
+        enabled: enabled_handler,
+        delete: Rc::clone(&delete_handler),
+    };
     let renderer = BreakpointGutterRenderer::new(
         move |buffer, line| {
             let source_line = line + 1;
@@ -261,21 +276,24 @@ pub(super) fn build_breakpoint_gutter(
                         handler(path.clone(), line);
                     }
                 }
-                (3, Some(breakpoint)) => {
-                    open_breakpoint_gutter_menu(
-                        renderer,
-                        area,
-                        breakpoint,
-                        Rc::clone(&enabled_handler),
-                        Rc::clone(&delete_handler),
-                    );
+                (3, breakpoint) => {
+                    if let Some(line) = line {
+                        open_source_gutter_menu(
+                            renderer,
+                            area,
+                            path.clone(),
+                            line,
+                            breakpoint,
+                            menu_handlers.clone(),
+                        );
+                    }
                 }
                 _ => {}
             }
         },
     );
     renderer.set_tooltip_text(Some(
-        "Left-click to add or delete a breakpoint · Right-click for more actions",
+        "Left-click to add or delete a breakpoint · Right-click for line actions",
     ));
     renderer
 }
@@ -310,12 +328,13 @@ pub(super) fn connect_breakpoint_gutter_context_click(
     page.add_controller(right_click);
 }
 
-pub(super) fn open_breakpoint_gutter_menu(
+fn open_source_gutter_menu(
     renderer: &BreakpointGutterRenderer,
     area: &gtk::gdk::Rectangle,
-    breakpoint: Breakpoint,
-    enabled_handler: Rc<RefCell<Option<BreakpointEnabledHandler>>>,
-    delete_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
+    path: PathBuf,
+    line: u32,
+    breakpoint: Option<Breakpoint>,
+    handlers: SourceGutterMenuHandlers,
 ) {
     let popover = gtk::Popover::builder()
         .has_arrow(false)
@@ -323,44 +342,76 @@ pub(super) fn open_breakpoint_gutter_menu(
         .build();
     let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
     menu.add_css_class("gutter-breakpoint-menu");
-    let title = gtk::Label::new(Some(&format!(
-        "BREAKPOINT #{}",
-        breakpoint.command_number()
-    )));
+    let title_text = breakpoint.as_ref().map_or_else(
+        || format!("LINE {line}"),
+        |breakpoint| format!("LINE {line} · BREAKPOINT #{}", breakpoint.command_number()),
+    );
+    let title = gtk::Label::new(Some(&title_text));
     title.add_css_class("section-title");
     title.set_halign(gtk::Align::Start);
     menu.append(&title);
 
-    let toggle = gtk::Button::with_label(if breakpoint.enabled {
-        "Disable"
-    } else {
-        "Enable"
+    let jump = gtk::Button::with_label("Jump to");
+    jump.set_tooltip_text(Some(
+        "Continue execution until this line and pause without creating a persistent breakpoint",
+    ));
+    jump.set_halign(gtk::Align::Fill);
+    jump.set_hexpand(true);
+    jump.set_sensitive(handlers.jump.borrow().is_some());
+    menu.append(&jump);
+
+    let jump_handler = Rc::clone(&handlers.jump);
+    let popover_for_jump = popover.clone();
+    jump.connect_clicked(move |_| {
+        if let Some(handler) = jump_handler.borrow().as_ref() {
+            handler(path.clone(), line);
+        }
+        popover_for_jump.popdown();
     });
-    let delete = gtk::Button::with_label("Delete");
-    delete.add_css_class("danger-action");
-    menu.append(&toggle);
-    menu.append(&delete);
+
+    if let Some(breakpoint) = breakpoint {
+        let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+        menu.append(&separator);
+        let toggle = gtk::Button::with_label(if breakpoint.enabled {
+            "Disable"
+        } else {
+            "Enable"
+        });
+        toggle.set_halign(gtk::Align::Fill);
+        toggle.set_hexpand(true);
+        let delete = gtk::Button::with_label("Delete");
+        delete.set_halign(gtk::Align::Fill);
+        delete.set_hexpand(true);
+        delete.add_css_class("danger-action");
+        menu.append(&toggle);
+        menu.append(&delete);
+
+        let number = breakpoint.command_number().to_owned();
+        let enable = !breakpoint.enabled;
+        let popover_for_toggle = popover.clone();
+        let enabled_handler = Rc::clone(&handlers.enabled);
+        toggle.connect_clicked(move |_| {
+            if let Some(handler) = enabled_handler.borrow().as_ref() {
+                handler(number.clone(), enable);
+            }
+            popover_for_toggle.popdown();
+        });
+        let number = breakpoint.command_number().to_owned();
+        let popover_for_delete = popover.clone();
+        let delete_handler = Rc::clone(&handlers.delete);
+        delete.connect_clicked(move |_| {
+            if let Some(handler) = delete_handler.borrow().as_ref() {
+                handler(number.clone());
+            }
+            popover_for_delete.popdown();
+        });
+    }
     popover.set_child(Some(&menu));
     popover.set_parent(renderer);
+    popover.set_position(gtk::PositionType::Right);
+    popover.set_offset(4, 0);
     popover.set_pointing_to(Some(area));
 
-    let number = breakpoint.command_number().to_owned();
-    let enable = !breakpoint.enabled;
-    let popover_for_toggle = popover.clone();
-    toggle.connect_clicked(move |_| {
-        if let Some(handler) = enabled_handler.borrow().as_ref() {
-            handler(number.clone(), enable);
-        }
-        popover_for_toggle.popdown();
-    });
-    let number = breakpoint.command_number().to_owned();
-    let popover_for_delete = popover.clone();
-    delete.connect_clicked(move |_| {
-        if let Some(handler) = delete_handler.borrow().as_ref() {
-            handler(number.clone());
-        }
-        popover_for_delete.popdown();
-    });
     popover.connect_closed(|popover| popover.unparent());
     popover.popup();
 }

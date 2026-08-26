@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.98"
 description = "A native, terminal-friendly GDB frontend"
+autoexamples = false
 
 [dependencies]
 gtk = { package = "gtk4", version = "0.11.4", features = ["v4_22"] }

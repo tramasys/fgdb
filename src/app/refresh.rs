@@ -6,12 +6,10 @@ pub(super) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     };
     current_ui.clear_execution_location();
     let generation = current_ui.start_stop_refresh();
-    for varobj in current_ui.variable_object_names() {
+    for varobj in current_ui.local_variable_object_names() {
         delete_variable_object(client, &varobj);
     }
     drop(current_ui);
-
-    refresh_modules(ui, client, generation);
 
     let stack_inputs = Rc::new(RefCell::new(StackInputs {
         ui: ui.clone(),
@@ -100,7 +98,8 @@ pub(super) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
 
     refresh_registers(ui, client, generation, stack_inputs);
 
-    refresh_breakpoints(ui, client);
+    refresh_expression_watches(ui.clone(), client, generation);
+
     refresh_threads(ui, client);
 }
 
@@ -110,6 +109,11 @@ pub(super) fn refresh_registers(
     generation: u64,
     stack_inputs: Rc<RefCell<StackInputs>>,
 ) {
+    if let Some(names) = ui.upgrade().and_then(|ui| ui.cached_register_names()) {
+        request_register_values(ui.clone(), client, generation, stack_inputs, names);
+        return;
+    }
+
     let weak_ui = ui.clone();
     let stack_inputs_for_names = Rc::clone(&stack_inputs);
     if client
@@ -126,63 +130,74 @@ pub(super) fn refresh_registers(
                 );
                 return;
             }
-            let names = crate::debugger::register_names(&record);
-            let numbers = crate::debugger::compact_register_numbers(&names);
-            if numbers.is_empty() {
-                finish_empty_register_refresh(
-                    &weak_ui,
-                    client,
-                    generation,
-                    &stack_inputs_for_names,
-                );
-                return;
+            let names = Rc::new(crate::debugger::register_names(&record));
+            if let Some(ui) = weak_ui.upgrade() {
+                ui.cache_register_names(Rc::clone(&names));
             }
-            let command = format!(
-                "-data-list-register-values x {}",
-                numbers
-                    .iter()
-                    .map(usize::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" ")
+            request_register_values(
+                weak_ui.clone(),
+                client,
+                generation,
+                Rc::clone(&stack_inputs_for_names),
+                names,
             );
-            let weak_ui = weak_ui.clone();
-            let weak_ui_for_values = weak_ui.clone();
-            let stack_inputs_for_values = Rc::clone(&stack_inputs_for_names);
-            if client
-                .request(&command, move |client, record| {
-                    if !stop_refresh_is_current(&weak_ui_for_values, generation) {
-                        return;
-                    }
-                    if !record.is_done() {
-                        finish_empty_register_refresh(
-                            &weak_ui_for_values,
-                            client,
-                            generation,
-                            &stack_inputs_for_values,
-                        );
-                        return;
-                    }
-                    let registers = crate::debugger::registers(&record, &names);
-                    if let Some(ui) = weak_ui_for_values.upgrade() {
-                        ui.show_registers_for_refresh(generation, &registers);
-                    }
-                    stack_inputs_for_values.borrow_mut().registers = Some(registers.clone());
-                    start_stack_refresh_if_ready(&stack_inputs_for_values, client);
-                    enrich_registers(weak_ui_for_values, client, generation, registers);
-                })
-                .is_err()
-            {
-                finish_empty_register_refresh(
-                    &weak_ui,
-                    client,
-                    generation,
-                    &stack_inputs_for_names,
-                );
-            }
         })
         .is_err()
     {
         finish_empty_register_refresh(ui, client, generation, &stack_inputs);
+    }
+}
+
+fn request_register_values(
+    ui: Weak<Ui>,
+    client: &MiClient,
+    generation: u64,
+    stack_inputs: Rc<RefCell<StackInputs>>,
+    names: Rc<Vec<String>>,
+) {
+    if !stop_refresh_is_current(&ui, generation) {
+        return;
+    }
+    let numbers = crate::debugger::compact_register_numbers(&names);
+    if numbers.is_empty() {
+        finish_empty_register_refresh(&ui, client, generation, &stack_inputs);
+        return;
+    }
+    let command = format!(
+        "-data-list-register-values x {}",
+        numbers
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let ui_for_response = ui.clone();
+    let stack_inputs_for_response = Rc::clone(&stack_inputs);
+    if client
+        .request(&command, move |client, record| {
+            if !stop_refresh_is_current(&ui_for_response, generation) {
+                return;
+            }
+            if !record.is_done() {
+                finish_empty_register_refresh(
+                    &ui_for_response,
+                    client,
+                    generation,
+                    &stack_inputs_for_response,
+                );
+                return;
+            }
+            let registers = crate::debugger::registers(&record, &names);
+            if let Some(ui) = ui_for_response.upgrade() {
+                ui.show_registers_for_refresh(generation, &registers);
+            }
+            stack_inputs_for_response.borrow_mut().registers = Some(registers.clone());
+            start_stack_refresh_if_ready(&stack_inputs_for_response, client);
+            enrich_registers(ui_for_response, client, generation, registers);
+        })
+        .is_err()
+    {
+        finish_empty_register_refresh(&ui, client, generation, &stack_inputs);
     }
 }
 
@@ -506,9 +521,29 @@ pub(super) fn enrich_registers(
         ui,
         generation,
         registers,
-        remaining: indices.len(),
+        pending: indices.into(),
+        active: 0,
     }));
-    for index in indices {
+    schedule_register_chains(client, refresh);
+}
+
+fn schedule_register_chains(client: &MiClient, refresh: Rc<RefCell<RegisterRefresh>>) {
+    loop {
+        let next = {
+            let mut state = refresh.borrow_mut();
+            if state.active >= POINTER_ENRICHMENT_CONCURRENCY {
+                None
+            } else {
+                let next = state.pending.pop_front();
+                if next.is_some() {
+                    state.active += 1;
+                }
+                next
+            }
+        };
+        let Some(index) = next else {
+            return;
+        };
         request_register_chain(client, Rc::clone(&refresh), index, 0);
     }
 }
@@ -583,12 +618,12 @@ pub(super) fn request_register_chain(
                     depth + 1,
                 );
             } else {
-                complete_register_sequence(&refresh_for_handler);
+                complete_register_sequence(client, &refresh_for_handler);
             }
         })
         .is_err()
     {
-        complete_register_sequence(&refresh);
+        complete_register_sequence(client, &refresh);
     }
 }
 
@@ -640,7 +675,7 @@ pub(super) fn request_register_string(
                 let state = refresh_for_guard.borrow();
                 stop_refresh_is_current(&state.ui, state.generation)
             },
-            move |_, record| {
+            move |client, record| {
                 let (ui, generation) = {
                     let state = refresh_for_handler.borrow();
                     (state.ui.clone(), state.generation)
@@ -659,20 +694,23 @@ pub(super) fn request_register_string(
                     chain.pop();
                     chain.push(value);
                 }
-                complete_register_sequence(&refresh_for_handler);
+                complete_register_sequence(client, &refresh_for_handler);
             },
         )
         .is_err()
     {
-        complete_register_sequence(&refresh);
+        complete_register_sequence(client, &refresh);
     }
 }
 
-pub(super) fn complete_register_sequence(refresh: &Rc<RefCell<RegisterRefresh>>) {
+pub(super) fn complete_register_sequence(
+    client: &MiClient,
+    refresh: &Rc<RefCell<RegisterRefresh>>,
+) {
     let completed = {
         let mut state = refresh.borrow_mut();
-        state.remaining = state.remaining.saturating_sub(1);
-        if state.remaining == 0 {
+        state.active = state.active.saturating_sub(1);
+        if state.active == 0 && state.pending.is_empty() {
             let ui = state.ui.clone();
             let generation = state.generation;
             Some((ui, generation, std::mem::take(&mut state.registers)))
@@ -684,6 +722,8 @@ pub(super) fn complete_register_sequence(refresh: &Rc<RefCell<RegisterRefresh>>)
         && let Some(ui) = ui.upgrade()
     {
         ui.show_registers_for_refresh(generation, &registers);
+    } else {
+        schedule_register_chains(client, Rc::clone(refresh));
     }
 }
 
@@ -724,12 +764,16 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
             if !stop_refresh_is_current(&ui, generation) {
                 return;
             }
-            let regions = crate::debugger::inferior_pid(&record)
-                .map(read_memory_regions)
-                .unwrap_or_default();
+            let pid = crate::debugger::inferior_pid(&record);
+            let mut regions = pid.map(read_memory_regions).unwrap_or_default();
+            annotate_memory_regions(&mut regions, &registers);
             if let Some(current_ui) = ui.upgrade() {
+                if pid.is_some() {
+                    current_ui.set_inferior_started(true);
+                }
                 current_ui.show_memory_regions_for_refresh(generation, &regions);
                 current_ui.refresh_memory_watches();
+                current_ui.refresh_kernel_after_stop();
             }
             request_stack_memory(ui, client, generation, registers, frames, regions);
         })
@@ -813,9 +857,30 @@ pub(super) fn enrich_stack(
         ui,
         generation,
         entries,
-        remaining: indices.len(),
+        stack_register,
+        pending: indices.into(),
+        active: 0,
     }));
-    for index in indices {
+    schedule_stack_chains(client, refresh);
+}
+
+fn schedule_stack_chains(client: &MiClient, refresh: Rc<RefCell<StackRefresh>>) {
+    loop {
+        let next = {
+            let mut state = refresh.borrow_mut();
+            if state.active >= POINTER_ENRICHMENT_CONCURRENCY {
+                None
+            } else {
+                let next = state.pending.pop_front();
+                if next.is_some() {
+                    state.active += 1;
+                }
+                next.map(|index| (index, state.stack_register))
+            }
+        };
+        let Some((index, stack_register)) = next else {
+            return;
+        };
         request_stack_chain(client, Rc::clone(&refresh), index, stack_register, 0);
     }
 }
@@ -891,12 +956,12 @@ pub(super) fn request_stack_chain(
                     depth + 1,
                 );
             } else {
-                complete_stack_sequence(&refresh_for_handler);
+                complete_stack_sequence(client, &refresh_for_handler);
             }
         })
         .is_err()
     {
-        complete_stack_sequence(&refresh);
+        complete_stack_sequence(client, &refresh);
     }
 }
 
@@ -947,7 +1012,7 @@ pub(super) fn request_stack_string(
                 let state = refresh_for_guard.borrow();
                 stop_refresh_is_current(&state.ui, state.generation)
             },
-            move |_, record| {
+            move |client, record| {
                 let (ui, generation) = {
                     let state = refresh_for_handler.borrow();
                     (state.ui.clone(), state.generation)
@@ -967,20 +1032,20 @@ pub(super) fn request_stack_string(
                     entry.pointer_chain.push(value);
                     entry.memory_kind = MemoryKind::String;
                 }
-                complete_stack_sequence(&refresh_for_handler);
+                complete_stack_sequence(client, &refresh_for_handler);
             },
         )
         .is_err()
     {
-        complete_stack_sequence(&refresh);
+        complete_stack_sequence(client, &refresh);
     }
 }
 
-pub(super) fn complete_stack_sequence(refresh: &Rc<RefCell<StackRefresh>>) {
+pub(super) fn complete_stack_sequence(client: &MiClient, refresh: &Rc<RefCell<StackRefresh>>) {
     let completed = {
         let mut state = refresh.borrow_mut();
-        state.remaining = state.remaining.saturating_sub(1);
-        if state.remaining == 0 {
+        state.active = state.active.saturating_sub(1);
+        if state.active == 0 && state.pending.is_empty() {
             for entry in &mut state.entries {
                 if entry
                     .pointer_chain
@@ -1003,6 +1068,8 @@ pub(super) fn complete_stack_sequence(refresh: &Rc<RefCell<StackRefresh>>) {
         && let Some(ui) = ui.upgrade()
     {
         ui.show_stack_for_refresh(generation, &entries);
+    } else {
+        schedule_stack_chains(client, Rc::clone(refresh));
     }
 }
 

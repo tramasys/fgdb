@@ -1,71 +1,16 @@
 use super::*;
 
 pub(super) fn insert_source_breakpoint(ui: Weak<Ui>, client: &MiClient, path: PathBuf, line: u32) {
-    if !client.is_ready() {
-        if let Some(ui) = ui.upgrade() {
-            ui.set_status(
-                "Breakpoint unavailable",
-                "Wait for the GDB/MI channel to become ready.",
-                Some("status-error"),
-            );
-        }
-        return;
-    }
-    let location = format!("{}:{line}", path.display());
-    if let Some(ui) = ui.upgrade() {
-        ui.set_command_pending(true);
-        ui.set_status(
-            "Checking source line",
-            &format!("Looking for executable code at {location}"),
-            None,
-        );
-    }
-    let command = format!(
-        "-symbol-list-lines {}",
-        crate::debugger::quote(&path.to_string_lossy())
+    resolve_executable_source_line(
+        ui,
+        client,
+        path,
+        line,
+        SourceLineOperation::Breakpoint,
+        |ui, client, source| {
+            request_exact_source_breakpoint(ui, client, source.path, source.line);
+        },
     );
-    let ui_for_response = ui.clone();
-    let path_for_response = path.clone();
-    if let Err(error) = client.request(&command, move |client, record| {
-        if !record.is_done() {
-            if let Some(ui) = ui_for_response.upgrade() {
-                ui.set_command_pending(false);
-                ui.set_status(
-                    "Breakpoint unavailable",
-                    record
-                        .error_message()
-                        .unwrap_or("GDB could not inspect executable lines for this source file"),
-                    Some("status-error"),
-                );
-            }
-            return;
-        }
-        if !crate::debugger::executable_source_lines(&record).contains(&line) {
-            if let Some(ui) = ui_for_response.upgrade() {
-                ui.set_command_pending(false);
-                ui.set_status(
-                    "No breakpoint added",
-                    &format!("{location} contains no executable code"),
-                    None,
-                );
-            }
-            return;
-        }
-        request_exact_source_breakpoint(
-            ui_for_response.clone(),
-            client,
-            path_for_response.clone(),
-            line,
-        );
-    }) && let Some(ui) = ui.upgrade()
-    {
-        ui.set_command_pending(false);
-        ui.set_status(
-            "Breakpoint unavailable",
-            &error.to_string(),
-            Some("status-error"),
-        );
-    }
 }
 
 pub(super) fn request_exact_source_breakpoint(
@@ -231,16 +176,62 @@ pub(super) fn refresh_breakpoints(ui: &Weak<Ui>, client: &MiClient) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
-    let generation = current_ui.start_breakpoint_refresh();
+    let Some(generation) = current_ui.begin_breakpoint_refresh() else {
+        return;
+    };
     drop(current_ui);
     let weak_ui = ui.clone();
-    let _ = client.request("-break-list", move |_, record| {
-        if record.is_done()
-            && let Some(ui) = weak_ui.upgrade()
-        {
-            ui.show_breakpoints_for_refresh(generation, crate::debugger::breakpoints(&record));
-        }
-    });
+    let weak_ui_for_error = ui.clone();
+    if client
+        .request("-break-list", move |client, record| {
+            let Some(ui) = weak_ui.upgrade() else {
+                return;
+            };
+            if record.is_done() {
+                ui.show_breakpoints_for_refresh(generation, crate::debugger::breakpoints(&record));
+            }
+            let refresh_again = ui.finish_breakpoint_refresh();
+            drop(ui);
+            if refresh_again {
+                refresh_breakpoints(&weak_ui, client);
+            }
+        })
+        .is_err()
+        && let Some(ui) = weak_ui_for_error.upgrade()
+    {
+        ui.finish_breakpoint_refresh();
+    }
+}
+
+pub(super) fn refresh_modules(ui: &Weak<Ui>, client: &MiClient) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+    if !current_ui.begin_module_refresh() {
+        return;
+    }
+    drop(current_ui);
+    let weak_ui = ui.clone();
+    let weak_ui_for_error = ui.clone();
+    if client
+        .request("-file-list-shared-libraries", move |client, record| {
+            let Some(ui) = weak_ui.upgrade() else {
+                return;
+            };
+            if record.is_done() {
+                ui.show_modules(&crate::debugger::shared_libraries(&record));
+            }
+            let refresh_again = ui.finish_module_refresh();
+            drop(ui);
+            if refresh_again {
+                refresh_modules(&weak_ui, client);
+            }
+        })
+        .is_err()
+        && let Some(ui) = weak_ui_for_error.upgrade()
+    {
+        ui.finish_module_refresh();
+    }
 }
 
 pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
@@ -294,22 +285,6 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
                 }
             },
         );
-    });
-}
-
-pub(super) fn refresh_modules(ui: &Weak<Ui>, client: &MiClient, generation: u64) {
-    let weak_ui = ui.clone();
-    let _ = client.request("-file-list-shared-libraries", move |_, record| {
-        if stop_refresh_is_current(&weak_ui, generation)
-            && let Some(ui) = weak_ui.upgrade()
-        {
-            let modules = if record.is_done() {
-                crate::debugger::shared_libraries(&record)
-            } else {
-                Vec::new()
-            };
-            ui.show_modules(&modules);
-        }
     });
 }
 

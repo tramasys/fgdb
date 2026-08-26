@@ -58,6 +58,8 @@ impl Ui {
     }
 
     pub fn show_locals(&self, variables: &[Variable]) {
+        let selected_name = variable_at(&self.locals_selection, self.locals_selection.selected())
+            .map(|variable| variable.name);
         replace_boxed_store(
             &self.locals_store,
             variables.iter().cloned().map(VariableNode::new),
@@ -69,7 +71,12 @@ impl Ui {
             self.locals_edit_button.set_sensitive(false);
         } else {
             self.locals_empty.set_visible(false);
-            self.locals_selection.set_selected(0);
+            let selected = selected_name
+                .as_deref()
+                .and_then(|name| variables.iter().position(|variable| variable.name == name))
+                .and_then(|position| u32::try_from(position).ok())
+                .unwrap_or(0);
+            self.locals_selection.set_selected(selected);
             self.locals_edit_button.set_sensitive(true);
         }
     }
@@ -90,7 +97,7 @@ impl Ui {
         let Some(parent_name) = parent.varobj.as_deref() else {
             return false;
         };
-        let Some(node) = find_variable_node(&self.locals_store, parent_name) else {
+        let Some(node) = self.find_variable_node(parent_name) else {
             return false;
         };
         if from != 0 {
@@ -119,7 +126,7 @@ impl Ui {
     }
 
     pub fn show_variable_children(&self, parent: &str, variables: &[Variable]) -> bool {
-        let Some(node) = find_variable_node(&self.locals_store, parent) else {
+        let Some(node) = self.find_variable_node(parent) else {
             return false;
         };
         let parent = node.variable.clone();
@@ -127,11 +134,11 @@ impl Ui {
     }
 
     pub fn has_variable_object(&self, varobj: &str) -> bool {
-        find_variable_node(&self.locals_store, varobj).is_some()
+        self.find_variable_node(varobj).is_some()
     }
 
     pub fn show_variable_children_error(&self, parent: &str, error: &str) {
-        let Some(node) = find_variable_node(&self.locals_store, parent) else {
+        let Some(node) = self.find_variable_node(parent) else {
             return;
         };
         node.children.splice(
@@ -146,17 +153,27 @@ impl Ui {
         node.children_loaded.set(true);
     }
 
-    pub fn variable_object_names(&self) -> Vec<String> {
+    pub fn local_variable_object_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         collect_variable_object_roots(&self.locals_store, None, &mut names);
         names
+    }
+
+    fn find_variable_node(&self, varobj: &str) -> Option<VariableNode> {
+        find_variable_node(&self.locals_store, varobj)
+            .or_else(|| find_variable_node(&self.expression_watches_store, varobj))
     }
 
     pub(super) fn connect_local_activation(&self) {
         let window = self.window.clone();
         let selection = self.locals_selection.clone();
         let handler = Rc::clone(&self.variable_assignment_handler);
+        let float_handler = Rc::clone(&self.float_assignment_handler);
+        let editor_handler = Rc::clone(&self.variable_editor_handler);
+        let string_handler = Rc::clone(&self.string_assignment_handler);
         let children_handler = Rc::clone(&self.variable_children_handler);
+        let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
+        let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
         self.locals_view.connect_activate(move |_, position| {
             let Some((row, node)) = variable_node_at(&selection, position) else {
                 return;
@@ -167,7 +184,23 @@ impl Ui {
                 if row.is_expandable() {
                     row.set_expanded(!row.is_expanded());
                 } else {
-                    open_variable_editor(&window, node.variable, Rc::clone(&handler));
+                    let variable = node.variable;
+                    if let Some(editor_handler) = editor_handler.borrow().as_ref() {
+                        editor_handler(variable);
+                    } else {
+                        open_variable_editor(
+                            &window,
+                            variable,
+                            target_pointer_bits.get(),
+                            current_source_is_rust.get(),
+                            None,
+                            ValueEditorHandlers {
+                                assignment: Rc::clone(&handler),
+                                float: Rc::clone(&float_handler),
+                                string: Rc::clone(&string_handler),
+                            },
+                        );
+                    }
                 }
             }
         });
@@ -175,9 +208,29 @@ impl Ui {
         let window = self.window.clone();
         let selection = self.locals_selection.clone();
         let handler = Rc::clone(&self.variable_assignment_handler);
+        let float_handler = Rc::clone(&self.float_assignment_handler);
+        let editor_handler = Rc::clone(&self.variable_editor_handler);
+        let string_handler = Rc::clone(&self.string_assignment_handler);
+        let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
+        let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
         self.locals_edit_button.connect_clicked(move |_| {
             if let Some(variable) = variable_at(&selection, selection.selected()) {
-                open_variable_editor(&window, variable, Rc::clone(&handler));
+                if let Some(editor_handler) = editor_handler.borrow().as_ref() {
+                    editor_handler(variable);
+                } else {
+                    open_variable_editor(
+                        &window,
+                        variable,
+                        target_pointer_bits.get(),
+                        current_source_is_rust.get(),
+                        None,
+                        ValueEditorHandlers {
+                            assignment: Rc::clone(&handler),
+                            float: Rc::clone(&float_handler),
+                            string: Rc::clone(&string_handler),
+                        },
+                    );
+                }
             }
         });
 
@@ -203,7 +256,11 @@ impl Ui {
             let parent = self.window.clone();
             let store = group.store.clone();
             let handler = Rc::clone(&self.variable_assignment_handler);
+            let float_handler = Rc::clone(&self.float_assignment_handler);
+            let string_handler = Rc::clone(&self.string_assignment_handler);
             let vector_handler = Rc::clone(&self.vector_assignment_handler);
+            let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
+            let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
             group.view.connect_activate(move |_, position| {
                 let Some(item) = store
                     .item(position)
@@ -227,7 +284,14 @@ impl Ui {
                             num_children: 0,
                             has_more: false,
                         },
-                        Rc::clone(&handler),
+                        target_pointer_bits.get(),
+                        current_source_is_rust.get(),
+                        None,
+                        ValueEditorHandlers {
+                            assignment: Rc::clone(&handler),
+                            float: Rc::clone(&float_handler),
+                            string: Rc::clone(&string_handler),
+                        },
                     );
                 }
             });
@@ -291,6 +355,10 @@ impl Ui {
     }
 
     pub fn show_modules(&self, modules: &[SharedLibrary]) {
+        if self.latest_modules.borrow().as_slice() == modules {
+            return;
+        }
+        self.latest_modules.replace(modules.to_vec());
         clear_box(&self.modules_list);
         if modules.is_empty() {
             self.modules_list
@@ -588,6 +656,20 @@ impl Ui {
         self.stop_refresh_generation.get() == generation
     }
 
+    pub fn current_stop_refresh_generation(&self) -> u64 {
+        self.stop_refresh_generation.get()
+    }
+
+    pub fn cached_register_names(&self) -> Option<Rc<Vec<String>>> {
+        self.cached_register_names.borrow().clone()
+    }
+
+    pub fn cache_register_names(&self, names: Rc<Vec<String>>) {
+        if !names.is_empty() {
+            self.cached_register_names.replace(Some(names));
+        }
+    }
+
     pub fn show_registers_for_refresh(&self, generation: u64, registers: &[Register]) {
         if self.is_stop_refresh_current(generation) {
             self.show_registers(registers);
@@ -801,6 +883,9 @@ impl Ui {
     }
 
     pub fn show_breakpoints(&self, breakpoints: Vec<Breakpoint>) {
+        if self.breakpoints.borrow().as_slice() == breakpoints {
+            return;
+        }
         self.breakpoints.replace(breakpoints);
         clear_box(&self.breakpoints_list);
         let breakpoints = self.breakpoints.borrow();
@@ -903,6 +988,27 @@ impl Ui {
                 location.set_tooltip_text(Some(&location_text));
                 row.append(&heading_row);
                 row.append(&location);
+                let mut metadata = Vec::new();
+                if breakpoint.hit_count > 0 {
+                    metadata.push(format!(
+                        "{} HIT{}",
+                        breakpoint.hit_count,
+                        if breakpoint.hit_count == 1 { "" } else { "S" }
+                    ));
+                }
+                if let Some(thread) = breakpoint.thread.as_deref() {
+                    metadata.push(format!("THREAD {thread}"));
+                }
+                if breakpoint.disposition.as_deref() == Some("del") {
+                    metadata.push(String::from("TEMPORARY"));
+                }
+                if !metadata.is_empty() {
+                    let metadata = gtk::Label::new(Some(&metadata.join("  ·  ")));
+                    metadata.add_css_class("breakpoint-metadata");
+                    metadata.set_halign(gtk::Align::Start);
+                    metadata.set_selectable(true);
+                    row.append(&metadata);
+                }
                 if let Some(condition) = breakpoint.condition.as_deref() {
                     let condition = gtk::Label::new(Some(&format!("WHEN  {condition}")));
                     condition.add_css_class("breakpoint-condition");
@@ -983,6 +1089,32 @@ impl Ui {
         generation
     }
 
+    pub fn begin_breakpoint_refresh(&self) -> Option<u64> {
+        self.breakpoint_refresh_gate
+            .begin()
+            .then(|| self.start_breakpoint_refresh())
+    }
+
+    pub fn finish_breakpoint_refresh(&self) -> bool {
+        self.breakpoint_refresh_gate.finish()
+    }
+
+    pub fn begin_module_refresh(&self) -> bool {
+        self.module_refresh_gate.begin()
+    }
+
+    pub fn finish_module_refresh(&self) -> bool {
+        self.module_refresh_gate.finish()
+    }
+
+    pub fn mark_modules_dirty(&self) {
+        self.modules_dirty.set(true);
+    }
+
+    pub fn take_modules_dirty(&self) -> bool {
+        self.modules_dirty.replace(false)
+    }
+
     pub fn show_breakpoints_for_refresh(&self, generation: u64, breakpoints: Vec<Breakpoint>) {
         if self.breakpoint_refresh_generation.get() == generation {
             self.show_breakpoints(breakpoints);
@@ -994,6 +1126,7 @@ impl Ui {
         let changed = set_breakpoint_enabled(&mut breakpoints, number, enabled);
         if changed {
             self.start_breakpoint_refresh();
+            self.breakpoint_refresh_gate.invalidate();
             self.show_breakpoints(breakpoints);
         }
         changed

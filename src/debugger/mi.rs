@@ -26,6 +26,7 @@ pub enum MiEvent {
     },
     BreakpointsChanged,
     ThreadsChanged,
+    LibrariesChanged,
     SelectionChanged,
     Error(String),
     Disconnected,
@@ -400,6 +401,9 @@ impl MiClient {
             }
             '=' if matches!(record.class.as_str(), "thread-created" | "thread-exited") => {
                 (self.event_handler)(self, MiEvent::ThreadsChanged);
+            }
+            '=' if matches!(record.class.as_str(), "library-loaded" | "library-unloaded") => {
+                (self.event_handler)(self, MiEvent::LibrariesChanged);
             }
             '=' if matches!(
                 record.class.as_str(),

@@ -305,6 +305,17 @@ button.breakpoint-badge-disabled:checked {{
     padding: 1px 3px;
 }}
 
+.breakpoint-metadata {{
+    color: @app_accent;
+    font-size: 10px;
+    padding: 1px 3px;
+}}
+
+.value-editor-validation {{
+    color: @app_error;
+    font-weight: 700;
+}}
+
 .watchpoint-row {{ background: alpha(@app_accent, 0.06); }}
 
 button.stack-frame {{
@@ -701,17 +712,33 @@ window.vector-editor dropdown > button {{
 }}
 
 .gutter-breakpoint-menu {{
-    min-width: 150px;
-    padding: 4px;
+    min-width: 172px;
+    padding: 5px;
     background: @app_surface;
     border: 1px solid @app_border;
 }}
 
-.gutter-breakpoint-menu > label {{ padding: 2px 5px 4px; }}
+.gutter-breakpoint-menu > label {{ padding: 2px 7px 5px; }}
 
 .gutter-breakpoint-menu > button {{
-    min-height: 24px;
-    padding: 1px 6px;
+    min-height: 25px;
+    padding: 1px 8px;
+    color: @app_fg;
+    background: transparent;
+    border-left: 2px solid transparent;
+}}
+
+.gutter-breakpoint-menu > button:hover,
+.gutter-breakpoint-menu > button:focus-visible {{
+    color: @app_accent_hover;
+    background: @app_raised;
+    border-left-color: @app_accent;
+}}
+
+.gutter-breakpoint-menu > separator {{
+    min-height: 1px;
+    margin: 3px 0;
+    background: @app_border;
 }}
 
 .until-menu > button {{
@@ -852,6 +879,67 @@ window.value-editor entry {{
 
 window.value-editor entry:focus {{ border-color: @app_accent; }}
 
+window.value-editor dropdown.value-editor-select > button {{
+    min-height: 28px;
+    padding: 1px 6px;
+    color: @app_fg;
+    background: @app_bg;
+    background-image: none;
+    border: 1px solid @app_border;
+    box-shadow: none;
+}}
+
+window.value-editor dropdown.value-editor-select > button:hover,
+window.value-editor dropdown.value-editor-select > button:focus,
+window.value-editor dropdown.value-editor-select > button:focus-visible,
+window.value-editor dropdown.value-editor-select > button:checked {{
+    color: @app_fg;
+    background: @app_raised;
+    background-image: none;
+    border: 1px solid @app_accent;
+    box-shadow: none;
+}}
+
+window.value-editor dropdown.value-editor-select > button > box {{
+    border-spacing: 6px;
+}}
+
+window.value-editor dropdown.value-editor-select > button arrow {{
+    min-width: 12px;
+    min-height: 12px;
+    margin: 0;
+    padding: 0;
+    color: @app_muted;
+    -gtk-icon-size: 12px;
+}}
+
+window.value-editor dropdown.value-editor-select popover > contents {{
+    padding: 2px;
+    color: @app_fg;
+    background: @app_surface;
+    border: 1px solid @app_border;
+    box-shadow: none;
+}}
+
+window.value-editor dropdown.value-editor-select popover listview {{
+    color: @app_fg;
+    background: @app_surface;
+}}
+
+window.value-editor dropdown.value-editor-select popover listview > row {{
+    min-height: 24px;
+    padding: 1px 6px;
+}}
+
+window.value-editor dropdown.value-editor-select popover listview > row:hover {{
+    background: @app_raised;
+}}
+
+window.value-editor dropdown.value-editor-select popover listview > row:selected {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.18);
+}}
+
 .status-readout {{
     min-height: 23px;
     padding: 0 7px;
@@ -941,18 +1029,21 @@ notebook > header > tabs > tab:hover {{
 /* Keep debugger category tabs distinct without making the data rows roomy. */
 notebook.panel > header > tabs,
 notebook.sidebar-tabs > header > tabs,
+notebook.kernel-tabs > header > tabs,
 notebook.gef-tools-tabs > header > tabs {{
     padding: 1px 2px;
 }}
 
 notebook.panel > header > tabs > tab,
 notebook.sidebar-tabs > header > tabs > tab,
+notebook.kernel-tabs > header > tabs > tab,
 notebook.gef-tools-tabs > header > tabs > tab {{
-    margin: 1px;
+    margin: 1px 0;
 }}
 
 notebook.panel > header > tabs > tab,
-notebook.sidebar-tabs > header > tabs > tab {{
+notebook.sidebar-tabs > header > tabs > tab,
+notebook.kernel-tabs > header > tabs > tab {{
     padding-left: 8px;
     padding-right: 8px;
 }}
@@ -960,6 +1051,272 @@ notebook.sidebar-tabs > header > tabs > tab {{
 notebook.gef-tools-tabs > header > tabs > tab {{
     padding-left: 6px;
     padding-right: 6px;
+}}
+
+notebook.panel > header > tabs > tab > label,
+notebook.sidebar-tabs > header > tabs > tab > label,
+notebook.kernel-tabs > header > tabs > tab > label,
+notebook.gef-tools-tabs > header > tabs > tab > label {{
+    margin: 0;
+    padding: 0;
+}}
+
+.kernel-page,
+stackswitcher.kernel-tabs {{ background: @app_surface; }}
+
+.kernel-tab-navigation {{
+    min-height: 26px;
+    background: @app_surface;
+}}
+
+button.kernel-tab-nav-button {{
+    min-width: 24px;
+    min-height: 24px;
+    margin: 1px 0;
+    padding: 0;
+    color: @app_muted;
+    background: transparent;
+    border: 0;
+}}
+
+button.kernel-tab-nav-button:hover {{
+    color: @app_fg;
+    background: @app_raised;
+}}
+
+button.kernel-tab-nav-button:disabled {{
+    color: alpha(@app_muted, 0.25);
+    background: transparent;
+}}
+
+stackswitcher.kernel-tabs {{
+    padding: 1px 2px;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+    background-image: none;
+}}
+
+scrolledwindow.kernel-tabs-scroll,
+scrolledwindow.kernel-tabs-scroll > viewport {{
+    min-height: 26px;
+    background: @app_surface;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+}}
+
+stackswitcher.kernel-tabs button {{
+    min-height: 22px;
+    margin: 1px 0;
+    padding: 1px 6px;
+    color: @app_muted;
+    background: transparent;
+    background-image: none;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+}}
+
+stackswitcher.kernel-tabs button > label {{
+    margin: 0;
+    padding: 0;
+}}
+
+stackswitcher.kernel-tabs button:hover {{
+    color: @app_fg;
+    background: @app_raised;
+}}
+
+stackswitcher.kernel-tabs button:checked {{
+    color: @app_fg;
+    background: alpha(@app_fg, 0.08);
+}}
+
+.kernel-status {{
+    font-size: 10px;
+    padding: 0 3px;
+}}
+
+.kernel-table-controls {{ padding: 2px 3px; }}
+.kernel-table-summary {{ padding: 3px 4px; }}
+
+.kernel-change-controls {{
+    min-height: 28px;
+    padding: 2px 6px;
+    background: @app_raised;
+    border-top: 1px solid @app_border;
+    border-bottom: 1px solid @app_border;
+}}
+
+.kernel-change-search {{
+    min-height: 22px;
+    color: @app_fg;
+    background: @app_bg;
+    border: 1px solid @app_border;
+    outline: 0;
+    box-shadow: none;
+}}
+
+.kernel-change-search:focus-within {{ border-color: @app_accent; }}
+
+entry.kernel-table-search > image:first-child {{
+    margin-right: 5px;
+}}
+
+.kernel-change-empty {{
+    padding: 8px 12px;
+    background: alpha(@app_surface, 0.88);
+}}
+
+.kernel-memory-summary {{
+    padding: 4px 5px 6px;
+    color: @app_fg;
+    background: alpha(@app_fg, 0.018);
+}}
+
+.kernel-memory-meta {{ padding: 1px 3px 4px; }}
+
+.kernel-memory-unit-grid {{
+    border-top: 1px solid @app_border;
+    border-left: 1px solid @app_border;
+}}
+
+.kernel-memory-unit-cell {{
+    min-height: 21px;
+    padding: 1px 5px;
+    color: @app_fg;
+    border-right: 1px solid @app_border;
+    border-bottom: 1px solid @app_border;
+}}
+
+.kernel-memory-unit-header {{
+    color: @app_muted;
+    font-size: 10px;
+    font-weight: 700;
+    background: @app_raised;
+}}
+
+.kernel-memory-unit-even {{ background: alpha(@app_fg, 0.018); }}
+.kernel-memory-unit-odd {{ background: alpha(@app_fg, 0.042); }}
+
+.kernel-memory-explanation {{
+    padding: 3px 7px 5px 7px;
+    border-bottom: 1px solid @app_border;
+}}
+
+.kernel-private-summary-grid {{ background: @app_border; }}
+
+.kernel-private-summary-cell {{
+    min-height: 0;
+    padding: 2px 7px 3px;
+    background: alpha(@app_success, 0.045);
+}}
+
+.kernel-private-summary-value {{
+    color: @app_success;
+    font-weight: 700;
+}}
+
+.kernel-memory-subtitle {{
+    min-height: 22px;
+    padding: 2px 7px;
+    background: @app_raised;
+    border-top: 1px solid @app_border;
+    border-bottom: 1px solid @app_border;
+}}
+
+.kernel-memory-category {{
+    color: @app_accent_hover;
+    font-weight: 700;
+}}
+
+.kernel-memory-exclusive {{ color: @app_success; }}
+
+.kernel-memory-table label.debug-table-cell {{ min-height: 23px; }}
+
+.kernel-change-table label.debug-table-cell {{ min-height: 23px; }}
+.kernel-change-growth {{ color: @app_accent_hover; }}
+.kernel-change-release {{ color: @app_success; }}
+.kernel-change-idle {{ color: @app_muted; }}
+.kernel-change-new {{ color: @app_success; font-weight: 700; }}
+.kernel-change-removed {{ color: @app_danger; font-weight: 700; }}
+.kernel-change-protection {{ color: @app_warning; font-weight: 700; }}
+.kernel-change-modified {{ color: @app_accent_hover; font-weight: 700; }}
+
+.kernel-fact-row {{
+    min-height: 23px;
+    padding: 1px 4px;
+}}
+
+.kernel-fact-row:nth-child(odd) {{ background: alpha(@app_fg, 0.035); }}
+
+listview.kernel-overview-list > row {{
+    color: @app_fg;
+    background: transparent;
+}}
+
+listview.kernel-overview-list > row:hover {{
+    color: @app_fg;
+    background: @app_raised;
+}}
+
+listview.kernel-overview-list > row:selected {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.16);
+}}
+
+listview.kernel-overview-list > row:hover .muted,
+listview.kernel-overview-list > row:selected .muted {{ color: @app_fg; }}
+
+.kernel-page label selection {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.38);
+}}
+
+.kernel-section-heading {{
+    min-height: 24px;
+    padding: 3px 5px;
+    border-top: 1px solid alpha(@app_fg, 0.07);
+    border-bottom: 1px solid alpha(@app_fg, 0.07);
+    background: alpha(@app_fg, 0.025);
+}}
+
+listview.kernel-overview-list > row:hover .kernel-section-heading {{
+    background: alpha(@app_accent, 0.12);
+}}
+
+.kernel-warnings {{
+    padding: 3px 5px;
+    background: alpha(@app_warning, 0.08);
+    border-bottom: 1px solid alpha(@app_warning, 0.24);
+}}
+
+.kernel-warning {{
+    color: @app_warning;
+    font-size: 10px;
+}}
+
+.kernel-state-active {{
+    color: @app_success;
+    font-weight: 700;
+}}
+
+.kernel-state-warning {{
+    color: @app_warning;
+    font-weight: 700;
+}}
+
+.kernel-process-target {{
+    color: @app_accent;
+    font-weight: 700;
+}}
+
+.kernel-numeric {{ color: @app_accent_hover; }}
+
+.kernel-signals-table label.debug-table-cell,
+.kernel-process-table label.debug-table-cell {{
+    min-height: 22px;
 }}
 
 notebook > header > tabs > arrow {{

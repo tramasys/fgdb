@@ -379,32 +379,57 @@ pub(super) fn build_disclosure(
     expanded: bool,
     class: &str,
 ) -> gtk::Box {
+    build_disclosure_with_content(title, child, expanded, class).0
+}
+
+pub(super) fn build_disclosure_with_content(
+    title: &str,
+    child: &impl IsA<gtk::Widget>,
+    expanded: bool,
+    class: &str,
+) -> (gtk::Box, gtk::Box) {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.add_css_class("disclosure");
     root.add_css_class(class);
     let heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let arrow = gtk::Label::new(Some(if expanded { "⌄" } else { "›" }));
     arrow.add_css_class("disclosure-arrow");
+    arrow.set_width_chars(1);
+    arrow.set_xalign(0.5);
     let title = gtk::Label::new(Some(title));
     title.add_css_class("section-title");
     title.set_halign(gtk::Align::Start);
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
     heading.append(&arrow);
     heading.append(&title);
     let button = gtk::Button::builder().child(&heading).build();
     button.add_css_class("disclosure-header");
     button.set_halign(gtk::Align::Fill);
+    button.set_focus_on_click(false);
+    button.set_tooltip_text(Some(if expanded {
+        "Collapse section"
+    } else {
+        "Expand section"
+    }));
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(child);
     content.set_visible(expanded);
     let content_for_click = content.clone();
+    let button_for_click = button.clone();
     button.connect_clicked(move |_| {
         let reveal = !content_for_click.is_visible();
         content_for_click.set_visible(reveal);
         arrow.set_text(if reveal { "⌄" } else { "›" });
+        button_for_click.set_tooltip_text(Some(if reveal {
+            "Collapse section"
+        } else {
+            "Expand section"
+        }));
     });
     root.append(&button);
     root.append(&content);
-    root
+    (root, content)
 }
 
 pub(super) fn stack_references(entry: &StackEntry) -> String {

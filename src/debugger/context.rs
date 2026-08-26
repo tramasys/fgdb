@@ -7,6 +7,24 @@ pub(crate) struct MemoryRegion {
     pub permissions: String,
     pub path: Option<String>,
     pub kind: MemoryKind,
+    pub referenced_by: Vec<String>,
+}
+
+pub(crate) fn annotate_memory_regions(regions: &mut [MemoryRegion], registers: &[Register]) {
+    for region in regions.iter_mut() {
+        region.referenced_by.clear();
+    }
+    for register in registers
+        .iter()
+        .filter(|register| is_pointer_register(&register.name))
+    {
+        let Some(address) = pointer_address(&register.value) else {
+            continue;
+        };
+        if let Some(region) = regions.iter_mut().find(|region| region.contains(address)) {
+            region.referenced_by.push(format!("${}", register.name));
+        }
+    }
 }
 
 impl MemoryRegion {
@@ -168,6 +186,7 @@ fn parse_memory_region(line: &str) -> Option<MemoryRegion> {
         permissions,
         path,
         kind,
+        referenced_by: Vec::new(),
     })
 }
 
@@ -181,7 +200,10 @@ fn region_description(region: &MemoryRegion) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{MemoryRegion, build_stack_entries, parse_memory_region, pointer_address};
+    use super::{
+        MemoryRegion, annotate_memory_regions, build_stack_entries, parse_memory_region,
+        pointer_address,
+    };
     use crate::debugger::{MemoryBlock, MemoryKind, Register, StackFrame};
 
     #[test]
@@ -222,6 +244,10 @@ mod tests {
                 pointer_chain: Vec::new(),
             },
         ];
+        let mut mapped_regions = vec![region.clone(), stack.clone()];
+        annotate_memory_regions(&mut mapped_regions, &registers);
+        assert_eq!(mapped_regions[0].referenced_by, ["$rsi"]);
+        assert!(mapped_regions[1].referenced_by.is_empty());
         let frames = vec![StackFrame {
             level: 1,
             address: String::from("0x401000"),

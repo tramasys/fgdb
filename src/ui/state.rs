@@ -21,6 +21,7 @@ impl Ui {
         let source_documents = Rc::new(RefCell::new(Vec::new()));
         let breakpoints = Rc::new(RefCell::new(Vec::new()));
         let variable_children_handler = Rc::new(RefCell::new(None));
+        let kernel_refresh_handler = Rc::new(RefCell::new(None));
         let target_pointer_bits = Rc::new(Cell::new(usize::BITS));
 
         let workspace = build_workspace(
@@ -30,19 +31,27 @@ impl Ui {
             &terminal,
             &variable_children_handler,
             &target_pointer_bits,
+            &kernel_refresh_handler,
         );
         root.append(&workspace.root);
         root.append(&workspace.status_detail);
         let terminal_panel = workspace.terminal_panel.clone();
+        let terminal_for_toggle = terminal.clone();
         topbar
             .terminal_toggle_button
-            .connect_toggled(move |button| terminal_panel.set_visible(button.is_active()));
+            .connect_toggled(move |button| {
+                terminal_panel.set_visible(button.is_active());
+                if button.is_active() {
+                    terminal_for_toggle.grab_focus();
+                }
+            });
         window.set_child(Some(&root));
         let layout = layout::Persistence::install(&window, workspace.layout_panes.clone());
 
         let ui = Self {
             window,
             terminal,
+            terminal_toggle_button: topbar.terminal_toggle_button,
             open_source_button: topbar.open_source_button,
             load_symbols_button: topbar.load_symbols_button,
             run_button: topbar.run_button,
@@ -54,6 +63,7 @@ impl Ui {
             finish_button: topbar.finish_button,
             until_button: topbar.until_button,
             until_popover: topbar.until_popover,
+            gef_until_section: topbar.gef_until_section,
             gef_tools_button: topbar.gef_tools_button,
             status_label: topbar.status_label,
             status_detail: workspace.status_detail,
@@ -68,12 +78,22 @@ impl Ui {
             selected_frame_level: Rc::new(Cell::new(0)),
             threads_list: workspace.threads_list,
             modules_list: workspace.modules_list,
+            latest_modules: Rc::new(RefCell::new(Vec::new())),
             locals_store: workspace.locals_store,
             locals_selection: workspace.locals_selection,
             locals_view: workspace.locals_view,
             locals_empty: workspace.locals_empty,
             locals_edit_button: workspace.locals_edit_button,
+            expression_watches_store: workspace.expression_watches_store,
+            expression_watches_selection: workspace.expression_watches_selection,
+            expression_watches_view: workspace.expression_watches_view,
+            expression_watches_empty: workspace.expression_watches_empty,
+            expression_watches: Rc::new(RefCell::new(Vec::new())),
+            expression_watch_entry: workspace.expression_watch_entry,
+            expression_watch_add_button: workspace.expression_watch_add_button,
+            expression_watch_remove_button: workspace.expression_watch_remove_button,
             target_pointer_bits,
+            current_source_is_rust: Rc::new(Cell::new(false)),
             instructions_title: workspace.instructions_title,
             instructions_store: workspace.instructions_store,
             instructions_selection: workspace.instructions_selection,
@@ -117,21 +137,34 @@ impl Ui {
             memory_format: workspace.memory_format,
             memory_add_button: workspace.memory_add_button,
             memory_watch_handler: Rc::new(RefCell::new(None)),
+            kernel_view: workspace.kernel_view,
+            kernel_refresh_handler,
+            kernel_refresh_generation: Rc::new(Cell::new(0)),
             layout,
             breakpoints,
             previous_registers: Rc::new(RefCell::new(HashMap::new())),
+            cached_register_names: Rc::new(RefCell::new(None)),
             stop_refresh_generation: Rc::new(Cell::new(0)),
             thread_refresh_generation: Rc::new(Cell::new(0)),
             breakpoint_refresh_generation: Rc::new(Cell::new(0)),
+            breakpoint_refresh_gate: Rc::new(RefreshGate::default()),
+            module_refresh_gate: Rc::new(RefreshGate::default()),
+            modules_dirty: Rc::new(Cell::new(false)),
             command_pending: Rc::new(Cell::new(false)),
+            gef_available: Rc::new(Cell::new(false)),
             source_roots: Rc::new(source::roots(config)),
             frame_selection_handler: Rc::new(RefCell::new(None)),
             thread_selection_handler: Rc::new(RefCell::new(None)),
             instruction_handler: Rc::new(RefCell::new(None)),
+            variable_editor_handler: Rc::new(RefCell::new(None)),
             variable_assignment_handler: Rc::new(RefCell::new(None)),
+            float_assignment_handler: Rc::new(RefCell::new(None)),
+            string_assignment_handler: Rc::new(RefCell::new(None)),
             variable_children_handler,
+            expression_watch_refresh_handler: Rc::new(RefCell::new(None)),
             vector_assignment_handler: Rc::new(RefCell::new(None)),
             breakpoint_insert_handler: Rc::new(RefCell::new(None)),
+            source_jump_handler: Rc::new(RefCell::new(None)),
             breakpoint_delete_handler: Rc::new(RefCell::new(None)),
             breakpoint_condition_handler: Rc::new(RefCell::new(None)),
             breakpoint_enabled_handler: Rc::new(RefCell::new(None)),
@@ -147,6 +180,7 @@ impl Ui {
         };
         ui.connect_instruction_activation();
         ui.connect_local_activation();
+        ui.connect_expression_watch_controls();
         ui.connect_register_activation();
         ui.connect_memory_controls();
         ui.connect_watchpoint_controls();
@@ -352,6 +386,7 @@ impl Ui {
         let next_instruction = self.next_instruction_button.clone();
         let step_instruction = self.step_instruction_button.clone();
         let finish = self.finish_button.clone();
+        let terminal_toggle = self.terminal_toggle_button.clone();
         keys.connect_key_pressed(move |_, key, _, state| {
             let control = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
@@ -359,6 +394,10 @@ impl Ui {
                 .intersects(gtk::gdk::ModifierType::ALT_MASK | gtk::gdk::ModifierType::SUPER_MASK);
             if blocked {
                 return gtk::glib::Propagation::Proceed;
+            }
+            if key == gtk::gdk::Key::grave && control && !shift {
+                terminal_toggle.set_active(!terminal_toggle.is_active());
+                return gtk::glib::Propagation::Stop;
             }
             let button = match (key, control, shift) {
                 (gtk::gdk::Key::F5, false, false) => Some(&run),
@@ -397,8 +436,29 @@ impl Ui {
         self.update_control_sensitivity();
     }
 
+    pub fn inferior_is_running(&self) -> bool {
+        self.inferior_running.get()
+    }
+
+    pub fn movement_commands_available(&self) -> bool {
+        self.debugger_ready.get()
+            && self.inferior_started.get()
+            && !self.inferior_running.get()
+            && !self.command_pending.get()
+    }
+
     pub fn set_command_pending(&self, pending: bool) {
         self.command_pending.set(pending);
+        self.update_control_sensitivity();
+    }
+
+    pub fn set_gef_available(&self, available: bool) {
+        self.gef_available.set(available);
+        self.gef_until_section.set_visible(available);
+        if !available {
+            self.gef_tools_button.set_active(false);
+        }
+        self.gef_tools_button.set_visible(available);
         self.update_control_sensitivity();
     }
 
@@ -436,11 +496,36 @@ impl Ui {
         self.finish_button.set_sensitive(can_move);
         self.until_button.set_sensitive(can_move);
         self.gef_tools_button
-            .set_sensitive(ready && !running && !pending);
+            .set_sensitive(self.gef_available.get() && ready && !running && !pending);
+        self.kernel_view
+            .refresh_button
+            .set_sensitive(can_move && !self.kernel_view.in_flight.get());
         self.locals_view.set_sensitive(can_move);
         self.locals_edit_button.set_sensitive(
             can_move
                 && variable_at(&self.locals_selection, self.locals_selection.selected()).is_some(),
+        );
+        self.expression_watches_view.set_sensitive(can_move);
+        let can_manage_watches = ready && !running && !pending;
+        let expression = self.expression_watch_entry.text();
+        self.expression_watch_entry
+            .set_sensitive(can_manage_watches);
+        self.expression_watch_add_button.set_sensitive(
+            can_manage_watches
+                && !expression.trim().is_empty()
+                && !self
+                    .expression_watches
+                    .borrow()
+                    .iter()
+                    .any(|existing| existing == expression.trim()),
+        );
+        self.expression_watch_remove_button.set_sensitive(
+            can_manage_watches
+                && root_variable_at(
+                    &self.expression_watches_selection,
+                    self.expression_watches_selection.selected(),
+                )
+                .is_some(),
         );
         for group in &self.register_groups {
             group.view.set_sensitive(can_move);
@@ -513,8 +598,30 @@ impl Ui {
             .replace(Some(Rc::new(handler)));
     }
 
+    pub fn set_variable_editor_handler(&self, handler: impl Fn(Variable) + 'static) {
+        self.variable_editor_handler.replace(Some(Rc::new(handler)));
+    }
+
+    pub fn set_string_assignment_handler(
+        &self,
+        handler: impl Fn(Variable, Vec<u8>, StringAssignmentKind) + 'static,
+    ) {
+        self.string_assignment_handler
+            .replace(Some(Rc::new(handler)));
+    }
+
+    pub fn set_float_assignment_handler(&self, handler: impl Fn(Variable, Vec<u8>) + 'static) {
+        self.float_assignment_handler
+            .replace(Some(Rc::new(handler)));
+    }
+
     pub fn set_variable_children_handler(&self, handler: impl Fn(Variable, usize) + 'static) {
         self.variable_children_handler
+            .replace(Some(Rc::new(handler)));
+    }
+
+    pub fn set_expression_watch_refresh_handler(&self, handler: impl Fn() + 'static) {
+        self.expression_watch_refresh_handler
             .replace(Some(Rc::new(handler)));
     }
 
@@ -529,6 +636,10 @@ impl Ui {
     pub fn set_breakpoint_insert_handler(&self, handler: impl Fn(PathBuf, u32) + 'static) {
         self.breakpoint_insert_handler
             .replace(Some(Rc::new(handler)));
+    }
+
+    pub fn set_source_jump_handler(&self, handler: impl Fn(PathBuf, u32) + 'static) {
+        self.source_jump_handler.replace(Some(Rc::new(handler)));
     }
 
     pub fn set_breakpoint_delete_handler(&self, handler: impl Fn(String) + 'static) {

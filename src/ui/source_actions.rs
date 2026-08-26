@@ -8,13 +8,13 @@ impl Ui {
             .get(reported_path)
             .cloned()
         {
-            return Some(path);
+            return path;
         }
-        let path = source::resolve(reported_path, &self.source_roots)?;
+        let path = source::resolve(reported_path, &self.source_roots);
         self.resolved_source_paths
             .borrow_mut()
             .insert(reported_path.to_owned(), path.clone());
-        Some(path)
+        path
     }
 
     pub fn show_source_locations(&self, symbol: &str, locations: &[SourceLocation]) {
@@ -44,6 +44,7 @@ impl Ui {
             style_scheme: self.source_style_scheme.as_ref(),
             breakpoints: &self.breakpoints,
             insert_handler: &self.breakpoint_insert_handler,
+            jump_handler: &self.source_jump_handler,
             delete_handler: &self.breakpoint_delete_handler,
             enabled_handler: &self.breakpoint_enabled_handler,
             symbol_handler: &self.source_symbol_handler,
@@ -83,6 +84,7 @@ impl Ui {
             style_scheme: self.source_style_scheme.as_ref(),
             breakpoints: &self.breakpoints,
             insert_handler: &self.breakpoint_insert_handler,
+            jump_handler: &self.source_jump_handler,
             delete_handler: &self.breakpoint_delete_handler,
             enabled_handler: &self.breakpoint_enabled_handler,
             symbol_handler: &self.source_symbol_handler,
@@ -104,6 +106,12 @@ impl Ui {
     pub fn show_execution_location(&self, frame: &StackFrame) {
         self.clear_execution_location();
         self.selected_frame_level.set(frame.level);
+        self.current_source_is_rust.set(
+            frame
+                .source_path()
+                .and_then(|path| Path::new(path).extension())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("rs")),
+        );
         if let Some(bits) = frame
             .architecture
             .as_deref()
@@ -130,6 +138,7 @@ impl Ui {
             style_scheme: self.source_style_scheme.as_ref(),
             breakpoints: &self.breakpoints,
             insert_handler: &self.breakpoint_insert_handler,
+            jump_handler: &self.source_jump_handler,
             delete_handler: &self.breakpoint_delete_handler,
             enabled_handler: &self.breakpoint_enabled_handler,
             symbol_handler: &self.source_symbol_handler,
@@ -180,6 +189,7 @@ impl Ui {
 
     pub fn clear_execution_location(&self) {
         self.selected_frame_level.set(u32::MAX);
+        self.current_source_is_rust.set(false);
         update_selected_frame_buttons(&self.frame_buttons.borrow(), u32::MAX);
         for document in self.source_documents.borrow().iter() {
             remove_marks(&document.buffer, EXECUTION_CATEGORY);
@@ -202,6 +212,7 @@ impl Ui {
         self.show_threads(&[]);
         self.show_modules(&[]);
         self.show_locals(&[]);
+        self.show_expression_watches_unavailable("<inferior exited>");
         self.show_registers(&[]);
         self.show_stack(&[]);
         self.previous_registers.borrow_mut().clear();
@@ -210,6 +221,7 @@ impl Ui {
         self.memory_region_store.remove_all();
         self.memory_regions.borrow_mut().clear();
         self.memory_regions_empty.set_visible(true);
+        self.clear_kernel_snapshot();
         for watch in self.memory_watches.borrow().iter() {
             watch.status.remove_css_class("memory-watch-error");
             watch.status.set_text("target is not paused");
@@ -227,6 +239,7 @@ impl Ui {
         let style_scheme = self.source_style_scheme.clone();
         let breakpoints = Rc::clone(&self.breakpoints);
         let insert_handler = Rc::clone(&self.breakpoint_insert_handler);
+        let jump_handler = Rc::clone(&self.source_jump_handler);
         let delete_handler = Rc::clone(&self.breakpoint_delete_handler);
         let enabled_handler = Rc::clone(&self.breakpoint_enabled_handler);
         let symbol_handler = Rc::clone(&self.source_symbol_handler);
@@ -265,6 +278,7 @@ impl Ui {
             let style_scheme = style_scheme.clone();
             let breakpoints = Rc::clone(&breakpoints);
             let insert_handler = Rc::clone(&insert_handler);
+            let jump_handler = Rc::clone(&jump_handler);
             let delete_handler = Rc::clone(&delete_handler);
             let enabled_handler = Rc::clone(&enabled_handler);
             let symbol_handler = Rc::clone(&symbol_handler);
@@ -294,6 +308,7 @@ impl Ui {
                             style_scheme: style_scheme.as_ref(),
                             breakpoints: &breakpoints,
                             insert_handler: &insert_handler,
+                            jump_handler: &jump_handler,
                             delete_handler: &delete_handler,
                             enabled_handler: &enabled_handler,
                             symbol_handler: &symbol_handler,

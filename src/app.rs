@@ -1,5 +1,6 @@
 use std::{
     cell::RefCell,
+    collections::VecDeque,
     path::PathBuf,
     rc::{Rc, Weak},
 };
@@ -11,8 +12,8 @@ use crate::{
     debugger::{
         MemoryKind, MiClient, MiEvent, Register, SessionEvent, StackEntry, StackFrame, Variable,
         context::{
-            MemoryRegion, build_stack_entries, is_pointer_register, looks_like_string_word,
-            pointer_address, read_memory_regions,
+            MemoryRegion, annotate_memory_regions, build_stack_entries, is_pointer_register,
+            looks_like_string_word, pointer_address, read_memory_regions,
         },
         launch_gdb,
     },
@@ -24,20 +25,24 @@ const MAX_POINTER_CHAIN_DEPTH: usize = 3;
 const AUTOMATIC_PRINT_ELEMENTS: usize = 128;
 const VARIABLE_CHILD_PAGE_SIZE: usize = 128;
 const STACK_WORD_COUNT: usize = 32;
-const POINTER_STRING_PREVIEW_ELEMENTS: usize = 4096;
+const POINTER_STRING_PREVIEW_ELEMENTS: usize = 256;
+const POINTER_ENRICHMENT_CONCURRENCY: usize = 4;
 
 struct RegisterRefresh {
     ui: Weak<Ui>,
     generation: u64,
     registers: Vec<Register>,
-    remaining: usize,
+    pending: VecDeque<usize>,
+    active: usize,
 }
 
 struct StackRefresh {
     ui: Weak<Ui>,
     generation: u64,
     entries: Vec<StackEntry>,
-    remaining: usize,
+    stack_register: &'static str,
+    pending: VecDeque<usize>,
+    active: usize,
 }
 
 struct StackInputs {
@@ -54,21 +59,31 @@ struct VariableRefresh {
     next_index: usize,
 }
 
+mod assignments;
 mod breakpoints;
 mod build;
+mod kernel;
 mod lifecycle;
 mod refresh;
+mod source_control;
 mod symbols;
+mod type_metadata;
+mod watches;
 
 pub use build::build;
 
 #[cfg(test)]
 use build::assignment_expression;
 
+use assignments::*;
 use breakpoints::*;
+use kernel::*;
 use lifecycle::*;
 use refresh::*;
+use source_control::*;
 use symbols::*;
+use type_metadata::*;
+use watches::*;
 
 #[cfg(test)]
 mod tests {

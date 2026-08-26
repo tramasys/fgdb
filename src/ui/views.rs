@@ -71,6 +71,7 @@ pub(super) fn build_memory_region_view() -> (gtk::ColumnView, gio::ListStore) {
         ("END", 175, false, MemoryColumn::End),
         ("SIZE", 90, false, MemoryColumn::Size),
         ("PERM", 65, false, MemoryColumn::Permissions),
+        ("REGS", 110, false, MemoryColumn::Registers),
         ("PATH", 280, true, MemoryColumn::Path),
     ] {
         view.append_column(&memory_region_column(title, width, expand, column));
@@ -114,6 +115,7 @@ pub(super) fn memory_region_column(
             MemoryColumn::End => format!("0x{:016x}", region.end),
             MemoryColumn::Size => format_memory_size(region.end.saturating_sub(region.start)),
             MemoryColumn::Permissions => region.permissions.clone(),
+            MemoryColumn::Registers => region.referenced_by.join(" "),
             MemoryColumn::Path => region
                 .path
                 .clone()
@@ -403,7 +405,7 @@ pub(super) fn local_name_column(
             }
             gesture.set_state(gtk::EventSequenceState::Claimed);
         });
-        label.add_controller(click);
+        expander.add_controller(click);
         item.set_child(Some(&expander));
     });
     let children_handler = Rc::clone(children_handler);
@@ -439,10 +441,10 @@ pub(super) fn local_name_column(
         let load_more = node.load_more.is_some();
         if expandable || load_more {
             label.add_css_class("local-expandable");
-            label.set_cursor_from_name(Some("pointer"));
+            expander.set_cursor_from_name(Some("pointer"));
         } else {
             label.remove_css_class("local-expandable");
-            label.set_cursor(None);
+            expander.set_cursor(None);
         }
         let tooltip = if node.placeholder {
             format!("{}\n{}", node.variable.name, node.variable.value)
@@ -890,10 +892,13 @@ pub(super) fn build_stack_word_inspector() -> StackWordInspector {
     let region = stack_inspector_row(&grid, 4, "REGION");
     for value in [&interpretation, &role, &region] {
         value.set_ellipsize(pango::EllipsizeMode::None);
-        value.set_wrap(true);
-        value.set_wrap_mode(pango::WrapMode::Char);
+        value.set_wrap(false);
     }
-    root.append(&grid);
+    let grid_scroll = gtk::ScrolledWindow::new();
+    grid_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    grid_scroll.set_propagate_natural_height(true);
+    grid_scroll.set_child(Some(&grid));
+    root.append(&grid_scroll);
     let inspector = StackWordInspector {
         root,
         address,

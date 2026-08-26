@@ -2,6 +2,7 @@ mod app;
 mod breakpoint_gutter;
 mod config;
 mod debugger;
+mod kernel;
 mod source;
 mod theme;
 mod ui;

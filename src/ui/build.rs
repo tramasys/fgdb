@@ -42,7 +42,7 @@ pub(super) fn build_topbar(
     terminal_toggle.add_css_class("toolbar-action");
     terminal_toggle.add_css_class("toolbar-toggle");
     terminal_toggle.set_active(true);
-    terminal_toggle.set_tooltip_text(Some("Show or hide the interactive GDB terminal"));
+    terminal_toggle.set_tooltip_text(Some("Show or hide the interactive GDB terminal · Ctrl+`"));
     leading.append(&terminal_toggle);
     let gef_tools = build_gef_tools_menu(terminal, &terminal_toggle);
     leading.append(&gef_tools);
@@ -72,9 +72,11 @@ pub(super) fn build_topbar(
     let until_menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
     until_menu.add_css_class("until-menu");
     until_menu.append(&section_title("RUN UNTIL"));
-    let until_actions = [
+    let native_until_actions = [
         ("Current line", "-exec-until"),
         ("Function returns", "-exec-finish"),
+    ];
+    let gef_until_actions = [
         ("Next call", "exec-until call"),
         ("Next return", "exec-until ret"),
         ("Next syscall", "exec-until syscall"),
@@ -84,29 +86,41 @@ pub(super) fn build_topbar(
         ("User code", "exec-until user-code"),
         ("libc code", "exec-until libc-code"),
         ("Region change", "exec-until region-change"),
-    ]
-    .into_iter()
-    .map(|(label, command)| {
+    ];
+    let add_until_action = |container: &gtk::Box, label: &'static str, command| {
         let button = gtk::Button::new();
         let label = gtk::Label::new(Some(label));
         label.set_halign(gtk::Align::Start);
         label.set_hexpand(true);
         button.set_child(Some(&label));
         button.set_halign(gtk::Align::Fill);
-        until_menu.append(&button);
+        container.append(&button);
         (button, command)
-    })
-    .collect::<Vec<_>>();
-    until_menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    };
+    let mut until_actions = native_until_actions
+        .into_iter()
+        .map(|(label, command)| add_until_action(&until_menu, label, command))
+        .collect::<Vec<_>>();
+    let gef_until_section = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    gef_until_section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    gef_until_section.append(&section_title("GEF EXEC-UNTIL"));
+    until_actions.extend(
+        gef_until_actions
+            .into_iter()
+            .map(|(label, command)| add_until_action(&gef_until_section, label, command)),
+    );
+    gef_until_section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     let until_condition_entry = gtk::Entry::builder()
         .placeholder_text("$rax == 0")
         .hexpand(true)
         .build();
     until_condition_entry.set_tooltip_text(Some("GDB expression used by GEF exec-until cond"));
-    until_menu.append(&until_condition_entry);
+    gef_until_section.append(&until_condition_entry);
     let until_condition_button = gtk::Button::with_label("Expression");
     until_condition_button.add_css_class("inline-action");
-    until_menu.append(&until_condition_button);
+    gef_until_section.append(&until_condition_button);
+    gef_until_section.set_visible(false);
+    until_menu.append(&gef_until_section);
     until_popover.set_child(Some(&until_menu));
     let until = header_popup_button("Until", &until_popover);
     until.add_css_class("debug-control");
@@ -166,6 +180,7 @@ pub(super) fn build_topbar(
         finish_button: finish,
         until_button: until,
         until_popover,
+        gef_until_section: gef_until_section.upcast(),
         gef_tools_button: gef_tools,
         until_actions,
         until_condition_entry,
@@ -189,6 +204,9 @@ pub(super) fn build_gef_tools_menu(
             "Context",
             &[
                 ("Current instruction", "xinfo $pc", "xinfo $pc"),
+                ("Opcode + memory effects", "ii $pc", "ii $pc"),
+                ("Register pointer chains", "registers", "registers"),
+                ("Stack telescope", "telescope $sp", "telescope $sp"),
                 ("Function arguments", "dumpargs", "dumpargs"),
                 ("Current syscall", "syscall-args", "syscall-args"),
                 ("Future calls", "future-calls", "future-calls"),
@@ -199,6 +217,10 @@ pub(super) fn build_gef_tools_menu(
             "Process",
             &[
                 ("Virtual memory map", "vmmap", "vmmap"),
+                ("Process information", "proc-info", "proc-info"),
+                ("Mapped files", "xfiles", "xfiles"),
+                ("Program arguments", "argv", "argv"),
+                ("Environment", "envp", "envp"),
                 ("Open file descriptors", "fds", "fds"),
                 ("ELF auxiliary vector", "auxv", "auxv"),
                 ("Current errno", "errno", "errno"),
@@ -210,7 +232,9 @@ pub(super) fn build_gef_tools_menu(
             "Binary",
             &[
                 ("Binary protections", "checksec", "checksec"),
+                ("ELF information", "elf-info", "elf-info"),
                 ("GOT / PLT", "got", "got"),
+                ("All GOT entries", "got-all", "got-all"),
                 ("Stack canary", "canary", "canary"),
                 (
                     "Exception unwind data",
@@ -292,6 +316,7 @@ pub(super) fn build_gef_tools_menu(
     button.set_tooltip_text(Some(
         "Run useful bata24/GEF investigations in this debugger's terminal",
     ));
+    button.set_visible(false);
     button.set_sensitive(false);
     button
 }
@@ -391,6 +416,7 @@ pub(super) fn build_workspace(
     terminal: &vte4::Terminal,
     variable_children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
     target_pointer_bits: &Rc<Cell<u32>>,
+    kernel_refresh_handler: &Rc<RefCell<Option<KernelRefreshHandler>>>,
 ) -> Workspace {
     let workspace = gtk::Paned::new(gtk::Orientation::Horizontal);
     workspace.add_css_class("workspace-columns");
@@ -398,7 +424,11 @@ pub(super) fn build_workspace(
     workspace.set_position(980);
     workspace.set_shrink_start_child(false);
     workspace.set_resize_start_child(true);
-    let inspector = build_inspector(variable_children_handler, target_pointer_bits);
+    let inspector = build_inspector(
+        variable_children_handler,
+        target_pointer_bits,
+        kernel_refresh_handler,
+    );
     workspace.set_end_child(Some(&inspector.root));
 
     let navigation_and_editor = gtk::Paned::new(gtk::Orientation::Horizontal);
@@ -423,6 +453,7 @@ pub(super) fn build_workspace(
         layout::Pane::new("navigation_source", &navigation_and_editor),
         layout::Pane::new("workspace_terminal", &main_and_terminal),
         layout::Pane::new("locals_instructions", &inspector.context_split),
+        layout::Pane::new("kernel_changes", &inspector.kernel_view.changes_split),
     ];
     let mut debug_state_panels = inspector.stale_panels.clone();
     debug_state_panels.push(left_sidebar.root.clone().upcast());
@@ -440,6 +471,13 @@ pub(super) fn build_workspace(
         locals_view: inspector.locals_view,
         locals_empty: inspector.locals_empty,
         locals_edit_button: inspector.locals_edit_button,
+        expression_watches_store: inspector.expression_watches_store,
+        expression_watches_selection: inspector.expression_watches_selection,
+        expression_watches_view: inspector.expression_watches_view,
+        expression_watches_empty: inspector.expression_watches_empty,
+        expression_watch_entry: inspector.expression_watch_entry,
+        expression_watch_add_button: inspector.expression_watch_add_button,
+        expression_watch_remove_button: inspector.expression_watch_remove_button,
         instructions_title: inspector.instructions_title,
         instructions_store: inspector.instructions_store,
         instructions_selection: inspector.instructions_selection,
@@ -473,6 +511,7 @@ pub(super) fn build_workspace(
         memory_size: inspector.memory_size,
         memory_format: inspector.memory_format,
         memory_add_button: inspector.memory_add_button,
+        kernel_view: inspector.kernel_view,
     }
 }
 
@@ -524,9 +563,10 @@ pub(super) fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSi
 pub(super) fn build_inspector(
     variable_children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
     target_pointer_bits: &Rc<Cell<u32>>,
+    kernel_refresh_handler: &Rc<RefCell<Option<KernelRefreshHandler>>>,
 ) -> Inspector {
     let notebook = gtk::Notebook::new();
-    notebook.set_size_request(260, -1);
+    notebook.set_size_request(260, 0);
     notebook.set_scrollable(true);
     notebook.add_css_class("panel");
 
@@ -538,6 +578,8 @@ pub(super) fn build_inspector(
     detail.set_ellipsize(pango::EllipsizeMode::Middle);
     detail.set_single_line_mode(true);
     let (locals_view, locals_store, locals_selection) =
+        build_locals_view(variable_children_handler, target_pointer_bits);
+    let (expression_watches_view, expression_watches_store, expression_watches_selection) =
         build_locals_view(variable_children_handler, target_pointer_bits);
     let locals_empty = empty_label("Values appear when the target is paused");
     let locals_scrolled = gtk::ScrolledWindow::builder()
@@ -583,8 +625,8 @@ pub(super) fn build_inspector(
     let instructions_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
     instructions_panel.set_vexpand(true);
     let instructions_title = section_title("INSTRUCTIONS");
-    instructions_title.set_ellipsize(pango::EllipsizeMode::End);
     instructions_title.set_hexpand(true);
+    instructions_title.set_xalign(0.0);
     instructions_title.set_tooltip_text(Some("INSTRUCTIONS"));
     let instructions_header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     instructions_header.add_css_class("subpanel-header");
@@ -604,6 +646,44 @@ pub(super) fn build_inspector(
     context.set_start_child(Some(&locals_panel));
     context.set_end_child(Some(&instructions_panel));
     state.append(&context);
+
+    let expression_watches_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    expression_watches_page.add_css_class("sidebar");
+    let expression_watch_header = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    expression_watch_header.add_css_class("subpanel-header");
+    let expression_watch_entry = gtk::Entry::builder()
+        .placeholder_text("counter, *node, vec.len, …")
+        .hexpand(true)
+        .build();
+    expression_watch_entry.set_tooltip_text(Some(
+        "Any C, C++, Rust, or GDB expression that is valid in the selected frame",
+    ));
+    let expression_watch_add_button = gtk::Button::with_label("Add");
+    expression_watch_add_button.add_css_class("inline-action");
+    expression_watch_add_button.set_sensitive(false);
+    let expression_watch_remove_button = gtk::Button::with_label("Remove");
+    expression_watch_remove_button.add_css_class("inline-action");
+    expression_watch_remove_button.add_css_class("danger-action");
+    expression_watch_remove_button.set_sensitive(false);
+    expression_watch_header.append(&expression_watch_entry);
+    expression_watch_header.append(&expression_watch_add_button);
+    expression_watch_header.append(&expression_watch_remove_button);
+    expression_watches_page.append(&expression_watch_header);
+    let expression_watch_hint = gtk::Label::new(Some(
+        "Structured values expand in place. Double-click a scalar value to edit it.",
+    ));
+    expression_watch_hint.add_css_class("muted");
+    expression_watch_hint.set_halign(gtk::Align::Start);
+    expression_watch_hint.set_wrap(true);
+    expression_watches_page.append(&expression_watch_hint);
+    let expression_watches_empty = empty_label("No watched expressions");
+    expression_watches_page.append(&expression_watches_empty);
+    let expression_watches_scrolled = gtk::ScrolledWindow::builder()
+        .child(&expression_watches_view)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .build();
+    expression_watches_page.append(&expression_watches_scrolled);
 
     let registers_page = gtk::Box::new(gtk::Orientation::Vertical, 2);
     registers_page.add_css_class("sidebar");
@@ -626,6 +706,7 @@ pub(super) fn build_inspector(
     let stack_empty = empty_label("Stack values appear when the target is paused");
     let stack_scrolled = gtk::ScrolledWindow::builder()
         .child(&stack_view)
+        .min_content_height(1)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
@@ -706,7 +787,7 @@ pub(super) fn build_inspector(
     hint.set_halign(gtk::Align::Start);
     hint.set_wrap(true);
     breakpoints_page.append(&hint);
-    let breakpoints_list = dynamic_list("No breakpoints or watchpoints set");
+    let breakpoints_list = dynamic_list("No breakpoints, catchpoints, or watchpoints set");
     let breakpoints_scrolled = gtk::ScrolledWindow::builder()
         .child(&breakpoints_list)
         .vexpand(true)
@@ -835,8 +916,13 @@ pub(super) fn build_inspector(
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
+    let kernel_view = build_kernel_view(kernel_refresh_handler);
 
     notebook.append_page(&state, Some(&gtk::Label::new(Some("Context"))));
+    notebook.append_page(
+        &expression_watches_page,
+        Some(&gtk::Label::new(Some("Watches"))),
+    );
     notebook.append_page(&registers_page, Some(&gtk::Label::new(Some("Registers"))));
     notebook.append_page(&stack_page, Some(&gtk::Label::new(Some("Stack"))));
     notebook.append_page(&memory_page, Some(&gtk::Label::new(Some("Memory"))));
@@ -845,12 +931,17 @@ pub(super) fn build_inspector(
         Some(&gtk::Label::new(Some("Breakpoints"))),
     );
     notebook.append_page(&signals_page, Some(&gtk::Label::new(Some("Signals"))));
+    let kernel_page =
+        notebook.append_page(&kernel_view.root, Some(&gtk::Label::new(Some("Kernel"))));
+    connect_kernel_tab_visibility(&notebook, kernel_page, &kernel_view, kernel_refresh_handler);
     let stale_panels = vec![
         state.clone().upcast(),
+        expression_watches_page.clone().upcast(),
         registers_page.clone().upcast(),
         stack_page.clone().upcast(),
         memory_page.clone().upcast(),
         signals_page.clone().upcast(),
+        kernel_view.root.clone().upcast(),
     ];
     Inspector {
         root: notebook,
@@ -862,6 +953,13 @@ pub(super) fn build_inspector(
         locals_view,
         locals_empty,
         locals_edit_button,
+        expression_watches_store,
+        expression_watches_selection,
+        expression_watches_view,
+        expression_watches_empty,
+        expression_watch_entry,
+        expression_watch_add_button,
+        expression_watch_remove_button,
         instructions_title,
         instructions_store,
         instructions_selection,
@@ -895,5 +993,6 @@ pub(super) fn build_inspector(
         memory_size,
         memory_format,
         memory_add_button,
+        kernel_view,
     }
 }

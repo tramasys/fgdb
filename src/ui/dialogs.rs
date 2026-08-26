@@ -1,7 +1,37 @@
 use super::*;
 
+impl Ui {
+    pub fn present_variable_editor(&self, variable: Variable, metadata: Option<ValueTypeMetadata>) {
+        open_variable_editor(
+            &self.window,
+            variable,
+            self.target_pointer_bits.get(),
+            self.current_source_is_rust.get(),
+            metadata.as_ref(),
+            ValueEditorHandlers {
+                assignment: Rc::clone(&self.variable_assignment_handler),
+                float: Rc::clone(&self.float_assignment_handler),
+                string: Rc::clone(&self.string_assignment_handler),
+            },
+        );
+    }
+}
+
 pub(super) fn variable_at(selection: &gtk::SingleSelection, position: u32) -> Option<Variable> {
     variable_row_at(selection, position).map(|(_, variable)| variable)
+}
+
+pub(super) fn root_variable_at(
+    selection: &gtk::SingleSelection,
+    position: u32,
+) -> Option<Variable> {
+    let (mut row, _) = variable_node_at(selection, position)?;
+    while let Some(parent) = row.parent() {
+        row = parent;
+    }
+    let item = row.item()?.downcast::<glib::BoxedAnyObject>().ok()?;
+    let node = item.borrow::<VariableNode>();
+    (!node.placeholder).then(|| node.variable.clone())
 }
 
 pub(super) fn variable_row_at(
@@ -90,8 +120,45 @@ pub(super) fn remove_load_more_rows(store: &gio::ListStore) {
 pub(super) fn open_variable_editor(
     parent: &gtk::ApplicationWindow,
     variable: Variable,
-    handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
+    target_pointer_bits: u32,
+    rust_source: bool,
+    metadata: Option<&ValueTypeMetadata>,
+    handlers: ValueEditorHandlers,
 ) {
+    if let Some(string) = string_edit(&variable) {
+        open_string_editor(
+            parent,
+            variable,
+            string,
+            Rc::clone(&handlers.assignment),
+            Rc::clone(&handlers.string),
+        );
+        return;
+    }
+    if is_rust_string(&variable) {
+        open_unavailable_rust_string_editor(parent, &variable);
+        return;
+    }
+    if let Some(metadata) = metadata.filter(|metadata| {
+        metadata.kind == ValueTypeKind::Enum && !metadata.enum_variants.is_empty()
+    }) {
+        open_enum_editor(parent, variable, metadata, Rc::clone(&handlers.assignment));
+        return;
+    }
+    if let Some(float) = variable_float_edit(&variable, metadata) {
+        open_float_editor(
+            parent,
+            variable,
+            float,
+            Rc::clone(&handlers.assignment),
+            Rc::clone(&handlers.float),
+        );
+        return;
+    }
+    if let Some(value) = variable_boolean_value(&variable, metadata) {
+        open_boolean_editor(parent, variable, value, Rc::clone(&handlers.assignment));
+        return;
+    }
     let editor = gtk::Window::builder()
         .title(format!("Edit {}", variable.name))
         .transient_for(parent)
@@ -115,15 +182,91 @@ pub(super) fn open_variable_editor(
     type_name.add_css_class("local-type");
     type_name.set_halign(gtk::Align::Start);
     content.append(&type_name);
+    let character_format =
+        variable_character_format(&variable, target_pointer_bits, rust_source, metadata);
+    let integer_format = character_format
+        .or_else(|| variable_integer_format(&variable, target_pointer_bits, metadata))
+        .or_else(|| {
+            variable
+                .type_name
+                .is_none()
+                .then(|| register_integer_format(&variable.name, target_pointer_bits))
+                .flatten()
+        });
+    let address = variable_is_address(&variable);
     let entry = gtk::Entry::new();
     let (editable_value, _) = variable_value_parts(&variable.value);
-    entry.set_text(editable_value);
     entry.set_activates_default(true);
     entry.set_hexpand(true);
-    entry.set_tooltip_text(Some(
-        "Enter a GDB expression for the new value, then press Enter",
-    ));
+    let validation = gtk::Label::new(None);
+    validation.add_css_class("value-editor-validation");
+    validation.set_halign(gtk::Align::Start);
+    validation.set_visible(false);
+    let notation = integer_format.map(|format| {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let label = gtk::Label::new(Some(if character_format.is_some() {
+            "Display"
+        } else {
+            "Base"
+        }));
+        label.add_css_class("muted");
+        let mut labels = Vec::new();
+        if character_format.is_some() {
+            labels.push("Character");
+        }
+        labels.extend(IntegerRadix::ALL.map(IntegerRadix::label));
+        let dropdown = gtk::DropDown::from_strings(&labels);
+        dropdown.add_css_class("value-editor-select");
+        let detected = IntegerRadix::detect(editable_value);
+        let selected = if character_format.is_some() {
+            0
+        } else {
+            detected.index()
+        };
+        dropdown.set_selected(selected);
+        dropdown.set_hexpand(true);
+        row.append(&label);
+        row.append(&dropdown);
+        content.append(&row);
+        let raw = parse_integer_input(editable_value, format, detected)
+            .or_else(|error| {
+                if character_format.is_some() {
+                    parse_character_input(editable_value, format)
+                } else {
+                    Err(error)
+                }
+            })
+            .ok();
+        if let Some(raw) = raw {
+            entry.set_text(&format_scalar_value(
+                raw,
+                format,
+                selected,
+                character_format.is_some(),
+            ));
+        } else {
+            entry.set_text(editable_value);
+        }
+        (format, dropdown, raw, Rc::new(Cell::new(selected)))
+    });
+    if notation.is_none() {
+        entry.set_text(editable_value);
+    }
+    if address {
+        let hint = gtk::Label::new(Some("ADDRESS · hexadecimal or a GDB address expression"));
+        hint.add_css_class("muted");
+        hint.set_halign(gtk::Align::Start);
+        content.append(&hint);
+    }
+    entry.set_tooltip_text(Some(if notation.is_some() {
+        "Choose a representation, enter a value, then press Enter"
+    } else if address {
+        "Enter a hexadecimal address or a GDB expression such as &symbol"
+    } else {
+        "Enter a GDB expression for the new value, then press Enter"
+    }));
     content.append(&entry);
+    content.append(&validation);
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     actions.set_halign(gtk::Align::End);
@@ -137,15 +280,38 @@ pub(super) fn open_variable_editor(
     connect_escape_to_close(&editor);
 
     let original_value = editable_value.to_owned();
-    let variable_for_submit = variable;
+    let handler = handlers.assignment;
+    let variable_for_submit = variable.clone();
     let entry_for_submit = entry.clone();
     let editor_for_submit = editor.clone();
+    let notation_for_submit = notation.as_ref().map(|(format, dropdown, raw, _)| {
+        (*format, dropdown.clone(), *raw, character_format.is_some())
+    });
     let submit = Rc::new(move || {
-        let value = entry_for_submit.text().trim().to_owned();
-        if !value.is_empty()
-            && value != original_value
-            && let Some(handler) = handler.borrow().as_ref()
+        let value = if let Some((format, dropdown, original_raw, character)) =
+            notation_for_submit.as_ref()
         {
+            let selected = dropdown.selected();
+            let Ok(raw) =
+                parse_scalar_value(&entry_for_submit.text(), *format, selected, *character)
+            else {
+                return;
+            };
+            if Some(raw) == *original_raw {
+                editor_for_submit.close();
+                return;
+            }
+            let radix = scalar_radix(selected, *character).unwrap_or(IntegerRadix::Hexadecimal);
+            canonical_gdb_integer(raw, *format, radix)
+        } else {
+            let value = entry_for_submit.text().trim().to_owned();
+            if value.is_empty() || value == original_value {
+                editor_for_submit.close();
+                return;
+            }
+            value
+        };
+        if let Some(handler) = handler.borrow().as_ref() {
             handler(variable_for_submit.clone(), value);
         }
         editor_for_submit.close();
@@ -156,9 +322,810 @@ pub(super) fn open_variable_editor(
     let editor_for_cancel = editor.clone();
     cancel.connect_clicked(move |_| editor_for_cancel.close());
 
+    if let Some((format, dropdown, _, active)) = notation {
+        update_scalar_validation(
+            &entry,
+            &validation,
+            &apply,
+            format,
+            dropdown.selected(),
+            character_format.is_some(),
+        );
+        let validation_for_entry = validation.clone();
+        let apply_for_entry = apply.clone();
+        let dropdown_for_entry = dropdown.clone();
+        entry.connect_changed(move |entry| {
+            update_scalar_validation(
+                entry,
+                &validation_for_entry,
+                &apply_for_entry,
+                format,
+                dropdown_for_entry.selected(),
+                character_format.is_some(),
+            );
+        });
+        let entry_for_notation = entry.clone();
+        let validation_for_notation = validation.clone();
+        let apply_for_notation = apply.clone();
+        dropdown.connect_selected_notify(move |dropdown| {
+            let selected = dropdown.selected();
+            let previous = active.replace(selected);
+            if let Ok(raw) = parse_scalar_value(
+                &entry_for_notation.text(),
+                format,
+                previous,
+                character_format.is_some(),
+            ) {
+                entry_for_notation.set_text(&format_scalar_value(
+                    raw,
+                    format,
+                    selected,
+                    character_format.is_some(),
+                ));
+            }
+            update_scalar_validation(
+                &entry_for_notation,
+                &validation_for_notation,
+                &apply_for_notation,
+                format,
+                selected,
+                character_format.is_some(),
+            );
+        });
+    }
+
     editor.present();
     entry.grab_focus();
     entry.select_region(0, -1);
+}
+
+fn open_float_editor(
+    parent: &gtk::ApplicationWindow,
+    variable: Variable,
+    float: value::FloatEdit,
+    handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
+    raw_handler: Rc<RefCell<Option<FloatAssignmentHandler>>>,
+) {
+    let editor = gtk::Window::builder()
+        .title(format!("Edit {}", variable.name))
+        .transient_for(parent)
+        .modal(true)
+        .default_width(620)
+        .build();
+    editor.add_css_class("value-editor");
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
+    let expression = gtk::Label::new(Some(&variable.name));
+    expression.add_css_class("local-name");
+    expression.set_halign(gtk::Align::Start);
+    content.append(&expression);
+    let type_name = gtk::Label::new(variable.type_name.as_deref());
+    type_name.add_css_class("local-type");
+    type_name.set_halign(gtk::Align::Start);
+    content.append(&type_name);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let label = gtk::Label::new(Some("Format"));
+    label.add_css_class("muted");
+    let representation =
+        gtk::DropDown::from_strings(&FloatRepresentation::ALL.map(FloatRepresentation::label));
+    representation.add_css_class("value-editor-select");
+    representation.set_hexpand(true);
+    row.append(&label);
+    row.append(&representation);
+    content.append(&row);
+    let entry = gtk::Entry::new();
+    entry.set_hexpand(true);
+    entry.set_activates_default(true);
+    entry.set_text(&format_float_value(
+        &float.raw_bytes,
+        float.bits,
+        FloatRepresentation::Decimal,
+    ));
+    content.append(&entry);
+    let detail = gtk::Label::new(Some(&format!(
+        "{}-bit floating point · accepts inf, -inf, and nan · raw mode preserves the exact bit pattern",
+        float.bits
+    )));
+    detail.add_css_class("muted");
+    detail.set_halign(gtk::Align::Start);
+    detail.set_wrap(true);
+    content.append(&detail);
+    let validation = gtk::Label::new(None);
+    validation.add_css_class("value-editor-validation");
+    validation.set_halign(gtk::Align::Start);
+    validation.set_visible(false);
+    content.append(&validation);
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let apply = gtk::Button::with_label("Set value");
+    apply.add_css_class("primary-control");
+    actions.append(&cancel);
+    actions.append(&apply);
+    content.append(&actions);
+    editor.set_child(Some(&content));
+    connect_escape_to_close(&editor);
+
+    update_float_validation(
+        &entry,
+        &validation,
+        &apply,
+        float.bits,
+        FloatRepresentation::Decimal,
+    );
+    let active = Rc::new(Cell::new(0_u32));
+    let entry_for_representation = entry.clone();
+    let validation_for_representation = validation.clone();
+    let apply_for_representation = apply.clone();
+    let active_for_representation = Rc::clone(&active);
+    let original_raw_for_representation = float.raw_bytes.clone();
+    representation.connect_selected_notify(move |representation| {
+        let selected = representation.selected();
+        let previous = active_for_representation.replace(selected);
+        let previous_representation = FloatRepresentation::from_index(previous);
+        let raw = if entry_for_representation.text()
+            == format_float_value(
+                &original_raw_for_representation,
+                float.bits,
+                previous_representation,
+            ) {
+            Ok(original_raw_for_representation.clone())
+        } else {
+            parse_float_value(
+                &entry_for_representation.text(),
+                float.bits,
+                previous_representation,
+            )
+        };
+        if let Ok(raw) = raw {
+            entry_for_representation.set_text(&format_float_value(
+                &raw,
+                float.bits,
+                FloatRepresentation::from_index(selected),
+            ));
+        }
+        update_float_validation(
+            &entry_for_representation,
+            &validation_for_representation,
+            &apply_for_representation,
+            float.bits,
+            FloatRepresentation::from_index(selected),
+        );
+    });
+    let representation_for_entry = representation.clone();
+    let validation_for_entry = validation.clone();
+    let apply_for_entry = apply.clone();
+    entry.connect_changed(move |entry| {
+        update_float_validation(
+            entry,
+            &validation_for_entry,
+            &apply_for_entry,
+            float.bits,
+            FloatRepresentation::from_index(representation_for_entry.selected()),
+        );
+    });
+
+    let editor_for_apply = editor.clone();
+    let entry_for_apply = entry.clone();
+    let representation_for_apply = representation.clone();
+    let original_raw = float.raw_bytes;
+    apply.connect_clicked(move |_| {
+        let representation = FloatRepresentation::from_index(representation_for_apply.selected());
+        let Ok(raw) = parse_float_value(&entry_for_apply.text(), float.bits, representation) else {
+            return;
+        };
+        if raw != original_raw {
+            if representation == FloatRepresentation::RawBits {
+                if let Some(handler) = raw_handler.borrow().as_ref() {
+                    handler(variable.clone(), raw);
+                }
+            } else if let Some(handler) = handler.borrow().as_ref() {
+                handler(variable.clone(), canonical_gdb_float(&raw, float.bits));
+            }
+        }
+        editor_for_apply.close();
+    });
+    let apply_for_activate = apply.clone();
+    entry.connect_activate(move |_| {
+        if apply_for_activate.is_sensitive() {
+            apply_for_activate.emit_clicked();
+        }
+    });
+    let editor_for_cancel = editor.clone();
+    cancel.connect_clicked(move |_| editor_for_cancel.close());
+    editor.present();
+    entry.grab_focus();
+    entry.select_region(0, -1);
+}
+
+fn update_float_validation(
+    entry: &gtk::Entry,
+    validation: &gtk::Label,
+    apply: &gtk::Button,
+    bits: u32,
+    representation: FloatRepresentation,
+) {
+    match parse_float_value(&entry.text(), bits, representation) {
+        Ok(_) => {
+            validation.set_visible(false);
+            apply.set_sensitive(true);
+        }
+        Err(error) => {
+            validation.set_text(error);
+            validation.set_visible(true);
+            apply.set_sensitive(false);
+        }
+    }
+}
+
+fn open_enum_editor(
+    parent: &gtk::ApplicationWindow,
+    variable: Variable,
+    metadata: &ValueTypeMetadata,
+    handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
+) {
+    let editor = gtk::Window::builder()
+        .title(format!("Edit {}", variable.name))
+        .transient_for(parent)
+        .modal(true)
+        .default_width(620)
+        .build();
+    editor.add_css_class("value-editor");
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
+    let expression = gtk::Label::new(Some(&variable.name));
+    expression.add_css_class("local-name");
+    expression.set_halign(gtk::Align::Start);
+    content.append(&expression);
+    let type_name = gtk::Label::new(variable.type_name.as_deref());
+    type_name.add_css_class("local-type");
+    type_name.set_halign(gtk::Align::Start);
+    content.append(&type_name);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let label = gtk::Label::new(Some("Variant"));
+    label.add_css_class("muted");
+    let mut labels = metadata
+        .enum_variants
+        .iter()
+        .map(|variant| variant.name.as_str())
+        .collect::<Vec<_>>();
+    labels.push("Custom expression…");
+    let variants = gtk::DropDown::from_strings(&labels);
+    variants.add_css_class("value-editor-select");
+    variants.set_hexpand(true);
+    row.append(&label);
+    row.append(&variants);
+    content.append(&row);
+
+    let original = variable.value.trim().to_owned();
+    let selected = metadata
+        .enum_variants
+        .iter()
+        .position(|variant| enum_value_matches(&original, &variant.name))
+        .and_then(|position| u32::try_from(position).ok())
+        .unwrap_or(metadata.enum_variants.len() as u32);
+    variants.set_selected(selected);
+    let custom = gtk::Entry::new();
+    custom.set_hexpand(true);
+    custom.set_activates_default(true);
+    custom.set_text(&original);
+    custom.set_visible(selected as usize == metadata.enum_variants.len());
+    content.append(&custom);
+    let detail = gtk::Label::new(None);
+    detail.add_css_class("muted");
+    detail.set_halign(gtk::Align::Start);
+    detail.set_wrap(true);
+    update_enum_detail(&detail, metadata, selected);
+    content.append(&detail);
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let apply = gtk::Button::with_label("Set value");
+    apply.add_css_class("primary-control");
+    actions.append(&cancel);
+    actions.append(&apply);
+    content.append(&actions);
+    editor.set_child(Some(&content));
+    connect_escape_to_close(&editor);
+
+    let metadata = metadata.clone();
+    let metadata_for_selection = metadata.clone();
+    let custom_for_selection = custom.clone();
+    let detail_for_selection = detail.clone();
+    variants.connect_selected_notify(move |variants| {
+        let selected = variants.selected();
+        custom_for_selection
+            .set_visible(selected as usize == metadata_for_selection.enum_variants.len());
+        update_enum_detail(&detail_for_selection, &metadata_for_selection, selected);
+        if selected as usize == metadata_for_selection.enum_variants.len() {
+            custom_for_selection.grab_focus();
+            custom_for_selection.select_region(0, -1);
+        }
+    });
+
+    let editor_for_apply = editor.clone();
+    let variants_for_apply = variants.clone();
+    let custom_for_apply = custom.clone();
+    let enum_variants = metadata.enum_variants.clone();
+    apply.connect_clicked(move |_| {
+        let value = enum_variants
+            .get(variants_for_apply.selected() as usize)
+            .map_or_else(
+                || custom_for_apply.text().trim().to_owned(),
+                |variant| variant.name.clone(),
+            );
+        if !value.is_empty()
+            && !enum_value_matches(&original, &value)
+            && let Some(handler) = handler.borrow().as_ref()
+        {
+            handler(variable.clone(), value);
+        }
+        editor_for_apply.close();
+    });
+    let apply_for_entry = apply.clone();
+    custom.connect_activate(move |_| apply_for_entry.emit_clicked());
+    let editor_for_cancel = editor.clone();
+    cancel.connect_clicked(move |_| editor_for_cancel.close());
+    editor.present();
+}
+
+fn enum_value_matches(current: &str, variant: &str) -> bool {
+    current == variant
+        || current
+            .rsplit("::")
+            .next()
+            .zip(variant.rsplit("::").next())
+            .is_some_and(|(current, variant)| current == variant)
+}
+
+fn update_enum_detail(detail: &gtk::Label, metadata: &ValueTypeMetadata, selected: u32) {
+    if let Some(variant) = metadata.enum_variants.get(selected as usize) {
+        detail.set_text(&format!(
+            "Discriminant {} · {}-bit enum",
+            variant.value,
+            metadata.bits.unwrap_or_default()
+        ));
+    } else {
+        detail.set_text("Raw GDB expression · useful for values absent from the debug information");
+    }
+}
+
+fn open_boolean_editor(
+    parent: &gtk::ApplicationWindow,
+    variable: Variable,
+    original: bool,
+    handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
+) {
+    let editor = gtk::Window::builder()
+        .title(format!("Edit {}", variable.name))
+        .transient_for(parent)
+        .modal(true)
+        .default_width(620)
+        .build();
+    editor.add_css_class("value-editor");
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
+    let expression = gtk::Label::new(Some(&variable.name));
+    expression.add_css_class("local-name");
+    expression.set_halign(gtk::Align::Start);
+    content.append(&expression);
+    let type_name = gtk::Label::new(variable.type_name.as_deref());
+    type_name.add_css_class("local-type");
+    type_name.set_halign(gtk::Align::Start);
+    content.append(&type_name);
+
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let label = gtk::Label::new(Some("Value"));
+    label.add_css_class("muted");
+    let value = gtk::DropDown::from_strings(&["false", "true"]);
+    value.add_css_class("value-editor-select");
+    value.set_selected(u32::from(original));
+    value.set_hexpand(true);
+    row.append(&label);
+    row.append(&value);
+    content.append(&row);
+    let detail = gtk::Label::new(Some(
+        "Boolean value · fgdb sends the language-neutral value 0 or 1 to GDB",
+    ));
+    detail.add_css_class("muted");
+    detail.set_halign(gtk::Align::Start);
+    content.append(&detail);
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let apply = gtk::Button::with_label("Set value");
+    apply.add_css_class("primary-control");
+    actions.append(&cancel);
+    actions.append(&apply);
+    content.append(&actions);
+    editor.set_child(Some(&content));
+    connect_escape_to_close(&editor);
+
+    let editor_for_apply = editor.clone();
+    apply.connect_clicked(move |_| {
+        let selected = value.selected() == 1;
+        if selected != original
+            && let Some(handler) = handler.borrow().as_ref()
+        {
+            handler(
+                variable.clone(),
+                if selected { "1" } else { "0" }.to_owned(),
+            );
+        }
+        editor_for_apply.close();
+    });
+    let editor_for_cancel = editor.clone();
+    cancel.connect_clicked(move |_| editor_for_cancel.close());
+    editor.present();
+}
+
+fn scalar_radix(selected: u32, character: bool) -> Option<IntegerRadix> {
+    if character && selected == 0 {
+        None
+    } else {
+        Some(IntegerRadix::from_index(
+            selected.saturating_sub(u32::from(character)),
+        ))
+    }
+}
+
+fn parse_scalar_value(
+    value: &str,
+    format: value::IntegerFormat,
+    selected: u32,
+    character: bool,
+) -> Result<u128, &'static str> {
+    scalar_radix(selected, character).map_or_else(
+        || parse_character_input(value, format),
+        |radix| parse_integer_input(value, format, radix),
+    )
+}
+
+fn format_scalar_value(
+    raw: u128,
+    format: value::IntegerFormat,
+    selected: u32,
+    character: bool,
+) -> String {
+    scalar_radix(selected, character).map_or_else(
+        || format_character_value(raw, format),
+        |radix| format_integer_value(raw, format, radix),
+    )
+}
+
+fn update_scalar_validation(
+    entry: &gtk::Entry,
+    validation: &gtk::Label,
+    apply: &gtk::Button,
+    format: value::IntegerFormat,
+    selected: u32,
+    character: bool,
+) {
+    match parse_scalar_value(&entry.text(), format, selected, character) {
+        Ok(_) => {
+            validation.set_visible(false);
+            apply.set_sensitive(true);
+        }
+        Err(error) => {
+            validation.set_text(error);
+            validation.set_visible(true);
+            apply.set_sensitive(false);
+        }
+    }
+}
+
+fn open_string_editor(
+    parent: &gtk::ApplicationWindow,
+    variable: Variable,
+    string: value::StringEdit,
+    assignment_handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
+    string_handler: Rc<RefCell<Option<StringAssignmentHandler>>>,
+) {
+    let editor = gtk::Window::builder()
+        .title(format!("Edit {}", variable.name))
+        .transient_for(parent)
+        .modal(true)
+        .default_width(620)
+        .build();
+    editor.add_css_class("value-editor");
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
+    let expression = gtk::Label::new(Some(&variable.name));
+    expression.add_css_class("local-name");
+    expression.set_halign(gtk::Align::Start);
+    content.append(&expression);
+    let type_name = gtk::Label::new(variable.type_name.as_deref());
+    type_name.add_css_class("local-type");
+    type_name.set_halign(gtk::Align::Start);
+    content.append(&type_name);
+
+    let mode = matches!(string.storage, StringStorage::Buffer { pointer: true, .. }).then(|| {
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        let label = gtk::Label::new(Some("Edit"));
+        label.add_css_class("muted");
+        let dropdown = gtk::DropDown::from_strings(&["String contents", "Pointer address"]);
+        dropdown.add_css_class("value-editor-select");
+        dropdown.set_hexpand(true);
+        row.append(&label);
+        row.append(&dropdown);
+        content.append(&row);
+        dropdown
+    });
+    let entry = gtk::Entry::new();
+    let original_text = format_string_bytes(&string.bytes);
+    let (original_address, _) = variable_value_parts(&variable.value);
+    let original_address = original_address.to_owned();
+    entry.set_text(&original_text);
+    entry.set_activates_default(true);
+    entry.set_hexpand(true);
+    content.append(&entry);
+    let detail = gtk::Label::new(None);
+    detail.add_css_class("muted");
+    detail.set_halign(gtk::Align::Start);
+    detail.set_wrap(true);
+    content.append(&detail);
+    let validation = gtk::Label::new(None);
+    validation.add_css_class("value-editor-validation");
+    validation.set_halign(gtk::Align::Start);
+    validation.set_visible(false);
+    content.append(&validation);
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let apply = gtk::Button::with_label("Set value");
+    apply.add_css_class("primary-control");
+    actions.append(&cancel);
+    actions.append(&apply);
+    content.append(&actions);
+    editor.set_child(Some(&content));
+    connect_escape_to_close(&editor);
+
+    update_string_editor(&entry, &detail, &validation, &apply, &string, false);
+    let detail_for_entry = detail.clone();
+    let validation_for_entry = validation.clone();
+    let apply_for_entry = apply.clone();
+    let string_for_entry = string.clone();
+    let mode_for_entry = mode.clone();
+    entry.connect_changed(move |entry| {
+        let address_mode = mode_for_entry
+            .as_ref()
+            .is_some_and(|mode| mode.selected() == 1);
+        update_string_editor(
+            entry,
+            &detail_for_entry,
+            &validation_for_entry,
+            &apply_for_entry,
+            &string_for_entry,
+            address_mode,
+        );
+    });
+    if let Some(mode) = &mode {
+        let entry_for_mode = entry.clone();
+        let detail_for_mode = detail.clone();
+        let validation_for_mode = validation.clone();
+        let apply_for_mode = apply.clone();
+        let string_for_mode = string.clone();
+        let original_text_for_mode = original_text.clone();
+        let original_address_for_mode = original_address.clone();
+        mode.connect_selected_notify(move |mode| {
+            let address_mode = mode.selected() == 1;
+            entry_for_mode.set_text(if address_mode {
+                &original_address_for_mode
+            } else {
+                &original_text_for_mode
+            });
+            update_string_editor(
+                &entry_for_mode,
+                &detail_for_mode,
+                &validation_for_mode,
+                &apply_for_mode,
+                &string_for_mode,
+                address_mode,
+            );
+        });
+    }
+
+    let editor_for_apply = editor.clone();
+    let variable_for_apply = variable;
+    let entry_for_apply = entry.clone();
+    let mode_for_apply = mode;
+    apply.connect_clicked(move |_| {
+        let address_mode = mode_for_apply
+            .as_ref()
+            .is_some_and(|mode| mode.selected() == 1);
+        if address_mode {
+            let address = entry_for_apply.text().trim().to_owned();
+            if !address.is_empty()
+                && address != original_address
+                && let Some(handler) = assignment_handler.borrow().as_ref()
+            {
+                handler(variable_for_apply.clone(), address);
+            }
+        } else {
+            let Ok(bytes) = parse_string_input(&entry_for_apply.text()) else {
+                return;
+            };
+            if matches!(
+                string.storage,
+                StringStorage::Buffer { capacity, .. } if bytes.len() > capacity
+            ) || matches!(
+                string.storage,
+                StringStorage::RustString { length } if bytes.len() != length
+            ) {
+                return;
+            }
+            if bytes != string.bytes
+                && let Some(handler) = string_handler.borrow().as_ref()
+            {
+                handler(variable_for_apply.clone(), bytes, string.assignment_kind());
+            }
+        }
+        editor_for_apply.close();
+    });
+    let apply_for_entry = apply.clone();
+    entry.connect_activate(move |_| {
+        if apply_for_entry.is_sensitive() {
+            apply_for_entry.emit_clicked();
+        }
+    });
+    let editor_for_cancel = editor.clone();
+    cancel.connect_clicked(move |_| editor_for_cancel.close());
+    editor.present();
+    entry.grab_focus();
+    entry.select_region(0, -1);
+}
+
+fn update_string_editor(
+    entry: &gtk::Entry,
+    detail: &gtk::Label,
+    validation: &gtk::Label,
+    apply: &gtk::Button,
+    string: &value::StringEdit,
+    address_mode: bool,
+) {
+    if address_mode {
+        detail.set_text("Pointer address · hexadecimal or a GDB address expression");
+        let valid = !entry.text().trim().is_empty();
+        validation.set_visible(false);
+        apply.set_sensitive(valid);
+        return;
+    }
+    entry.set_tooltip_text(Some(
+        "Edit text directly; use C escapes such as \\n, \\t, \\0, or \\x41 for individual bytes",
+    ));
+    match (parse_string_input(&entry.text()), string.storage) {
+        (Ok(bytes), StringStorage::Buffer { capacity, pointer }) if bytes.len() <= capacity => {
+            detail.set_text(&format!(
+                "String contents · {} / {} bytes · terminating NUL is written automatically{}",
+                bytes.len(),
+                capacity,
+                if pointer {
+                    " · growth is limited to the currently known buffer"
+                } else {
+                    ""
+                }
+            ));
+            validation.set_visible(false);
+            apply.set_sensitive(true);
+        }
+        (Ok(bytes), StringStorage::Buffer { capacity, .. }) => {
+            detail.set_text(&format!(
+                "String contents · {} / {} bytes",
+                bytes.len(),
+                capacity
+            ));
+            validation.set_text("The text does not fit the known destination buffer");
+            validation.set_visible(true);
+            apply.set_sensitive(false);
+        }
+        (Ok(bytes), StringStorage::CppString) => {
+            detail.set_text(&format!(
+                "std::string contents · {} bytes · applying calls assign() in the inferior and may allocate",
+                bytes.len()
+            ));
+            validation.set_visible(false);
+            apply.set_sensitive(true);
+        }
+        (Ok(bytes), StringStorage::RustString { length })
+            if bytes.len() == length && std::str::from_utf8(&bytes).is_ok() =>
+        {
+            detail.set_text(&format!(
+                "Rust String contents · {length} UTF-8 bytes · edited in place without changing its allocation"
+            ));
+            validation.set_visible(false);
+            apply.set_sensitive(true);
+        }
+        (Ok(bytes), StringStorage::RustString { length }) => {
+            detail.set_text(&format!(
+                "Rust String contents · {} / {length} bytes · in-place edits must keep the same UTF-8 byte length",
+                bytes.len()
+            ));
+            validation.set_text(if std::str::from_utf8(&bytes).is_err() {
+                "Rust String contents must remain valid UTF-8"
+            } else {
+                "This GDB integration can safely edit Rust String only without resizing it"
+            });
+            validation.set_visible(true);
+            apply.set_sensitive(false);
+        }
+        (Err(error), StringStorage::Buffer { capacity, .. }) => {
+            detail.set_text(&format!("String contents · up to {} bytes", capacity));
+            validation.set_text(error);
+            validation.set_visible(true);
+            apply.set_sensitive(false);
+        }
+        (Err(error), StringStorage::CppString) => {
+            detail.set_text(
+                "std::string contents · applying calls assign() in the inferior and may allocate",
+            );
+            validation.set_text(error);
+            validation.set_visible(true);
+            apply.set_sensitive(false);
+        }
+        (Err(error), StringStorage::RustString { length }) => {
+            detail.set_text(&format!(
+                "Rust String contents · exactly {length} UTF-8 bytes"
+            ));
+            validation.set_text(error);
+            validation.set_visible(true);
+            apply.set_sensitive(false);
+        }
+    }
+}
+
+fn open_unavailable_rust_string_editor(parent: &gtk::ApplicationWindow, variable: &Variable) {
+    let editor = gtk::Window::builder()
+        .title(format!("Edit {}", variable.name))
+        .transient_for(parent)
+        .modal(true)
+        .default_width(620)
+        .build();
+    editor.add_css_class("value-editor");
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
+    let expression = gtk::Label::new(Some(&variable.name));
+    expression.add_css_class("local-name");
+    expression.set_halign(gtk::Align::Start);
+    content.append(&expression);
+    let type_name = gtk::Label::new(variable.type_name.as_deref());
+    type_name.add_css_class("local-type");
+    type_name.set_halign(gtk::Align::Start);
+    content.append(&type_name);
+    let explanation = gtk::Label::new(Some(
+        "Rust String editing needs GDB's Rust pretty-printer to locate the backing buffer safely. Start fgdb with rust-gdb, or configure the matching Rust pretty-printer in GDB.",
+    ));
+    explanation.set_halign(gtk::Align::Start);
+    explanation.set_wrap(true);
+    content.append(&explanation);
+    let close = gtk::Button::with_label("Close");
+    close.set_halign(gtk::Align::End);
+    content.append(&close);
+    editor.set_child(Some(&content));
+    connect_escape_to_close(&editor);
+    let editor_for_close = editor.clone();
+    close.connect_clicked(move |_| editor_for_close.close());
+    editor.present();
 }
 
 pub(super) fn open_vector_editor(
@@ -202,11 +1169,23 @@ pub(super) fn open_vector_editor(
             .as_slice(),
     );
     let interpretation = gtk::DropDown::new(Some(interpretations), gtk::Expression::NONE);
+    interpretation.add_css_class("value-editor-select");
     interpretation.set_selected(3);
     interpretation.set_hexpand(true);
     interpretation_row.append(&interpretation_label);
     interpretation_row.append(&interpretation);
     content.append(&interpretation_row);
+
+    let radix_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let radix_label = gtk::Label::new(Some("Integer base"));
+    radix_label.add_css_class("muted");
+    let radix = gtk::DropDown::from_strings(&IntegerRadix::ALL.map(IntegerRadix::label));
+    radix.add_css_class("value-editor-select");
+    radix.set_selected(IntegerRadix::Hexadecimal.index());
+    radix.set_hexpand(true);
+    radix_row.append(&radix_label);
+    radix_row.append(&radix);
+    content.append(&radix_row);
 
     let hint = gtk::Label::new(Some(
         "Each view addresses the same register bits. Apply edits before changing the interpretation; switching views resets unapplied lane edits.",
@@ -230,6 +1209,7 @@ pub(super) fn open_vector_editor(
         &register.value,
         register_bytes,
         VectorLaneFormat::Int64,
+        IntegerRadix::Hexadecimal,
     );
     let scroll = gtk::ScrolledWindow::builder()
         .child(&grid)
@@ -237,6 +1217,11 @@ pub(super) fn open_vector_editor(
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
     content.append(&scroll);
+    let lane_validation = gtk::Label::new(None);
+    lane_validation.add_css_class("value-editor-validation");
+    lane_validation.set_halign(gtk::Align::Start);
+    lane_validation.set_visible(false);
+    content.append(&lane_validation);
 
     let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     actions.set_halign(gtk::Align::End);
@@ -253,31 +1238,84 @@ pub(super) fn open_vector_editor(
     let entries_for_format = Rc::clone(&entries);
     let originals_for_format = Rc::clone(&original_values);
     let register_value = register.value.clone();
+    let radix_for_format = radix.clone();
     interpretation.connect_selected_notify(move |dropdown| {
+        let format = VectorLaneFormat::from_index(dropdown.selected());
+        radix_for_format.set_sensitive(!format.is_float());
         populate_vector_lane_grid(
             &grid_for_format,
             &entries_for_format,
             &originals_for_format,
             &register_value,
             register_bytes,
-            VectorLaneFormat::from_index(dropdown.selected()),
+            format,
+            IntegerRadix::from_index(radix_for_format.selected()),
         );
+    });
+    let grid_for_radix = grid.clone();
+    let entries_for_radix = Rc::clone(&entries);
+    let originals_for_radix = Rc::clone(&original_values);
+    let register_value_for_radix = register.value.clone();
+    let interpretation_for_radix = interpretation.clone();
+    radix.connect_selected_notify(move |radix| {
+        let format = VectorLaneFormat::from_index(interpretation_for_radix.selected());
+        if !format.is_float() {
+            populate_vector_lane_grid(
+                &grid_for_radix,
+                &entries_for_radix,
+                &originals_for_radix,
+                &register_value_for_radix,
+                register_bytes,
+                format,
+                IntegerRadix::from_index(radix.selected()),
+            );
+        }
     });
 
     let editor_for_apply = editor.clone();
     let register_name = register.name;
+    let validation_for_apply = lane_validation;
     apply.connect_clicked(move |_| {
         let format = VectorLaneFormat::from_index(interpretation.selected());
+        let selected_radix = IntegerRadix::from_index(radix.selected());
         let changes = entries
             .borrow()
             .iter()
             .zip(original_values.borrow().iter())
             .enumerate()
-            .filter_map(|(index, (entry, original))| {
+            .map(|(index, (entry, original))| {
                 let value = entry.text().trim().to_owned();
-                (!value.is_empty() && value != *original).then_some((index, value))
+                if value.is_empty() || value == *original {
+                    return Ok(None);
+                }
+                if format.is_float() {
+                    value
+                        .parse::<f64>()
+                        .map_err(|_| ())
+                        .map(|_| Some((index, value)))
+                } else {
+                    let integer_format = value::IntegerFormat::signed(
+                        u32::try_from(format.lane_bytes() * 8).unwrap_or(64),
+                    );
+                    parse_integer_input(&value, integer_format, selected_radix)
+                        .map(|raw| {
+                            Some((
+                                index,
+                                canonical_gdb_integer(raw, integer_format, selected_radix),
+                            ))
+                        })
+                        .map_err(|_| ())
+                }
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(changes) = changes else {
+            validation_for_apply
+                .set_text("At least one lane is invalid for the selected interpretation and base");
+            validation_for_apply.set_visible(true);
+            return;
+        };
+        validation_for_apply.set_visible(false);
+        let changes = changes.into_iter().flatten().collect::<Vec<_>>();
         if !changes.is_empty()
             && let Some(handler) = handler.borrow().as_ref()
         {
@@ -297,6 +1335,7 @@ pub(super) fn populate_vector_lane_grid(
     register_value: &str,
     register_bytes: usize,
     format: VectorLaneFormat,
+    radix: IntegerRadix,
 ) {
     while let Some(child) = grid.first_child() {
         grid.remove(&child);
@@ -307,8 +1346,19 @@ pub(super) fn populate_vector_lane_grid(
     let field = format.field(register_bytes);
     let values = vector_field_values(register_value, &field, lane_count, format)
         .unwrap_or_else(|| vec![String::from("0"); lane_count]);
+    let integer_format =
+        value::IntegerFormat::signed(u32::try_from(format.lane_bytes() * 8).unwrap_or(64));
+    let values = values.into_iter().map(|value| {
+        if format.is_float() {
+            value
+        } else {
+            parse_integer_input(&value, integer_format, IntegerRadix::detect(&value))
+                .map(|raw| format_integer_value(raw, integer_format, radix))
+                .unwrap_or(value)
+        }
+    });
     let columns = if lane_count <= 8 { 2 } else { 4 };
-    for (index, value) in values.into_iter().enumerate() {
+    for (index, value) in values.enumerate() {
         let group = index % columns;
         let row = index / columns;
         let label = gtk::Label::new(Some(&format!("[{index}]")));

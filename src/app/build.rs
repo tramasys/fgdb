@@ -22,7 +22,6 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             return;
         }
     };
-
     ui.connect_debug_controls(&mi_client);
     ui.connect_source_actions();
     let weak_ui = Rc::downgrade(&ui);
@@ -46,9 +45,17 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
-        let _ = client.request(&format!("-thread-select {id}"), move |client, record| {
-            if record.is_done() {
-                refresh_stopped_state(&weak_ui, client);
+        let _ = client.request(&format!("-thread-select {id}"), move |_, record| {
+            if !record.is_done()
+                && let Some(ui) = weak_ui.upgrade()
+            {
+                ui.set_status(
+                    "Thread selection failed",
+                    record
+                        .error_message()
+                        .unwrap_or("GDB rejected the selected thread"),
+                    Some("status-error"),
+                );
             }
         });
     });
@@ -140,11 +147,27 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+    ui.set_kernel_refresh_handler(move || {
+        let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
+            return;
+        };
+        request_kernel_refresh(weak_ui, client);
+    });
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
     ui.set_breakpoint_insert_handler(move |path, line| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
         insert_source_breakpoint(weak_ui.clone(), &client, path, line);
+    });
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
+    ui.set_source_jump_handler(move |path, line| {
+        let Some(client) = weak_client.upgrade() else {
+            return;
+        };
+        run_to_source_line(weak_ui.clone(), &client, path, line);
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
@@ -315,6 +338,14 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+    ui.set_variable_editor_handler(move |variable| {
+        let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
+            return;
+        };
+        request_value_type_metadata(weak_ui, client, variable);
+    });
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
     ui.set_variable_object_assignment_handler(move |variable, value| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
@@ -365,6 +396,22 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 Some("status-error"),
             );
         }
+    });
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
+    ui.set_string_assignment_handler(move |variable, bytes, kind| {
+        let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
+            return;
+        };
+        assign_string(weak_ui, client, variable, bytes, kind);
+    });
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
+    ui.set_float_assignment_handler(move |variable, raw_bytes| {
+        let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
+            return;
+        };
+        assign_float_bytes(weak_ui, client, variable, raw_bytes);
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
@@ -421,6 +468,16 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             return;
         };
         request_variable_children(weak_ui, client, variable, from);
+    });
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
+    ui.set_expression_watch_refresh_handler(move || {
+        let (Some(client), Some(ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
+            return;
+        };
+        let generation = ui.current_stop_refresh_generation();
+        drop(ui);
+        refresh_expression_watches(weak_ui.clone(), &client, generation);
     });
 
     let weak_ui = Rc::downgrade(&ui);

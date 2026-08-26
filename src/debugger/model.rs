@@ -27,6 +27,36 @@ pub struct Variable {
     pub has_more: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ValueTypeKind {
+    Integer,
+    Float,
+    Enum,
+    Boolean,
+    Character,
+    #[default]
+    Other,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EnumVariant {
+    pub name: String,
+    pub value: String,
+}
+
+/// Target-derived facts used by value editors. This is intentionally fetched
+/// on demand: expanding a large locals tree must not issue one GDB query per
+/// value merely to populate the debugger view.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ValueTypeMetadata {
+    pub kind: ValueTypeKind,
+    pub bits: Option<u32>,
+    pub signed: Option<bool>,
+    pub language: Option<String>,
+    pub raw_bytes: Option<Vec<u8>>,
+    pub enum_variants: Vec<EnumVariant>,
+}
+
 impl Variable {
     pub fn is_pointer(&self) -> bool {
         self.type_name.as_deref().is_some_and(|type_name| {
@@ -149,6 +179,9 @@ pub struct Breakpoint {
     pub line: Option<u32>,
     pub original_location: Option<String>,
     pub catch_type: Option<String>,
+    pub disposition: Option<String>,
+    pub hit_count: u64,
+    pub thread: Option<String>,
 }
 
 impl Breakpoint {
@@ -683,6 +716,15 @@ fn expand_breakpoint(tuple: &[MiResult]) -> Vec<Breakpoint> {
                 if location.catch_type.is_none() {
                     location.catch_type.clone_from(&parent.catch_type);
                 }
+                if location.disposition.is_none() {
+                    location.disposition.clone_from(&parent.disposition);
+                }
+                if location.hit_count == 0 {
+                    location.hit_count = parent.hit_count;
+                }
+                if location.thread.is_none() {
+                    location.thread.clone_from(&parent.thread);
+                }
             }
         }
         locations
@@ -704,6 +746,11 @@ fn breakpoint(tuple: &[MiResult]) -> Option<Breakpoint> {
             .or_else(|| owned_constant(tuple, "what"))
             .or_else(|| owned_constant(tuple, "exp")),
         catch_type: owned_constant(tuple, "catch-type"),
+        disposition: owned_constant(tuple, "disp"),
+        hit_count: constant(tuple, "times")
+            .and_then(|times| times.parse().ok())
+            .unwrap_or(0),
+        thread: owned_constant(tuple, "thread"),
     })
 }
 
@@ -831,12 +878,15 @@ mod tests {
 
     #[test]
     fn converts_breakpoint_table() {
-        let record = parse_record(r#"5^done,BreakpointTable={nr_rows="1",body=[bkpt={number="1",type="breakpoint",disp="keep",enabled="y",addr="0x1",func="main",file="a.c",fullname="/tmp/a.c",line="12",cond="count == 4",original-location="main"}]}"#).unwrap();
+        let record = parse_record(r#"5^done,BreakpointTable={nr_rows="1",body=[bkpt={number="1",type="breakpoint",disp="keep",enabled="y",addr="0x1",func="main",file="a.c",fullname="/tmp/a.c",line="12",cond="count == 4",times="7",thread="2",original-location="main"}]}"#).unwrap();
         let parsed_breakpoints = breakpoints(&record);
         assert_eq!(parsed_breakpoints.len(), 1);
         assert_eq!(parsed_breakpoints[0].number, "1");
         assert_eq!(parsed_breakpoints[0].kind, "breakpoint");
         assert_eq!(parsed_breakpoints[0].line, Some(12));
+        assert_eq!(parsed_breakpoints[0].disposition.as_deref(), Some("keep"));
+        assert_eq!(parsed_breakpoints[0].hit_count, 7);
+        assert_eq!(parsed_breakpoints[0].thread.as_deref(), Some("2"));
         assert_eq!(
             parsed_breakpoints[0].condition.as_deref(),
             Some("count == 4")

@@ -9,14 +9,19 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         MiEvent::Ready => {
             ui.set_command_pending(false);
             ui.set_debug_state_stale(false);
+            ui.set_gef_available(false);
             ui.set_status(
                 "Ready",
                 "The native controls and terminal share one GDB process.",
                 Some("status-ready"),
             );
             ui.set_controls_ready(true);
+            detect_gef(weak_ui, client);
             request_initial_source(weak_ui, client);
             refresh_stopped_state(weak_ui, client);
+            refresh_breakpoints(weak_ui, client);
+            ui.take_modules_dirty();
+            refresh_modules(weak_ui, client);
             infer_initial_stop_reason(weak_ui, client);
         }
         MiEvent::Running => {
@@ -29,6 +34,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             // issuing more MI work while the inferior is running.
             ui.start_stop_refresh();
             ui.start_thread_refresh();
+            ui.invalidate_kernel_refresh();
             ui.clear_execution_location();
             ui.set_status(
                 "Running",
@@ -54,6 +60,9 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 ui.set_inferior_started(true);
                 refresh_stopped_state(weak_ui, client);
             }
+            if ui.take_modules_dirty() {
+                refresh_modules(weak_ui, client);
+            }
             ui.show_signal(signal_name.as_deref(), signal_meaning.as_deref());
             ui.set_status(
                 "Paused",
@@ -61,9 +70,20 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 Some("status-ready"),
             );
             ui.set_controls_running(false);
+            ui.refresh_kernel_after_stop();
         }
         MiEvent::BreakpointsChanged => refresh_breakpoints(weak_ui, client),
-        MiEvent::ThreadsChanged => refresh_threads(weak_ui, client),
+        MiEvent::ThreadsChanged => {
+            if !ui.inferior_is_running() {
+                refresh_threads(weak_ui, client);
+            }
+        }
+        MiEvent::LibrariesChanged => {
+            ui.mark_modules_dirty();
+            if !ui.inferior_is_running() && ui.take_modules_dirty() {
+                refresh_modules(weak_ui, client);
+            }
+        }
         MiEvent::SelectionChanged => refresh_stopped_state(weak_ui, client),
         MiEvent::Error(message) => {
             ui.set_command_pending(false);
@@ -72,6 +92,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         MiEvent::Disconnected => {
             ui.set_command_pending(false);
             ui.set_debug_state_stale(true);
+            ui.set_gef_available(false);
             ui.set_status(
                 "Disconnected",
                 "The GDB/MI channel was closed.",
@@ -79,6 +100,26 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             );
             ui.set_controls_ready(false);
         }
+    }
+}
+
+fn detect_gef(ui: &Weak<Ui>, client: &MiClient) {
+    let weak_ui = ui.clone();
+    if client
+        .request("-complete gef", move |_, record| {
+            if let Some(ui) = weak_ui.upgrade() {
+                let available = record.is_done()
+                    && record
+                        .field("completion")
+                        .and_then(|value| value.as_const())
+                        == Some("gef");
+                ui.set_gef_available(available);
+            }
+        })
+        .is_err()
+        && let Some(ui) = ui.upgrade()
+    {
+        ui.set_gef_available(false);
     }
 }
 

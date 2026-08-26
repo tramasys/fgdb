@@ -1,7 +1,7 @@
 use std::{
     cell::{Cell, RefCell},
     cmp::Reverse,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
 };
@@ -13,15 +13,29 @@ use vte4::prelude::*;
 mod layout;
 mod value;
 
-use value::{architecture_pointer_bits, integer_decimal_value};
+#[cfg(test)]
+use value::IntegerFormat;
+pub(crate) use value::StringAssignmentKind;
+use value::{
+    FloatRepresentation, IntegerRadix, StringStorage, architecture_pointer_bits,
+    canonical_gdb_float, canonical_gdb_integer, format_character_value, format_float_value,
+    format_integer_value, format_string_bytes, integer_decimal_value, is_rust_string,
+    parse_character_input, parse_float_value, parse_integer_input, parse_string_input,
+    register_integer_format, string_edit, variable_boolean_value, variable_character_format,
+    variable_float_edit, variable_integer_format, variable_is_address,
+};
 
 use crate::{
     breakpoint_gutter::{BreakpointGutterRenderer, LineStyle},
     config::LaunchConfig,
     debugger::{
         Breakpoint, Instruction, MemoryBlock, MemoryKind, MiClient, Register, SharedLibrary,
-        SourceFile, SourceLocation, StackEntry, StackFrame, ThreadInfo, Variable,
-        context::MemoryRegion,
+        SourceFile, SourceLocation, StackEntry, StackFrame, ThreadInfo, ValueTypeKind,
+        ValueTypeMetadata, Variable, context::MemoryRegion,
+    },
+    kernel::{
+        KernelFileDescriptor, KernelLimit, KernelMapping, KernelMappingChange,
+        KernelMemoryCategory, KernelProcess, KernelSignal, KernelSnapshot, KernelThread,
     },
     source,
     theme::Theme,
@@ -82,17 +96,58 @@ const MORE_SIGNALS: &[(&str, &str)] = &[
 type FrameSelectionHandler = Rc<dyn Fn(u32)>;
 type StringSelectionHandler = Rc<dyn Fn(String)>;
 type VariableAssignmentHandler = Rc<dyn Fn(Variable, String)>;
+type VariableEditorHandler = Rc<dyn Fn(Variable)>;
+type FloatAssignmentHandler = Rc<dyn Fn(Variable, Vec<u8>)>;
 type VariableChildrenHandler = Rc<dyn Fn(Variable, usize)>;
+type ExpressionWatchRefreshHandler = Rc<dyn Fn()>;
+type StringAssignmentHandler = Rc<dyn Fn(Variable, Vec<u8>, StringAssignmentKind)>;
 type VectorAssignmentHandler = Rc<dyn Fn(String, String, Vec<(usize, String)>)>;
 type BreakpointConditionHandler = Rc<dyn Fn(String, Option<String>)>;
 type BreakpointEnabledHandler = Rc<dyn Fn(String, bool)>;
 type BreakpointBulkDeleteHandler = Rc<dyn Fn(Vec<String>)>;
 type BreakpointInsertHandler = Rc<dyn Fn(PathBuf, u32)>;
+type SourceJumpHandler = Rc<dyn Fn(PathBuf, u32)>;
 type SignalCatchpointHandler = Rc<dyn Fn(String, Option<String>)>;
 type EventCatchpointHandler = Rc<dyn Fn(EventCatchpoint, Option<String>)>;
 type WatchpointInsertHandler = Rc<dyn Fn(String, WatchpointAccess)>;
 type MemoryWatchHandler = Rc<dyn Fn(u64, String, usize)>;
 type InstructionMemoryHandler = Rc<dyn Fn(String)>;
+type KernelRefreshHandler = Rc<dyn Fn()>;
+
+#[derive(Clone)]
+struct ValueEditorHandlers {
+    assignment: Rc<RefCell<Option<VariableAssignmentHandler>>>,
+    float: Rc<RefCell<Option<FloatAssignmentHandler>>>,
+    string: Rc<RefCell<Option<StringAssignmentHandler>>>,
+}
+
+#[derive(Default)]
+struct RefreshGate {
+    in_flight: Cell<bool>,
+    queued: Cell<bool>,
+}
+
+impl RefreshGate {
+    fn begin(&self) -> bool {
+        if self.in_flight.replace(true) {
+            self.queued.set(true);
+            false
+        } else {
+            true
+        }
+    }
+
+    fn finish(&self) -> bool {
+        self.in_flight.set(false);
+        self.queued.replace(false)
+    }
+
+    fn invalidate(&self) {
+        if self.in_flight.get() {
+            self.queued.set(true);
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum EventCatchpoint {
@@ -332,6 +387,94 @@ struct StackWordInspector {
     region: gtk::Label,
 }
 
+#[derive(Clone)]
+struct KernelView {
+    root: gtk::Box,
+    active: Rc<Cell<bool>>,
+    tracking_enabled: Rc<Cell<bool>>,
+    in_flight: Rc<Cell<bool>>,
+    needs_refresh: Rc<Cell<bool>>,
+    refresh_button: gtk::Button,
+    status: gtk::Label,
+    warnings: gtk::Box,
+    previous_snapshot: Rc<RefCell<Option<KernelSnapshot>>>,
+    overview_store: gio::ListStore,
+    resource_store: gio::ListStore,
+    change_store: gio::ListStore,
+    mapping_change_store: gio::ListStore,
+    mapping_change_count: gtk::Label,
+    mapping_changes_empty: gtk::Label,
+    changes_split: gtk::Paned,
+    memory_store: gio::ListStore,
+    private_mapping_store: gio::ListStore,
+    memory_summary: KernelMemorySummaryView,
+    memory_empty: gtk::Label,
+    private_mapping_empty: gtk::Label,
+    thread_store: gio::ListStore,
+    thread_count: gtk::Label,
+    threads_empty: gtk::Label,
+    signal_store: gio::ListStore,
+    signal_count: gtk::Label,
+    signals_empty: gtk::Label,
+    mapping_store: gio::ListStore,
+    mapping_count: gtk::Label,
+    mappings_empty: gtk::Label,
+    descriptor_store: gio::ListStore,
+    descriptor_count: gtk::Label,
+    descriptors_empty: gtk::Label,
+    limit_store: gio::ListStore,
+    limit_count: gtk::Label,
+    limits_empty: gtk::Label,
+    process_store: gio::ListStore,
+    process_count: gtk::Label,
+    processes_empty: gtk::Label,
+}
+
+#[derive(Clone)]
+struct KernelOverviewRow {
+    section: bool,
+    section_key: String,
+    label: String,
+    value: String,
+}
+
+#[derive(Clone)]
+struct KernelMemoryRow {
+    category: KernelMemoryCategory,
+    page_size: u64,
+    total_unique: u64,
+}
+
+#[derive(Clone)]
+struct KernelPrivateMappingRow {
+    mapping: KernelMapping,
+    page_size: u64,
+    total_unique: u64,
+}
+
+#[derive(Clone)]
+struct KernelMemorySummaryView {
+    meta: gtk::Label,
+    rows: Vec<KernelMemoryUnitRow>,
+    private_summary: KernelPrivateSummaryView,
+}
+
+#[derive(Clone)]
+struct KernelPrivateSummaryView {
+    total: gtk::Label,
+    clean: gtk::Label,
+    dirty: gtk::Label,
+    mappings: gtk::Label,
+}
+
+#[derive(Clone)]
+struct KernelMemoryUnitRow {
+    kib: gtk::Label,
+    mib: gtk::Label,
+    gib: gtk::Label,
+    pages: gtk::Label,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct MemoryWatchText {
     addresses: String,
@@ -357,6 +500,7 @@ struct SourceOpenContext<'a> {
     style_scheme: Option<&'a sourceview5::StyleScheme>,
     breakpoints: &'a Rc<RefCell<Vec<Breakpoint>>>,
     insert_handler: &'a Rc<RefCell<Option<BreakpointInsertHandler>>>,
+    jump_handler: &'a Rc<RefCell<Option<SourceJumpHandler>>>,
     delete_handler: &'a Rc<RefCell<Option<StringSelectionHandler>>>,
     enabled_handler: &'a Rc<RefCell<Option<BreakpointEnabledHandler>>>,
     symbol_handler: &'a Rc<RefCell<Option<StringSelectionHandler>>>,
@@ -457,6 +601,7 @@ enum MemoryColumn {
     End,
     Size,
     Permissions,
+    Registers,
     Path,
 }
 const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
@@ -477,6 +622,7 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 pub struct Ui {
     pub window: gtk::ApplicationWindow,
     pub terminal: vte4::Terminal,
+    terminal_toggle_button: gtk::ToggleButton,
     pub open_source_button: gtk::Button,
     pub load_symbols_button: gtk::Button,
     pub run_button: gtk::Button,
@@ -488,6 +634,7 @@ pub struct Ui {
     pub finish_button: gtk::Button,
     pub until_button: gtk::ToggleButton,
     until_popover: gtk::Popover,
+    gef_until_section: gtk::Widget,
     pub gef_tools_button: gtk::ToggleButton,
     pub status_label: gtk::Label,
     pub status_detail: gtk::Label,
@@ -496,18 +643,28 @@ pub struct Ui {
     source_documents: Rc<RefCell<Vec<SourceDocument>>>,
     source_theme: Theme,
     source_style_scheme: Option<sourceview5::StyleScheme>,
-    resolved_source_paths: Rc<RefCell<HashMap<String, PathBuf>>>,
+    resolved_source_paths: Rc<RefCell<HashMap<String, Option<PathBuf>>>>,
     call_stack_list: gtk::Box,
     frame_buttons: Rc<RefCell<Vec<(u32, gtk::Button)>>>,
     selected_frame_level: Rc<Cell<u32>>,
     threads_list: gtk::Box,
     modules_list: gtk::Box,
+    latest_modules: Rc<RefCell<Vec<SharedLibrary>>>,
     locals_store: gio::ListStore,
     locals_selection: gtk::SingleSelection,
     locals_view: gtk::ColumnView,
     locals_empty: gtk::Label,
     locals_edit_button: gtk::Button,
+    expression_watches_store: gio::ListStore,
+    expression_watches_selection: gtk::SingleSelection,
+    expression_watches_view: gtk::ColumnView,
+    expression_watches_empty: gtk::Label,
+    expression_watches: Rc<RefCell<Vec<String>>>,
+    expression_watch_entry: gtk::Entry,
+    expression_watch_add_button: gtk::Button,
+    expression_watch_remove_button: gtk::Button,
     target_pointer_bits: Rc<Cell<u32>>,
+    current_source_is_rust: Rc<Cell<bool>>,
     instructions_title: gtk::Label,
     instructions_store: gio::ListStore,
     instructions_selection: gtk::SingleSelection,
@@ -551,21 +708,34 @@ pub struct Ui {
     memory_format: gtk::DropDown,
     memory_add_button: gtk::Button,
     memory_watch_handler: Rc<RefCell<Option<MemoryWatchHandler>>>,
+    kernel_view: KernelView,
+    kernel_refresh_handler: Rc<RefCell<Option<KernelRefreshHandler>>>,
+    kernel_refresh_generation: Rc<Cell<u64>>,
     layout: layout::Persistence,
     breakpoints: Rc<RefCell<Vec<Breakpoint>>>,
     previous_registers: Rc<RefCell<HashMap<String, String>>>,
+    cached_register_names: Rc<RefCell<Option<Rc<Vec<String>>>>>,
     stop_refresh_generation: Rc<Cell<u64>>,
     thread_refresh_generation: Rc<Cell<u64>>,
     breakpoint_refresh_generation: Rc<Cell<u64>>,
+    breakpoint_refresh_gate: Rc<RefreshGate>,
+    module_refresh_gate: Rc<RefreshGate>,
+    modules_dirty: Rc<Cell<bool>>,
     command_pending: Rc<Cell<bool>>,
+    gef_available: Rc<Cell<bool>>,
     source_roots: Rc<Vec<PathBuf>>,
     frame_selection_handler: Rc<RefCell<Option<FrameSelectionHandler>>>,
     thread_selection_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
     instruction_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
+    variable_editor_handler: Rc<RefCell<Option<VariableEditorHandler>>>,
     variable_assignment_handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
+    float_assignment_handler: Rc<RefCell<Option<FloatAssignmentHandler>>>,
+    string_assignment_handler: Rc<RefCell<Option<StringAssignmentHandler>>>,
     variable_children_handler: Rc<RefCell<Option<VariableChildrenHandler>>>,
+    expression_watch_refresh_handler: Rc<RefCell<Option<ExpressionWatchRefreshHandler>>>,
     vector_assignment_handler: Rc<RefCell<Option<VectorAssignmentHandler>>>,
     breakpoint_insert_handler: Rc<RefCell<Option<BreakpointInsertHandler>>>,
+    source_jump_handler: Rc<RefCell<Option<SourceJumpHandler>>>,
     breakpoint_delete_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
     breakpoint_condition_handler: Rc<RefCell<Option<BreakpointConditionHandler>>>,
     breakpoint_enabled_handler: Rc<RefCell<Option<BreakpointEnabledHandler>>>,
@@ -594,6 +764,7 @@ struct Topbar {
     finish_button: gtk::Button,
     until_button: gtk::ToggleButton,
     until_popover: gtk::Popover,
+    gef_until_section: gtk::Widget,
     gef_tools_button: gtk::ToggleButton,
     until_actions: Vec<(gtk::Button, &'static str)>,
     until_condition_entry: gtk::Entry,
@@ -615,6 +786,13 @@ struct Workspace {
     locals_view: gtk::ColumnView,
     locals_empty: gtk::Label,
     locals_edit_button: gtk::Button,
+    expression_watches_store: gio::ListStore,
+    expression_watches_selection: gtk::SingleSelection,
+    expression_watches_view: gtk::ColumnView,
+    expression_watches_empty: gtk::Label,
+    expression_watch_entry: gtk::Entry,
+    expression_watch_add_button: gtk::Button,
+    expression_watch_remove_button: gtk::Button,
     instructions_title: gtk::Label,
     instructions_store: gio::ListStore,
     instructions_selection: gtk::SingleSelection,
@@ -648,6 +826,7 @@ struct Workspace {
     memory_size: gtk::SpinButton,
     memory_format: gtk::DropDown,
     memory_add_button: gtk::Button,
+    kernel_view: KernelView,
 }
 
 struct Inspector {
@@ -660,6 +839,13 @@ struct Inspector {
     locals_view: gtk::ColumnView,
     locals_empty: gtk::Label,
     locals_edit_button: gtk::Button,
+    expression_watches_store: gio::ListStore,
+    expression_watches_selection: gtk::SingleSelection,
+    expression_watches_view: gtk::ColumnView,
+    expression_watches_empty: gtk::Label,
+    expression_watch_entry: gtk::Entry,
+    expression_watch_add_button: gtk::Button,
+    expression_watch_remove_button: gtk::Button,
     instructions_title: gtk::Label,
     instructions_store: gio::ListStore,
     instructions_selection: gtk::SingleSelection,
@@ -693,6 +879,7 @@ struct Inspector {
     memory_size: gtk::SpinButton,
     memory_format: gtk::DropDown,
     memory_add_button: gtk::Button,
+    kernel_view: KernelView,
 }
 
 struct LeftSidebar {
@@ -707,15 +894,18 @@ mod controls;
 mod debug_state;
 mod dialogs;
 mod formatting;
+mod kernel_view;
 mod source_actions;
 mod source_view;
 mod state;
 mod views;
+mod watches;
 
 use build::*;
 use controls::*;
 use dialogs::*;
 use formatting::*;
+use kernel_view::*;
 use source_view::*;
 use views::*;
 
@@ -724,18 +914,35 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        EventCatchpoint, MemoryWatchFormat, VectorLaneFormat, architecture_pointer_bits,
+        EventCatchpoint, IntegerFormat, IntegerRadix, MemoryWatchFormat, RefreshGate,
+        StringStorage, VectorLaneFormat, architecture_pointer_bits,
         breakpoint_command_number_at_address, breakpoint_command_numbers, compact_function_name,
         event_catchpoint_command_number, event_catchpoint_command_numbers, flags_markup,
         format_memory_watch, format_register_value, full_address,
         instruction_arguments_description, instruction_flow_description,
         instruction_memory_expression, integer_decimal_value, normalized_signal_name,
+        parse_character_input, parse_integer_input, parse_string_input, register_integer_format,
         register_value_css, set_breakpoint_enabled, signal_catchpoint_command_number,
         signal_catchpoint_command_numbers, source_location_score, source_symbol_at_offset,
-        source_tab_title, stop_reason_label, thread_os_id, variable_details, variable_value_parts,
-        vector_field_values, without_generic_arguments,
+        source_tab_title, stop_reason_label, string_edit, thread_os_id, variable_boolean_value,
+        variable_character_format, variable_details, variable_integer_format, variable_is_address,
+        variable_value_parts, vector_field_values, without_generic_arguments,
     };
     use crate::debugger::{Breakpoint, Instruction, Register, SourceLocation, Variable};
+
+    #[test]
+    fn coalesces_bursty_model_refreshes() {
+        let gate = RefreshGate::default();
+        assert!(gate.begin());
+        assert!(!gate.begin());
+        assert!(!gate.begin());
+        assert!(gate.finish());
+        assert!(gate.begin());
+        assert!(!gate.finish());
+        assert!(gate.begin());
+        gate.invalidate();
+        assert!(gate.finish());
+    }
 
     #[test]
     fn formats_pointer_words_and_ascii_previews() {
@@ -860,6 +1067,102 @@ mod tests {
         assert_eq!(decimal("_BitInt(17)", "0x1ffff", 64), Some("-1".into()));
         assert_eq!(architecture_pointer_bits("i386:x86-64"), Some(64));
         assert_eq!(architecture_pointer_bits("i386"), Some(32));
+    }
+
+    #[test]
+    fn parses_and_converts_type_aware_editor_values() {
+        let signed = IntegerFormat::signed(32);
+        let unsigned = IntegerFormat::unsigned(16);
+        assert_eq!(
+            parse_integer_input("-1", signed, IntegerRadix::Decimal),
+            Ok(0xffff_ffff)
+        );
+        assert_eq!(
+            parse_integer_input("0xffffffff", signed, IntegerRadix::Hexadecimal),
+            Ok(0xffff_ffff)
+        );
+        assert_eq!(
+            parse_integer_input("1111_1111", unsigned, IntegerRadix::Binary),
+            Ok(255)
+        );
+        assert_eq!(
+            parse_integer_input("0o177", unsigned, IntegerRadix::Decimal),
+            Ok(127)
+        );
+        assert!(
+            parse_integer_input("32768", IntegerFormat::signed(16), IntegerRadix::Decimal).is_err()
+        );
+        assert!(parse_integer_input("-1", unsigned, IntegerRadix::Decimal).is_err());
+
+        assert_eq!(parse_character_input("'A'", unsigned), Ok(65));
+        assert_eq!(parse_character_input("\\n", unsigned), Ok(10));
+        assert!(parse_character_input("AB", unsigned).is_err());
+        assert_eq!(
+            parse_string_input(r"line\nA\101\x42\\"),
+            Ok(b"line\nAAB\\".to_vec())
+        );
+    }
+
+    #[test]
+    fn chooses_safe_editor_semantics_from_type_and_register_role() {
+        let variable = |name: &str, type_name: &str, value: &str| Variable {
+            name: name.to_owned(),
+            value: value.to_owned(),
+            type_name: Some(type_name.to_owned()),
+            varobj: None,
+            num_children: 0,
+            has_more: false,
+        };
+        assert_eq!(
+            variable_integer_format(&variable("count", "std::uint32_t", "0x2a"), 64, None),
+            Some(IntegerFormat::unsigned(32))
+        );
+        assert_eq!(
+            variable_character_format(
+                &variable("separator", "char16_t", "65 'A'"),
+                64,
+                false,
+                None,
+            ),
+            Some(IntegerFormat::unsigned(16))
+        );
+        assert_eq!(
+            variable_character_format(&variable("letter", "char", "'🦀'"), 64, true, None),
+            Some(IntegerFormat::unsigned(32))
+        );
+        assert!(variable_is_address(&variable(
+            "data",
+            "char *",
+            "0x1000 \"x\""
+        )));
+        assert!(register_integer_format("$rax", 64).is_some());
+        assert!(register_integer_format("$rsp", 64).is_none());
+        assert_eq!(
+            variable_boolean_value(&variable("enabled", "bool", "true"), None),
+            Some(true)
+        );
+        assert_eq!(
+            variable_boolean_value(&variable("enabled", "const _Bool", "0"), None),
+            Some(false)
+        );
+        assert_eq!(
+            variable_boolean_value(&variable("enabled", "core::ffi::c_bool", "0x1"), None),
+            Some(true)
+        );
+
+        let c_buffer = string_edit(&variable("text", "char[8]", r#""hello""#)).unwrap();
+        assert_eq!(
+            c_buffer.storage,
+            StringStorage::Buffer {
+                capacity: 7,
+                pointer: false
+            }
+        );
+        let cpp = string_edit(&variable("text", "std::string &", r#""hello""#)).unwrap();
+        assert_eq!(cpp.storage, StringStorage::CppString);
+        let rust = string_edit(&variable("text", "alloc::string::String", r#""hello""#)).unwrap();
+        assert_eq!(rust.storage, StringStorage::RustString { length: 5 });
+        assert!(string_edit(&variable("wide", "char32_t[8]", r#"U"hello""#)).is_none());
     }
 
     #[test]
@@ -1125,6 +1428,9 @@ mod tests {
             fullname: None,
             line: None,
             original_location: None,
+            disposition: Some(String::from("keep")),
+            hit_count: 0,
+            thread: None,
         };
         let stop_points = vec![
             stop_point("1.1", "breakpoint"),
