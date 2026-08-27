@@ -1478,6 +1478,19 @@ paned > separator {{
 
 paned.workspace-columns > separator:hover {{ background: @app_accent; }}
 
+/* Keep the inspector resize handle functional without drawing a seam through
+   both the source area and the terminal below it. */
+paned.workspace-inspector-split > separator {{
+    min-width: 1px;
+    margin: 0;
+    padding: 0;
+    background: @app_surface;
+    background-image: none;
+    border: 0;
+}}
+
+paned.workspace-inspector-split > separator:hover {{ background: @app_accent; }}
+
 paned.context-split > separator {{
     min-height: 3px;
     background: alpha(@app_fg, 0.06);

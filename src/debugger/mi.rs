@@ -457,8 +457,12 @@ impl MiClient {
     }
 
     fn start_next_scoped_request(&self) {
-        while self.scoped_request.borrow().is_none() {
-            let Some(request) = self.scoped_queue.borrow_mut().pop_front() else {
+        loop {
+            if self.scoped_request.borrow().is_some() {
+                return;
+            }
+            let request = { self.scoped_queue.borrow_mut().pop_front() };
+            let Some(request) = request else {
                 return;
             };
             if request.deadline <= Instant::now() {
@@ -689,7 +693,8 @@ impl MiClient {
         };
         for (token, stale) in expired {
             self.outgoing.borrow_mut().cancel_unstarted(token);
-            if let Some(request) = self.pending.borrow_mut().remove(&token) {
+            let request = { self.pending.borrow_mut().remove(&token) };
+            if let Some(request) = request {
                 (request.handler)(
                     self,
                     error_record(if stale {
@@ -710,9 +715,13 @@ impl MiClient {
                 None
             }
         });
-        if let Some(reason) = scoped_reason
-            && let Some(request) = self.scoped_request.borrow_mut().take()
-        {
+        let expired_scoped = scoped_reason.and_then(|reason| {
+            self.scoped_request
+                .borrow_mut()
+                .take()
+                .map(|request| (reason, request))
+        });
+        if let Some((reason, request)) = expired_scoped {
             self.outgoing.borrow_mut().cancel_unstarted(request.token);
             (request.handler)(self, error_record(reason));
             self.start_next_scoped_request();
@@ -751,7 +760,8 @@ impl MiClient {
                     .as_ref()
                     .is_some_and(|request| record.token == Some(request.token));
                 if scoped {
-                    let Some(request) = self.scoped_request.borrow_mut().take() else {
+                    let request = { self.scoped_request.borrow_mut().take() };
+                    let Some(request) = request else {
                         return;
                     };
                     let response = request.response.unwrap_or_else(|| {

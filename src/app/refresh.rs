@@ -106,6 +106,56 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     refresh_threads(ui, client);
 }
 
+/// Add the expensive pointer-chain details for an inspector page from the
+/// current stop cache. Switching tabs must never invalidate and rebuild the
+/// complete stopped state.
+pub(crate) fn refresh_cached_inspector_details(ui: &Weak<Ui>, client: &MiClient, page: u32) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+    let generation = current_ui.current_stop_refresh_generation();
+    match page {
+        2 => {
+            let Some(registers) = current_ui.registers_for_details(generation) else {
+                return;
+            };
+            drop(current_ui);
+            enrich_registers(ui.clone(), client, generation, registers);
+        }
+        3 => {
+            let Some(entries) = current_ui.stack_for_details(generation) else {
+                return;
+            };
+            let Some(registers) = current_ui.registers_for_details(generation) else {
+                return;
+            };
+            let architecture = current_ui.target_architecture();
+            let Some(stack_register) =
+                architecture.stack_pointer(registers.iter().map(|register| register.name.as_str()))
+            else {
+                return;
+            };
+            let Some(endian) = current_ui.target_endian() else {
+                return;
+            };
+            let word_size = usize::try_from(current_ui.target_pointer_bits() / 8)
+                .unwrap_or(8)
+                .clamp(4, 8);
+            drop(current_ui);
+            enrich_stack(
+                ui.clone(),
+                client,
+                generation,
+                entries,
+                stack_register,
+                word_size,
+                endian,
+            );
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn refresh_registers(
     ui: &Weak<Ui>,
     client: &MiClient,
@@ -524,18 +574,20 @@ pub(super) fn enrich_registers(
     generation: u64,
     registers: Vec<Register>,
 ) {
-    if !stop_refresh_is_current(&ui, generation) {
+    if registers.is_empty() || !stop_refresh_is_current(&ui, generation) {
         return;
     }
-    if !ui.upgrade().is_some_and(|ui| ui.register_details_visible()) {
-        return;
-    }
-    let Some((endian, architecture, pointer_bits)) = ui.upgrade().and_then(|ui| {
-        ui.target_endian()
-            .map(|endian| (endian, ui.target_architecture(), ui.target_pointer_bits()))
-    }) else {
+    let Some(current_ui) = ui.upgrade() else {
         return;
     };
+    if !current_ui.register_details_visible() {
+        return;
+    }
+    let Some(endian) = current_ui.target_endian() else {
+        return;
+    };
+    let architecture = current_ui.target_architecture();
+    let pointer_bits = current_ui.target_pointer_bits();
     let indices = registers
         .iter()
         .enumerate()
@@ -545,9 +597,13 @@ pub(super) fn enrich_registers(
         })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    if indices.is_empty() {
+    // Do not consume this generation's one enrichment attempt until all
+    // prerequisites are present and there is actual work to schedule. ABI
+    // discovery can finish after the first register response.
+    if indices.is_empty() || !current_ui.claim_register_details(generation) {
         return;
     }
+    drop(current_ui);
 
     let refresh = Rc::new(RefCell::new(RegisterRefresh {
         ui,
@@ -844,8 +900,19 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
                 // Register names can be ambiguous (notably numbered RISC,
                 // MIPS, PowerPC and s390 registers). Rebind rows once the
                 // executable resolves the architecture so grouping, widths
-                // and semantic colors are correct on the first stop.
-                current_ui.show_registers_for_refresh(generation, &registers);
+                // and semantic colors are correct on the first stop. Use the
+                // current generation's cached rows rather than the captured
+                // raw response: pointer-chain enrichment may already have
+                // completed while the PID/ABI request was in flight.
+                if let Some(current_registers) = current_ui.registers_for_details(generation) {
+                    current_ui.show_registers_for_refresh(generation, &current_registers);
+                    // If the initial enrichment was deferred because target
+                    // byte order or architecture was not known yet, ABI
+                    // discovery is the event that makes it runnable. An
+                    // already active/completed attempt is rejected by the
+                    // per-generation claim.
+                    enrich_registers(ui.clone(), client, generation, current_registers);
+                }
             }
             let mut regions = pid
                 .zip(debugger_pid)
@@ -1080,10 +1147,13 @@ pub(super) fn enrich_stack(
     word_size: usize,
     endian: TargetEndian,
 ) {
-    if !stop_refresh_is_current(&ui, generation) {
+    if entries.is_empty() || !stop_refresh_is_current(&ui, generation) {
         return;
     }
-    if !ui.upgrade().is_some_and(|ui| ui.stack_details_visible()) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+    if !current_ui.stack_details_visible() {
         return;
     }
     let indices = entries
@@ -1097,9 +1167,10 @@ pub(super) fn enrich_stack(
         })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    if indices.is_empty() {
+    if indices.is_empty() || !current_ui.claim_stack_details(generation) {
         return;
     }
+    drop(current_ui);
     let refresh = Rc::new(RefCell::new(StackRefresh {
         ui,
         generation,

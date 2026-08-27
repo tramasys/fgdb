@@ -123,10 +123,15 @@ impl Ui {
             current_instruction: Rc::new(RefCell::new(None)),
             current_instruction_memory_expression: Rc::new(RefCell::new(None)),
             latest_registers: Rc::new(RefCell::new(Vec::new())),
+            latest_registers_generation: Rc::new(Cell::new(None)),
+            register_details_generation: Rc::new(Cell::new(None)),
             instruction_memory_handler: Rc::new(RefCell::new(None)),
             register_groups: workspace.register_groups,
             registers_empty: workspace.registers_empty,
             stack_store: workspace.stack_store,
+            latest_stack: Rc::new(RefCell::new(Vec::new())),
+            latest_stack_generation: Rc::new(Cell::new(None)),
+            stack_details_generation: Rc::new(Cell::new(None)),
             stack_empty: workspace.stack_empty,
             breakpoints_list: workspace.breakpoints_list,
             delete_all_breakpoints_button: workspace.delete_all_breakpoints_button,
@@ -293,16 +298,29 @@ impl Ui {
                 if !matches!(page, 2 | 3) {
                     return;
                 }
-                let Some(ui) = weak_ui.upgrade() else {
-                    return;
-                };
-                if ui.debugger_ready.get()
-                    && ui.inferior_started.get()
-                    && !ui.inferior_running.get()
-                    && !ui.command_pending.get()
-                {
-                    crate::app::refresh_stopped_state(&Rc::downgrade(&ui), &client_for_inspector);
-                }
+                // GTK can emit `switch-page` before `current_page()` exposes
+                // the new page. Enrichment checks visibility to avoid doing
+                // expensive pointer walks for hidden tabs, so defer it by one
+                // main-loop turn and verify that this page is still active.
+                let weak_ui = weak_ui.clone();
+                let client = Rc::clone(&client_for_inspector);
+                glib::idle_add_local_once(move || {
+                    let Some(ui) = weak_ui.upgrade() else {
+                        return;
+                    };
+                    if ui.inspector_notebook.current_page() == Some(page)
+                        && ui.debugger_ready.get()
+                        && ui.inferior_started.get()
+                        && !ui.inferior_running.get()
+                        && !ui.command_pending.get()
+                    {
+                        crate::app::refresh_cached_inspector_details(
+                            &Rc::downgrade(&ui),
+                            &client,
+                            page,
+                        );
+                    }
+                });
             });
         let client_for_run = Rc::clone(client);
         let weak_ui = Rc::downgrade(self);

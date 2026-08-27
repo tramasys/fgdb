@@ -59,6 +59,11 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         } => {
             ui.set_command_pending(false);
             ui.set_debug_state_stale(false);
+            // The preceding *running event marks the inferior as running, but
+            // stopped-state queries intentionally refuse to run in that state.
+            // Clear it before populating context, source marks, registers and
+            // stack data.
+            ui.set_controls_running(false);
             let reason = reason.unwrap_or_else(|| String::from("stopped"));
             ui.set_thread_stop_reason(Some(&reason));
             if reason.starts_with("exited") {
@@ -78,7 +83,6 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 &format!("GDB reported: {}", reason.replace('-', " ")),
                 Some("status-ready"),
             );
-            ui.set_controls_running(false);
             ui.refresh_kernel_after_stop();
         }
         MiEvent::BreakpointsChanged => refresh_breakpoints(weak_ui, client),

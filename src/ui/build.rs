@@ -420,10 +420,12 @@ pub(super) fn build_workspace(
 ) -> Workspace {
     let workspace = gtk::Paned::new(gtk::Orientation::Horizontal);
     workspace.add_css_class("workspace-columns");
+    workspace.add_css_class("workspace-inspector-split");
     workspace.set_vexpand(true);
     workspace.set_position(980);
     workspace.set_shrink_start_child(false);
     workspace.set_resize_start_child(true);
+    workspace.set_wide_handle(false);
     let inspector = build_inspector(
         variable_children_handler,
         target_pointer_bits,

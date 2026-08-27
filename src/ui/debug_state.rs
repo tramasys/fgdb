@@ -622,6 +622,7 @@ impl Ui {
     }
 
     pub fn show_registers(&self, registers: &[Register]) {
+        self.latest_registers_generation.set(None);
         for group in &self.register_groups {
             group.panel.set_visible(false);
             if registers.is_empty() {
@@ -713,10 +714,24 @@ impl Ui {
     pub fn show_registers_for_refresh(&self, generation: u64, registers: &[Register]) {
         if self.is_stop_refresh_current(generation) {
             self.show_registers(registers);
+            self.latest_registers_generation.set(Some(generation));
         }
     }
 
+    pub(crate) fn registers_for_details(&self, generation: u64) -> Option<Vec<Register>> {
+        (self.latest_registers_generation.get() == Some(generation))
+            .then(|| self.latest_registers.borrow().clone())
+            .filter(|registers| !registers.is_empty())
+    }
+
+    pub(crate) fn claim_register_details(&self, generation: u64) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self.register_details_generation.replace(Some(generation)) != Some(generation)
+    }
+
     pub fn show_stack(&self, entries: &[StackEntry]) {
+        self.latest_stack_generation.set(None);
+        self.latest_stack.replace(entries.to_vec());
         replace_boxed_store(&self.stack_store, entries.iter().cloned());
         if entries.is_empty() {
             self.stack_empty
@@ -730,13 +745,27 @@ impl Ui {
     pub fn show_stack_for_refresh(&self, generation: u64, entries: &[StackEntry]) {
         if self.is_stop_refresh_current(generation) {
             self.show_stack(entries);
+            self.latest_stack_generation.set(Some(generation));
         }
+    }
+
+    pub(crate) fn stack_for_details(&self, generation: u64) -> Option<Vec<StackEntry>> {
+        (self.latest_stack_generation.get() == Some(generation))
+            .then(|| self.latest_stack.borrow().clone())
+            .filter(|entries| !entries.is_empty())
+    }
+
+    pub(crate) fn claim_stack_details(&self, generation: u64) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self.stack_details_generation.replace(Some(generation)) != Some(generation)
     }
 
     pub fn show_stack_unavailable_for_refresh(&self, generation: u64, reason: &str) {
         if !self.is_stop_refresh_current(generation) {
             return;
         }
+        self.latest_stack.replace(Vec::new());
+        self.latest_stack_generation.set(Some(generation));
         self.stack_store.remove_all();
         self.stack_empty.set_text(reason);
         self.stack_empty.set_visible(true);
