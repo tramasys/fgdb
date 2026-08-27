@@ -118,6 +118,12 @@ const MAX_MI_WRITE_BATCH_BYTES: usize = 256 * 1024;
 const MAX_PENDING_REQUESTS: usize = 4096;
 const MAX_SCOPED_REQUESTS: usize = 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const SESSION_INITIALIZATION_COMMANDS: [&str; 2] = [
+    "-gdb-set mi-async on",
+    // GDB only creates dynamic variable objects backed by C++/Rust Python
+    // visualizers after an MI frontend explicitly enables pretty-printing.
+    "-enable-pretty-printing",
+];
 const REQUEST_TIMEOUT_POLL: Duration = Duration::from_millis(250);
 
 struct PendingRequest {
@@ -732,7 +738,12 @@ impl MiClient {
     fn process_line(&self, line: &str) {
         if line.trim() == "(gdb)" {
             if !self.ready.replace(true) {
-                let _ = self.request("-gdb-set mi-async on", |_, _| {});
+                // Publish Ready only after both initialization commands have
+                // entered the FIFO. Requests issued by the Ready handler are
+                // therefore always written after pretty-printing is enabled.
+                for command in SESSION_INITIALIZATION_COMMANDS {
+                    let _ = self.request(command, |_, _| {});
+                }
                 (self.event_handler)(self, MiEvent::Ready);
             }
             return;
@@ -1188,8 +1199,9 @@ pub fn quote(argument: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MiListItem, MiValue, OutgoingQueue, drain_outgoing, parse_record, parse_stream_output,
-        quote, result_field, scoped_mi_command, take_complete_input, validate_mi_command,
+        MiListItem, MiValue, OutgoingQueue, SESSION_INITIALIZATION_COMMANDS, drain_outgoing,
+        parse_record, parse_stream_output, quote, result_field, scoped_mi_command,
+        take_complete_input, validate_mi_command,
     };
 
     struct BackpressuredWriter;
@@ -1202,6 +1214,14 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn initializes_mi_async_and_dynamic_pretty_printing() {
+        assert_eq!(
+            SESSION_INITIALIZATION_COMMANDS,
+            ["-gdb-set mi-async on", "-enable-pretty-printing"]
+        );
     }
 
     #[test]

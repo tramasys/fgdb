@@ -408,7 +408,9 @@ pub(super) fn request_variable_children(
     let Some(varobj) = variable.varobj.clone() else {
         return;
     };
-    if variable.num_children > 0 {
+    // Dynamic varobjs may advertise available pretty-printed children only
+    // through `has_more`; GDB documents `numchild` as unreliable for them.
+    if variable.num_children > 0 || variable.has_more {
         let to = from.saturating_add(VARIABLE_CHILD_PAGE_SIZE);
         let command = format!(
             "-var-list-children --all-values {} {from} {to}",

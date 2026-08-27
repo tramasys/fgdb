@@ -644,6 +644,70 @@ enum MemoryColumn {
     Registers,
     Path,
 }
+
+pub(crate) const GEF_COMMAND_CAPABILITIES: &[&str] = &[
+    "xinfo",
+    "ii",
+    "registers",
+    "telescope",
+    "dumpargs",
+    "syscall-args",
+    "future-calls",
+    "stack-frame",
+    "vmmap",
+    "proc-info",
+    "xfiles",
+    "argv",
+    "envp",
+    "fds",
+    "auxv",
+    "errno",
+    "tls",
+    "follow",
+    "checksec",
+    "elf-info",
+    "got",
+    "got-all",
+    "canary",
+    "dwarf-exception-handler",
+    "dynamic",
+    "link-map",
+    "heap bins-simple",
+    "heap arenas",
+    "heap chunks",
+    "heap top",
+    "heap parse",
+    "dt",
+    "exec-until call",
+    "exec-until ret",
+    "exec-until syscall",
+    "exec-until indirect-branch",
+    "exec-until all-branch",
+    "exec-until memaccess",
+    "exec-until user-code",
+    "exec-until libc-code",
+    "exec-until region-change",
+    "exec-until cond",
+];
+
+#[derive(Clone)]
+struct GefCapabilityControl {
+    widget: gtk::Widget,
+    capability: &'static str,
+}
+
+#[derive(Clone)]
+struct GefCapabilityGroup {
+    widget: gtk::Widget,
+    capabilities: Vec<&'static str>,
+}
+
+struct GefToolsMenu {
+    button: gtk::ToggleButton,
+    controls: Vec<GefCapabilityControl>,
+    groups: Vec<GefCapabilityGroup>,
+}
+
 const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 //
 // Source opens automatically at the first source-backed stop.
@@ -675,7 +739,10 @@ pub struct Ui {
     pub until_button: gtk::ToggleButton,
     until_popover: gtk::Popover,
     gef_until_section: gtk::Widget,
+    gef_until_controls: Vec<GefCapabilityControl>,
     pub gef_tools_button: gtk::ToggleButton,
+    gef_tool_controls: Vec<GefCapabilityControl>,
+    gef_tool_groups: Vec<GefCapabilityGroup>,
     pub status_label: gtk::Label,
     pub status_detail: gtk::Label,
     debug_state_panels: Vec<gtk::Widget>,
@@ -815,7 +882,10 @@ struct Topbar {
     until_button: gtk::ToggleButton,
     until_popover: gtk::Popover,
     gef_until_section: gtk::Widget,
+    gef_until_controls: Vec<GefCapabilityControl>,
     gef_tools_button: gtk::ToggleButton,
+    gef_tool_controls: Vec<GefCapabilityControl>,
+    gef_tool_groups: Vec<GefCapabilityGroup>,
     until_actions: Vec<(gtk::Button, &'static str)>,
     until_condition_entry: gtk::Entry,
     until_condition_button: gtk::Button,
@@ -962,11 +1032,11 @@ use views::*;
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{collections::HashSet, path::Path};
 
     use super::{
-        EventCatchpoint, IntegerFormat, IntegerRadix, MemoryWatchFormat, RefreshGate,
-        StringStorage, VectorLaneFormat, breakpoint_command_number_at_address,
+        EventCatchpoint, GEF_COMMAND_CAPABILITIES, IntegerFormat, IntegerRadix, MemoryWatchFormat,
+        RefreshGate, StringStorage, VectorLaneFormat, breakpoint_command_number_at_address,
         breakpoint_command_numbers, compact_function_name, conditional_branch_taken,
         event_catchpoint_command_number, event_catchpoint_command_numbers, flags_markup,
         format_memory_watch, format_register_value, format_register_value_for_architecture,
@@ -984,6 +1054,15 @@ mod tests {
         Breakpoint, Instruction, Register, SourceLocation, TargetArchitecture, TargetEndian,
         Variable,
     };
+
+    #[test]
+    fn gef_capability_probes_are_unique() {
+        let unique = GEF_COMMAND_CAPABILITIES
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        assert_eq!(unique.len(), GEF_COMMAND_CAPABILITIES.len());
+    }
 
     #[test]
     fn coalesces_bursty_model_refreshes() {

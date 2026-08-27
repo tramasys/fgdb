@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     fmt::Write as _,
     path::PathBuf,
     rc::{Rc, Weak},

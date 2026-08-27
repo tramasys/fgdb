@@ -9,7 +9,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         MiEvent::Ready => {
             ui.set_command_pending(false);
             ui.set_debug_state_stale(false);
-            ui.set_gef_available(false);
+            ui.clear_gef_capabilities();
             ui.reset_target_abi();
             ui.set_status(
                 "Ready",
@@ -109,7 +109,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         MiEvent::Disconnected => {
             ui.set_command_pending(false);
             ui.set_debug_state_stale(true);
-            ui.set_gef_available(false);
+            ui.clear_gef_capabilities();
             ui.set_inferior_started(false);
             ui.reset_target_abi();
             ui.clear_debugger_state();
@@ -220,20 +220,78 @@ fn detect_target_endian(ui: &Weak<Ui>, client: &MiClient) {
 fn detect_gef(ui: &Weak<Ui>, client: &MiClient) {
     let weak_ui = ui.clone();
     if client
-        .request("-complete gef", move |_, record| {
-            if let Some(ui) = weak_ui.upgrade() {
-                let available = record.is_done()
-                    && record
-                        .field("completion")
-                        .and_then(|value| value.as_const())
-                        == Some("gef");
-                ui.set_gef_available(available);
+        .request("-complete gef", move |client, record| {
+            if crate::debugger::has_exact_command_completion(&record, "gef") {
+                detect_gef_capabilities(weak_ui, client);
+            } else if let Some(ui) = weak_ui.upgrade() {
+                ui.clear_gef_capabilities();
             }
         })
         .is_err()
         && let Some(ui) = ui.upgrade()
     {
-        ui.set_gef_available(false);
+        ui.clear_gef_capabilities();
+    }
+}
+
+struct GefCapabilityDiscovery {
+    ui: Weak<Ui>,
+    next: usize,
+    available: HashSet<&'static str>,
+}
+
+fn detect_gef_capabilities(ui: Weak<Ui>, client: &MiClient) {
+    let capabilities = crate::ui::GEF_COMMAND_CAPABILITIES;
+    if capabilities.is_empty() {
+        if let Some(ui) = ui.upgrade() {
+            ui.show_gef_capabilities(&HashSet::new());
+        }
+        return;
+    }
+
+    let discovery = Rc::new(RefCell::new(GefCapabilityDiscovery {
+        ui,
+        next: 0,
+        available: HashSet::with_capacity(capabilities.len()),
+    }));
+    probe_next_gef_capability(client, discovery);
+}
+
+fn probe_next_gef_capability(client: &MiClient, discovery: Rc<RefCell<GefCapabilityDiscovery>>) {
+    loop {
+        let capability = {
+            let mut discovery = discovery.borrow_mut();
+            if discovery.ui.upgrade().is_none() {
+                return;
+            }
+            let Some(&capability) = crate::ui::GEF_COMMAND_CAPABILITIES.get(discovery.next) else {
+                let Some(ui) = discovery.ui.upgrade() else {
+                    return;
+                };
+                ui.show_gef_capabilities(&discovery.available);
+                return;
+            };
+            discovery.next += 1;
+            capability
+        };
+        let command = format!("-complete {}", crate::debugger::quote(capability));
+        let discovery_for_response = Rc::clone(&discovery);
+        if client
+            .request(&command, move |client, record| {
+                if crate::debugger::has_exact_command_completion(&record, capability) {
+                    discovery_for_response
+                        .borrow_mut()
+                        .available
+                        .insert(capability);
+                }
+                probe_next_gef_capability(client, discovery_for_response);
+            })
+            .is_ok()
+        {
+            return;
+        }
+        // A saturated or disconnected MI client rejected this probe. Skip it
+        // without recursively walking the remaining capability list.
     }
 }
 

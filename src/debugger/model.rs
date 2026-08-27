@@ -69,6 +69,7 @@ impl Variable {
     pub fn can_expand(&self) -> bool {
         self.varobj.is_some()
             && (self.num_children > 0
+                || self.has_more
                 || (self.is_pointer()
                     && !matches!(
                         self.value.trim(),
@@ -646,6 +647,10 @@ pub fn current_source(record: &MiRecord) -> Option<SourceFile> {
     })
 }
 
+pub fn has_exact_command_completion(record: &MiRecord, command: &str) -> bool {
+    record.is_done() && record.field("completion").and_then(MiValue::as_const) == Some(command)
+}
+
 fn expand_breakpoint(tuple: &[MiResult]) -> Vec<Breakpoint> {
     let parent = breakpoint(tuple);
     let mut locations: Vec<_> = result_field(tuple, "locations")
@@ -740,10 +745,10 @@ fn owned_constant(tuple: &[MiResult], name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        breakpoints, compact_register_numbers, current_source, inferior_pid, inserted_breakpoints,
-        instructions, memory_block, register_names, registers, shared_libraries, source_locations,
-        stack_frames, threads, variable_children, variable_children_have_more, variable_object,
-        variable_path_expression, variables,
+        breakpoints, compact_register_numbers, current_source, has_exact_command_completion,
+        inferior_pid, inserted_breakpoints, instructions, memory_block, register_names, registers,
+        shared_libraries, source_locations, stack_frames, threads, variable_children,
+        variable_children_have_more, variable_object, variable_path_expression, variables,
     };
     use crate::debugger::mi::parse_record;
     use crate::debugger::{TargetArchitecture, TargetEndian};
@@ -758,6 +763,26 @@ mod tests {
             TargetEndian::from_gdb_description("The target is set to big endian"),
             Some(TargetEndian::Big)
         );
+    }
+
+    #[test]
+    fn distinguishes_exact_cli_commands_from_prefix_matches() {
+        let exact = parse_record(
+            r#"1^done,completion="dt",matches=["dt","dtor-dump"],max_completions_reached="0""#,
+        )
+        .unwrap();
+        assert!(has_exact_command_completion(&exact, "dt"));
+        assert!(!has_exact_command_completion(&exact, "dtor"));
+
+        let nested = parse_record(
+            r#"2^done,completion="heap bins",matches=["heap bins","heap bins-simple"],max_completions_reached="0""#,
+        )
+        .unwrap();
+        assert!(has_exact_command_completion(&nested, "heap bins"));
+        assert!(!has_exact_command_completion(&nested, "heap bins-simple"));
+
+        let missing = parse_record(r#"3^done,matches=[],max_completions_reached="0""#).unwrap();
+        assert!(!has_exact_command_completion(&missing, "future-calls"));
     }
 
     #[test]
@@ -954,6 +979,18 @@ mod tests {
         .unwrap();
         assert!(reference.is_pointer());
         assert!(reference.needs_variable_object());
+
+        let dynamic = variable_object(
+            &parse_record(
+                r#"10^done,name="var3",numchild="0",value="std::vector of length 3",type="std::vector<int>",dynamic="1",has_more="1""#,
+            )
+            .unwrap(),
+            "numbers",
+        )
+        .unwrap();
+        assert_eq!(dynamic.num_children, 0);
+        assert!(dynamic.has_more);
+        assert!(dynamic.can_expand());
 
         let children_record = parse_record(
             r#"11^done,numchild="2",children=[child={name="var1.x",exp="x",numchild="0",type="int",value="1"},child={name="var1.nested",exp="nested",numchild="1",type="struct Inner",value="{...}",has_more="0"}],has_more="1""#,

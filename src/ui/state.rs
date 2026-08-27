@@ -78,7 +78,10 @@ impl Ui {
             until_button: topbar.until_button,
             until_popover: topbar.until_popover,
             gef_until_section: topbar.gef_until_section,
+            gef_until_controls: topbar.gef_until_controls,
             gef_tools_button: topbar.gef_tools_button,
+            gef_tool_controls: topbar.gef_tool_controls,
+            gef_tool_groups: topbar.gef_tool_groups,
             status_label: topbar.status_label,
             status_detail: workspace.status_detail,
             debug_state_panels: workspace.debug_state_panels,
@@ -579,13 +582,49 @@ impl Ui {
         self.update_control_sensitivity();
     }
 
-    pub fn set_gef_available(&self, available: bool) {
-        self.gef_available.set(available);
-        self.gef_until_section.set_visible(available);
-        if !available {
+    pub fn clear_gef_capabilities(&self) {
+        self.set_gef_capabilities(false, &HashSet::new());
+    }
+
+    pub fn show_gef_capabilities(&self, capabilities: &HashSet<&'static str>) {
+        self.set_gef_capabilities(true, capabilities);
+    }
+
+    fn set_gef_capabilities(&self, gef_available: bool, capabilities: &HashSet<&'static str>) {
+        self.gef_available.set(gef_available);
+        for control in self
+            .gef_tool_controls
+            .iter()
+            .chain(&self.gef_until_controls)
+        {
+            control
+                .widget
+                .set_visible(gef_available && capabilities.contains(control.capability));
+        }
+        for group in &self.gef_tool_groups {
+            group.widget.set_visible(
+                gef_available
+                    && group
+                        .capabilities
+                        .iter()
+                        .any(|capability| capabilities.contains(capability)),
+            );
+        }
+        let tools_available = gef_available
+            && self
+                .gef_tool_controls
+                .iter()
+                .any(|control| capabilities.contains(control.capability));
+        let until_available = gef_available
+            && self
+                .gef_until_controls
+                .iter()
+                .any(|control| capabilities.contains(control.capability));
+        self.gef_until_section.set_visible(until_available);
+        if !tools_available {
             self.gef_tools_button.set_active(false);
         }
-        self.gef_tools_button.set_visible(available);
+        self.gef_tools_button.set_visible(tools_available);
         self.update_control_sensitivity();
     }
 

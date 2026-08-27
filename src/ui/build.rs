@@ -45,7 +45,7 @@ pub(super) fn build_topbar(
     terminal_toggle.set_tooltip_text(Some("Show or hide the interactive GDB terminal · Ctrl+`"));
     leading.append(&terminal_toggle);
     let gef_tools = build_gef_tools_menu(terminal, &terminal_toggle);
-    leading.append(&gef_tools);
+    leading.append(&gef_tools.button);
     topbar.pack_start(&leading);
 
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -101,24 +101,34 @@ pub(super) fn build_topbar(
         .into_iter()
         .map(|(label, command)| add_until_action(&until_menu, label, command))
         .collect::<Vec<_>>();
+    let mut gef_until_controls = Vec::with_capacity(gef_until_actions.len() + 1);
     let gef_until_section = gtk::Box::new(gtk::Orientation::Vertical, 1);
     gef_until_section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     gef_until_section.append(&section_title("GEF EXEC-UNTIL"));
-    until_actions.extend(
-        gef_until_actions
-            .into_iter()
-            .map(|(label, command)| add_until_action(&gef_until_section, label, command)),
-    );
-    gef_until_section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    for (label, command) in gef_until_actions {
+        let (button, command) = add_until_action(&gef_until_section, label, command);
+        gef_until_controls.push(GefCapabilityControl {
+            widget: button.clone().upcast(),
+            capability: command,
+        });
+        until_actions.push((button, command));
+    }
+    let condition_section = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    condition_section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     let until_condition_entry = gtk::Entry::builder()
         .placeholder_text("$rax == 0")
         .hexpand(true)
         .build();
     until_condition_entry.set_tooltip_text(Some("GDB expression used by GEF exec-until cond"));
-    gef_until_section.append(&until_condition_entry);
+    condition_section.append(&until_condition_entry);
     let until_condition_button = gtk::Button::with_label("Expression");
     until_condition_button.add_css_class("inline-action");
-    gef_until_section.append(&until_condition_button);
+    condition_section.append(&until_condition_button);
+    gef_until_section.append(&condition_section);
+    gef_until_controls.push(GefCapabilityControl {
+        widget: condition_section.upcast(),
+        capability: "exec-until cond",
+    });
     gef_until_section.set_visible(false);
     until_menu.append(&gef_until_section);
     until_popover.set_child(Some(&until_menu));
@@ -181,7 +191,10 @@ pub(super) fn build_topbar(
         until_button: until,
         until_popover,
         gef_until_section: gef_until_section.upcast(),
-        gef_tools_button: gef_tools,
+        gef_until_controls,
+        gef_tools_button: gef_tools.button,
+        gef_tool_controls: gef_tools.controls,
+        gef_tool_groups: gef_tools.groups,
         until_actions,
         until_condition_entry,
         until_condition_button,
@@ -192,76 +205,121 @@ pub(super) fn build_topbar(
 pub(super) fn build_gef_tools_menu(
     terminal: &vte4::Terminal,
     terminal_toggle: &gtk::ToggleButton,
-) -> gtk::ToggleButton {
+) -> GefToolsMenu {
     let popover = gtk::Popover::new();
     let menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
     menu.add_css_class("gef-tools-menu");
     menu.append(&section_title("GEF / LOW-LEVEL TOOLS"));
     let tools = gtk::Notebook::new();
     tools.add_css_class("gef-tools-tabs");
+    let mut controls = Vec::new();
+    let mut groups = Vec::new();
     for (title, commands) in [
         (
             "Context",
             &[
-                ("Current instruction", "xinfo $pc", "xinfo $pc"),
-                ("Opcode + memory effects", "ii $pc", "ii $pc"),
-                ("Register pointer chains", "registers", "registers"),
-                ("Stack telescope", "telescope $sp", "telescope $sp"),
-                ("Function arguments", "dumpargs", "dumpargs"),
-                ("Current syscall", "syscall-args", "syscall-args"),
-                ("Future calls", "future-calls", "future-calls"),
-                ("Entire stack frame", "stack-frame", "stack-frame"),
+                ("Current instruction", "xinfo $pc", "xinfo $pc", "xinfo"),
+                ("Opcode + memory effects", "ii $pc", "ii $pc", "ii"),
+                (
+                    "Register pointer chains",
+                    "registers",
+                    "registers",
+                    "registers",
+                ),
+                (
+                    "Stack telescope",
+                    "telescope $sp",
+                    "telescope $sp",
+                    "telescope",
+                ),
+                ("Function arguments", "dumpargs", "dumpargs", "dumpargs"),
+                (
+                    "Current syscall",
+                    "syscall-args",
+                    "syscall-args",
+                    "syscall-args",
+                ),
+                (
+                    "Future calls",
+                    "future-calls",
+                    "future-calls",
+                    "future-calls",
+                ),
+                (
+                    "Entire stack frame",
+                    "stack-frame",
+                    "stack-frame",
+                    "stack-frame",
+                ),
             ][..],
         ),
         (
             "Process",
             &[
-                ("Virtual memory map", "vmmap", "vmmap"),
-                ("Process information", "proc-info", "proc-info"),
-                ("Mapped files", "xfiles", "xfiles"),
-                ("Program arguments", "argv", "argv"),
-                ("Environment", "envp", "envp"),
-                ("Open file descriptors", "fds", "fds"),
-                ("ELF auxiliary vector", "auxv", "auxv"),
-                ("Current errno", "errno", "errno"),
-                ("Thread-local storage", "tls", "tls"),
-                ("Fork following", "follow", "follow"),
+                ("Virtual memory map", "vmmap", "vmmap", "vmmap"),
+                ("Process information", "proc-info", "proc-info", "proc-info"),
+                ("Mapped files", "xfiles", "xfiles", "xfiles"),
+                ("Program arguments", "argv", "argv", "argv"),
+                ("Environment", "envp", "envp", "envp"),
+                ("Open file descriptors", "fds", "fds", "fds"),
+                ("ELF auxiliary vector", "auxv", "auxv", "auxv"),
+                ("Current errno", "errno", "errno", "errno"),
+                ("Thread-local storage", "tls", "tls", "tls"),
+                ("Fork following", "follow", "follow", "follow"),
             ][..],
         ),
         (
             "Binary",
             &[
-                ("Binary protections", "checksec", "checksec"),
-                ("ELF information", "elf-info", "elf-info"),
-                ("GOT / PLT", "got", "got"),
-                ("All GOT entries", "got-all", "got-all"),
-                ("Stack canary", "canary", "canary"),
+                ("Binary protections", "checksec", "checksec", "checksec"),
+                ("ELF information", "elf-info", "elf-info", "elf-info"),
+                ("GOT / PLT", "got", "got", "got"),
+                ("All GOT entries", "got-all", "got-all", "got-all"),
+                ("Stack canary", "canary", "canary", "canary"),
                 (
                     "Exception unwind data",
                     "dwarf-exception-handler",
                     "dwarf-exception-handler",
+                    "dwarf-exception-handler",
                 ),
-                ("Dynamic section", "dynamic", "dynamic"),
-                ("Runtime link map", "link-map", "link-map"),
+                ("Dynamic section", "dynamic", "dynamic", "dynamic"),
+                ("Runtime link map", "link-map", "link-map", "link-map"),
             ][..],
         ),
         (
             "Heap",
             &[
-                ("Compact bins", "heap bins-simple", "heap bins-simple"),
-                ("Heap arenas", "heap arenas", "heap arenas"),
-                ("Heap chunks", "heap chunks", "heap chunks"),
-                ("Top chunk", "heap top", "heap top"),
-                ("Parsed heap", "heap parse", "heap parse"),
+                (
+                    "Compact bins",
+                    "heap bins-simple",
+                    "heap bins-simple",
+                    "heap bins-simple",
+                ),
+                ("Heap arenas", "heap arenas", "heap arenas", "heap arenas"),
+                ("Heap chunks", "heap chunks", "heap chunks", "heap chunks"),
+                ("Top chunk", "heap top", "heap top", "heap top"),
+                ("Parsed heap", "heap parse", "heap parse", "heap parse"),
             ][..],
         ),
     ] {
-        let page = build_gef_tool_page(commands, terminal, terminal_toggle, &popover);
+        let capabilities = commands
+            .iter()
+            .map(|(_, _, _, capability)| *capability)
+            .collect();
+        let (page, page_controls) =
+            build_gef_tool_page(commands, terminal, terminal_toggle, &popover);
+        page.set_visible(false);
         tools.append_page(&page, Some(&gtk::Label::new(Some(title))));
+        groups.push(GefCapabilityGroup {
+            widget: page.upcast(),
+            capabilities,
+        });
+        controls.extend(page_controls);
     }
     menu.append(&tools);
 
-    menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let expression_section = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    expression_section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     let expression_row = gtk::Box::new(gtk::Orientation::Horizontal, 1);
     let expression = gtk::Entry::builder()
         .placeholder_text("address or expression")
@@ -280,7 +338,23 @@ pub(super) fn build_gef_tools_menu(
     expression_row.append(&inspect);
     expression_row.append(&telescope);
     expression_row.append(&data_type);
-    menu.append(&expression_row);
+    expression_section.append(&expression_row);
+    expression_section.set_visible(false);
+    menu.append(&expression_section);
+    for (button, capability) in [
+        (&inspect, "xinfo"),
+        (&telescope, "telescope"),
+        (&data_type, "dt"),
+    ] {
+        controls.push(GefCapabilityControl {
+            widget: button.clone().upcast(),
+            capability,
+        });
+    }
+    groups.push(GefCapabilityGroup {
+        widget: expression_section.upcast(),
+        capabilities: vec!["xinfo", "telescope", "dt"],
+    });
 
     let submit = |prefix: &'static str| {
         let terminal = terminal.clone();
@@ -304,36 +378,55 @@ pub(super) fn build_gef_tools_menu(
     let inspect_submit = submit("xinfo");
     let submit_for_button = Rc::clone(&inspect_submit);
     inspect.connect_clicked(move |_| submit_for_button());
-    let submit_for_button = submit("telescope");
+    let telescope_submit = submit("telescope");
+    let submit_for_button = Rc::clone(&telescope_submit);
     telescope.connect_clicked(move |_| submit_for_button());
-    let submit_for_button = submit("dt");
+    let data_type_submit = submit("dt");
+    let submit_for_button = Rc::clone(&data_type_submit);
     data_type.connect_clicked(move |_| submit_for_button());
-    expression.connect_activate(move |_| inspect_submit());
+    expression.connect_activate(move |_| {
+        if inspect.is_visible() {
+            inspect_submit();
+        } else if telescope.is_visible() {
+            telescope_submit();
+        } else if data_type.is_visible() {
+            data_type_submit();
+        }
+    });
 
     popover.set_child(Some(&menu));
     let button = header_popup_button("GEF tools", &popover);
     button.add_css_class("debug-control");
     button.set_tooltip_text(Some(
-        "Run useful bata24/GEF investigations in this debugger's terminal",
+        "Run investigations supported by the active GEF installation",
     ));
     button.set_visible(false);
     button.set_sensitive(false);
-    button
+    GefToolsMenu {
+        button,
+        controls,
+        groups,
+    }
 }
 
 pub(super) fn build_gef_tool_page(
-    commands: &[(&'static str, &'static str, &'static str)],
+    commands: &[(&'static str, &'static str, &'static str, &'static str)],
     terminal: &vte4::Terminal,
     terminal_toggle: &gtk::ToggleButton,
     popover: &gtk::Popover,
-) -> gtk::Box {
+) -> (gtk::Box, Vec<GefCapabilityControl>) {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    for (label, detail, command) in commands {
+    let mut controls = Vec::with_capacity(commands.len());
+    for (label, detail, command, capability) in commands {
         let button = gef_tool_button(label, detail);
         connect_gef_tool(&button, terminal, terminal_toggle, popover, command);
         page.append(&button);
+        controls.push(GefCapabilityControl {
+            widget: button.upcast(),
+            capability,
+        });
     }
-    page
+    (page, controls)
 }
 
 pub(super) fn header_popup_button(label: &str, popover: &gtk::Popover) -> gtk::ToggleButton {

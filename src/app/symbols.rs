@@ -197,7 +197,7 @@ pub(super) fn handle_session_event(ui: &Weak<Ui>, event: SessionEvent) {
             ui.set_debugger_pid(None);
             ui.set_command_pending(false);
             ui.set_debug_state_stale(true);
-            ui.set_gef_available(false);
+            ui.clear_gef_capabilities();
             ui.set_inferior_started(false);
             ui.reset_target_abi();
             ui.clear_debugger_state();
