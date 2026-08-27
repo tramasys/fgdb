@@ -11,6 +11,7 @@ use std::{
 
 use gtk::glib;
 use nix::{
+    fcntl::{FcntlArg, OFlag, fcntl},
     pty::openpty,
     sys::termios::{SetArg, cfmakeraw, tcgetattr, tcsetattr},
     unistd::ttyname,
@@ -112,6 +113,8 @@ const MAX_MI_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MI_NESTING: usize = 64;
 const MAX_MI_ITEMS: usize = 100_000;
 const MAX_MI_COMMAND_BYTES: usize = 1024 * 1024;
+const MAX_QUEUED_MI_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MI_WRITE_BATCH_BYTES: usize = 256 * 1024;
 const MAX_PENDING_REQUESTS: usize = 4096;
 const MAX_SCOPED_REQUESTS: usize = 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -132,6 +135,121 @@ struct ScopedMiRequest {
     deadline: Instant,
 }
 
+struct OutgoingCommand {
+    token: u64,
+    bytes: Vec<u8>,
+    written: usize,
+}
+
+#[derive(Default)]
+struct OutgoingQueue {
+    commands: VecDeque<OutgoingCommand>,
+    remaining_bytes: usize,
+}
+
+impl OutgoingQueue {
+    fn enqueue(&mut self, token: u64, command: &str) -> io::Result<()> {
+        let capacity = command
+            .len()
+            .checked_add(21)
+            .ok_or_else(|| io::Error::other("GDB/MI command size overflow"))?;
+        let mut bytes = Vec::with_capacity(capacity);
+        writeln!(&mut bytes, "{token}{command}")?;
+        let new_size = self
+            .remaining_bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| io::Error::other("GDB/MI output queue size overflow"))?;
+        if new_size > MAX_QUEUED_MI_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "GDB/MI output queue exceeds the 8 MiB limit",
+            ));
+        }
+        self.remaining_bytes = new_size;
+        self.commands.push_back(OutgoingCommand {
+            token,
+            bytes,
+            written: 0,
+        });
+        Ok(())
+    }
+
+    fn advance(&mut self, count: usize) {
+        let Some(command) = self.commands.front_mut() else {
+            return;
+        };
+        let count = count.min(command.bytes.len().saturating_sub(command.written));
+        command.written += count;
+        self.remaining_bytes = self.remaining_bytes.saturating_sub(count);
+        if command.written == command.bytes.len() {
+            self.commands.pop_front();
+        }
+    }
+
+    fn cancel_unstarted(&mut self, token: u64) -> bool {
+        let Some(index) = self
+            .commands
+            .iter()
+            .position(|command| command.token == token && command.written == 0)
+        else {
+            return false;
+        };
+        if let Some(command) = self.commands.remove(index) {
+            self.remaining_bytes = self.remaining_bytes.saturating_sub(command.bytes.len());
+        }
+        true
+    }
+
+    fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+    }
+
+    fn clear(&mut self) {
+        self.commands.clear();
+        self.remaining_bytes = 0;
+    }
+}
+
+fn drain_outgoing(
+    writer: &mut impl Write,
+    outgoing: &mut OutgoingQueue,
+    byte_budget: usize,
+) -> io::Result<bool> {
+    let mut written_this_batch = 0_usize;
+    while written_this_batch < byte_budget {
+        let write_result = {
+            let Some(command) = outgoing.commands.front() else {
+                return Ok(true);
+            };
+            let remaining_budget = byte_budget - written_this_batch;
+            let remaining = &command.bytes[command.written..];
+            writer.write(&remaining[..remaining.len().min(remaining_budget)])
+        };
+        match write_result {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "could not write a GDB/MI command",
+                ));
+            }
+            Ok(count) => {
+                outgoing.advance(count);
+                written_this_batch += count;
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(outgoing.is_empty())
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IoSource {
+    Read,
+    Write,
+}
+
 pub struct MiClient {
     master: RefCell<File>,
     _slave: OwnedFd,
@@ -142,8 +260,12 @@ pub struct MiClient {
     pending: RefCell<HashMap<u64, PendingRequest>>,
     scoped_request: RefCell<Option<ScopedMiRequest>>,
     scoped_queue: RefCell<VecDeque<ScopedMiRequest>>,
+    outgoing: RefCell<OutgoingQueue>,
     event_handler: EventHandler,
-    source: RefCell<Option<glib::SourceId>>,
+    self_weak: Weak<Self>,
+    connected: Cell<bool>,
+    read_source: RefCell<Option<glib::SourceId>>,
+    write_source: RefCell<Option<glib::SourceId>>,
     timeout_source: RefCell<Option<glib::SourceId>>,
     discarding_oversized_line: Cell<bool>,
 }
@@ -158,8 +280,11 @@ impl MiClient {
         tcsetattr(&pty.slave, SetArg::TCSANOW, &terminal_settings).map_err(io::Error::other)?;
 
         let master = File::from(pty.master);
+        let flags = fcntl(&master, FcntlArg::F_GETFL).map_err(io::Error::other)?;
+        let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
+        fcntl(&master, FcntlArg::F_SETFL(flags)).map_err(io::Error::other)?;
         let master_fd = master.as_raw_fd();
-        let client = Rc::new(Self {
+        let client = Rc::new_cyclic(|self_weak| Self {
             master: RefCell::new(master),
             _slave: pty.slave,
             slave_path,
@@ -169,8 +294,12 @@ impl MiClient {
             pending: RefCell::new(HashMap::new()),
             scoped_request: RefCell::new(None),
             scoped_queue: RefCell::new(VecDeque::new()),
+            outgoing: RefCell::new(OutgoingQueue::default()),
             event_handler: Box::new(event_handler),
-            source: RefCell::new(None),
+            self_weak: self_weak.clone(),
+            connected: Cell::new(true),
+            read_source: RefCell::new(None),
+            write_source: RefCell::new(None),
             timeout_source: RefCell::new(None),
             discarding_oversized_line: Cell::new(false),
         });
@@ -181,7 +310,7 @@ impl MiClient {
             glib::IOCondition::IN | glib::IOCondition::HUP | glib::IOCondition::ERR,
             move |_, condition| Self::on_io_ready(&weak_client, condition),
         );
-        client.source.replace(Some(source));
+        client.read_source.replace(Some(source));
         let weak_client = Rc::downgrade(&client);
         let timeout_source = glib::timeout_add_local(REQUEST_TIMEOUT_POLL, move || {
             let Some(client) = weak_client.upgrade() else {
@@ -279,6 +408,19 @@ impl MiClient {
                 "too many queued scoped GDB/MI requests",
             ));
         }
+        let queued_bytes = self
+            .scoped_queue
+            .borrow()
+            .iter()
+            .fold(0_usize, |total, request| {
+                total.saturating_add(request.command.len())
+            });
+        if queued_bytes.saturating_add(command.len()) > MAX_QUEUED_MI_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "queued scoped GDB/MI commands exceed the 8 MiB limit",
+            ));
+        }
         let token = self.allocate_token();
         let request = ScopedMiRequest {
             token,
@@ -302,11 +444,14 @@ impl MiClient {
 
     fn start_scoped_request(
         &self,
-        request: ScopedMiRequest,
+        mut request: ScopedMiRequest,
     ) -> Result<(), Box<(io::Error, ScopedMiRequest)>> {
         if let Err(error) = self.write_tokenized(request.token, &request.command) {
             return Err(Box::new((error, request)));
         }
+        // The encoded command is now owned by the output queue. Do not retain
+        // a duplicate, potentially large allocation while waiting for GDB.
+        request.command = String::new();
         self.scoped_request.replace(Some(request));
         Ok(())
     }
@@ -356,9 +501,70 @@ impl MiClient {
     }
 
     fn write_tokenized(&self, token: u64, command: &str) -> io::Result<()> {
-        let mut master = self.master.borrow_mut();
-        writeln!(master, "{token}{command}")?;
-        master.flush()
+        if !self.connected.get() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "GDB/MI connection is closed",
+            ));
+        }
+        self.outgoing.borrow_mut().enqueue(token, command)?;
+        self.ensure_write_source();
+        Ok(())
+    }
+
+    fn ensure_write_source(&self) {
+        if self.write_source.borrow().is_some() {
+            return;
+        }
+        let weak_client = self.self_weak.clone();
+        let source = glib_unix::unix_fd_add_local(
+            self.master.borrow().as_raw_fd(),
+            glib::IOCondition::OUT | glib::IOCondition::HUP | glib::IOCondition::ERR,
+            move |_, condition| Self::on_write_ready(&weak_client, condition),
+        );
+        self.write_source.replace(Some(source));
+    }
+
+    fn stop_write_source_if_idle(&self) {
+        if self.outgoing.borrow().is_empty()
+            && let Some(source) = self.write_source.borrow_mut().take()
+        {
+            source.remove();
+        }
+    }
+
+    fn on_write_ready(weak_client: &Weak<Self>, condition: glib::IOCondition) -> glib::ControlFlow {
+        let Some(client) = weak_client.upgrade() else {
+            return glib::ControlFlow::Break;
+        };
+        let result = {
+            let mut master = client.master.borrow_mut();
+            let mut outgoing = client.outgoing.borrow_mut();
+            drain_outgoing(&mut *master, &mut outgoing, MAX_MI_WRITE_BATCH_BYTES)
+        };
+        match result {
+            Ok(true) => {
+                client.write_source.borrow_mut().take();
+                glib::ControlFlow::Break
+            }
+            Ok(false) if condition.intersects(glib::IOCondition::HUP | glib::IOCondition::ERR) => {
+                client.write_source.borrow_mut().take();
+                (client.event_handler)(
+                    &client,
+                    MiEvent::Error(String::from("GDB closed the MI command channel")),
+                );
+                client.disconnect(IoSource::Write)
+            }
+            Ok(false) => glib::ControlFlow::Continue,
+            Err(error) => {
+                client.write_source.borrow_mut().take();
+                (client.event_handler)(
+                    &client,
+                    MiEvent::Error(format!("Could not write a GDB/MI command: {error}")),
+                );
+                client.disconnect(IoSource::Write)
+            }
+        }
     }
 
     fn on_io_ready(weak_client: &Weak<Self>, condition: glib::IOCondition) -> glib::ControlFlow {
@@ -373,28 +579,41 @@ impl MiClient {
         };
 
         match read_result {
-            Ok(0) => client.disconnect(),
+            Ok(0) => client.disconnect(IoSource::Read),
             Ok(length) => {
                 client.consume(&bytes[..length]);
                 glib::ControlFlow::Continue
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 if condition.intersects(glib::IOCondition::HUP | glib::IOCondition::ERR) {
-                    client.disconnect()
+                    client.disconnect(IoSource::Read)
                 } else {
                     glib::ControlFlow::Continue
                 }
             }
-            Err(_) => client.disconnect(),
+            Err(_) => client.disconnect(IoSource::Read),
         }
     }
 
-    fn disconnect(&self) -> glib::ControlFlow {
+    fn disconnect(&self, origin: IoSource) -> glib::ControlFlow {
+        if !self.connected.replace(false) {
+            return glib::ControlFlow::Break;
+        }
         self.ready.set(false);
-        self.source.borrow_mut().take();
+        if let Some(source) = self.read_source.borrow_mut().take()
+            && origin != IoSource::Read
+        {
+            source.remove();
+        }
+        if let Some(source) = self.write_source.borrow_mut().take()
+            && origin != IoSource::Write
+        {
+            source.remove();
+        }
         if let Some(source) = self.timeout_source.borrow_mut().take() {
             source.remove();
         }
+        self.outgoing.borrow_mut().clear();
         self.pending.borrow_mut().clear();
         self.scoped_request.borrow_mut().take();
         self.scoped_queue.borrow_mut().clear();
@@ -469,6 +688,7 @@ impl MiClient {
                 .collect::<Vec<_>>()
         };
         for (token, stale) in expired {
+            self.outgoing.borrow_mut().cancel_unstarted(token);
             if let Some(request) = self.pending.borrow_mut().remove(&token) {
                 (request.handler)(
                     self,
@@ -493,9 +713,11 @@ impl MiClient {
         if let Some(reason) = scoped_reason
             && let Some(request) = self.scoped_request.borrow_mut().take()
         {
+            self.outgoing.borrow_mut().cancel_unstarted(request.token);
             (request.handler)(self, error_record(reason));
             self.start_next_scoped_request();
         }
+        self.stop_write_source_if_idle();
     }
 
     fn process_line(&self, line: &str) {
@@ -667,7 +889,10 @@ fn take_complete_input(incoming: &mut Vec<u8>) -> Option<Vec<u8>> {
 
 impl Drop for MiClient {
     fn drop(&mut self) {
-        if let Some(source) = self.source.borrow_mut().take() {
+        if let Some(source) = self.read_source.borrow_mut().take() {
+            source.remove();
+        }
+        if let Some(source) = self.write_source.borrow_mut().take() {
             source.remove();
         }
         if let Some(source) = self.timeout_source.borrow_mut().take() {
@@ -953,9 +1178,61 @@ pub fn quote(argument: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MiListItem, MiValue, parse_record, parse_stream_output, quote, result_field,
-        scoped_mi_command, take_complete_input, validate_mi_command,
+        MiListItem, MiValue, OutgoingQueue, drain_outgoing, parse_record, parse_stream_output,
+        quote, result_field, scoped_mi_command, take_complete_input, validate_mi_command,
     };
+
+    struct BackpressuredWriter;
+
+    impl std::io::Write for BackpressuredWriter {
+        fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn drains_outgoing_commands_in_fifo_order_and_bounded_batches() {
+        let mut outgoing = OutgoingQueue::default();
+        outgoing.enqueue(7, "-exec-next").unwrap();
+        outgoing.enqueue(8, "-exec-step").unwrap();
+        let total = outgoing.remaining_bytes;
+        let mut written = Vec::new();
+
+        assert!(!drain_outgoing(&mut written, &mut outgoing, 5).unwrap());
+        assert_eq!(written, b"7-exe");
+        assert_eq!(outgoing.remaining_bytes, total - 5);
+        assert!(drain_outgoing(&mut written, &mut outgoing, 1024).unwrap());
+        assert_eq!(written, b"7-exec-next\n8-exec-step\n");
+        assert_eq!(outgoing.remaining_bytes, 0);
+    }
+
+    #[test]
+    fn preserves_queued_output_when_the_pty_applies_backpressure() {
+        let mut outgoing = OutgoingQueue::default();
+        outgoing.enqueue(11, "-exec-continue").unwrap();
+        let remaining = outgoing.remaining_bytes;
+
+        assert!(!drain_outgoing(&mut BackpressuredWriter, &mut outgoing, 1024).unwrap());
+        assert_eq!(outgoing.remaining_bytes, remaining);
+        assert_eq!(outgoing.commands.front().unwrap().written, 0);
+    }
+
+    #[test]
+    fn only_cancels_commands_that_have_not_started_writing() {
+        let mut outgoing = OutgoingQueue::default();
+        outgoing.enqueue(1, "-first").unwrap();
+        outgoing.enqueue(2, "-second").unwrap();
+        outgoing.advance(1);
+
+        assert!(!outgoing.cancel_unstarted(1));
+        assert!(outgoing.cancel_unstarted(2));
+        assert_eq!(outgoing.commands.len(), 1);
+        assert_eq!(outgoing.commands.front().unwrap().token, 1);
+    }
 
     #[test]
     fn extracts_complete_mi_lines_without_discarding_a_partial_record() {
