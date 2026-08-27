@@ -1,5 +1,8 @@
 use super::*;
 
+const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_SOURCE_LINES: usize = 250_000;
+
 #[derive(Clone)]
 struct SourceGutterMenuHandlers {
     jump: Rc<RefCell<Option<SourceJumpHandler>>>,
@@ -72,6 +75,28 @@ pub(super) fn replace_boxed_store<T: 'static>(
     store.splice(0, store.n_items(), &values);
 }
 
+pub(super) fn replace_boxed_store_if_changed<T: PartialEq + 'static>(
+    store: &gio::ListStore,
+    values: impl IntoIterator<Item = T>,
+) {
+    let values = values.into_iter().collect::<Vec<_>>();
+    let unchanged = usize::try_from(store.n_items()).ok() == Some(values.len())
+        && values.iter().enumerate().all(|(index, value)| {
+            store
+                .item(u32::try_from(index).unwrap_or(u32::MAX))
+                .and_downcast::<glib::BoxedAnyObject>()
+                .is_some_and(|item| *item.borrow::<T>() == *value)
+        });
+    if unchanged {
+        return;
+    }
+    let values = values
+        .into_iter()
+        .map(glib::BoxedAnyObject::new)
+        .collect::<Vec<_>>();
+    store.splice(0, store.n_items(), &values);
+}
+
 pub(super) fn update_selected_frame_buttons(buttons: &[(u32, gtk::Button)], selected: u32) {
     for (level, button) in buttons {
         if *level == selected {
@@ -101,7 +126,10 @@ pub(super) fn open_source_document(
         return Some(document);
     }
 
-    let contents = std::fs::read_to_string(&path).ok()?;
+    let contents = crate::bounded::read_string(&path, MAX_SOURCE_BYTES).ok()?;
+    if contents.lines().take(MAX_SOURCE_LINES + 1).count() > MAX_SOURCE_LINES {
+        return None;
+    }
     let buffer = build_source_buffer(&contents, Some(&path), context.style_scheme);
     let view = build_source_view(&buffer);
     let breakpoint_renderer = build_breakpoint_gutter(

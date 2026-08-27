@@ -2,6 +2,8 @@ use super::*;
 
 impl Ui {
     fn resolve_source_path(&self, reported_path: &str) -> Option<PathBuf> {
+        const MAX_RESOLVED_SOURCE_PATHS: usize = 4_096;
+
         if let Some(path) = self
             .resolved_source_paths
             .borrow()
@@ -11,9 +13,11 @@ impl Ui {
             return path;
         }
         let path = source::resolve(reported_path, &self.source_roots);
-        self.resolved_source_paths
-            .borrow_mut()
-            .insert(reported_path.to_owned(), path.clone());
+        let mut cache = self.resolved_source_paths.borrow_mut();
+        if cache.len() >= MAX_RESOLVED_SOURCE_PATHS {
+            cache.clear();
+        }
+        cache.insert(reported_path.to_owned(), path.clone());
         path
     }
 
@@ -112,12 +116,19 @@ impl Ui {
                 .and_then(|path| Path::new(path).extension())
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("rs")),
         );
-        if let Some(bits) = frame
-            .architecture
-            .as_deref()
-            .and_then(architecture_pointer_bits)
-        {
-            self.target_pointer_bits.set(bits);
+        if let Some(description) = frame.architecture.as_deref() {
+            let architecture = TargetArchitecture::from_gdb_description(description);
+            if architecture != TargetArchitecture::Unknown {
+                self.set_target_architecture(architecture);
+            }
+            if let Some(bits) =
+                TargetArchitecture::explicit_pointer_bits_from_gdb_description(description)
+            {
+                self.set_target_pointer_bits(bits);
+            }
+            if let Some(endian) = TargetEndian::from_architecture_description(description) {
+                self.set_target_endian(Some(endian));
+            }
         }
         update_selected_frame_buttons(&self.frame_buttons.borrow(), frame.level);
         let (Some(reported_path), Some(line)) = (frame.source_path(), frame.line) else {

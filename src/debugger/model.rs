@@ -1,4 +1,5 @@
 use super::mi::{MiListItem, MiRecord, MiResult, MiValue, result_field};
+use super::target::{TargetArchitecture, TargetEndian};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StackFrame {
@@ -127,6 +128,8 @@ pub struct StackEntry {
     pub address: u64,
     pub offset: usize,
     pub index: usize,
+    pub pointer_bits: u32,
+    pub endian: TargetEndian,
     pub value: String,
     pub pointer_chain: Vec<String>,
     pub address_registers: Vec<String>,
@@ -354,123 +357,75 @@ pub fn register_names(record: &MiRecord) -> Vec<String> {
         .collect()
 }
 
-pub fn compact_register_numbers(names: &[String]) -> Vec<usize> {
-    let has_64_bit_x86_registers = names
-        .iter()
-        .any(|name| matches!(name.as_str(), "rax" | "rip"));
+pub fn compact_register_numbers(names: &[String], architecture: TargetArchitecture) -> Vec<usize> {
+    const MAX_REGISTER_VALUES: usize = 256;
+    let architecture = architecture.effective_for_registers(names);
+    if architecture == TargetArchitecture::Unknown {
+        return names
+            .iter()
+            .enumerate()
+            // Unknown architectures must degrade to a complete, bounded
+            // snapshot. A partial list based on generic aliases can silently
+            // hide the registers needed to identify the target later.
+            .filter(|(_, name)| !name.is_empty())
+            .map(|(number, _)| number)
+            .take(MAX_REGISTER_VALUES)
+            .collect();
+    }
     let preferred = names
         .iter()
         .enumerate()
         .filter(|(_, name)| {
-            is_primary_register(name) && !(has_64_bit_x86_registers && is_32_bit_x86_register(name))
+            architecture.is_core_register(name) || architecture.is_thread_pointer(name)
         })
         .map(|(number, _)| number)
         .collect::<Vec<_>>();
     if !preferred.is_empty() {
-        let vector_prefix = if names.iter().any(|name| vector_register(name, "zmm")) {
-            "zmm"
-        } else if names.iter().any(|name| vector_register(name, "ymm")) {
-            "ymm"
-        } else {
-            "xmm"
+        // Always keep a complete first-stop snapshot. On x86, request only
+        // the widest advertised SIMD alias (ZMM, YMM, or XMM), rather than
+        // transferring overlapping views of the same register file.
+        let x86_vector_prefix = match architecture {
+            TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
+                if names.iter().any(|name| vector_register(name, "zmm")) {
+                    Some("zmm")
+                } else if names.iter().any(|name| vector_register(name, "ymm")) {
+                    Some("ymm")
+                } else {
+                    Some("xmm")
+                }
+            }
+            _ => None,
         };
         return names
             .iter()
             .enumerate()
             .filter(|(number, name)| {
                 preferred.binary_search(number).is_ok()
-                    || vector_register(name, vector_prefix)
-                    || floating_point_register(name)
+                    || x86_vector_prefix.is_some_and(|prefix| vector_register(name, prefix))
+                    || (matches!(
+                        architecture,
+                        TargetArchitecture::X86 | TargetArchitecture::X86_64
+                    ) && name.as_str() == "mxcsr")
+                    || (x86_vector_prefix.is_none() && architecture.is_vector_register(name))
+                    || architecture.is_floating_register(name)
             })
             .map(|(number, _)| number)
-            .take(96)
+            .take(MAX_REGISTER_VALUES)
             .collect();
     }
 
     names
         .iter()
         .enumerate()
-        .filter(|(_, name)| !name.is_empty() && !is_vector_register(name))
+        .filter(|(_, name)| !name.is_empty())
         .map(|(number, _)| number)
-        .take(64)
+        .take(MAX_REGISTER_VALUES)
         .collect()
 }
 
 fn vector_register(name: &str, prefix: &str) -> bool {
     name.strip_prefix(prefix).is_some_and(|index| {
         !index.is_empty() && index.chars().all(|character| character.is_ascii_digit())
-    })
-}
-
-fn floating_point_register(name: &str) -> bool {
-    matches!(
-        name,
-        "fctrl" | "fstat" | "ftag" | "fiseg" | "fioff" | "foseg" | "fooff" | "fop" | "mxcsr"
-    ) || vector_register(name, "st")
-}
-
-fn is_32_bit_x86_register(name: &str) -> bool {
-    matches!(
-        name,
-        "eax" | "ebx" | "ecx" | "edx" | "esp" | "ebp" | "esi" | "edi" | "eip"
-    )
-}
-
-fn is_primary_register(name: &str) -> bool {
-    matches!(
-        name,
-        "rax"
-            | "rbx"
-            | "rcx"
-            | "rdx"
-            | "rsp"
-            | "rbp"
-            | "rsi"
-            | "rdi"
-            | "rip"
-            | "r8"
-            | "r9"
-            | "r10"
-            | "r11"
-            | "r12"
-            | "r13"
-            | "r14"
-            | "r15"
-            | "eflags"
-            | "rflags"
-            | "cs"
-            | "ss"
-            | "ds"
-            | "es"
-            | "fs"
-            | "gs"
-            | "fs_base"
-            | "gs_base"
-            | "eax"
-            | "ebx"
-            | "ecx"
-            | "edx"
-            | "esp"
-            | "ebp"
-            | "esi"
-            | "edi"
-            | "eip"
-            | "cpsr"
-    )
-}
-
-fn is_vector_register(name: &str) -> bool {
-    [
-        "st", "mm", "xmm", "ymm", "zmm", "v", "q", "d", "s", "h", "b",
-    ]
-    .iter()
-    .any(|prefix| {
-        name.strip_prefix(prefix).is_some_and(|suffix| {
-            suffix
-                .chars()
-                .next()
-                .is_some_and(|character| character.is_ascii_digit())
-        })
     })
 }
 
@@ -791,6 +746,19 @@ mod tests {
         variable_path_expression, variables,
     };
     use crate::debugger::mi::parse_record;
+    use crate::debugger::{TargetArchitecture, TargetEndian};
+
+    #[test]
+    fn parses_target_byte_order_descriptions() {
+        assert_eq!(
+            TargetEndian::from_gdb_description("auto (currently little endian)"),
+            Some(TargetEndian::Little)
+        );
+        assert_eq!(
+            TargetEndian::from_gdb_description("The target is set to big endian"),
+            Some(TargetEndian::Big)
+        );
+    }
 
     #[test]
     fn converts_debugger_models() {
@@ -825,26 +793,60 @@ mod tests {
         );
         assert_eq!(values[0].name, "rbx");
         assert_eq!(
-            compact_register_numbers(&[
-                String::from("rax"),
-                String::from("xmm0"),
-                String::from("rip"),
-                String::from("eax"),
-                String::new(),
-            ]),
+            compact_register_numbers(
+                &[
+                    String::from("rax"),
+                    String::from("xmm0"),
+                    String::from("rip"),
+                    String::from("eax"),
+                    String::new(),
+                ],
+                TargetArchitecture::X86_64,
+            ),
             [0, 1, 2]
         );
         assert_eq!(
-            compact_register_numbers(&[
-                String::from("rax"),
-                String::from("xmm0"),
-                String::from("ymm0"),
-                String::from("zmm0"),
-                String::from("st0"),
-                String::from("mxcsr"),
-            ]),
+            compact_register_numbers(
+                &[
+                    String::from("rax"),
+                    String::from("xmm0"),
+                    String::from("ymm0"),
+                    String::from("zmm0"),
+                    String::from("st0"),
+                    String::from("mxcsr"),
+                ],
+                TargetArchitecture::X86_64,
+            ),
             [0, 3, 4, 5]
         );
+        assert_eq!(
+            compact_register_numbers(
+                &[
+                    String::from("x0"),
+                    String::from("x31"),
+                    String::from("pc"),
+                    String::from("f0"),
+                    String::from("v0"),
+                ],
+                TargetArchitecture::RiscV32,
+            ),
+            [0, 1, 2, 3, 4]
+        );
+        assert_eq!(
+            compact_register_numbers(
+                &[String::from("pc"), String::from("v0"), String::from("f0")],
+                TargetArchitecture::Unknown,
+            ),
+            [0, 1, 2]
+        );
+        let mut powerpc = (0..32).map(|index| format!("r{index}")).collect::<Vec<_>>();
+        powerpc.extend((0..32).map(|index| format!("f{index}")));
+        powerpc.extend((0..32).map(|index| format!("vr{index}")));
+        powerpc.extend((0..64).map(|index| format!("vs{index}")));
+        powerpc.extend([String::from("pc"), String::from("msr")]);
+        let selected = compact_register_numbers(&powerpc, TargetArchitecture::PowerPc64);
+        assert_eq!(selected.len(), 162);
+        assert_eq!(selected.last(), Some(&161));
 
         let thread_list = threads(&parse_record(r#"5^done,threads=[{id="1",target-id="Thread 1",name="main",state="stopped",core="3",frame={level="0",addr="0x12",func="main"}}],current-thread-id="1""#).unwrap());
         assert!(thread_list[0].current);

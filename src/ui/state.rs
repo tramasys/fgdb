@@ -30,6 +30,7 @@ impl Ui {
         let kernel_section_handler = Rc::new(RefCell::new(None));
         let remembered_disclosures = layout::remembered_disclosures();
         let target_pointer_bits = Rc::new(Cell::new(usize::BITS));
+        let target_pointer_bits_known = Rc::new(Cell::new(false));
         let kernel_view_bindings = KernelViewBindings {
             refresh_handler: &kernel_refresh_handler,
             remembered_disclosures: &remembered_disclosures,
@@ -81,6 +82,7 @@ impl Ui {
             status_label: topbar.status_label,
             status_detail: workspace.status_detail,
             debug_state_panels: workspace.debug_state_panels,
+            inspector_notebook: workspace.inspector_notebook,
             source_notebook,
             source_documents,
             source_theme: theme.clone(),
@@ -106,6 +108,9 @@ impl Ui {
             expression_watch_add_button: workspace.expression_watch_add_button,
             expression_watch_remove_button: workspace.expression_watch_remove_button,
             target_pointer_bits,
+            target_pointer_bits_known,
+            target_architecture: Rc::new(Cell::new(TargetArchitecture::Unknown)),
+            target_endian: Rc::new(Cell::new(None)),
             current_source_is_rust: Rc::new(Cell::new(false)),
             instructions_title: workspace.instructions_title,
             instructions_store: workspace.instructions_store,
@@ -153,6 +158,7 @@ impl Ui {
             kernel_view: workspace.kernel_view,
             kernel_refresh_handler,
             kernel_refresh_generation: Rc::new(Cell::new(0)),
+            debugger_pid: Rc::new(Cell::new(None)),
             layout,
             breakpoints,
             previous_registers: Rc::new(RefCell::new(HashMap::new())),
@@ -207,7 +213,97 @@ impl Ui {
         self.layout.save();
     }
 
+    pub fn set_debugger_pid(&self, pid: Option<u32>) {
+        self.debugger_pid.set(pid);
+    }
+
+    pub fn debugger_pid(&self) -> Option<u32> {
+        self.debugger_pid.get()
+    }
+
+    pub fn set_target_endian(&self, endian: Option<TargetEndian>) {
+        self.target_endian.set(endian);
+    }
+
+    pub fn set_target_architecture(&self, architecture: TargetArchitecture) {
+        let architecture = if self.target_pointer_bits_known.get() {
+            architecture.refine_for_pointer_bits(self.target_pointer_bits.get())
+        } else {
+            if let Some(bits) = architecture.pointer_bits() {
+                self.target_pointer_bits.set(bits);
+            }
+            architecture
+        };
+        let previous = self.target_architecture.replace(architecture);
+        if previous != TargetArchitecture::Unknown
+            && architecture != TargetArchitecture::Unknown
+            && previous != architecture
+        {
+            self.cached_register_names.replace(None);
+        }
+    }
+
+    pub fn target_architecture(&self) -> TargetArchitecture {
+        self.target_architecture.get()
+    }
+
+    pub fn target_endian(&self) -> Option<TargetEndian> {
+        self.target_endian.get()
+    }
+
+    pub fn target_pointer_bits(&self) -> u32 {
+        self.target_pointer_bits.get()
+    }
+
+    pub fn set_target_pointer_bits(&self, bits: u32) {
+        if matches!(bits, 32 | 64) {
+            self.target_pointer_bits.set(bits);
+            self.target_pointer_bits_known.set(true);
+            let previous = self.target_architecture.get();
+            let refined = previous.refine_for_pointer_bits(bits);
+            self.target_architecture.set(refined);
+            if previous != TargetArchitecture::Unknown && refined != previous {
+                self.cached_register_names.replace(None);
+            }
+        }
+    }
+
+    pub fn reset_target_abi(&self) {
+        self.target_architecture.set(TargetArchitecture::Unknown);
+        self.target_endian.set(None);
+        self.target_pointer_bits.set(usize::BITS);
+        self.target_pointer_bits_known.set(false);
+        self.cached_register_names.replace(None);
+        self.resolved_source_paths.borrow_mut().clear();
+    }
+
+    pub fn register_details_visible(&self) -> bool {
+        self.inspector_notebook.current_page() == Some(2)
+    }
+
+    pub fn stack_details_visible(&self) -> bool {
+        self.inspector_notebook.current_page() == Some(3)
+    }
+
     pub fn connect_debug_controls(self: &Rc<Self>, client: &Rc<MiClient>) {
+        let weak_ui = Rc::downgrade(self);
+        let client_for_inspector = Rc::clone(client);
+        self.inspector_notebook
+            .connect_switch_page(move |_, _, page| {
+                if !matches!(page, 2 | 3) {
+                    return;
+                }
+                let Some(ui) = weak_ui.upgrade() else {
+                    return;
+                };
+                if ui.debugger_ready.get()
+                    && ui.inferior_started.get()
+                    && !ui.inferior_running.get()
+                    && !ui.command_pending.get()
+                {
+                    crate::app::refresh_stopped_state(&Rc::downgrade(&ui), &client_for_inspector);
+                }
+            });
         let client_for_run = Rc::clone(client);
         let weak_ui = Rc::downgrade(self);
         self.run_button.connect_clicked(move |_| {

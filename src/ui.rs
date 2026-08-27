@@ -17,12 +17,12 @@ mod value;
 use value::IntegerFormat;
 pub(crate) use value::StringAssignmentKind;
 use value::{
-    FloatRepresentation, IntegerRadix, StringStorage, architecture_pointer_bits,
-    canonical_gdb_float, canonical_gdb_integer, format_character_value, format_float_value,
-    format_integer_value, format_string_bytes, integer_decimal_value, is_rust_string,
-    parse_character_input, parse_float_value, parse_integer_input, parse_string_input,
-    register_integer_format, string_edit, variable_boolean_value, variable_character_format,
-    variable_float_edit, variable_integer_format, variable_is_address,
+    FloatRepresentation, IntegerRadix, StringStorage, canonical_gdb_float, canonical_gdb_integer,
+    format_character_value, format_float_value, format_integer_value, format_string_bytes,
+    integer_decimal_value, is_rust_string, parse_character_input, parse_float_value,
+    parse_integer_input, parse_string_input, register_integer_format, string_edit,
+    variable_boolean_value, variable_character_format, variable_float_edit,
+    variable_integer_format, variable_is_address,
 };
 
 use crate::{
@@ -30,11 +30,11 @@ use crate::{
     config::LaunchConfig,
     debugger::{
         Breakpoint, Instruction, MemoryBlock, MemoryKind, MiClient, Register, SharedLibrary,
-        SourceFile, SourceLocation, StackEntry, StackFrame, ThreadInfo, ValueTypeKind,
-        ValueTypeMetadata, Variable, context::MemoryRegion,
+        SourceFile, SourceLocation, StackEntry, StackFrame, TargetArchitecture, TargetEndian,
+        ThreadInfo, ValueTypeKind, ValueTypeMetadata, Variable, context::MemoryRegion,
     },
     kernel::{
-        KernelFileDescriptor, KernelLimit, KernelMapping, KernelMappingChange,
+        KernelBaseline, KernelFileDescriptor, KernelLimit, KernelMapping, KernelMappingChange,
         KernelMemoryCategory, KernelProcess, KernelSignal, KernelSnapshot, KernelThread,
         KernelTlsModule, KernelTlsSymbol,
     },
@@ -43,15 +43,10 @@ use crate::{
 };
 
 const EXECUTION_CATEGORY: &str = "execution";
+const MAX_EXPRESSION_WATCHES: usize = 256;
+const MAX_MEMORY_WATCHES: usize = 256;
 const DISCLOSURE_EXPANDED_ICON: &str = "▾";
 const DISCLOSURE_COLLAPSED_ICON: &str = "›";
-const GENERAL_REGISTERS: &[&str] = &[
-    "rax", "rbx", "rcx", "rdx", "rsp", "rbp", "rsi", "rdi", "rip", "r8", "r9", "r10", "r11", "r12",
-    "r13", "r14", "r15", "eax", "ebx", "ecx", "edx", "esp", "ebp", "esi", "edi", "eip",
-];
-const BASE_REGISTERS: &[&str] = &["fs_base", "gs_base"];
-const FLAG_REGISTERS: &[&str] = &["eflags", "rflags", "cpsr"];
-const SEGMENT_REGISTERS: &[&str] = &["cs", "ss", "ds", "es", "fs", "gs"];
 const FLAGS: &[(u8, &str)] = &[
     (21, "ident"),
     (18, "align"),
@@ -240,6 +235,7 @@ impl EventCatchpoint {
 struct InstructionRowData {
     instruction: Instruction,
     current: bool,
+    pointer_bits: u32,
 }
 
 #[derive(Clone)]
@@ -247,6 +243,9 @@ struct RegisterRowData {
     register: Register,
     changed: bool,
     ring: Option<u64>,
+    architecture: TargetArchitecture,
+    endian: Option<TargetEndian>,
+    pointer_bits: u32,
 }
 
 #[derive(Clone)]
@@ -404,10 +403,12 @@ struct KernelView {
     tracking_enabled: Rc<Cell<bool>>,
     in_flight: Rc<Cell<bool>>,
     needs_refresh: Rc<Cell<bool>>,
+    tls_requested: Rc<Cell<bool>>,
+    metadata_only_refresh: Rc<Cell<bool>>,
     refresh_button: gtk::Button,
     status: gtk::Label,
     warnings: gtk::Box,
-    previous_snapshot: Rc<RefCell<Option<KernelSnapshot>>>,
+    previous_snapshot: Rc<RefCell<Option<KernelBaseline>>>,
     overview_store: gio::ListStore,
     resource_store: gio::ListStore,
     tls_runtime_store: gio::ListStore,
@@ -449,7 +450,7 @@ struct KernelView {
     processes_empty: gtk::Label,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct KernelOverviewRow {
     section: bool,
     section_key: String,
@@ -460,6 +461,9 @@ struct KernelOverviewRow {
 #[derive(Clone, Debug, Default)]
 struct KernelTlsRuntime {
     thread: Option<String>,
+    architecture: TargetArchitecture,
+    endian: Option<TargetEndian>,
+    pointer_bits: u32,
     register: Option<String>,
     base: Option<u64>,
     mapping: Option<String>,
@@ -467,23 +471,23 @@ struct KernelTlsRuntime {
     error: Option<String>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct KernelTlsSymbolRow {
-    module: String,
-    path: String,
+    module: Rc<str>,
+    path: Rc<str>,
     symbol: KernelTlsSymbol,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct KernelMemoryRow {
     category: KernelMemoryCategory,
     page_size: u64,
     total_unique: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct KernelPrivateMappingRow {
-    mapping: KernelMapping,
+    mapping: Rc<KernelMapping>,
     page_size: u64,
     total_unique: u64,
 }
@@ -675,6 +679,7 @@ pub struct Ui {
     pub status_label: gtk::Label,
     pub status_detail: gtk::Label,
     debug_state_panels: Vec<gtk::Widget>,
+    inspector_notebook: gtk::Notebook,
     source_notebook: gtk::Notebook,
     source_documents: Rc<RefCell<Vec<SourceDocument>>>,
     source_theme: Theme,
@@ -700,6 +705,9 @@ pub struct Ui {
     expression_watch_add_button: gtk::Button,
     expression_watch_remove_button: gtk::Button,
     target_pointer_bits: Rc<Cell<u32>>,
+    target_pointer_bits_known: Rc<Cell<bool>>,
+    target_architecture: Rc<Cell<TargetArchitecture>>,
+    target_endian: Rc<Cell<Option<TargetEndian>>>,
     current_source_is_rust: Rc<Cell<bool>>,
     instructions_title: gtk::Label,
     instructions_store: gio::ListStore,
@@ -747,6 +755,7 @@ pub struct Ui {
     kernel_view: KernelView,
     kernel_refresh_handler: Rc<RefCell<Option<KernelRefreshHandler>>>,
     kernel_refresh_generation: Rc<Cell<u64>>,
+    debugger_pid: Rc<Cell<Option<u32>>>,
     layout: layout::Persistence,
     breakpoints: Rc<RefCell<Vec<Breakpoint>>>,
     previous_registers: Rc<RefCell<HashMap<String, String>>>,
@@ -814,6 +823,7 @@ struct Workspace {
     terminal_panel: gtk::Box,
     status_detail: gtk::Label,
     debug_state_panels: Vec<gtk::Widget>,
+    inspector_notebook: gtk::Notebook,
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
     modules_list: gtk::Box,
@@ -951,20 +961,24 @@ mod tests {
 
     use super::{
         EventCatchpoint, IntegerFormat, IntegerRadix, MemoryWatchFormat, RefreshGate,
-        StringStorage, VectorLaneFormat, architecture_pointer_bits,
-        breakpoint_command_number_at_address, breakpoint_command_numbers, compact_function_name,
+        StringStorage, VectorLaneFormat, breakpoint_command_number_at_address,
+        breakpoint_command_numbers, compact_function_name, conditional_branch_taken,
         event_catchpoint_command_number, event_catchpoint_command_numbers, flags_markup,
-        format_memory_watch, format_register_value, full_address,
-        instruction_arguments_description, instruction_flow_description,
-        instruction_memory_expression, integer_decimal_value, normalized_signal_name,
-        parse_character_input, parse_integer_input, parse_string_input, register_integer_format,
-        register_value_css, set_breakpoint_enabled, signal_catchpoint_command_number,
-        signal_catchpoint_command_numbers, source_location_score, source_symbol_at_offset,
-        source_tab_title, stop_reason_label, string_edit, thread_os_id, variable_boolean_value,
-        variable_character_format, variable_details, variable_integer_format, variable_is_address,
-        variable_value_parts, vector_field_values, without_generic_arguments,
+        format_memory_watch, format_register_value, format_register_value_for_architecture,
+        format_register_value_for_target, full_address, instruction_arguments_description,
+        instruction_flow_description, instruction_memory_expression, integer_decimal_value,
+        normalized_signal_name, parse_character_input, parse_integer_input, parse_string_input,
+        register_details, register_integer_format, register_value_css, set_breakpoint_enabled,
+        signal_catchpoint_command_number, signal_catchpoint_command_numbers, source_location_score,
+        source_symbol_at_offset, source_tab_title, stop_reason_label, string_edit, thread_os_id,
+        variable_boolean_value, variable_character_format, variable_details,
+        variable_integer_format, variable_is_address, variable_value_parts, vector_field_values,
+        without_generic_arguments,
     };
-    use crate::debugger::{Breakpoint, Instruction, Register, SourceLocation, Variable};
+    use crate::debugger::{
+        Breakpoint, Instruction, Register, SourceLocation, TargetArchitecture, TargetEndian,
+        Variable,
+    };
 
     #[test]
     fn coalesces_bursty_model_refreshes() {
@@ -1030,7 +1044,7 @@ mod tests {
             details(&integer("char", "0x41 'A'"), "0x41", "'A'"),
             "65  ·  'A'"
         );
-        assert_eq!(details(&integer("__time_t", "-0x1"), "-0x1", ""), "-1");
+        assert_eq!(details(&integer("pid_t", "-0x1"), "-0x1", ""), "-1");
         assert_eq!(
             details(&integer("int", "0xffffffff"), "0xffffffff", ""),
             "-1"
@@ -1101,8 +1115,6 @@ mod tests {
             Some("131071".into())
         );
         assert_eq!(decimal("_BitInt(17)", "0x1ffff", 64), Some("-1".into()));
-        assert_eq!(architecture_pointer_bits("i386:x86-64"), Some(64));
-        assert_eq!(architecture_pointer_bits("i386"), Some(32));
     }
 
     #[test]
@@ -1166,13 +1178,21 @@ mod tests {
             variable_character_format(&variable("letter", "char", "'🦀'"), 64, true, None),
             Some(IntegerFormat::unsigned(32))
         );
-        assert!(variable_is_address(&variable(
-            "data",
-            "char *",
-            "0x1000 \"x\""
-        )));
-        assert!(register_integer_format("$rax", 64).is_some());
-        assert!(register_integer_format("$rsp", 64).is_none());
+        assert!(variable_is_address(
+            &variable("data", "char *", "0x1000 \"x\""),
+            TargetArchitecture::X86_64,
+        ));
+        assert!(register_integer_format("$rax", 64, TargetArchitecture::X86_64).is_some());
+        assert_eq!(
+            register_integer_format("$rax", 32, TargetArchitecture::X86_64),
+            Some(IntegerFormat::unsigned(64))
+        );
+        assert_eq!(
+            register_integer_format("$a0", 32, TargetArchitecture::Mips64),
+            Some(IntegerFormat::unsigned(64))
+        );
+        assert!(register_integer_format("$rsp", 64, TargetArchitecture::X86_64).is_none());
+        assert!(register_integer_format("$r29", 32, TargetArchitecture::Mips32).is_none());
         assert_eq!(
             variable_boolean_value(&variable("enabled", "bool", "true"), None),
             Some(true)
@@ -1215,11 +1235,16 @@ mod tests {
             "q0…q3 = 0x0000000000000000"
         );
         assert_eq!(
-            register_value_css(&Register {
-                name: String::from("ymm1"),
-                value: zero_ymm.to_owned(),
-                pointer_chain: Vec::new(),
-            }),
+            register_value_css(
+                &Register {
+                    name: String::from("ymm1"),
+                    value: zero_ymm.to_owned(),
+                    pointer_chain: Vec::new(),
+                },
+                TargetArchitecture::X86_64,
+                Some(TargetEndian::Little),
+                64,
+            ),
             "register-zero"
         );
     }
@@ -1253,17 +1278,48 @@ mod tests {
 
     #[test]
     fn keeps_full_addresses_and_colors_register_roles() {
-        assert_eq!(full_address("0x55555555516f"), "0x000055555555516f");
+        assert_eq!(full_address("0x55555555516f", 64), "0x000055555555516f");
+        assert_eq!(full_address("0x8048123", 32), "0x08048123");
         let register = |name: &str, chain: &[&str]| Register {
             name: name.to_owned(),
             value: String::from("0x7fffffffcf40"),
             pointer_chain: chain.iter().map(|value| (*value).to_owned()).collect(),
         };
-        assert_eq!(register_value_css(&register("rip", &[])), "memory-code");
-        assert_eq!(register_value_css(&register("rsp", &[])), "memory-stack");
         assert_eq!(
-            register_value_css(&register("rsi", &["0x1", "0x61732f656d6f682f"])),
+            register_value_css(
+                &register("rip", &[]),
+                TargetArchitecture::X86_64,
+                Some(TargetEndian::Little),
+                64,
+            ),
+            "memory-code"
+        );
+        assert_eq!(
+            register_value_css(
+                &register("rsp", &[]),
+                TargetArchitecture::X86_64,
+                Some(TargetEndian::Little),
+                64,
+            ),
+            "memory-stack"
+        );
+        assert_eq!(
+            register_value_css(
+                &register("rsi", &["0x1", "0x61732f656d6f682f"]),
+                TargetArchitecture::X86_64,
+                Some(TargetEndian::Little),
+                64,
+            ),
             "memory-string"
+        );
+        assert_eq!(
+            register_details(
+                &register("rax", &["0x123456789", "0x8048123"]),
+                TargetArchitecture::X86_64,
+                Some(TargetEndian::Little),
+                32,
+            ),
+            "0x08048123"
         );
     }
 
@@ -1304,10 +1360,11 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            instruction_flow_description(&instruction, &registers),
+            instruction_flow_description(&instruction, &registers, TargetArchitecture::X86_64,),
             "CALL  ▶  0x402000 <mmap@plt>"
         );
-        let arguments = instruction_arguments_description(&instruction, &registers);
+        let arguments =
+            instruction_arguments_description(&instruction, &registers, TargetArchitecture::X86_64);
         assert!(arguments.contains("$rdi=0x0000000000000000"));
         assert!(arguments.contains("$r9=0x0000000000000005"));
 
@@ -1322,7 +1379,12 @@ mod tests {
             pointer_chain: Vec::new(),
         });
         assert_eq!(
-            instruction_memory_expression(&memory_instruction, &with_rbp).as_deref(),
+            instruction_memory_expression(
+                &memory_instruction,
+                &with_rbp,
+                TargetArchitecture::X86_64,
+            )
+            .as_deref(),
             Some("($rbp-0x10)")
         );
     }
@@ -1342,7 +1404,11 @@ mod tests {
             pointer_chain: Vec::new(),
         };
         assert_eq!(
-            instruction_flow_description(&branch, std::slice::from_ref(&flags)),
+            instruction_flow_description(
+                &branch,
+                std::slice::from_ref(&flags),
+                TargetArchitecture::X86_64,
+            ),
             "BRANCH · NOT TAKEN  ▶  0x40100c <main+0x1c>"
         );
 
@@ -1361,18 +1427,220 @@ mod tests {
             value: value.to_owned(),
             pointer_chain: Vec::new(),
         });
-        let arguments = instruction_arguments_description(&syscall, &registers);
+        let arguments =
+            instruction_arguments_description(&syscall, &registers, TargetArchitecture::X86_64);
         assert!(arguments.starts_with("SYSCALL  #1 write("));
         assert!(arguments.contains("fd=0x0000000000000002"));
         assert!(arguments.contains("count=0x0000000000000020"));
+
+        let carry = Register {
+            name: String::from("eflags"),
+            value: String::from("0x1"),
+            pointer_chain: Vec::new(),
+        };
+        for (mnemonic, expected) in [("jbe 0x10", Some(true)), ("ja 0x10", Some(false))] {
+            let conditional = Instruction {
+                text: mnemonic.to_owned(),
+                ..syscall.clone()
+            };
+            assert_eq!(
+                conditional_branch_taken(
+                    &conditional,
+                    std::slice::from_ref(&carry),
+                    TargetArchitecture::X86,
+                ),
+                expected,
+                "{mnemonic}"
+            );
+        }
+
+        let i386_registers = [
+            ("eax", "0x4"),
+            ("ebx", "0x1"),
+            ("ecx", "0x8049000"),
+            ("edx", "0x4"),
+        ]
+        .map(|(name, value)| Register {
+            name: name.to_owned(),
+            value: value.to_owned(),
+            pointer_chain: Vec::new(),
+        });
+        let int80 = Instruction {
+            text: String::from("int 0x80"),
+            ..syscall
+        };
+        let arguments =
+            instruction_arguments_description(&int80, &i386_registers, TargetArchitecture::X86);
+        assert!(arguments.starts_with("SYSCALL  #4 write("));
+        assert!(arguments.contains("fd=0x00000001"));
+
+        let arguments =
+            instruction_arguments_description(&int80, &i386_registers, TargetArchitecture::X86_64);
+        assert!(arguments.starts_with("SYSCALL  #4 write("));
+
+        let trap = Instruction {
+            text: String::from("int3"),
+            ..int80
+        };
+        assert!(
+            !instruction_flow_description(&trap, &i386_registers, TargetArchitecture::X86_64,)
+                .contains("SYSCALL")
+        );
+        assert!(
+            instruction_arguments_description(&trap, &i386_registers, TargetArchitecture::X86_64,)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn applies_arm_and_riscv_abis_to_instruction_insight() {
+        assert_eq!(
+            format_register_value_for_architecture("r8", "0x1234", false, TargetArchitecture::Arm,),
+            "0x00001234"
+        );
+        assert_eq!(
+            format_register_value_for_architecture(
+                "r8",
+                "0x1234",
+                false,
+                TargetArchitecture::X86_64,
+            ),
+            "0x0000000000001234"
+        );
+
+        let svc = Instruction {
+            address: String::from("0x4000"),
+            function: String::from("write_one"),
+            offset: String::from("4"),
+            opcodes: None,
+            text: String::from("svc #0"),
+        };
+        let aarch64_registers = [
+            ("x8", "0x40"),
+            ("x0", "0x1"),
+            ("x1", "0x8000"),
+            ("x2", "0x4"),
+        ]
+        .map(|(name, value)| Register {
+            name: name.to_owned(),
+            value: value.to_owned(),
+            pointer_chain: Vec::new(),
+        });
+        let arguments = instruction_arguments_description(
+            &svc,
+            &aarch64_registers,
+            TargetArchitecture::AArch64,
+        );
+        assert!(arguments.starts_with("SYSCALL  #64 write("));
+        assert!(arguments.contains("fd=0x0000000000000001"));
+
+        let branch = Instruction {
+            text: String::from("beq a0,a1,0x1010"),
+            ..svc.clone()
+        };
+        let riscv_registers = [("a0", "0x2a"), ("a1", "0x2a")].map(|(name, value)| Register {
+            name: name.to_owned(),
+            value: value.to_owned(),
+            pointer_chain: Vec::new(),
+        });
+        assert_eq!(
+            instruction_flow_description(&branch, &riscv_registers, TargetArchitecture::RiscV32,),
+            "BRANCH · TAKEN  ▶  a0,a1,0x1010"
+        );
+
+        let load = Instruction {
+            text: String::from("ldr x3,[x0, #0x10]"),
+            ..svc
+        };
+        assert_eq!(
+            instruction_memory_expression(&load, &aarch64_registers, TargetArchitecture::AArch64,)
+                .as_deref(),
+            Some("($x0 + 0x10)")
+        );
+        let arm_return = Instruction {
+            text: String::from("bx lr"),
+            ..load.clone()
+        };
+        assert_eq!(
+            instruction_flow_description(&arm_return, &[], TargetArchitecture::Arm),
+            "RETURN  ▶  return to caller"
+        );
+        let aarch64_return = Instruction {
+            text: String::from("br x30"),
+            ..load.clone()
+        };
+        assert_eq!(
+            instruction_flow_description(&aarch64_return, &[], TargetArchitecture::AArch64),
+            "RETURN  ▶  return to caller"
+        );
+
+        let s390_svc = Instruction {
+            text: String::from("svc 4"),
+            ..load
+        };
+        let s390_registers =
+            [("r2", "0x1"), ("r3", "0x2000"), ("r4", "0x8")].map(|(name, value)| Register {
+                name: name.to_owned(),
+                value: value.to_owned(),
+                pointer_chain: Vec::new(),
+            });
+        assert!(
+            instruction_arguments_description(
+                &s390_svc,
+                &s390_registers,
+                TargetArchitecture::S390x,
+            )
+            .starts_with("SYSCALL  #4 write(")
+        );
+    }
+
+    #[test]
+    fn formats_non_native_register_values_without_host_assumptions() {
+        assert_eq!(
+            format_register_value_for_target(
+                "r3",
+                "0x54455854",
+                true,
+                TargetArchitecture::PowerPc32,
+                Some(TargetEndian::Big),
+                32,
+            ),
+            "0x54455854 'TEXT…'"
+        );
+        let vector = format_register_value_for_target(
+            "v0",
+            "{ uint128 = 0x1, u = { 0x1, 0x2 } }",
+            false,
+            TargetArchitecture::AArch64,
+            Some(TargetEndian::Little),
+            64,
+        );
+        assert!(vector.contains("uint128 = 0x1"));
+        assert_ne!(vector, "{");
     }
 
     #[test]
     fn formats_memory_watches() {
-        let dump = format_memory_watch(0x1000, &[0x41, 0x42, 0, 0xff], MemoryWatchFormat::Bytes);
+        let dump = format_memory_watch(
+            0x1000,
+            &[0x41, 0x42, 0, 0xff],
+            MemoryWatchFormat::Bytes,
+            64,
+            TargetEndian::Little,
+        );
         assert_eq!(dump.addresses, "0x0000000000001000");
         assert_eq!(dump.values, "41 42 00 ff");
         assert_eq!(dump.decoded, "AB··");
+
+        let dump32 = format_memory_watch(
+            0x804_9000,
+            &[0, 0, 0, 0],
+            MemoryWatchFormat::Pointers,
+            32,
+            TargetEndian::Little,
+        );
+        assert_eq!(dump32.addresses, "0x08049000");
+        assert_eq!(dump32.values, "0x00000000");
     }
 
     #[test]

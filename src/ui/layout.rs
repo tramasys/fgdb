@@ -17,13 +17,14 @@ const MIN_WINDOW_WIDTH: i32 = 320;
 const MIN_WINDOW_HEIGHT: i32 = 200;
 const MAX_WINDOW_DIMENSION: i32 = 32_768;
 const DISCLOSURE_PREFIX: &str = "disclosure.";
+const MAX_LAYOUT_BYTES: usize = 1024 * 1024;
 
 fn layout_path() -> PathBuf {
     glib::user_config_dir().join("fgdb/layout.conf")
 }
 
 pub(super) fn remembered_disclosures() -> HashMap<String, bool> {
-    fs::read_to_string(layout_path())
+    crate::bounded::read_string(&layout_path(), MAX_LAYOUT_BYTES)
         .map(|contents| parse_layout(&contents).disclosures)
         .unwrap_or_default()
 }
@@ -49,7 +50,7 @@ pub(super) struct Persistence(Rc<State>);
 impl Persistence {
     pub(super) fn install(window: &gtk::ApplicationWindow, panes: Vec<Pane>) -> Self {
         let path = layout_path();
-        let remembered = fs::read_to_string(&path)
+        let remembered = crate::bounded::read_string(&path, MAX_LAYOUT_BYTES)
             .map(|contents| parse_layout(&contents))
             .unwrap_or_default();
         let normal_window_size =
@@ -409,7 +410,12 @@ fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> i
             .expect("writing to a String cannot fail");
     }
 
-    let parent = path.parent().expect("the layout path has a parent");
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the layout path does not have a parent directory",
+        )
+    })?;
     fs::create_dir_all(parent)?;
     let temporary = parent.join(format!(".layout.{}.tmp", std::process::id()));
     fs::write(&temporary, contents)?;

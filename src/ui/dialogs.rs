@@ -6,6 +6,7 @@ impl Ui {
             &self.window,
             variable,
             self.target_pointer_bits.get(),
+            self.target_architecture(),
             self.current_source_is_rust.get(),
             metadata.as_ref(),
             ValueEditorHandlers {
@@ -121,6 +122,7 @@ pub(super) fn open_variable_editor(
     parent: &gtk::ApplicationWindow,
     variable: Variable,
     target_pointer_bits: u32,
+    target_architecture: TargetArchitecture,
     rust_source: bool,
     metadata: Option<&ValueTypeMetadata>,
     handlers: ValueEditorHandlers,
@@ -190,10 +192,16 @@ pub(super) fn open_variable_editor(
             variable
                 .type_name
                 .is_none()
-                .then(|| register_integer_format(&variable.name, target_pointer_bits))
+                .then(|| {
+                    register_integer_format(
+                        &variable.name,
+                        target_pointer_bits,
+                        target_architecture,
+                    )
+                })
                 .flatten()
         });
-    let address = variable_is_address(&variable);
+    let address = variable_is_address(&variable, target_architecture);
     let entry = gtk::Entry::new();
     let (editable_value, _) = variable_value_parts(&variable.value);
     entry.set_activates_default(true);

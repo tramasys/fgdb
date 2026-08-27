@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     collections::VecDeque,
+    fmt::Write as _,
     path::PathBuf,
     rc::{Rc, Weak},
 };
@@ -10,7 +11,8 @@ use gtk::prelude::*;
 use crate::{
     config::LaunchConfig,
     debugger::{
-        MemoryKind, MiClient, MiEvent, Register, SessionEvent, StackEntry, StackFrame, Variable,
+        MemoryKind, MiClient, MiEvent, Register, SessionEvent, StackEntry, StackFrame,
+        TargetArchitecture, TargetEndian, Variable,
         context::{
             MemoryRegion, annotate_memory_regions, build_stack_entries, is_pointer_register,
             looks_like_string_word, pointer_address, read_memory_regions,
@@ -27,6 +29,7 @@ const VARIABLE_CHILD_PAGE_SIZE: usize = 128;
 const STACK_WORD_COUNT: usize = 32;
 const POINTER_STRING_PREVIEW_ELEMENTS: usize = 256;
 const POINTER_ENRICHMENT_CONCURRENCY: usize = 4;
+const MAX_AUTOMATIC_VARIABLE_OBJECTS: usize = 256;
 
 struct RegisterRefresh {
     ui: Weak<Ui>,
@@ -34,6 +37,9 @@ struct RegisterRefresh {
     registers: Vec<Register>,
     pending: VecDeque<usize>,
     active: usize,
+    architecture: TargetArchitecture,
+    endian: TargetEndian,
+    pointer_bits: u32,
 }
 
 struct StackRefresh {
@@ -43,6 +49,8 @@ struct StackRefresh {
     stack_register: &'static str,
     pending: VecDeque<usize>,
     active: usize,
+    word_size: usize,
+    endian: TargetEndian,
 }
 
 struct StackInputs {
@@ -57,6 +65,7 @@ struct VariableRefresh {
     generation: u64,
     variables: Vec<Variable>,
     next_index: usize,
+    created: usize,
 }
 
 mod assignments;
@@ -79,7 +88,7 @@ use assignments::*;
 use breakpoints::*;
 use kernel::*;
 use lifecycle::*;
-use refresh::*;
+pub(crate) use refresh::*;
 use source_control::*;
 use symbols::*;
 use type_metadata::*;
@@ -92,7 +101,7 @@ mod tests {
         source_symbol_pattern, stack_pointer_expression, stack_string_address, symbol_annotation,
         vector_assignment_expression,
     };
-    use crate::debugger::{MemoryKind, Register, StackEntry};
+    use crate::debugger::{MemoryKind, Register, StackEntry, TargetArchitecture, TargetEndian};
 
     #[test]
     fn builds_pointer_chain_expressions() {
@@ -111,6 +120,8 @@ mod tests {
             address: 0x7fff_0000,
             offset: 0,
             index: 0,
+            pointer_bits: 64,
+            endian: TargetEndian::Little,
             value: String::from("0x7fff1000"),
             pointer_chain: vec![
                 String::from("0x7fff1000"),
@@ -123,9 +134,15 @@ mod tests {
             region: Some(String::from("rw-p · [stack]")),
         };
         let word = u64::from_le_bytes(*b"LD_LIBRA");
-        assert_eq!(stack_string_address(&entry, word, 1), Some(0x7fff_1000));
+        assert_eq!(
+            stack_string_address(&entry, word, 1, TargetEndian::Little, 8),
+            Some(0x7fff_1000)
+        );
         entry.memory_kind = MemoryKind::Code;
-        assert_eq!(stack_string_address(&entry, word, 1), None);
+        assert_eq!(
+            stack_string_address(&entry, word, 1, TargetEndian::Little, 8),
+            None
+        );
     }
 
     #[test]
@@ -141,11 +158,28 @@ mod tests {
             ],
         };
         assert_eq!(
-            register_string_address(&register, word, 2),
+            register_string_address(
+                &register,
+                word,
+                2,
+                TargetEndian::Little,
+                64,
+                TargetArchitecture::X86_64,
+            ),
             Some(0x7fff_f7fe_edf6)
         );
         register.name = String::from("rip");
-        assert_eq!(register_string_address(&register, word, 2), None);
+        assert_eq!(
+            register_string_address(
+                &register,
+                word,
+                2,
+                TargetEndian::Little,
+                64,
+                TargetArchitecture::X86_64,
+            ),
+            None
+        );
     }
 
     #[test]

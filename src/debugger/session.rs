@@ -7,7 +7,7 @@ use super::MiClient;
 
 #[derive(Clone, Debug)]
 pub enum SessionEvent {
-    Spawned,
+    Spawned(u32),
     Failed(String),
     Exited(i32),
 }
@@ -39,9 +39,14 @@ pub fn launch_gdb(
         -1,
         None::<&gtk::gio::Cancellable>,
         move |result| match result {
-            Ok(_) => {
+            Ok(pid) => {
                 terminal_for_callback.feed_child(format!("new-ui mi2 {mi_path}\n").as_bytes());
-                spawn_event(SessionEvent::Spawned);
+                match u32::try_from(pid.0) {
+                    Ok(pid) => spawn_event(SessionEvent::Spawned(pid)),
+                    Err(_) => spawn_event(SessionEvent::Failed(String::from(
+                        "GDB started with an invalid process ID",
+                    ))),
+                }
             }
             Err(error) => spawn_event(SessionEvent::Failed(error.to_string())),
         },

@@ -1,4 +1,6 @@
-use super::{MemoryBlock, MemoryKind, Register, StackEntry, StackFrame};
+use super::{
+    MemoryBlock, MemoryKind, Register, StackEntry, StackFrame, TargetArchitecture, TargetEndian,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MemoryRegion {
@@ -10,19 +12,25 @@ pub(crate) struct MemoryRegion {
     pub referenced_by: Vec<String>,
 }
 
-pub(crate) fn annotate_memory_regions(regions: &mut [MemoryRegion], registers: &[Register]) {
+pub(crate) fn annotate_memory_regions(
+    regions: &mut [MemoryRegion],
+    registers: &[Register],
+    architecture: TargetArchitecture,
+) {
     for region in regions.iter_mut() {
         region.referenced_by.clear();
     }
     for register in registers
         .iter()
-        .filter(|register| is_pointer_register(&register.name))
+        .filter(|register| is_pointer_register(&register.name, architecture))
     {
         let Some(address) = pointer_address(&register.value) else {
             continue;
         };
-        if let Some(region) = regions.iter_mut().find(|region| region.contains(address)) {
-            region.referenced_by.push(format!("${}", register.name));
+        if let Some(index) = region_index(regions, address) {
+            regions[index]
+                .referenced_by
+                .push(format!("${}", register.name));
         }
     }
 }
@@ -45,54 +53,39 @@ pub(crate) fn pointer_address(value: &str) -> Option<u64> {
     u64::from_str_radix(value, 16).ok()
 }
 
-pub(crate) fn is_pointer_register(name: &str) -> bool {
-    matches!(
-        name,
-        "rax"
-            | "rbx"
-            | "rcx"
-            | "rdx"
-            | "rsp"
-            | "rbp"
-            | "rsi"
-            | "rdi"
-            | "rip"
-            | "r8"
-            | "r9"
-            | "r10"
-            | "r11"
-            | "r12"
-            | "r13"
-            | "r14"
-            | "r15"
-            | "fs_base"
-            | "gs_base"
-            | "eax"
-            | "ebx"
-            | "ecx"
-            | "edx"
-            | "esp"
-            | "ebp"
-            | "esi"
-            | "edi"
-            | "eip"
-    )
+pub(crate) fn is_pointer_register(name: &str, architecture: TargetArchitecture) -> bool {
+    architecture.is_address_register(name)
 }
 
-pub(crate) fn read_memory_regions(pid: u32) -> Vec<MemoryRegion> {
-    let Ok(maps) = std::fs::read_to_string(format!("/proc/{pid}/maps")) else {
+pub(crate) fn read_memory_regions(pid: u32, debugger_pid: u32) -> Vec<MemoryRegion> {
+    const MAX_MAPS_BYTES: usize = 16 * 1024 * 1024;
+    let Ok(root) = crate::kernel::verified_proc_root(pid, debugger_pid) else {
         return Vec::new();
     };
-    maps.lines().filter_map(parse_memory_region).collect()
+    let Ok(maps) = crate::bounded::read_string(&root.join("maps"), MAX_MAPS_BYTES) else {
+        return Vec::new();
+    };
+    maps.lines()
+        .take(32_768)
+        .filter_map(parse_memory_region)
+        .collect()
 }
 
 pub(crate) fn build_stack_entries(
     memory: &MemoryBlock,
     word_size: usize,
+    endian: TargetEndian,
+    architecture: TargetArchitecture,
     registers: &[Register],
     frames: &[StackFrame],
     regions: &[MemoryRegion],
 ) -> Vec<StackEntry> {
+    // Stack words are target pointers. Reject corrupt or unsupported ABI
+    // widths here as a last line of defence; slicing the fixed u64 buffer with
+    // a wider value would otherwise panic.
+    if !matches!(word_size, 4 | 8) {
+        return Vec::new();
+    }
     memory
         .bytes
         .chunks_exact(word_size)
@@ -100,13 +93,19 @@ pub(crate) fn build_stack_entries(
         .map(|(index, bytes)| {
             let mut word = [0_u8; 8];
             word[..word_size].copy_from_slice(bytes);
-            let value = u64::from_le_bytes(word);
-            let address = memory.begin + (index * word_size) as u64;
-            let address_registers = matching_registers(registers, address);
+            let value = match endian {
+                TargetEndian::Little => u64::from_le_bytes(word),
+                TargetEndian::Big => {
+                    word.rotate_right(8 - word_size);
+                    u64::from_be_bytes(word)
+                }
+            };
+            let address = memory.begin.saturating_add((index * word_size) as u64);
+            let address_registers = matching_registers(registers, address, architecture);
             let value_registers = if value == 0 {
                 Vec::new()
             } else {
-                matching_registers(registers, value)
+                matching_registers(registers, value, architecture)
             };
             let return_frame = frames
                 .iter()
@@ -114,15 +113,18 @@ pub(crate) fn build_stack_entries(
                 .find(|frame| pointer_address(&frame.address) == Some(value))
                 .map(|frame| frame.level);
             let region = region_for_address(regions, value);
-            let memory_kind = if region.is_none() && looks_like_string_word(value) {
-                MemoryKind::String
-            } else {
-                region.map_or(MemoryKind::None, |region| region.kind)
-            };
+            let memory_kind =
+                if region.is_none() && looks_like_string_word(value, endian, word_size) {
+                    MemoryKind::String
+                } else {
+                    region.map_or(MemoryKind::None, |region| region.kind)
+                };
             StackEntry {
                 address,
                 offset: index * word_size,
                 index,
+                pointer_bits: u32::try_from(word_size * 8).unwrap_or(64),
+                endian,
                 value: format!("0x{value:x}"),
                 pointer_chain: Vec::new(),
                 address_registers,
@@ -135,20 +137,30 @@ pub(crate) fn build_stack_entries(
         .collect()
 }
 
-pub(crate) fn looks_like_string_word(value: u64) -> bool {
-    value
-        .to_le_bytes()
+pub(crate) fn looks_like_string_word(value: u64, endian: TargetEndian, word_size: usize) -> bool {
+    let word_bytes = endian.word_bytes(value);
+    let bytes = match endian {
+        TargetEndian::Little => word_bytes.get(..word_size),
+        TargetEndian::Big => word_bytes.get(8_usize.saturating_sub(word_size)..),
+    };
+    bytes
+        .unwrap_or(&word_bytes)
         .iter()
         .take_while(|byte| byte.is_ascii_graphic() || **byte == b' ')
         .count()
         >= 4
 }
 
-fn matching_registers(registers: &[Register], address: u64) -> Vec<String> {
+fn matching_registers(
+    registers: &[Register],
+    address: u64,
+    architecture: TargetArchitecture,
+) -> Vec<String> {
     registers
         .iter()
         .filter(|register| {
-            is_pointer_register(&register.name) && pointer_address(&register.value) == Some(address)
+            is_pointer_register(&register.name, architecture)
+                && pointer_address(&register.value) == Some(address)
         })
         .map(|register| register.name.clone())
         .collect()
@@ -191,7 +203,14 @@ fn parse_memory_region(line: &str) -> Option<MemoryRegion> {
 }
 
 fn region_for_address(regions: &[MemoryRegion], address: u64) -> Option<&MemoryRegion> {
-    regions.iter().find(|region| region.contains(address))
+    region_index(regions, address).and_then(|index| regions.get(index))
+}
+
+fn region_index(regions: &[MemoryRegion], address: u64) -> Option<usize> {
+    let index = regions
+        .partition_point(|region| region.start <= address)
+        .checked_sub(1)?;
+    regions[index].contains(address).then_some(index)
 }
 
 fn region_description(region: &MemoryRegion) -> String {
@@ -204,7 +223,9 @@ mod tests {
         MemoryRegion, annotate_memory_regions, build_stack_entries, parse_memory_region,
         pointer_address,
     };
-    use crate::debugger::{MemoryBlock, MemoryKind, Register, StackFrame};
+    use crate::debugger::{
+        MemoryBlock, MemoryKind, Register, StackFrame, TargetArchitecture, TargetEndian,
+    };
 
     #[test]
     fn extracts_addresses_from_symbolic_values() {
@@ -245,7 +266,7 @@ mod tests {
             },
         ];
         let mut mapped_regions = vec![region.clone(), stack.clone()];
-        annotate_memory_regions(&mut mapped_regions, &registers);
+        annotate_memory_regions(&mut mapped_regions, &registers, TargetArchitecture::X86_64);
         assert_eq!(mapped_regions[0].referenced_by, ["$rsi"]);
         assert!(mapped_regions[1].referenced_by.is_empty());
         let frames = vec![StackFrame {
@@ -260,6 +281,8 @@ mod tests {
         let entries = build_stack_entries(
             &memory,
             8,
+            TargetEndian::Little,
+            TargetArchitecture::X86_64,
             &registers,
             &frames,
             &[MemoryRegion { ..region }],
@@ -290,9 +313,53 @@ mod tests {
             begin: 0x7fff_0000,
             bytes: words.into_iter().flat_map(u64::to_le_bytes).collect(),
         };
-        let entries = build_stack_entries(&memory, 8, &[], &[], &[]);
+        let entries = build_stack_entries(
+            &memory,
+            8,
+            TargetEndian::Little,
+            TargetArchitecture::X86_64,
+            &[],
+            &[],
+            &[],
+        );
         assert_eq!(entries.len(), words.len());
         assert_eq!(entries[0].memory_kind, MemoryKind::String);
         assert_eq!(entries[11].offset, 88);
+    }
+
+    #[test]
+    fn decodes_big_endian_stack_words() {
+        let memory = MemoryBlock {
+            begin: 0x1000,
+            bytes: 0x1234_5678_u32.to_be_bytes().to_vec(),
+        };
+        let entries = build_stack_entries(
+            &memory,
+            4,
+            TargetEndian::Big,
+            TargetArchitecture::PowerPc32,
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(entries[0].value, "0x12345678");
+    }
+
+    #[test]
+    fn recognizes_inline_ascii_in_big_endian_32_bit_words() {
+        let memory = MemoryBlock {
+            begin: 0x1000,
+            bytes: b"TEXT".to_vec(),
+        };
+        let entries = build_stack_entries(
+            &memory,
+            4,
+            TargetEndian::Big,
+            TargetArchitecture::PowerPc32,
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(entries[0].memory_kind, MemoryKind::String);
     }
 }

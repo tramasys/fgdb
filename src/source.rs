@@ -1,6 +1,9 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use crate::config::LaunchConfig;
@@ -15,24 +18,46 @@ pub fn roots(config: &LaunchConfig) -> Vec<PathBuf> {
     if let Some(paths) = std::env::var_os("FGDB_SOURCE_PATH") {
         roots.extend(std::env::split_paths(&paths));
     }
-    if let Ok(output) = Command::new("rustc").args(["--print", "sysroot"]).output()
-        && output.status.success()
-    {
-        let sysroot = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        roots.push(
-            PathBuf::from(sysroot)
-                .join("lib")
-                .join("rustlib")
-                .join("src")
-                .join("rust"),
-        );
+    if let Some(paths) = std::env::var_os("RUST_SRC_PATH") {
+        roots.extend(std::env::split_paths(&paths));
+    }
+    if let Some(sysroot) = rust_sysroot(Duration::from_millis(250)) {
+        roots.push(sysroot.join("lib/rustlib/src/rust"));
     }
     roots.push(PathBuf::from("/usr/src/debug"));
     if let Some(home) = std::env::var_os("HOME") {
         roots.push(PathBuf::from(home).join(".cache/debuginfod_client"));
     }
-    roots.retain(|root| root.is_dir());
+    let mut seen = HashSet::new();
+    roots.retain(|root| root.is_dir() && seen.insert(root.clone()));
     roots
+}
+
+fn rust_sysroot(timeout: Duration) -> Option<PathBuf> {
+    let mut child = Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let output = child.wait_with_output().ok()?;
+                return status
+                    .success()
+                    .then(|| PathBuf::from(String::from_utf8_lossy(&output.stdout).trim()))
+                    .filter(|path| !path.as_os_str().is_empty());
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 pub fn resolve(reported: &str, roots: &[PathBuf]) -> Option<PathBuf> {
@@ -67,6 +92,15 @@ pub fn resolve(reported: &str, roots: &[PathBuf]) -> Option<PathBuf> {
         .map(|length| components[components.len() - length..].iter().collect())
         .collect::<Vec<PathBuf>>();
     for root in roots {
+        // Most compiler paths retain a useful suffix. Try those cheap direct
+        // probes before enumerating child directories on every cache miss.
+        if let Some(candidate) = suffixes
+            .iter()
+            .map(|suffix| root.join(suffix))
+            .find(|candidate| candidate.is_file())
+        {
+            return Some(candidate);
+        }
         let child_directories = std::fs::read_dir(root)
             .into_iter()
             .flatten()
@@ -76,10 +110,6 @@ pub fn resolve(reported: &str, roots: &[PathBuf]) -> Option<PathBuf> {
             .filter(|path| path.is_dir())
             .collect::<Vec<_>>();
         for suffix in &suffixes {
-            let candidate = root.join(suffix);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
             for child in &child_directories {
                 for candidate in [child.join(suffix), child.join("source").join(suffix)] {
                     if candidate.is_file() {

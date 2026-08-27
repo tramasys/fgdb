@@ -43,9 +43,43 @@ pub(crate) struct KernelSnapshot {
     pub signals: Vec<KernelSignal>,
     pub process_tree: Vec<KernelProcess>,
     pub warnings: Vec<String>,
+    pub tls_metadata_scanned: bool,
     pub comparison_ready: bool,
     identity: Option<u64>,
     metrics: KernelMetrics,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct KernelBaseline {
+    pid: u32,
+    captured_at_millis: u64,
+    identity: Option<u64>,
+    metrics: KernelMetrics,
+    mappings: Vec<KernelMappingBaseline>,
+}
+
+/// The subset of a VMA needed for stop-to-stop comparison.
+///
+/// Keeping this separate from [`KernelMapping`] matters for large processes:
+/// the live mapping model contains display-only NUMA, page-sampling and smaps
+/// fields which would otherwise remain allocated for the entire next stop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct KernelMappingBaseline {
+    start: u64,
+    end: u64,
+    permissions: String,
+    offset: u64,
+    device: String,
+    inode: u64,
+    path: Option<String>,
+    size: u64,
+    rss: u64,
+    pss: u64,
+    private_rss: u64,
+    private_dirty: u64,
+    referenced: u64,
+    swap: u64,
+    huge: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -194,6 +228,26 @@ impl KernelMapping {
             .saturating_add(self.shared_hugetlb)
             .saturating_add(self.private_hugetlb)
     }
+
+    fn comparison_baseline(&self) -> KernelMappingBaseline {
+        KernelMappingBaseline {
+            start: self.start,
+            end: self.end,
+            permissions: self.permissions.clone(),
+            offset: self.offset,
+            device: self.device.clone(),
+            inode: self.inode,
+            path: self.path.clone(),
+            size: self.size,
+            rss: self.rss,
+            pss: self.pss,
+            private_rss: self.private_bytes(),
+            private_dirty: self.private_dirty,
+            referenced: self.referenced,
+            swap: self.swap,
+            huge: self.huge_bytes(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -286,7 +340,7 @@ pub(crate) struct KernelProcess {
     pub threads: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct KernelMetrics {
     virtual_bytes: u64,
     rss: u64,
@@ -333,16 +387,74 @@ struct KernelMetrics {
     cgroup_metrics_available: bool,
 }
 
-pub(crate) fn read_snapshot(pid: u32) -> Result<KernelSnapshot, String> {
-    read_snapshot_from(&PathBuf::from(format!("/proc/{pid}")), pid)
+pub(crate) fn verified_proc_root(pid: u32, debugger_pid: u32) -> Result<PathBuf, String> {
+    let root = PathBuf::from(format!("/proc/{pid}"));
+    let status = process::read_key_values(&root.join("status"))
+        .map_err(|error| format!("Cannot inspect /proc/{pid}/status: {error}"))?;
+    verify_tracer(pid, debugger_pid, &status)?;
+    Ok(root)
 }
 
-fn read_snapshot_from(root: &Path, pid: u32) -> Result<KernelSnapshot, String> {
+/// Returns the ABI encoded by the traced process' executable.
+///
+/// GDB often reports its architecture and byte order as `auto`, especially
+/// before the inferior has stopped. Reading the already-verified `/proc` entry
+/// gives local sessions an authoritative fallback without trusting an
+/// arbitrary PID supplied by debugger output.
+pub(crate) fn read_local_target_abi(
+    pid: u32,
+    debugger_pid: u32,
+) -> Option<(
+    crate::debugger::TargetArchitecture,
+    crate::debugger::TargetEndian,
+    u32,
+)> {
+    let root = verified_proc_root(pid, debugger_pid).ok()?;
+    let bytes = crate::bounded::read_prefix(&root.join("exe"), 40).ok()?;
+    crate::debugger::TargetArchitecture::from_elf_ident(&bytes)
+}
+
+fn verify_tracer(
+    pid: u32,
+    debugger_pid: u32,
+    status: &HashMap<String, String>,
+) -> Result<(), String> {
+    let tracer = status
+        .get("TracerPid")
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or_else(|| format!("/proc/{pid}/status did not expose TracerPid"))?;
+    if tracer != debugger_pid {
+        return Err(format!(
+            "PID {pid} is not a local inferior traced by this GDB process (expected tracer {debugger_pid}, found {tracer})"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn read_snapshot(
+    pid: u32,
+    debugger_pid: u32,
+    include_tls_metadata: bool,
+) -> Result<KernelSnapshot, String> {
+    let root = verified_proc_root(pid, debugger_pid)?;
+    let snapshot = read_snapshot_from(&root, pid, include_tls_metadata)?;
+    // Revalidate ownership after the potentially expensive reads. This closes
+    // the window where GDB detaches (or the PID is recycled) during collection.
+    verified_proc_root(pid, debugger_pid)?;
+    Ok(snapshot)
+}
+
+fn read_snapshot_from(
+    root: &Path,
+    pid: u32,
+    include_tls_metadata: bool,
+) -> Result<KernelSnapshot, String> {
     let started = Instant::now();
     let status = process::read_key_values(&root.join("status"))
         .map_err(|error| format!("Cannot inspect /proc/{pid}/status: {error}"))?;
-    let stat = process::read_proc_stat(&root.join("stat"));
-    let identity = stat.as_ref().map(|stat| stat.start_time);
+    let stat = process::read_proc_stat(&root.join("stat"))
+        .ok_or_else(|| format!("Cannot establish the identity of process {pid}"))?;
+    let identity = Some(stat.start_time);
     let mut snapshot = KernelSnapshot {
         pid,
         identity,
@@ -354,8 +466,11 @@ fn read_snapshot_from(root: &Path, pid: u32) -> Result<KernelSnapshot, String> {
     memory::populate_memory(&mut snapshot, root, &status);
     memory::populate_numa(&mut snapshot, root);
     memory::populate_page_samples(&mut snapshot, root);
-    elf::populate_tls_metadata(&mut snapshot, root);
-    process::populate_scheduler(&mut snapshot, root, &status, stat.as_ref());
+    if include_tls_metadata {
+        elf::populate_tls_metadata(&mut snapshot, root);
+        snapshot.tls_metadata_scanned = true;
+    }
+    process::populate_scheduler(&mut snapshot, root, &status, Some(&stat));
     process::populate_security(&mut snapshot, root, &status);
     process::populate_io(&mut snapshot, root);
     process::populate_isolation(&mut snapshot, root, &status);
@@ -368,18 +483,16 @@ fn read_snapshot_from(root: &Path, pid: u32) -> Result<KernelSnapshot, String> {
     resources::populate_kernel_policy(&mut snapshot, root);
     populate_diagnostics(&mut snapshot);
 
-    if let Some(stat) = stat {
-        snapshot.metrics.minor_faults = stat.minor_faults;
-        snapshot.metrics.major_faults = stat.major_faults;
-        snapshot.metrics.user_ticks = stat.user_ticks;
-        snapshot.metrics.system_ticks = stat.system_ticks;
-    }
+    snapshot.metrics.minor_faults = stat.minor_faults;
+    snapshot.metrics.major_faults = stat.major_faults;
+    snapshot.metrics.user_ticks = stat.user_ticks;
+    snapshot.metrics.system_ticks = stat.system_ticks;
     snapshot.metrics.mappings = snapshot.mappings.len() as u64;
     snapshot.metrics.descriptors = snapshot.file_descriptors.len() as u64;
 
-    if let (Some(before), Some(after)) = (identity, process::read_proc_stat(&root.join("stat")))
-        && before != after.start_time
-    {
+    let after = process::read_proc_stat(&root.join("stat"))
+        .ok_or_else(|| format!("Process {pid} disappeared while its snapshot was being read"))?;
+    if stat.start_time != after.start_time {
         return Err(String::from(
             "The inferior changed while its procfs snapshot was being read",
         ));
@@ -395,7 +508,27 @@ fn read_snapshot_from(root: &Path, pid: u32) -> Result<KernelSnapshot, String> {
 }
 
 impl KernelSnapshot {
+    #[cfg(test)]
     pub(crate) fn compare_with(&mut self, previous: Option<&Self>) {
+        let baseline = previous.map(Self::baseline);
+        self.compare_with_baseline(baseline.as_ref());
+    }
+
+    pub(crate) fn baseline(&self) -> KernelBaseline {
+        KernelBaseline {
+            pid: self.pid,
+            captured_at_millis: self.captured_at_millis,
+            identity: self.identity,
+            metrics: self.metrics,
+            mappings: self
+                .mappings
+                .iter()
+                .map(KernelMapping::comparison_baseline)
+                .collect(),
+        }
+    }
+
+    pub(crate) fn compare_with_baseline(&mut self, previous: Option<&KernelBaseline>) {
         self.changes.clear();
         self.cgroup_changes.clear();
         self.mapping_changes.clear();
@@ -867,24 +1000,17 @@ fn summarize_mapping_changes(changes: &[KernelMappingChange]) -> Vec<KernelFact>
     facts
 }
 
-fn compare_mappings(before: &[KernelMapping], after: &[KernelMapping]) -> Vec<KernelMappingChange> {
-    type MappingKey = (u64, u64, String, u64, Option<String>);
-    let key = |mapping: &KernelMapping| {
-        MappingKey::from((
-            mapping.start,
-            mapping.offset,
-            mapping.device.clone(),
-            mapping.inode,
-            mapping.path.clone(),
-        ))
-    };
+fn compare_mappings(
+    before: &[KernelMappingBaseline],
+    after: &[KernelMapping],
+) -> Vec<KernelMappingChange> {
     let mut previous = before
         .iter()
-        .map(|mapping| (key(mapping), mapping))
+        .map(|mapping| (baseline_mapping_key(mapping), mapping))
         .collect::<HashMap<_, _>>();
     let mut changes = Vec::new();
     for mapping in after {
-        let old = previous.remove(&key(mapping));
+        let old = previous.remove(&current_mapping_key(mapping));
         let status = match old {
             None => "NEW",
             Some(old) if old.end != mapping.end && old.permissions != mapping.permissions => {
@@ -894,46 +1020,110 @@ fn compare_mappings(before: &[KernelMapping], after: &[KernelMapping]) -> Vec<Ke
             Some(old) if old.permissions != mapping.permissions => "PROTECTION",
             Some(_) => "CHANGED",
         };
-        let change = mapping_change(status, old, Some(mapping));
-        if old.is_none() || mapping_change_has_delta(&change) {
+        if let Some(change) = mapping_change(status, old, Some(mapping))
+            && (old.is_none() || mapping_change_has_delta(&change))
+        {
             changes.push(change);
         }
     }
     changes.extend(
         previous
             .into_values()
-            .map(|mapping| mapping_change("UNMAPPED", Some(mapping), None)),
+            .filter_map(|mapping| mapping_change("UNMAPPED", Some(mapping), None)),
     );
     changes.sort_by_key(|change| std::cmp::Reverse(change.impact()));
     changes
 }
 
+fn baseline_mapping_key(mapping: &KernelMappingBaseline) -> (u64, u64, &str, u64, Option<&str>) {
+    (
+        mapping.start,
+        mapping.offset,
+        &mapping.device,
+        mapping.inode,
+        mapping.path.as_deref(),
+    )
+}
+
+fn current_mapping_key(mapping: &KernelMapping) -> (u64, u64, &str, u64, Option<&str>) {
+    (
+        mapping.start,
+        mapping.offset,
+        &mapping.device,
+        mapping.inode,
+        mapping.path.as_deref(),
+    )
+}
+
 fn mapping_change(
     status: &str,
-    before: Option<&KernelMapping>,
+    before: Option<&KernelMappingBaseline>,
     after: Option<&KernelMapping>,
-) -> KernelMappingChange {
-    let display = after.or(before).expect("a mapping change has one side");
-    let delta = |value: fn(&KernelMapping) -> u64| {
-        i128::from(after.map_or(0, value)) - i128::from(before.map_or(0, value))
+) -> Option<KernelMappingChange> {
+    let (start, end, permissions, device, inode, path) = if let Some(mapping) = after {
+        (
+            mapping.start,
+            mapping.end,
+            mapping.permissions.as_str(),
+            mapping.device.as_str(),
+            mapping.inode,
+            mapping.path.as_deref(),
+        )
+    } else {
+        let mapping = before?;
+        (
+            mapping.start,
+            mapping.end,
+            mapping.permissions.as_str(),
+            mapping.device.as_str(),
+            mapping.inode,
+            mapping.path.as_deref(),
+        )
     };
-    KernelMappingChange {
+    let delta = |before: u64, after: u64| i128::from(after) - i128::from(before);
+    let before_value = |value: fn(&KernelMappingBaseline) -> u64| before.map_or(0, value);
+    let after_value = |value: fn(&KernelMapping) -> u64| after.map_or(0, value);
+    Some(KernelMappingChange {
         status: status.to_owned(),
-        start: display.start,
-        end: display.end,
-        permissions: display.permissions.clone(),
-        device: display.device.clone(),
-        inode: display.inode,
-        path: display.path.clone(),
-        size_delta: delta(|mapping| mapping.size),
-        rss_delta: delta(|mapping| mapping.rss),
-        pss_delta: delta(|mapping| mapping.pss),
-        private_delta: delta(KernelMapping::private_bytes),
-        dirty_delta: delta(|mapping| mapping.private_dirty),
-        referenced_delta: delta(|mapping| mapping.referenced),
-        swap_delta: delta(|mapping| mapping.swap),
-        huge_delta: delta(KernelMapping::huge_bytes),
-    }
+        start,
+        end,
+        permissions: permissions.to_owned(),
+        device: device.to_owned(),
+        inode,
+        path: path.map(str::to_owned),
+        size_delta: delta(
+            before_value(|mapping| mapping.size),
+            after_value(|mapping| mapping.size),
+        ),
+        rss_delta: delta(
+            before_value(|mapping| mapping.rss),
+            after_value(|mapping| mapping.rss),
+        ),
+        pss_delta: delta(
+            before_value(|mapping| mapping.pss),
+            after_value(|mapping| mapping.pss),
+        ),
+        private_delta: delta(
+            before_value(|mapping| mapping.private_rss),
+            after_value(KernelMapping::private_bytes),
+        ),
+        dirty_delta: delta(
+            before_value(|mapping| mapping.private_dirty),
+            after_value(|mapping| mapping.private_dirty),
+        ),
+        referenced_delta: delta(
+            before_value(|mapping| mapping.referenced),
+            after_value(|mapping| mapping.referenced),
+        ),
+        swap_delta: delta(
+            before_value(|mapping| mapping.swap),
+            after_value(|mapping| mapping.swap),
+        ),
+        huge_delta: delta(
+            before_value(|mapping| mapping.huge),
+            after_value(KernelMapping::huge_bytes),
+        ),
+    })
 }
 
 fn mapping_change_has_delta(change: &KernelMappingChange) -> bool {
@@ -1058,6 +1248,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rejects_procfs_data_not_traced_by_this_debugger() {
+        let status = HashMap::from([(String::from("TracerPid"), String::from("42"))]);
+        assert!(verify_tracer(7, 42, &status).is_ok());
+        assert!(
+            verify_tracer(7, 41, &status)
+                .unwrap_err()
+                .contains("found 42")
+        );
+    }
+
+    #[test]
     fn computes_signed_snapshot_deltas() {
         let mut old = KernelSnapshot {
             pid: 4,
@@ -1173,6 +1374,36 @@ mod tests {
     }
 
     #[test]
+    fn baseline_keeps_comparison_data_without_heavy_mapping_annotations() {
+        let snapshot = KernelSnapshot {
+            mappings: vec![KernelMapping {
+                start: 0x1000,
+                end: 0x2000,
+                permissions: String::from("rw-p"),
+                device: String::from("00:01"),
+                path: Some(String::from("[heap]")),
+                size: 4096,
+                rss: 4096,
+                private_dirty: 4096,
+                vm_flags: String::from("rd wr mr mw me ac sd"),
+                numa_nodes: String::from("N0=1"),
+                page_sample: String::from("large diagnostic payload"),
+                ..KernelMapping::default()
+            }],
+            ..KernelSnapshot::default()
+        };
+
+        let baseline = snapshot.baseline();
+        let mapping = &baseline.mappings[0];
+        assert_eq!(mapping.path.as_deref(), Some("[heap]"));
+        assert_eq!(mapping.private_dirty, 4096);
+        assert_eq!(mapping.private_rss, 4096);
+        assert!(
+            std::mem::size_of::<KernelMappingBaseline>() < std::mem::size_of::<KernelMapping>()
+        );
+    }
+
+    #[test]
     fn formats_debugger_scale_durations() {
         assert_eq!(format_duration_ns(420), "420 ns");
         assert_eq!(format_duration_ns(42_000), "42.000 µs");
@@ -1183,7 +1414,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn reads_a_live_procfs_snapshot() {
-        let snapshot = read_snapshot(std::process::id()).unwrap();
+        let pid = std::process::id();
+        let snapshot =
+            read_snapshot_from(&PathBuf::from(format!("/proc/{pid}")), pid, true).unwrap();
         assert_eq!(snapshot.pid, std::process::id());
         assert!(!snapshot.process.is_empty());
         assert!(!snapshot.mappings.is_empty());

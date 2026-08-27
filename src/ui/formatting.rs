@@ -5,6 +5,9 @@ pub(super) fn populate_register_group<'a>(
     registers: impl IntoIterator<Item = &'a Register>,
     previous: &HashMap<String, String>,
     ring: Option<u64>,
+    architecture: TargetArchitecture,
+    endian: Option<TargetEndian>,
+    pointer_bits: u32,
 ) {
     let rows = registers
         .into_iter()
@@ -12,40 +15,61 @@ pub(super) fn populate_register_group<'a>(
             register: register.clone(),
             changed: register_changed(register, previous),
             ring,
+            architecture,
+            endian,
+            pointer_bits,
         })
         .collect::<Vec<_>>();
     let count = rows.len() as i32;
     replace_boxed_store(&group.store, rows);
+    group.panel.set_visible(count != 0);
     if count == 0 {
         return;
     }
-    group.panel.set_visible(true);
     group.view.set_size_request(-1, 24 + count * 26);
 }
 
-pub(super) fn register_in_group(group: RegisterGroupKind, name: &str) -> bool {
+pub(super) fn register_in_group(
+    group: RegisterGroupKind,
+    name: &str,
+    architecture: TargetArchitecture,
+) -> bool {
     match group {
-        RegisterGroupKind::General => GENERAL_REGISTERS.contains(&name),
-        RegisterGroupKind::Bases => BASE_REGISTERS.contains(&name),
-        RegisterGroupKind::Flags => FLAG_REGISTERS.contains(&name),
-        RegisterGroupKind::Segments => SEGMENT_REGISTERS.contains(&name),
-        RegisterGroupKind::Vector => {
-            ["xmm", "ymm", "zmm", "mm"].iter().any(|prefix| {
-                name.strip_prefix(prefix).is_some_and(|index| {
-                    !index.is_empty() && index.chars().all(|character| character.is_ascii_digit())
-                })
-            }) || name == "mxcsr"
+        RegisterGroupKind::General => {
+            architecture.is_core_register(name)
+                && !architecture.is_status_register(name)
+                && !architecture.is_thread_pointer(name)
+                && !(matches!(
+                    architecture,
+                    TargetArchitecture::X86 | TargetArchitecture::X86_64
+                ) && matches!(name, "cs" | "ss" | "ds" | "es" | "fs" | "gs"))
         }
-        RegisterGroupKind::FloatingPoint => {
+        RegisterGroupKind::Bases => architecture.is_thread_pointer(name),
+        RegisterGroupKind::Flags => architecture.is_status_register(name),
+        RegisterGroupKind::Segments => {
             matches!(
-                name,
-                "fctrl" | "fstat" | "ftag" | "fiseg" | "fioff" | "foseg" | "fooff" | "fop"
-            ) || name.strip_prefix("st").is_some_and(|index| {
-                !index.is_empty() && index.chars().all(|character| character.is_ascii_digit())
-            })
+                architecture,
+                TargetArchitecture::X86 | TargetArchitecture::X86_64
+            ) && matches!(name, "cs" | "ss" | "ds" | "es" | "fs" | "gs")
         }
+        RegisterGroupKind::Vector => vector_register_for_architecture(name, architecture),
+        RegisterGroupKind::FloatingPoint => floating_register_for_architecture(name, architecture),
         RegisterGroupKind::Other => true,
     }
+}
+
+pub(super) fn vector_register_for_architecture(
+    name: &str,
+    architecture: TargetArchitecture,
+) -> bool {
+    architecture.is_vector_register(name)
+}
+
+pub(super) fn floating_register_for_architecture(
+    name: &str,
+    architecture: TargetArchitecture,
+) -> bool {
+    architecture.is_floating_register(name)
 }
 
 pub(super) fn register_changed(register: &Register, previous: &HashMap<String, String>) -> bool {
@@ -62,15 +86,23 @@ pub(super) fn same_register_values(left: &[Register], right: &[Register]) -> boo
             .all(|(left, right)| left.name == right.name && left.value == right.value)
 }
 
-pub(super) fn register_value_css(register: &Register) -> &'static str {
-    if matches!(register.name.as_str(), "rip" | "eip") {
+pub(super) fn register_value_css(
+    register: &Register,
+    architecture: TargetArchitecture,
+    endian: Option<TargetEndian>,
+    pointer_bits: u32,
+) -> &'static str {
+    if architecture.is_program_counter(&register.name) {
         "memory-code"
-    } else if matches!(register.name.as_str(), "rsp" | "rbp" | "esp" | "ebp") {
+    } else if architecture.is_stack_or_frame_pointer(&register.name) {
         "memory-stack"
     } else if register.pointer_chain.iter().skip(1).any(|value| {
         value.contains('"')
             || hex_value(value).is_some_and(|value| {
-                ascii_annotation(value).is_some_and(|annotation| !annotation.starts_with('('))
+                endian.is_some_and(|endian| {
+                    ascii_annotation(value, endian, pointer_bits)
+                        .is_some_and(|annotation| !annotation.starts_with('('))
+                })
             })
     }) {
         "memory-string"
@@ -91,7 +123,12 @@ pub(super) fn register_value_css(register: &Register) -> &'static str {
     }
 }
 
-pub(super) fn register_text(register: &Register) -> String {
+pub(super) fn register_text(
+    register: &Register,
+    architecture: TargetArchitecture,
+    endian: Option<TargetEndian>,
+    pointer_bits: u32,
+) -> String {
     let values = if register.pointer_chain.is_empty() {
         std::slice::from_ref(&register.value)
     } else {
@@ -100,33 +137,112 @@ pub(super) fn register_text(register: &Register) -> String {
     values
         .iter()
         .enumerate()
-        .map(|(index, value)| format_register_value(&register.name, value, index > 0))
+        .map(|(index, value)| {
+            if index == 0 {
+                format_register_value_for_target(
+                    &register.name,
+                    value,
+                    false,
+                    architecture,
+                    endian,
+                    pointer_bits,
+                )
+            } else {
+                format_target_pointer_word(value, endian, pointer_bits)
+            }
+        })
         .collect::<Vec<_>>()
         .join("  →  ")
 }
 
-pub(super) fn register_primary_value(register: &Register) -> String {
+pub(super) fn register_primary_value(
+    register: &Register,
+    architecture: TargetArchitecture,
+) -> String {
     let value = register.pointer_chain.first().unwrap_or(&register.value);
-    format_register_value(&register.name, value, false)
+    format_register_value_for_architecture(&register.name, value, false, architecture)
 }
 
-pub(super) fn register_details(register: &Register) -> String {
+pub(super) fn register_details(
+    register: &Register,
+    _architecture: TargetArchitecture,
+    endian: Option<TargetEndian>,
+    pointer_bits: u32,
+) -> String {
     register
         .pointer_chain
         .iter()
         .skip(1)
-        .map(|value| format_register_value(&register.name, value, true))
+        .map(|value| format_target_pointer_word(value, endian, pointer_bits))
         .collect::<Vec<_>>()
         .join("  →  ")
 }
 
-pub(super) fn is_flags_register(name: &str) -> bool {
-    matches!(name, "eflags" | "rflags" | "cpsr")
+fn format_target_pointer_word(
+    value: &str,
+    endian: Option<TargetEndian>,
+    pointer_bits: u32,
+) -> String {
+    // Dereference chains contain pointer-sized memory words, even when their
+    // source register is wider (x32, AArch64 ILP32, or MIPS n32).
+    format_register_value_for_target(
+        "pointer",
+        value,
+        true,
+        TargetArchitecture::Unknown,
+        endian,
+        pointer_bits,
+    )
 }
 
+pub(super) fn is_flags_register(name: &str) -> bool {
+    matches!(name, "eflags" | "rflags" | "cpsr" | "pstate" | "nzcv")
+}
+
+#[cfg(test)]
 pub(super) fn format_register_value(register: &str, value: &str, show_ascii: bool) -> String {
+    format_register_value_for_target(
+        register,
+        value,
+        show_ascii,
+        TargetArchitecture::Unknown,
+        Some(TargetEndian::Little),
+        64,
+    )
+}
+
+pub(super) fn format_register_value_for_architecture(
+    register: &str,
+    value: &str,
+    show_ascii: bool,
+    architecture: TargetArchitecture,
+) -> String {
+    format_register_value_for_target(
+        register,
+        value,
+        show_ascii,
+        architecture,
+        architecture.default_endian(),
+        architecture.pointer_bits().unwrap_or(64),
+    )
+}
+
+pub(super) fn format_register_value_for_target(
+    register: &str,
+    value: &str,
+    show_ascii: bool,
+    architecture: TargetArchitecture,
+    endian: Option<TargetEndian>,
+    pointer_bits: u32,
+) -> String {
     if let Some(vector) = format_vector_register_value(register, value) {
         return vector;
+    }
+    if (vector_register_for_architecture(register, architecture)
+        || floating_register_for_architecture(register, architecture))
+        && value.trim_start().starts_with('{')
+    {
+        return compact_structured_register_value(value);
     }
     if value.starts_with('[') {
         return value.to_owned();
@@ -134,16 +250,42 @@ pub(super) fn format_register_value(register: &str, value: &str, show_ascii: boo
     let Some(number) = hex_value(value) else {
         return value.lines().next().unwrap_or(value).to_owned();
     };
-    let width = register_hex_width(register);
+    let width = register_hex_width(register, architecture, pointer_bits);
     let mut formatted = format!("0x{number:0width$x}");
     if let Some((_, annotation)) = value.trim().split_once(char::is_whitespace) {
         formatted.push(' ');
         formatted.push_str(annotation.trim());
-    } else if show_ascii && let Some(annotation) = ascii_annotation(number) {
+    } else if show_ascii
+        && let Some(annotation) =
+            endian.and_then(|endian| ascii_annotation(number, endian, pointer_bits))
+    {
         formatted.push(' ');
         formatted.push_str(&annotation);
     }
     formatted
+}
+
+fn compact_structured_register_value(value: &str) -> String {
+    const MAX_CHARS: usize = 1_024;
+    let mut compact = String::with_capacity(value.len().min(MAX_CHARS));
+    let mut char_count = 0_usize;
+    let mut truncated = false;
+    for part in value.split_whitespace() {
+        let needed = part.chars().count() + usize::from(!compact.is_empty());
+        if char_count.saturating_add(needed) > MAX_CHARS {
+            truncated = true;
+            break;
+        }
+        if !compact.is_empty() {
+            compact.push(' ');
+        }
+        compact.push_str(part);
+        char_count += needed;
+    }
+    if truncated {
+        compact.push_str(" …");
+    }
+    compact
 }
 
 pub(super) fn format_vector_register_value(register: &str, value: &str) -> Option<String> {
@@ -266,17 +408,14 @@ pub(super) fn format_float(value: f64) -> String {
     }
 }
 
-pub(super) fn register_hex_width(register: &str) -> usize {
-    if matches!(register, "cs" | "ss" | "ds" | "es" | "fs" | "gs") {
-        4
-    } else if matches!(
-        register,
-        "eax" | "ebx" | "ecx" | "edx" | "esp" | "ebp" | "esi" | "edi" | "eip" | "cpsr"
-    ) {
-        8
-    } else {
-        16
-    }
+pub(super) fn register_hex_width(
+    register: &str,
+    architecture: TargetArchitecture,
+    target_pointer_bits: u32,
+) -> usize {
+    usize::try_from(architecture.scalar_register_bits(register, target_pointer_bits) / 4)
+        .unwrap_or(16)
+        .clamp(4, 32)
 }
 
 pub(super) fn hex_value(value: &str) -> Option<u64> {
@@ -288,8 +427,17 @@ pub(super) fn hex_value(value: &str) -> Option<u64> {
     u64::from_str_radix(hex, 16).ok()
 }
 
-pub(super) fn ascii_annotation(value: u64) -> Option<String> {
-    let bytes = value.to_le_bytes();
+pub(super) fn ascii_annotation(
+    value: u64,
+    endian: TargetEndian,
+    pointer_bits: u32,
+) -> Option<String> {
+    let bytes = endian.word_bytes(value);
+    let word_size = usize::try_from(pointer_bits / 8).unwrap_or(8).clamp(4, 8);
+    let bytes = match endian {
+        TargetEndian::Little => &bytes[..word_size],
+        TargetEndian::Big => &bytes[8 - word_size..],
+    };
     let printable = bytes
         .iter()
         .take_while(|byte| byte.is_ascii_graphic() || **byte == b' ')
@@ -317,18 +465,28 @@ pub(super) fn ascii_annotation(value: u64) -> Option<String> {
 
 #[cfg(test)]
 pub(super) fn flags_markup(value: &str, ring: Option<u64>) -> String {
-    let details = flags_details_markup(value, ring);
+    let details = flags_details_markup("rflags", value, ring);
     let Some(value) = hex_value(value) else {
         return details;
     };
     format!("0x{value:x}  {details}")
 }
 
-pub(super) fn flags_details_markup(value: &str, ring: Option<u64>) -> String {
+pub(super) fn flags_details_markup(register: &str, value: &str, ring: Option<u64>) -> String {
     let Some(value) = hex_value(value) else {
         return gtk::glib::markup_escape_text(value).to_string();
     };
-    let flags = FLAGS
+    let definitions: &[(u8, &str)] = if matches!(register, "cpsr" | "pstate" | "nzcv") {
+        &[
+            (31, "negative"),
+            (30, "zero"),
+            (29, "carry"),
+            (28, "overflow"),
+        ]
+    } else {
+        FLAGS
+    };
+    let flags = definitions
         .iter()
         .map(|(bit, name)| {
             if value & (1_u64 << bit) != 0 {
@@ -339,7 +497,11 @@ pub(super) fn flags_details_markup(value: &str, ring: Option<u64>) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    let ring = ring.map_or_else(String::new, |ring| format!("  [Ring={ring}]"));
+    let ring = if matches!(register, "eflags" | "rflags") {
+        ring.map_or_else(String::new, |ring| format!("  [Ring={ring}]"))
+    } else {
+        String::new()
+    };
     format!("[{flags}]{ring}")
 }
 
@@ -522,8 +684,11 @@ pub(super) fn stack_tooltip(entry: &StackEntry) -> String {
         .join(", ");
     let references = stack_references(entry);
     let region = entry.region.as_deref().unwrap_or("unmapped");
+    let width = usize::try_from(entry.pointer_bits / 4)
+        .unwrap_or(16)
+        .clamp(8, 16);
     format!(
-        "0x{:016x}  +0x{:04x} / +{:03}\n{}\nanchors: {} · references: {}\n{}",
+        "0x{:0width$x}  +0x{:04x} / +{:03}\n{}\nanchors: {} · references: {}\n{}",
         entry.address,
         entry.offset,
         entry.index,
@@ -535,6 +700,7 @@ pub(super) fn stack_tooltip(entry: &StackEntry) -> String {
             &references
         },
         region,
+        width = width,
     )
 }
 
@@ -547,7 +713,21 @@ pub(super) fn stack_entry_text(entry: &StackEntry) -> String {
     values
         .iter()
         .enumerate()
-        .map(|(index, value)| format_register_value("rsp", value, index > 0))
+        .map(|(index, value)| {
+            let architecture = if entry.pointer_bits == 32 {
+                TargetArchitecture::X86
+            } else {
+                TargetArchitecture::X86_64
+            };
+            format_register_value_for_target(
+                "sp",
+                value,
+                index > 0,
+                architecture,
+                Some(entry.endian),
+                entry.pointer_bits,
+            )
+        })
         .collect::<Vec<_>>()
         .join("  →  ")
 }
@@ -665,8 +845,12 @@ pub(super) fn thread_metadata(thread: &ThreadInfo, stop_reason: Option<&str>) ->
     metadata.join(", ")
 }
 
-pub(super) fn full_address(address: &str) -> String {
-    hex_value(address).map_or_else(|| address.to_owned(), |address| format!("0x{address:016x}"))
+pub(super) fn full_address(address: &str, pointer_bits: u32) -> String {
+    let width = usize::try_from(pointer_bits / 4).unwrap_or(16).clamp(8, 16);
+    hex_value(address).map_or_else(
+        || address.to_owned(),
+        |address| format!("0x{address:0width$x}"),
+    )
 }
 
 pub(super) fn split_instruction(instruction: &str) -> (&str, &str) {
@@ -677,28 +861,242 @@ pub(super) fn split_instruction(instruction: &str) -> (&str, &str) {
     }
 }
 
+fn is_call_instruction(mnemonic: &str, operands: &str, architecture: TargetArchitecture) -> bool {
+    match architecture {
+        TargetArchitecture::X86 | TargetArchitecture::X86_64 => mnemonic.starts_with("call"),
+        TargetArchitecture::Arm => matches!(mnemonic, "bl" | "blx"),
+        TargetArchitecture::AArch64 => matches!(mnemonic, "bl" | "blr"),
+        TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64 => {
+            matches!(mnemonic, "call" | "jal")
+        }
+        TargetArchitecture::Mips32 | TargetArchitecture::Mips64 => {
+            matches!(mnemonic, "jal" | "jalr" | "bal")
+        }
+        TargetArchitecture::PowerPc32 | TargetArchitecture::PowerPc64 => {
+            matches!(mnemonic, "bl" | "bcl" | "bctrl")
+        }
+        TargetArchitecture::S390 | TargetArchitecture::S390x => {
+            matches!(mnemonic, "brasl" | "basr")
+        }
+        TargetArchitecture::LoongArch64 => {
+            mnemonic == "bl"
+                || (mnemonic == "jirl"
+                    && operands
+                        .split(',')
+                        .next()
+                        .map(|operand| operand.trim().trim_start_matches('$'))
+                        .is_some_and(|operand| matches!(operand, "ra" | "r1")))
+        }
+        TargetArchitecture::Unknown => {
+            mnemonic.starts_with("call") || matches!(mnemonic, "bl" | "jal" | "brasl")
+        }
+    }
+}
+
+fn is_return_instruction(mnemonic: &str, operands: &str, architecture: TargetArchitecture) -> bool {
+    if mnemonic == "ret" || mnemonic.starts_with("ret.") {
+        return true;
+    }
+    match architecture {
+        TargetArchitecture::Arm => {
+            mnemonic == "bx" && operands.trim().trim_start_matches(['$', '%']) == "lr"
+        }
+        TargetArchitecture::AArch64 => {
+            mnemonic == "br"
+                && matches!(operands.trim().trim_start_matches(['$', '%']), "x30" | "lr")
+        }
+        TargetArchitecture::Mips32 | TargetArchitecture::Mips64 => {
+            mnemonic == "jr" && operands.contains("ra")
+        }
+        TargetArchitecture::PowerPc32 | TargetArchitecture::PowerPc64 => mnemonic == "blr",
+        TargetArchitecture::S390 | TargetArchitecture::S390x => {
+            mnemonic == "br" && (operands.contains("r14") || operands.contains("%r14"))
+        }
+        TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64 => {
+            mnemonic == "jr" && operands.contains("ra")
+        }
+        TargetArchitecture::LoongArch64 => {
+            if mnemonic != "jirl" {
+                return false;
+            }
+            let operands = operands
+                .split(',')
+                .map(|operand| operand.trim().trim_start_matches('$'))
+                .collect::<Vec<_>>();
+            matches!(operands.as_slice(), ["zero" | "r0", "ra" | "r1", _])
+        }
+        _ => false,
+    }
+}
+
+fn syscall_architecture(
+    mnemonic: &str,
+    operands: &str,
+    architecture: TargetArchitecture,
+) -> Option<TargetArchitecture> {
+    match architecture {
+        TargetArchitecture::X86 | TargetArchitecture::X86_64 => match mnemonic {
+            "syscall" | "sysenter" => Some(architecture),
+            "int" => {
+                let vector = operands.trim().trim_start_matches(['$', '#']);
+                matches!(vector, "0x80" | "80h" | "128").then_some(TargetArchitecture::X86)
+            }
+            _ => None,
+        },
+        TargetArchitecture::Arm => matches!(mnemonic, "svc" | "swi").then_some(architecture),
+        TargetArchitecture::AArch64 => (mnemonic == "svc").then_some(architecture),
+        TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64 => {
+            (mnemonic == "ecall").then_some(architecture)
+        }
+        TargetArchitecture::Mips32 | TargetArchitecture::Mips64 => {
+            (mnemonic == "syscall").then_some(architecture)
+        }
+        TargetArchitecture::PowerPc32 | TargetArchitecture::PowerPc64 => {
+            (mnemonic == "sc").then_some(architecture)
+        }
+        TargetArchitecture::S390 | TargetArchitecture::S390x => {
+            (mnemonic == "svc").then_some(architecture)
+        }
+        TargetArchitecture::LoongArch64 => (mnemonic == "syscall").then_some(architecture),
+        TargetArchitecture::Unknown => {
+            matches!(mnemonic, "syscall" | "sysenter" | "svc" | "ecall" | "sc")
+                .then_some(architecture)
+        }
+    }
+}
+
+fn is_unconditional_branch(mnemonic: &str, architecture: TargetArchitecture) -> bool {
+    match architecture {
+        TargetArchitecture::X86 | TargetArchitecture::X86_64 => mnemonic.starts_with("jmp"),
+        TargetArchitecture::Arm => matches!(mnemonic, "b" | "bx"),
+        TargetArchitecture::AArch64 => matches!(mnemonic, "b" | "br"),
+        TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64 => matches!(mnemonic, "j" | "jr"),
+        TargetArchitecture::Mips32 | TargetArchitecture::Mips64 => {
+            matches!(mnemonic, "b" | "j" | "jr")
+        }
+        TargetArchitecture::PowerPc32 | TargetArchitecture::PowerPc64 => {
+            matches!(mnemonic, "b" | "ba" | "bctr")
+        }
+        TargetArchitecture::S390 | TargetArchitecture::S390x => matches!(mnemonic, "j" | "br"),
+        TargetArchitecture::LoongArch64 => matches!(mnemonic, "b" | "jirl"),
+        TargetArchitecture::Unknown => matches!(mnemonic, "jmp" | "b" | "j"),
+    }
+}
+
+fn is_conditional_branch(mnemonic: &str, architecture: TargetArchitecture) -> bool {
+    match architecture {
+        TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
+            mnemonic.starts_with('j') || mnemonic.starts_with("loop")
+        }
+        TargetArchitecture::Arm | TargetArchitecture::AArch64 => {
+            mnemonic.starts_with("b.")
+                || matches!(
+                    mnemonic,
+                    "beq"
+                        | "bne"
+                        | "bcs"
+                        | "bhs"
+                        | "bcc"
+                        | "blo"
+                        | "bmi"
+                        | "bpl"
+                        | "bvs"
+                        | "bvc"
+                        | "bhi"
+                        | "bls"
+                        | "bge"
+                        | "blt"
+                        | "bgt"
+                        | "ble"
+                        | "cbz"
+                        | "cbnz"
+                        | "tbz"
+                        | "tbnz"
+                )
+        }
+        TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64 => {
+            matches!(
+                mnemonic,
+                "beq"
+                    | "bne"
+                    | "blt"
+                    | "bge"
+                    | "bltu"
+                    | "bgeu"
+                    | "beqz"
+                    | "bnez"
+                    | "blez"
+                    | "bgez"
+                    | "bltz"
+                    | "bgtz"
+            )
+        }
+        TargetArchitecture::Mips32 | TargetArchitecture::Mips64 => mnemonic.starts_with('b'),
+        TargetArchitecture::PowerPc32 | TargetArchitecture::PowerPc64 => mnemonic.starts_with("bc"),
+        TargetArchitecture::S390 | TargetArchitecture::S390x => mnemonic.starts_with('j'),
+        TargetArchitecture::LoongArch64 => {
+            mnemonic.starts_with('b') && mnemonic != "b" && mnemonic != "bl"
+        }
+        TargetArchitecture::Unknown => false,
+    }
+}
+
+fn riscv_branch_taken(
+    instruction: &Instruction,
+    registers: &[Register],
+    pointer_bits: u32,
+) -> Option<bool> {
+    let (mnemonic, operands) = split_instruction(&instruction.text);
+    let operands = operands.split(',').map(str::trim).collect::<Vec<_>>();
+    let value = |name: &str| register_number(registers, name.trim_start_matches(['$', '%']));
+    let (left, right) = match mnemonic {
+        "beqz" | "bnez" | "blez" | "bgez" | "bltz" | "bgtz" => (value(operands.first()?)?, 0),
+        _ => (value(operands.first()?)?, value(operands.get(1)?)?),
+    };
+    let signed = |value: u64| {
+        if pointer_bits == 32 {
+            i64::from(value as u32 as i32)
+        } else {
+            value as i64
+        }
+    };
+    match mnemonic {
+        "beq" | "beqz" => Some(left == right),
+        "bne" | "bnez" => Some(left != right),
+        "blt" | "bltz" => Some(signed(left) < signed(right)),
+        "bge" | "bgez" => Some(signed(left) >= signed(right)),
+        "blez" => Some(signed(left) <= 0),
+        "bgtz" => Some(signed(left) > 0),
+        "bltu" => Some(left < right),
+        "bgeu" => Some(left >= right),
+        _ => None,
+    }
+}
+
 pub(super) fn instruction_flow_description(
     instruction: &Instruction,
     registers: &[Register],
+    architecture: TargetArchitecture,
 ) -> String {
     let (mnemonic, operands) = split_instruction(&instruction.text);
     let mnemonic = mnemonic.to_ascii_lowercase();
-    let (kind, detail) = if mnemonic.starts_with("call") {
+    let (kind, detail) = if is_call_instruction(&mnemonic, operands, architecture) {
         ("CALL", operands)
-    } else if mnemonic == "ret" || mnemonic.starts_with("ret ") {
-        ("RETURN", "pop target from stack")
-    } else if mnemonic == "syscall" || mnemonic == "sysenter" {
+    } else if is_return_instruction(&mnemonic, operands, architecture) {
+        ("RETURN", "return to caller")
+    } else if syscall_architecture(&mnemonic, operands, architecture).is_some() {
         ("SYSCALL", "kernel transition")
-    } else if mnemonic == "jmp" || mnemonic.starts_with("jmp") {
+    } else if is_unconditional_branch(&mnemonic, architecture) {
         ("JUMP", operands)
-    } else if mnemonic.starts_with('j') || mnemonic.starts_with("loop") {
-        let decision = conditional_branch_taken(instruction, registers).map(|taken| {
-            if taken {
-                "BRANCH · TAKEN"
-            } else {
-                "BRANCH · NOT TAKEN"
-            }
-        });
+    } else if is_conditional_branch(&mnemonic, architecture) {
+        let decision =
+            conditional_branch_taken(instruction, registers, architecture).map(|taken| {
+                if taken {
+                    "BRANCH · TAKEN"
+                } else {
+                    "BRANCH · NOT TAKEN"
+                }
+            });
         (decision.unwrap_or("BRANCH"), operands)
     } else {
         ("FLOW", "sequential")
@@ -713,21 +1111,37 @@ pub(super) fn instruction_flow_description(
 pub(super) fn instruction_arguments_description(
     instruction: &Instruction,
     registers: &[Register],
+    architecture: TargetArchitecture,
 ) -> String {
-    let mnemonic = split_instruction(&instruction.text).0.to_ascii_lowercase();
-    if matches!(mnemonic.as_str(), "syscall" | "sysenter") {
-        return syscall_arguments_description(registers);
+    let (mnemonic, operands) = split_instruction(&instruction.text);
+    let mnemonic = mnemonic.to_ascii_lowercase();
+    if let Some(syscall_architecture) = syscall_architecture(&mnemonic, operands, architecture) {
+        let encoded_number = match syscall_architecture {
+            TargetArchitecture::S390 | TargetArchitecture::S390x if mnemonic == "svc" => {
+                instruction_immediate(operands).filter(|number| *number != 0)
+            }
+            TargetArchitecture::Arm if matches!(mnemonic.as_str(), "svc" | "swi") => {
+                instruction_immediate(operands)
+                    .filter(|number| *number != 0)
+                    .map(|number| number.saturating_sub(0x90_0000))
+            }
+            _ => None,
+        };
+        return syscall_arguments_description(registers, syscall_architecture, encoded_number);
     }
-    if !mnemonic.starts_with("call") {
+    if !is_call_instruction(&mnemonic, operands, architecture) {
         return String::new();
     }
-    let arguments = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
+    let arguments = architecture
+        .call_argument_registers()
         .iter()
         .filter_map(|name| {
             registers
                 .iter()
                 .find(|register| register.name == *name)
-                .map(|register| format!("${name}={}", register_primary_value(register)))
+                .map(|register| {
+                    format!("${name}={}", register_primary_value(register, architecture))
+                })
         })
         .collect::<Vec<_>>();
     if arguments.is_empty() {
@@ -740,33 +1154,71 @@ pub(super) fn instruction_arguments_description(
 pub(super) fn conditional_branch_taken(
     instruction: &Instruction,
     registers: &[Register],
+    architecture: TargetArchitecture,
 ) -> Option<bool> {
-    let mnemonic = split_instruction(&instruction.text).0.to_ascii_lowercase();
-    let flags =
-        register_number(registers, "rflags").or_else(|| register_number(registers, "eflags"));
+    let mut mnemonic = split_instruction(&instruction.text).0.to_ascii_lowercase();
+    if matches!(
+        architecture,
+        TargetArchitecture::Arm | TargetArchitecture::AArch64
+    ) && let Some(condition) = mnemonic.strip_prefix("b.")
+    {
+        mnemonic = format!("b{condition}");
+    }
+    if matches!(
+        architecture,
+        TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64
+    ) {
+        return riscv_branch_taken(
+            instruction,
+            registers,
+            architecture.pointer_bits().unwrap_or(64),
+        );
+    }
+    let flags = if matches!(
+        architecture,
+        TargetArchitecture::Arm | TargetArchitecture::AArch64
+    ) {
+        register_number(registers, "cpsr")
+            .or_else(|| register_number(registers, "pstate"))
+            .or_else(|| register_number(registers, "nzcv"))
+    } else {
+        register_number(registers, "rflags").or_else(|| register_number(registers, "eflags"))
+    };
+    let (carry_bit, zero_bit, sign_bit, overflow_bit, parity_bit) = if matches!(
+        architecture,
+        TargetArchitecture::Arm | TargetArchitecture::AArch64
+    ) {
+        (29, 30, 31, 28, None)
+    } else {
+        (0, 6, 7, 11, Some(2))
+    };
     let flag = |bit: u8| flags.map(|flags| flags & (1_u64 << bit) != 0);
-    let carry = || flag(0);
-    let parity = || flag(2);
-    let zero = || flag(6);
-    let sign = || flag(7);
-    let overflow = || flag(11);
+    let carry = || flag(carry_bit);
+    let parity = || parity_bit.and_then(flag);
+    let zero = || flag(zero_bit);
+    let sign = || flag(sign_bit);
+    let overflow = || flag(overflow_bit);
     match mnemonic.as_str() {
         "jo" => overflow(),
         "jno" => overflow().map(|value| !value),
-        "jb" | "jc" | "jnae" => carry(),
-        "jae" | "jnb" | "jnc" => carry().map(|value| !value),
-        "je" | "jz" => zero(),
-        "jne" | "jnz" => zero().map(|value| !value),
+        "jb" | "jc" | "jnae" | "bcs" | "bhs" => carry(),
+        "jae" | "jnb" | "jnc" | "bcc" | "blo" => carry().map(|value| !value),
+        "je" | "jz" | "beq" => zero(),
+        "jne" | "jnz" | "bne" => zero().map(|value| !value),
         "jbe" | "jna" => Some(carry()? || zero()?),
         "ja" | "jnbe" => Some(!carry()? && !zero()?),
-        "js" => sign(),
-        "jns" => sign().map(|value| !value),
+        "bls" => Some(!carry()? || zero()?),
+        "bhi" => Some(carry()? && !zero()?),
+        "js" | "bmi" => sign(),
+        "jns" | "bpl" => sign().map(|value| !value),
+        "bvs" => overflow(),
+        "bvc" => overflow().map(|value| !value),
         "jp" | "jpe" => parity(),
         "jnp" | "jpo" => parity().map(|value| !value),
-        "jl" | "jnge" => Some(sign()? != overflow()?),
-        "jge" | "jnl" => Some(sign()? == overflow()?),
-        "jle" | "jng" => Some(zero()? || sign()? != overflow()?),
-        "jg" | "jnle" => Some(!zero()? && sign()? == overflow()?),
+        "jl" | "jnge" | "blt" => Some(sign()? != overflow()?),
+        "jge" | "jnl" | "bge" => Some(sign()? == overflow()?),
+        "jle" | "jng" | "ble" => Some(zero()? || sign()? != overflow()?),
+        "jg" | "jnle" | "bgt" => Some(!zero()? && sign()? == overflow()?),
         "jcxz" => register_number(registers, "cx")
             .or_else(|| register_number(registers, "ecx"))
             .or_else(|| register_number(registers, "rcx"))
@@ -796,19 +1248,44 @@ pub(super) fn register_number(registers: &[Register], name: &str) -> Option<u64>
         .and_then(|register| hex_value(&register.value))
 }
 
-pub(super) fn syscall_arguments_description(registers: &[Register]) -> String {
-    let Some(number) = register_number(registers, "rax") else {
+fn instruction_immediate(operand: &str) -> Option<u64> {
+    let operand = operand
+        .trim()
+        .trim_start_matches(['$', '#'])
+        .trim_end_matches(',');
+    operand.strip_prefix("0x").map_or_else(
+        || operand.parse().ok(),
+        |hex| u64::from_str_radix(hex, 16).ok(),
+    )
+}
+
+pub(super) fn syscall_arguments_description(
+    registers: &[Register],
+    architecture: TargetArchitecture,
+    encoded_number: Option<u64>,
+) -> String {
+    let Some((number_register, argument_registers)) = architecture.syscall_registers() else {
         return String::from("SYSCALL  number unavailable");
     };
-    let (name, argument_names) = syscall_signature(number);
-    let values = ["rdi", "rsi", "rdx", "r10", "r8", "r9"]
+    let Some(number) = encoded_number.or_else(|| register_number(registers, number_register))
+    else {
+        return String::from("SYSCALL  number unavailable");
+    };
+    let number = architecture.normalize_syscall_number(number);
+    let (name, argument_names) = syscall_signature(number, architecture);
+    let values = argument_registers
         .iter()
         .zip(argument_names.iter())
         .filter_map(|(register_name, argument_name)| {
             registers
                 .iter()
                 .find(|register| register.name == *register_name)
-                .map(|register| format!("{argument_name}={}", register_primary_value(register)))
+                .map(|register| {
+                    format!(
+                        "{argument_name}={}",
+                        register_primary_value(register, architecture)
+                    )
+                })
         })
         .collect::<Vec<_>>();
     if values.is_empty() {
@@ -818,79 +1295,56 @@ pub(super) fn syscall_arguments_description(registers: &[Register]) -> String {
     }
 }
 
-pub(super) fn syscall_signature(number: u64) -> (&'static str, &'static [&'static str]) {
-    match number {
-        0 => ("read", &["fd", "buf", "count"]),
-        1 => ("write", &["fd", "buf", "count"]),
-        2 => ("open", &["path", "flags", "mode"]),
-        3 => ("close", &["fd"]),
-        8 => ("lseek", &["fd", "offset", "whence"]),
-        9 => ("mmap", &["addr", "length", "prot", "flags", "fd", "offset"]),
-        10 => ("mprotect", &["addr", "length", "prot"]),
-        11 => ("munmap", &["addr", "length"]),
-        12 => ("brk", &["addr"]),
-        13 => (
-            "rt_sigaction",
-            &["signal", "action", "old_action", "sigset_size"],
-        ),
-        14 => ("rt_sigprocmask", &["how", "set", "old_set", "sigset_size"]),
-        16 => ("ioctl", &["fd", "request", "argument"]),
-        17 => ("pread64", &["fd", "buf", "count", "offset"]),
-        18 => ("pwrite64", &["fd", "buf", "count", "offset"]),
-        19 => ("readv", &["fd", "iov", "iov_count"]),
-        20 => ("writev", &["fd", "iov", "iov_count"]),
-        21 => ("access", &["path", "mode"]),
-        32 => ("dup", &["old_fd"]),
-        33 => ("dup2", &["old_fd", "new_fd"]),
-        39 => ("getpid", &[]),
-        41 => ("socket", &["domain", "type", "protocol"]),
-        42 => ("connect", &["fd", "address", "length"]),
-        43 => ("accept", &["fd", "address", "length"]),
-        56 => (
-            "clone",
-            &["flags", "stack", "parent_tid", "child_tid", "tls"],
-        ),
-        57 => ("fork", &[]),
-        58 => ("vfork", &[]),
-        59 => ("execve", &["path", "argv", "envp"]),
-        60 => ("exit", &["status"]),
-        61 => ("wait4", &["pid", "status", "options", "usage"]),
-        62 => ("kill", &["pid", "signal"]),
-        72 => ("fcntl", &["fd", "command", "argument"]),
-        80 => ("chdir", &["path"]),
-        87 => ("unlink", &["path"]),
-        158 => ("arch_prctl", &["code", "address"]),
-        186 => ("gettid", &[]),
-        202 => (
-            "futex",
-            &[
-                "address",
-                "operation",
-                "value",
-                "timeout",
-                "address2",
-                "value3",
-            ],
-        ),
-        231 => ("exit_group", &["status"]),
-        257 => ("openat", &["dir_fd", "path", "flags", "mode"]),
-        262 => ("newfstatat", &["dir_fd", "path", "stat", "flags"]),
-        263 => ("unlinkat", &["dir_fd", "path", "flags"]),
-        273 => ("set_robust_list", &["head", "length"]),
-        318 => ("getrandom", &["buf", "count", "flags"]),
-        332 => ("statx", &["dir_fd", "path", "flags", "mask", "statx"]),
-        435 => ("clone3", &["arguments", "size"]),
-        436 => ("close_range", &["first", "last", "flags"]),
-        437 => ("openat2", &["dir_fd", "path", "how", "size"]),
-        _ => ("unknown", &["arg0", "arg1", "arg2", "arg3", "arg4", "arg5"]),
-    }
+pub(super) fn syscall_signature(
+    number: u64,
+    architecture: TargetArchitecture,
+) -> (&'static str, &'static [&'static str]) {
+    let name = architecture.syscall_name(number);
+    let arguments: &[&str] = match name {
+        "read" | "write" => &["fd", "buffer", "count"],
+        "open" => &["path", "flags", "mode"],
+        "openat" => &["dir_fd", "path", "flags", "mode"],
+        "openat2" => &["dir_fd", "path", "how", "size"],
+        "close" => &["fd"],
+        "lseek" => &["fd", "offset", "whence"],
+        "mmap" | "mmap2" => &["address", "length", "protection", "flags", "fd", "offset"],
+        "mprotect" => &["address", "length", "protection"],
+        "munmap" | "brk" => &["address"],
+        "ioctl" => &["fd", "request", "argument"],
+        "pread64" | "pwrite64" => &["fd", "buffer", "count", "offset"],
+        "readv" | "writev" => &["fd", "iov", "iov_count"],
+        "clone" => &["flags", "stack", "parent_tid", "tls", "child_tid"],
+        "clone3" => &["arguments", "size"],
+        "execve" => &["path", "argv", "envp"],
+        "exit" | "exit_group" => &["status"],
+        "wait4" => &["pid", "status", "options", "usage"],
+        "kill" => &["pid", "signal"],
+        "futex" => &[
+            "address",
+            "operation",
+            "value",
+            "timeout",
+            "address2",
+            "value3",
+        ],
+        "set_robust_list" => &["head", "length"],
+        "getrandom" => &["buffer", "count", "flags"],
+        "statx" => &["dir_fd", "path", "flags", "mask", "statx"],
+        "close_range" => &["first", "last", "flags"],
+        _ => &["arg0", "arg1", "arg2", "arg3", "arg4", "arg5"],
+    };
+    (name, arguments)
 }
 
 pub(super) fn instruction_memory_expression(
     instruction: &Instruction,
     registers: &[Register],
+    architecture: TargetArchitecture,
 ) -> Option<String> {
-    if let Some(comment) = instruction.text.split_once('#').map(|(_, comment)| comment)
+    if matches!(
+        architecture,
+        TargetArchitecture::X86 | TargetArchitecture::X86_64
+    ) && let Some(comment) = instruction.text.split_once('#').map(|(_, comment)| comment)
         && let Some(address) = comment
             .split_whitespace()
             .find(|part| part.starts_with("0x"))
@@ -900,9 +1354,38 @@ pub(super) fn instruction_memory_expression(
     if registers.is_empty() {
         return None;
     }
-    let start = instruction.text.find('[')? + 1;
-    let end = instruction.text[start..].find(']')? + start;
-    let operand = &instruction.text[start..end];
+    let operand = if let Some(start) = instruction.text.find('[') {
+        let start = start + 1;
+        let end = instruction.text[start..].find(']')? + start;
+        instruction.text[start..end]
+            .split(',')
+            .map(|part| part.trim().replace('#', ""))
+            .collect::<Vec<_>>()
+            .join(" + ")
+    } else {
+        let open = instruction.text.find('(')?;
+        let close = instruction.text[open..].find(')')? + open;
+        let displacement = instruction.text[..open]
+            .rsplit(|character: char| character == ',' || character.is_whitespace())
+            .find(|part| !part.is_empty())
+            .unwrap_or("0");
+        let bases = instruction.text[open + 1..close]
+            .split(',')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        if bases.is_empty() {
+            return None;
+        }
+        format!("{} + {displacement}", bases.join(" + "))
+    }
+    .replace(['$', '%'], "");
+    if ["lsl", "lsr", "asr", "uxtw", "sxtw"]
+        .iter()
+        .any(|operator| operand.split_whitespace().any(|part| part == *operator))
+    {
+        return None;
+    }
     let register_names = registers
         .iter()
         .map(|register| register.name.as_str())
@@ -928,7 +1411,7 @@ pub(super) fn instruction_memory_expression(
         }
     }
     flush_token(&mut token, &mut expression);
-    let expression = expression.trim();
+    let expression = expression.trim().trim_end_matches('!').trim();
     (!expression.is_empty()).then(|| format!("({expression})"))
 }
 

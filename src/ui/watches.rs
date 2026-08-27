@@ -5,6 +5,10 @@ impl Ui {
         self.expression_watches.borrow().clone()
     }
 
+    pub fn expression_watches_match(&self, expected: &[String]) -> bool {
+        self.expression_watches.borrow().as_slice() == expected
+    }
+
     pub fn expression_watch_variable_object_names(&self) -> Vec<String> {
         let mut names = Vec::new();
         collect_variable_object_roots(&self.expression_watches_store, None, &mut names);
@@ -79,6 +83,7 @@ impl Ui {
                     && !running.get()
                     && !pending.get()
                     && !expression.trim().is_empty()
+                    && expressions.borrow().len() < MAX_EXPRESSION_WATCHES
                     && !expressions
                         .borrow()
                         .iter()
@@ -92,6 +97,7 @@ impl Ui {
         self.expression_watch_add_button.connect_clicked(move |_| {
             let expression = entry.text().trim().to_owned();
             if expression.is_empty()
+                || expressions.borrow().len() >= MAX_EXPRESSION_WATCHES
                 || expressions
                     .borrow()
                     .iter()
@@ -144,6 +150,7 @@ impl Ui {
         let string_handler = Rc::clone(&self.string_assignment_handler);
         let children_handler = Rc::clone(&self.variable_children_handler);
         let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
+        let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
         self.expression_watches_view
             .connect_activate(move |_, position| {
@@ -164,6 +171,7 @@ impl Ui {
                                 &window,
                                 variable,
                                 target_pointer_bits.get(),
+                                target_architecture.get(),
                                 current_source_is_rust.get(),
                                 None,
                                 ValueEditorHandlers {

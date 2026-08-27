@@ -33,7 +33,11 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         let _ = client.request(
             &format!("-stack-select-frame {level}"),
             move |client, record| {
-                if record.is_done() {
+                if record.is_done()
+                    && weak_ui
+                        .upgrade()
+                        .is_some_and(|ui| !ui.inferior_is_running())
+                {
                     refresh_stopped_state(&weak_ui, client);
                 }
             },
@@ -45,10 +49,14 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
-        let _ = client.request(&format!("-thread-select {id}"), move |_, record| {
-            if !record.is_done()
-                && let Some(ui) = weak_ui.upgrade()
+        let _ = client.request(&format!("-thread-select {id}"), move |client, record| {
+            if record.is_done()
+                && weak_ui
+                    .upgrade()
+                    .is_some_and(|ui| !ui.inferior_is_running())
             {
+                refresh_stopped_state(&weak_ui, client);
+            } else if let Some(ui) = weak_ui.upgrade() {
                 ui.set_status(
                     "Thread selection failed",
                     record
@@ -85,31 +93,47 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
     ui.set_instruction_memory_handler(move |expression| {
-        let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
+        let (Some(client), Some(current_ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
             return;
         };
+        let generation = current_ui.current_stop_refresh_generation();
+        drop(current_ui);
+        let weak_ui = weak_ui.clone();
         let command = format!(
             "-data-read-memory-bytes {} 32",
             crate::debugger::quote(&expression)
         );
         let expression_for_response = expression.clone();
         let weak_ui_for_response = weak_ui.clone();
+        let weak_ui_for_guard = weak_ui.clone();
         if client
-            .request(&command, move |_, record| {
-                let Some(ui) = weak_ui_for_response.upgrade() else {
-                    return;
-                };
-                if let Some(memory) = crate::debugger::memory_block(&record) {
-                    ui.show_instruction_memory(&expression_for_response, Ok(&memory));
-                } else {
-                    ui.show_instruction_memory(
-                        &expression_for_response,
-                        Err(record.error_message().unwrap_or("memory is not readable")),
-                    );
-                }
-            })
+            .request_when(
+                &command,
+                move || {
+                    weak_ui_for_guard
+                        .upgrade()
+                        .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+                },
+                move |_, record| {
+                    let Some(ui) = weak_ui_for_response.upgrade() else {
+                        return;
+                    };
+                    if !ui.is_stop_refresh_current(generation) {
+                        return;
+                    }
+                    if let Some(memory) = crate::debugger::memory_block(&record) {
+                        ui.show_instruction_memory(&expression_for_response, Ok(&memory));
+                    } else {
+                        ui.show_instruction_memory(
+                            &expression_for_response,
+                            Err(record.error_message().unwrap_or("memory is not readable")),
+                        );
+                    }
+                },
+            )
             .is_err()
             && let Some(ui) = weak_ui.upgrade()
+            && ui.is_stop_refresh_current(generation)
         {
             ui.show_instruction_memory(&expression, Err("MI channel is unavailable"));
         }
@@ -117,30 +141,46 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
     ui.set_memory_watch_handler(move |id, expression, byte_count| {
-        let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
+        let (Some(client), Some(current_ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
             return;
         };
+        let generation = current_ui.current_stop_refresh_generation();
+        drop(current_ui);
+        let weak_ui = weak_ui.clone();
         let command = format!(
             "-data-read-memory-bytes {} {byte_count}",
             crate::debugger::quote(&expression)
         );
         let weak_ui_for_response = weak_ui.clone();
+        let weak_ui_for_guard = weak_ui.clone();
         if client
-            .request(&command, move |_, record| {
-                let Some(ui) = weak_ui_for_response.upgrade() else {
-                    return;
-                };
-                if let Some(memory) = crate::debugger::memory_block(&record) {
-                    ui.show_memory_watch(id, Ok(&memory));
-                } else {
-                    ui.show_memory_watch(
-                        id,
-                        Err(record.error_message().unwrap_or("memory is not readable")),
-                    );
-                }
-            })
+            .request_when(
+                &command,
+                move || {
+                    weak_ui_for_guard
+                        .upgrade()
+                        .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+                },
+                move |_, record| {
+                    let Some(ui) = weak_ui_for_response.upgrade() else {
+                        return;
+                    };
+                    if !ui.is_stop_refresh_current(generation) {
+                        return;
+                    }
+                    if let Some(memory) = crate::debugger::memory_block(&record) {
+                        ui.show_memory_watch(id, Ok(&memory));
+                    } else {
+                        ui.show_memory_watch(
+                            id,
+                            Err(record.error_message().unwrap_or("memory is not readable")),
+                        );
+                    }
+                },
+            )
             .is_err()
             && let Some(ui) = weak_ui.upgrade()
+            && ui.is_stop_refresh_current(generation)
         {
             ui.show_memory_watch(id, Err("MI channel is unavailable"));
         }

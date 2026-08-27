@@ -3,6 +3,7 @@ use std::{
     fs, io,
     net::{Ipv4Addr, Ipv6Addr},
     path::Path,
+    time::{Duration, Instant},
 };
 
 use super::*;
@@ -181,7 +182,14 @@ pub(super) fn populate_constraints(snapshot: &mut KernelSnapshot, root: &Path) {
 
 pub(super) fn populate_descriptors(snapshot: &mut KernelSnapshot, root: &Path) {
     match read_file_descriptors(root) {
-        Ok(descriptors) => snapshot.file_descriptors = descriptors,
+        Ok((descriptors, truncated)) => {
+            snapshot.file_descriptors = descriptors;
+            if truncated {
+                snapshot.warnings.push(String::from(
+                    "File descriptor details were truncated at 16,384 entries",
+                ));
+            }
+        }
         Err(error) => snapshot
             .warnings
             .push(format!("Open file descriptors unavailable: {error}")),
@@ -206,36 +214,45 @@ pub(super) fn populate_kernel_policy(snapshot: &mut KernelSnapshot, root: &Path)
     }
 }
 
-fn read_file_descriptors(root: &Path) -> io::Result<Vec<KernelFileDescriptor>> {
-    let descriptors = fs::read_dir(root.join("fd"))?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let number = entry.file_name().to_string_lossy().parse::<u32>().ok()?;
-            let target = fs::read_link(entry.path())
-                .ok()?
-                .to_string_lossy()
-                .into_owned();
-            let raw_info = fs::read_to_string(root.join("fdinfo").join(number.to_string())).ok();
-            let info = raw_info
-                .as_deref()
-                .map(parse_key_values)
-                .unwrap_or_default();
-            let flags = info
-                .get("flags")
-                .and_then(|flags| u64::from_str_radix(flags, 8).ok());
-            let position = info.get("pos").and_then(|position| position.parse().ok());
-            Some((number, target, raw_info, flags, position))
-        })
-        .collect::<Vec<_>>();
+fn read_file_descriptors(root: &Path) -> io::Result<(Vec<KernelFileDescriptor>, bool)> {
+    const MAX_FILE_DESCRIPTORS: usize = 16_384;
+    const MAX_FDINFO_BYTES: usize = 64 * 1024;
+    let mut truncated = false;
+    let deadline = Instant::now() + Duration::from_millis(500);
+    let mut descriptors = Vec::new();
+    for entry in fs::read_dir(root.join("fd"))?.filter_map(Result::ok) {
+        if descriptors.len() >= MAX_FILE_DESCRIPTORS || Instant::now() >= deadline {
+            truncated = true;
+            break;
+        }
+        let Some(number) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
+            continue;
+        };
+        let Some(target) = fs::read_link(entry.path())
+            .ok()
+            .map(|target| target.to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        let info = crate::bounded::read_prefix(
+            &root.join("fdinfo").join(number.to_string()),
+            MAX_FDINFO_BYTES,
+        )
+        .ok()
+        .map(|bytes| parse_descriptor_info(&String::from_utf8_lossy(&bytes)))
+        .unwrap_or_default();
+        descriptors.push((number, target, info));
+    }
     let socket_inodes = descriptors
         .iter()
-        .filter_map(|(_, target, _, _, _)| socket_inode(target).map(str::to_owned))
+        .filter_map(|(_, target, _)| socket_inode(target))
         .collect::<HashSet<_>>();
     let sockets = read_socket_endpoints(root, &socket_inodes);
+    drop(socket_inodes);
     let mut descriptors = descriptors
         .into_iter()
-        .map(|(number, target, raw_info, flags, position)| {
-            let access = match flags.map(|flags| flags & 3) {
+        .map(|(number, target, info)| {
+            let access = match info.flags.map(|flags| flags & 3) {
                 Some(0) => "read",
                 Some(1) => "write",
                 Some(2) => "read/write",
@@ -243,30 +260,44 @@ fn read_file_descriptors(root: &Path) -> io::Result<Vec<KernelFileDescriptor>> {
             }
             .to_owned();
             let socket = socket_inode(&target).and_then(|inode| sockets.get(inode));
-            let details = descriptor_details(raw_info.as_deref().unwrap_or_default(), socket);
+            let details = match (socket, info.details.is_empty()) {
+                (Some(socket), false) => format!("{socket} · {}", info.details),
+                (Some(socket), true) => socket.clone(),
+                (None, _) => info.details,
+            };
             KernelFileDescriptor {
                 number,
                 kind: descriptor_kind(&target).to_owned(),
                 access,
-                flags: descriptor_flags(flags),
-                position,
+                flags: descriptor_flags(info.flags),
+                position: info.position,
                 target,
                 details,
             }
         })
         .collect::<Vec<_>>();
     descriptors.sort_unstable_by_key(|descriptor| descriptor.number);
-    Ok(descriptors)
+    Ok((descriptors, truncated))
 }
 
-fn descriptor_details(fdinfo: &str, socket: Option<&String>) -> String {
-    let mut details = Vec::new();
-    if let Some(socket) = socket {
-        details.push(socket.clone());
-    }
+#[derive(Default)]
+struct DescriptorInfo {
+    flags: Option<u64>,
+    position: Option<u64>,
+    details: String,
+}
+
+fn parse_descriptor_info(fdinfo: &str) -> DescriptorInfo {
+    let mut info = DescriptorInfo::default();
+    let mut detail_count = 0_usize;
     for line in fdinfo.lines() {
         let trimmed = line.trim();
-        let key = trimmed.split_once(':').map_or(trimmed, |(key, _)| key);
+        let (key, value) = trimmed.split_once(':').unwrap_or((trimmed, ""));
+        match key {
+            "flags" => info.flags = u64::from_str_radix(value.trim(), 8).ok(),
+            "pos" => info.position = value.trim().parse().ok(),
+            _ => {}
+        }
         if matches!(
             key,
             "mnt_id"
@@ -284,14 +315,18 @@ fn descriptor_details(fdinfo: &str, socket: Option<&String>) -> String {
                 | "sq_entries"
                 | "cq_entries"
         ) {
-            details.push(trimmed.split_whitespace().collect::<Vec<_>>().join(" "));
+            if !info.details.is_empty() {
+                info.details.push_str(" · ");
+            }
+            push_compact_whitespace(&mut info.details, trimmed);
+            detail_count += 1;
         }
-        if details.len() >= 10 {
-            details.push(String::from("…"));
+        if detail_count >= 10 {
+            info.details.push_str(" · …");
             break;
         }
     }
-    details.join(" · ")
+    info
 }
 
 fn descriptor_kind(target: &str) -> &'static str {
@@ -328,7 +363,7 @@ fn socket_inode(target: &str) -> Option<&str> {
     target.strip_prefix("socket:[")?.strip_suffix(']')
 }
 
-fn read_socket_endpoints(root: &Path, wanted: &HashSet<String>) -> HashMap<String, String> {
+fn read_socket_endpoints(root: &Path, wanted: &HashSet<&str>) -> HashMap<String, String> {
     let mut endpoints = HashMap::new();
     if wanted.is_empty() {
         return endpoints;
@@ -339,39 +374,58 @@ fn read_socket_endpoints(root: &Path, wanted: &HashSet<String>) -> HashMap<Strin
         ("udp", "UDP", false),
         ("udp6", "UDP6", true),
     ] {
-        let Ok(input) = fs::read_to_string(root.join("net").join(entry)) else {
+        let Ok(input) =
+            crate::bounded::read_string(&root.join("net").join(entry), 16 * 1024 * 1024)
+        else {
             continue;
         };
         for line in input.lines().skip(1) {
-            let fields = line.split_whitespace().collect::<Vec<_>>();
-            if fields.len() < 10 {
+            let mut fields = line.split_whitespace();
+            let Some(local_field) = fields.nth(1) else {
+                continue;
+            };
+            let Some(remote_field) = fields.next() else {
+                continue;
+            };
+            let Some(state_field) = fields.next() else {
+                continue;
+            };
+            let Some(inode) = fields.nth(5) else {
+                continue;
+            };
+            if !wanted.contains(inode) {
                 continue;
             }
-            if !wanted.contains(fields[9]) {
-                continue;
-            }
-            let local = decode_endpoint(fields[1], ipv6).unwrap_or_else(|| fields[1].to_owned());
-            let remote = decode_endpoint(fields[2], ipv6).unwrap_or_else(|| fields[2].to_owned());
-            let state = socket_state(fields[3]);
+            let local =
+                decode_endpoint(local_field, ipv6).unwrap_or_else(|| local_field.to_owned());
+            let remote =
+                decode_endpoint(remote_field, ipv6).unwrap_or_else(|| remote_field.to_owned());
+            let state = socket_state(state_field);
             endpoints.insert(
-                fields[9].to_owned(),
+                inode.to_owned(),
                 format!("{protocol} {local} → {remote} · {state}"),
             );
         }
     }
-    if let Ok(input) = fs::read_to_string(root.join("net/unix")) {
+    if let Ok(input) = crate::bounded::read_string(&root.join("net/unix"), 16 * 1024 * 1024) {
         for line in input.lines().skip(1) {
-            let fields = line.split_whitespace().collect::<Vec<_>>();
-            if fields.len() < 7 {
+            let mut fields = line.split_whitespace();
+            let Some(socket_type) = fields.nth(4) else {
+                continue;
+            };
+            let Some(state) = fields.next() else {
+                continue;
+            };
+            let Some(inode) = fields.next() else {
+                continue;
+            };
+            if !wanted.contains(inode) {
                 continue;
             }
-            if !wanted.contains(fields[6]) {
-                continue;
-            }
-            let path = fields.get(7).copied().unwrap_or("unnamed");
+            let path = fields.next().unwrap_or("unnamed");
             endpoints.insert(
-                fields[6].to_owned(),
-                format!("UNIX {path} · state {} · type {}", fields[5], fields[4]),
+                inode.to_owned(),
+                format!("UNIX {path} · state {state} · type {socket_type}"),
             );
         }
     }
@@ -475,12 +529,13 @@ fn fixed_column(line: &str, start: usize, end: usize) -> &str {
         .trim()
 }
 
-fn parse_key_values(input: &str) -> HashMap<String, String> {
-    input
-        .lines()
-        .filter_map(|line| line.split_once(':'))
-        .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
-        .collect()
+fn push_compact_whitespace(output: &mut String, value: &str) {
+    for word in value.split_whitespace() {
+        if !output.is_empty() && !output.ends_with(" · ") {
+            output.push(' ');
+        }
+        output.push_str(word);
+    }
 }
 
 fn compact_lines(value: &str) -> String {
@@ -564,6 +619,13 @@ mod tests {
         );
         assert_eq!(descriptor_flags(Some(0)), "00");
         assert_eq!(descriptor_flags(None), "—");
+
+        let info = parse_descriptor_info(
+            "pos:\t17\nflags:\t02004002\nmnt_id:\t  12   34\nino:\t99\nignored:\tlarge\n",
+        );
+        assert_eq!(info.position, Some(17));
+        assert_eq!(info.flags, Some(0o2004002));
+        assert_eq!(info.details, "mnt_id: 12 34 · ino: 99");
     }
 
     #[test]

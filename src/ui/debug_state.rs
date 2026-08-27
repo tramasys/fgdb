@@ -173,6 +173,7 @@ impl Ui {
         let string_handler = Rc::clone(&self.string_assignment_handler);
         let children_handler = Rc::clone(&self.variable_children_handler);
         let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
+        let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
         self.locals_view.connect_activate(move |_, position| {
             let Some((row, node)) = variable_node_at(&selection, position) else {
@@ -192,6 +193,7 @@ impl Ui {
                             &window,
                             variable,
                             target_pointer_bits.get(),
+                            target_architecture.get(),
                             current_source_is_rust.get(),
                             None,
                             ValueEditorHandlers {
@@ -212,6 +214,7 @@ impl Ui {
         let editor_handler = Rc::clone(&self.variable_editor_handler);
         let string_handler = Rc::clone(&self.string_assignment_handler);
         let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
+        let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
         self.locals_edit_button.connect_clicked(move |_| {
             if let Some(variable) = variable_at(&selection, selection.selected()) {
@@ -222,6 +225,7 @@ impl Ui {
                         &window,
                         variable,
                         target_pointer_bits.get(),
+                        target_architecture.get(),
                         current_source_is_rust.get(),
                         None,
                         ValueEditorHandlers {
@@ -260,6 +264,7 @@ impl Ui {
             let string_handler = Rc::clone(&self.string_assignment_handler);
             let vector_handler = Rc::clone(&self.vector_assignment_handler);
             let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
+            let target_architecture = Rc::clone(&self.target_architecture);
             let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
             group.view.connect_activate(move |_, position| {
                 let Some(item) = store
@@ -285,6 +290,7 @@ impl Ui {
                             has_more: false,
                         },
                         target_pointer_bits.get(),
+                        target_architecture.get(),
                         current_source_is_rust.get(),
                         None,
                         ValueEditorHandlers {
@@ -441,6 +447,20 @@ impl Ui {
         pc: &str,
         architecture: Option<&str>,
     ) {
+        if let Some(description) = architecture {
+            let detected = TargetArchitecture::from_gdb_description(description);
+            if detected != TargetArchitecture::Unknown {
+                self.set_target_architecture(detected);
+            }
+            if let Some(bits) =
+                TargetArchitecture::explicit_pointer_bits_from_gdb_description(description)
+            {
+                self.set_target_pointer_bits(bits);
+            }
+            if let Some(endian) = TargetEndian::from_architecture_description(description) {
+                self.set_target_endian(Some(endian));
+            }
+        }
         self.instructions_selection
             .set_selected(gtk::INVALID_LIST_POSITION);
         let title = architecture.map_or_else(
@@ -476,6 +496,7 @@ impl Ui {
             .map(|instruction| InstructionRowData {
                 instruction: instruction.clone(),
                 current: addresses_equal(&instruction.address, pc),
+                pointer_bits: self.target_pointer_bits(),
             })
             .collect::<Vec<_>>();
         let selected = rows
@@ -495,8 +516,9 @@ impl Ui {
             return;
         };
         let registers = self.latest_registers.borrow();
-        let branch_taken = conditional_branch_taken(&instruction, &registers);
-        let flow = instruction_flow_description(&instruction, &registers);
+        let architecture = self.target_architecture();
+        let branch_taken = conditional_branch_taken(&instruction, &registers, architecture);
+        let flow = instruction_flow_description(&instruction, &registers, architecture);
         self.instruction_flow.set_text(&flow);
         self.instruction_flow.set_tooltip_text(Some(&flow));
         self.instruction_flow.set_visible(true);
@@ -510,14 +532,14 @@ impl Ui {
             });
         }
 
-        let arguments = instruction_arguments_description(&instruction, &registers);
+        let arguments = instruction_arguments_description(&instruction, &registers, architecture);
         self.instruction_arguments
             .set_visible(!arguments.is_empty());
         self.instruction_arguments.set_text(&arguments);
         self.instruction_arguments
             .set_tooltip_text((!arguments.is_empty()).then_some(arguments.as_str()));
 
-        let expression = instruction_memory_expression(&instruction, &registers);
+        let expression = instruction_memory_expression(&instruction, &registers, architecture);
         drop(registers);
         let mut current = self.current_instruction_memory_expression.borrow_mut();
         if current.as_ref() == expression.as_ref() {
@@ -547,11 +569,16 @@ impl Ui {
             return;
         }
         let text = match result {
-            Ok(memory) => format!(
-                "MEM  {expression} = 0x{:016x}  {}",
-                memory.begin,
-                compact_memory_preview(&memory.bytes)
-            ),
+            Ok(memory) => {
+                let width = usize::try_from(self.target_pointer_bits() / 4)
+                    .unwrap_or(16)
+                    .clamp(8, 16);
+                format!(
+                    "MEM  {expression} = 0x{:0width$x}  {}",
+                    memory.begin,
+                    compact_memory_preview(&memory.bytes)
+                )
+            }
             Err(error) => format!("MEM  {expression} · {error}"),
         };
         self.instruction_memory.set_text(&text);
@@ -605,25 +632,37 @@ impl Ui {
             self.registers_empty.set_visible(true);
         } else {
             self.registers_empty.set_visible(false);
+            let architecture = self.target_architecture();
+            let endian = self.target_endian();
+            let pointer_bits = self.target_pointer_bits();
             let previous = self.previous_registers.borrow();
-            let by_name = registers
+            let ring = registers
                 .iter()
-                .map(|register| (register.name.as_str(), register))
-                .collect::<HashMap<_, _>>();
-            let ring = by_name
-                .get("cs")
+                .find(|register| register.name == "cs")
                 .and_then(|register| hex_value(&register.value))
                 .map(|value| value & 0x3);
             for group in self.register_groups.iter() {
                 let grouped = registers.iter().filter(|register| {
-                    register_in_group(group.kind, &register.name)
+                    register_in_group(group.kind, &register.name, architecture)
                         && (group.kind != RegisterGroupKind::Other
                             || !self.register_groups.iter().any(|candidate| {
                                 candidate.kind != RegisterGroupKind::Other
-                                    && register_in_group(candidate.kind, &register.name)
+                                    && register_in_group(
+                                        candidate.kind,
+                                        &register.name,
+                                        architecture,
+                                    )
                             }))
                 });
-                populate_register_group(group, grouped, &previous, ring);
+                populate_register_group(
+                    group,
+                    grouped,
+                    &previous,
+                    ring,
+                    architecture,
+                    endian,
+                    pointer_bits,
+                );
             }
         }
         let values_changed = {
@@ -680,6 +719,8 @@ impl Ui {
     pub fn show_stack(&self, entries: &[StackEntry]) {
         replace_boxed_store(&self.stack_store, entries.iter().cloned());
         if entries.is_empty() {
+            self.stack_empty
+                .set_text("Stack values appear when the target is paused");
             self.stack_empty.set_visible(true);
             return;
         }
@@ -690,6 +731,15 @@ impl Ui {
         if self.is_stop_refresh_current(generation) {
             self.show_stack(entries);
         }
+    }
+
+    pub fn show_stack_unavailable_for_refresh(&self, generation: u64, reason: &str) {
+        if !self.is_stop_refresh_current(generation) {
+            return;
+        }
+        self.stack_store.remove_all();
+        self.stack_empty.set_text(reason);
+        self.stack_empty.set_visible(true);
     }
 
     pub fn show_memory_regions_for_refresh(&self, generation: u64, regions: &[MemoryRegion]) {
@@ -709,6 +759,8 @@ impl Ui {
         let expression = self.memory_address_entry.clone();
         let size = self.memory_size.clone();
         let format = self.memory_format.clone();
+        let status_label = self.status_label.clone();
+        let status_detail = self.status_detail.clone();
         self.memory_add_button.connect_clicked(move |_| {
             let expression_text = expression.text().trim().to_owned();
             if expression_text.is_empty() {
@@ -720,7 +772,7 @@ impl Ui {
                 2 => MemoryWatchFormat::Pointers,
                 _ => MemoryWatchFormat::Bytes,
             };
-            add_memory_watch(
+            let added = add_memory_watch(
                 &list,
                 &empty,
                 &watches,
@@ -729,7 +781,17 @@ impl Ui {
                 byte_count,
                 format,
             );
-            expression.set_text("");
+            if added {
+                expression.set_text("");
+            } else {
+                set_status_widgets(
+                    &status_label,
+                    &status_detail,
+                    "Memory watch limit",
+                    "Remove a memory watch before adding another (limit 256)",
+                    Some("status-error"),
+                );
+            }
             expression.grab_focus();
         });
         let button = self.memory_add_button.clone();
@@ -857,6 +919,19 @@ impl Ui {
         };
         match result {
             Ok(memory) => {
+                let endian = self.target_endian().or_else(|| {
+                    (watch.format == MemoryWatchFormat::Bytes).then_some(TargetEndian::Little)
+                });
+                let Some(endian) = endian else {
+                    watch.status.add_css_class("memory-watch-error");
+                    watch
+                        .status
+                        .set_text("Target byte order is unavailable; use Bytes display");
+                    watch.output_addresses.set_text("");
+                    watch.output_values.set_text("");
+                    watch.output_decoded.set_text("");
+                    return;
+                };
                 watch.status.remove_css_class("memory-watch-error");
                 let region = self
                     .memory_regions
@@ -865,10 +940,19 @@ impl Ui {
                     .find(|region| region.contains(memory.begin))
                     .map(MemoryRegion::description)
                     .unwrap_or_else(|| String::from("unmapped"));
+                let width = usize::try_from(self.target_pointer_bits() / 4)
+                    .unwrap_or(16)
+                    .clamp(8, 16);
                 watch
                     .status
-                    .set_text(&format!("0x{:016x} · {region}", memory.begin));
-                let output = format_memory_watch(memory.begin, &memory.bytes, watch.format);
+                    .set_text(&format!("0x{:0width$x} · {region}", memory.begin));
+                let output = format_memory_watch(
+                    memory.begin,
+                    &memory.bytes,
+                    watch.format,
+                    self.target_pointer_bits.get(),
+                    endian,
+                );
                 watch.output_addresses.set_text(&output.addresses);
                 watch.output_values.set_text(&output.values);
                 watch.output_decoded.set_text(&output.decoded);

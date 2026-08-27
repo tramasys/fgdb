@@ -6,7 +6,6 @@ const KERNEL_FACT_LABEL_MIN_WIDTH: i32 = 28;
 const KERNEL_FACT_LABEL_MAX_WIDTH: i32 = 42;
 const KERNEL_PAGE_NAMES: [&str; 12] = [
     "overview",
-    "tls",
     "memory",
     "private-memory",
     "changes",
@@ -17,6 +16,7 @@ const KERNEL_PAGE_NAMES: [&str; 12] = [
     "file-descriptors",
     "limits",
     "process-tree",
+    "tls",
 ];
 const KERNEL_OVERVIEW_DISCLOSURES: [(&str, &str, bool); 7] = [
     ("PROCESS", "kernel.overview.process", true),
@@ -185,6 +185,12 @@ enum TlsSymbolColumn {
 }
 
 pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView {
+    let active = Rc::new(Cell::new(false));
+    let tracking_enabled = Rc::new(Cell::new(false));
+    let in_flight = Rc::new(Cell::new(false));
+    let needs_refresh = Rc::new(Cell::new(true));
+    let tls_requested = Rc::new(Cell::new(false));
+    let metadata_only_refresh = Rc::new(Cell::new(false));
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_size_request(-1, 0);
     root.add_css_class("sidebar");
@@ -254,7 +260,6 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
         tls_symbols_empty,
         tls_metadata,
     ) = build_tls();
-    pages.add_titled(&tls, Some("tls"), "TLS");
 
     let (
         memory,
@@ -290,6 +295,7 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     pages.add_titled(&limits, Some("limits"), "Limits");
     let (processes, process_store, process_count, processes_empty) = build_processes();
     pages.add_titled(&processes, Some("process-tree"), "Tree");
+    pages.add_titled(&tls, Some("tls"), "TLS");
     page_switcher.set_hexpand(true);
     let page_switcher_scroll = gtk::ScrolledWindow::new();
     page_switcher_scroll.add_css_class("kernel-tabs-scroll");
@@ -318,7 +324,25 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     let previous_for_page = previous_page.clone();
     let next_for_page = next_page.clone();
     let scroll_for_page = page_switcher_scroll.clone();
+    let active_for_page = Rc::clone(&active);
+    let needs_refresh_for_page = Rc::clone(&needs_refresh);
+    let tls_requested_for_page = Rc::clone(&tls_requested);
+    let metadata_only_for_page = Rc::clone(&metadata_only_refresh);
+    let refresh_for_page = Rc::clone(bindings.refresh_handler);
     pages.connect_visible_child_notify(move |pages| {
+        if pages.visible_child_name().as_deref() == Some("tls")
+            && !tls_requested_for_page.replace(true)
+        {
+            // Loading static TLS metadata is a view enrichment, not a new
+            // execution stop. Preserve the existing Changes comparison when
+            // a current procfs snapshot is already on screen.
+            metadata_only_for_page.set(!needs_refresh_for_page.replace(true));
+            if active_for_page.get()
+                && let Some(handler) = refresh_for_page.borrow().as_ref()
+            {
+                handler();
+            }
+        }
         update_kernel_page_navigation(pages, &previous_for_page, &next_for_page, &scroll_for_page);
         let pages = pages.clone();
         glib::idle_add_local_once(move || {
@@ -354,14 +378,16 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     });
 
     let tls_runtime = Rc::new(RefCell::new(KernelTlsRuntime::default()));
-    replace_boxed_store(&tls_runtime_store, tls_runtime_rows(&tls_runtime.borrow()));
+    replace_boxed_store_if_changed(&tls_runtime_store, tls_runtime_rows(&tls_runtime.borrow()));
 
     KernelView {
         root,
-        active: Rc::new(Cell::new(false)),
-        tracking_enabled: Rc::new(Cell::new(false)),
-        in_flight: Rc::new(Cell::new(false)),
-        needs_refresh: Rc::new(Cell::new(true)),
+        active,
+        tracking_enabled,
+        in_flight,
+        needs_refresh,
+        tls_requested,
+        metadata_only_refresh,
         refresh_button,
         status,
         warnings,
@@ -777,10 +803,7 @@ fn build_tls() -> (
         };
         let row = data.borrow::<KernelTlsSymbolRow>();
         let query = query_for_filter.borrow();
-        query.is_empty()
-            || format!("{} {} {}", row.module, row.symbol.name, row.path)
-                .to_ascii_lowercase()
-                .contains(&*query)
+        query.is_empty() || tls_symbol_search_text(&row).contains(&*query)
     });
     let filtered = gtk::FilterListModel::new(Some(symbol_store.clone()), Some(filter.clone()));
     let symbol_selection = gtk::SingleSelection::new(Some(filtered));
@@ -1403,11 +1426,8 @@ fn build_private_summary() -> (gtk::Grid, KernelPrivateSummaryView) {
     grid.add_css_class("kernel-private-summary-grid");
     grid.set_column_homogeneous(true);
     grid.set_column_spacing(1);
-    let mut values = Vec::new();
-    for (column, title) in ["TOTAL USS", "PRIVATE CLEAN", "PRIVATE DIRTY", "MAPPINGS"]
-        .into_iter()
-        .enumerate()
-    {
+    let mut column = 0;
+    let mut add_value = |title: &str| {
         let cell = gtk::Box::new(gtk::Orientation::Vertical, 1);
         cell.add_css_class("kernel-private-summary-cell");
         let title = gtk::Label::new(Some(title));
@@ -1421,12 +1441,14 @@ fn build_private_summary() -> (gtk::Grid, KernelPrivateSummaryView) {
         enable_stable_text_selection(&value);
         cell.append(&title);
         cell.append(&value);
-        grid.attach(&cell, column as i32, 0, 1, 1);
-        values.push(value);
-    }
-    let [total, clean, dirty, mappings]: [gtk::Label; 4] = values
-        .try_into()
-        .expect("private summary always has four values");
+        grid.attach(&cell, column, 0, 1, 1);
+        column += 1;
+        value
+    };
+    let total = add_value("TOTAL USS");
+    let clean = add_value("PRIVATE CLEAN");
+    let dirty = add_value("PRIVATE DIRTY");
+    let mappings = add_value("MAPPINGS");
     (
         grid,
         KernelPrivateSummaryView {
@@ -1474,7 +1496,8 @@ fn build_mappings() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
             return false;
         };
         let query = query_for_filter.borrow();
-        query.is_empty() || mapping_search_text(&data.borrow::<KernelMapping>()).contains(&*query)
+        query.is_empty()
+            || mapping_search_text(&data.borrow::<Rc<KernelMapping>>()).contains(&*query)
     });
     let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
     let selection = gtk::SingleSelection::new(Some(filtered));
@@ -1798,7 +1821,7 @@ fn mapping_column(
     column: MappingColumn,
 ) -> gtk::ColumnViewColumn {
     table_column(title, width, expand, move |object, label| {
-        let mapping = object.borrow::<KernelMapping>();
+        let mapping = object.borrow::<Rc<KernelMapping>>();
         reset_semantic_css(label);
         label.add_css_class(mapping_css(&mapping));
         let text = match column {
@@ -2277,12 +2300,12 @@ fn tls_symbol_column(
         let row = object.borrow::<KernelTlsSymbolRow>();
         reset_kernel_css(label);
         let text = match column {
-            TlsSymbolColumn::Module => row.module.clone(),
+            TlsSymbolColumn::Module => row.module.to_string(),
             TlsSymbolColumn::Name => row.symbol.name.clone(),
             TlsSymbolColumn::Offset => format!("0x{:016x}", row.symbol.offset),
             TlsSymbolColumn::Size => crate::kernel::format_bytes(row.symbol.size),
             TlsSymbolColumn::Binding => row.symbol.binding.clone(),
-            TlsSymbolColumn::Path => row.path.clone(),
+            TlsSymbolColumn::Path => row.path.to_string(),
         };
         if matches!(column, TlsSymbolColumn::Offset | TlsSymbolColumn::Size) {
             label.add_css_class("kernel-numeric");
@@ -2374,6 +2397,10 @@ fn mapping_search_text(mapping: &KernelMapping) -> String {
     .to_ascii_lowercase()
 }
 
+fn tls_symbol_search_text(row: &KernelTlsSymbolRow) -> String {
+    format!("{} {} {}", row.module, row.symbol.name, row.path).to_ascii_lowercase()
+}
+
 fn mapping_change_search_text(change: &KernelMappingChange) -> String {
     format!(
         "{} 0x{:x} 0x{:x} {} {} {} {}",
@@ -2401,86 +2428,44 @@ fn mapping_css(mapping: &KernelMapping) -> &'static str {
 }
 
 impl KernelView {
-    fn show_snapshot(&self, snapshot: &KernelSnapshot) {
-        self.status.set_text(&format!(
-            "PID {} · {} threads · {} VMAs · {} FDs",
-            snapshot.pid,
-            snapshot.threads.len(),
-            snapshot.mappings.len(),
-            snapshot.file_descriptors.len()
-        ));
-        self.status.set_tooltip_text(Some(&format!(
-            "Linux procfs snapshot for PID {} · collected in {}. Changes compare this capture with the preceding successful snapshot.",
-            snapshot.pid,
-            crate::kernel::format_duration_ns(snapshot.capture_duration_micros.saturating_mul(1_000)),
-        )));
-        replace_boxed_store(&self.overview_store, overview_rows(snapshot));
-        replace_boxed_store(&self.resource_store, resource_rows(snapshot));
-        replace_boxed_store(&self.tls_module_store, snapshot.tls_modules.iter().cloned());
-        let tls_symbols = snapshot
-            .tls_modules
+    fn show_snapshot(&self, mut snapshot: KernelSnapshot) {
+        let thread_count = snapshot.threads.len();
+        let signal_count = snapshot.signals.len();
+        let mapping_count = snapshot.mappings.len();
+        let descriptor_count = snapshot.file_descriptors.len();
+        let limit_count = snapshot.limits.len();
+        let process_count = snapshot.process_tree.len();
+        let mapping_change_count = snapshot.mapping_changes.len();
+        let active_signals = snapshot
+            .signals
             .iter()
-            .flat_map(|module| {
-                module
-                    .symbols
-                    .iter()
-                    .cloned()
-                    .map(|symbol| KernelTlsSymbolRow {
-                        module: module.module.clone(),
-                        path: module.path.clone(),
-                        symbol,
-                    })
+            .filter(|signal| {
+                signal.pending_process
+                    || signal.pending_threads > 0
+                    || signal.blocked_threads > 0
+                    || signal.ignored
+                    || signal.caught
             })
-            .collect::<Vec<_>>();
-        let known_tls_symbols = snapshot
-            .tls_modules
-            .iter()
-            .map(|module| module.symbol_count)
-            .sum::<usize>();
-        self.tls_module_count.set_text(&format!(
-            "{} ELF module(s) with static TLS templates",
-            snapshot.tls_modules.len()
-        ));
-        self.tls_module_count.set_tooltip_text(Some(
-            "ELF PT_TLS template addresses describe module metadata, not live per-thread addresses",
-        ));
-        self.tls_symbol_count
-            .set_text(&if known_tls_symbols == tls_symbols.len() {
-                format!("{known_tls_symbols} named TLS symbol(s)")
-            } else {
-                format!(
-                    "{} of {known_tls_symbols} named TLS symbol(s) shown",
-                    tls_symbols.len()
-                )
-            });
-        self.tls_modules_empty
-            .set_visible(snapshot.tls_modules.is_empty());
-        self.tls_symbols_empty.set_visible(tls_symbols.is_empty());
-        self.tls_metadata
-            .set_visible_child_name(if snapshot.tls_modules.is_empty() {
-                "empty"
-            } else {
-                "content"
-            });
-        replace_boxed_store(&self.tls_symbol_store, tls_symbols);
-        replace_boxed_store(&self.change_store, change_rows(snapshot));
-        replace_boxed_store(
+            .count();
+        self.show_snapshot_status(&snapshot);
+        replace_boxed_store_if_changed(&self.overview_store, overview_rows(&snapshot));
+        replace_boxed_store_if_changed(&self.resource_store, resource_rows(&snapshot));
+        self.show_tls_metadata(&mut snapshot);
+        replace_boxed_store_if_changed(&self.change_store, change_rows(&snapshot));
+        replace_boxed_store_if_changed(
             &self.mapping_change_store,
-            snapshot.mapping_changes.iter().cloned(),
+            std::mem::take(&mut snapshot.mapping_changes),
         );
         if snapshot.comparison_ready {
-            let summary = if snapshot.mapping_changes.is_empty() {
+            let summary = if mapping_change_count == 0 {
                 String::from("No changes")
             } else {
-                format!(
-                    "{} changed mappings · largest first",
-                    snapshot.mapping_changes.len()
-                )
+                format!("{mapping_change_count} changed mappings · largest first")
             };
             self.mapping_change_count.set_text(&summary);
             self.mapping_change_count.set_tooltip_text(Some(&summary));
             self.mapping_changes_empty
-                .set_text(if snapshot.mapping_changes.is_empty() {
+                .set_text(if mapping_change_count == 0 {
                     "No mapping changes since the previous snapshot"
                 } else {
                     ""
@@ -2494,26 +2479,14 @@ impl KernelView {
                 .set_text("Capture another snapshot to compare mappings");
         }
         self.mapping_changes_empty
-            .set_visible(snapshot.mapping_changes.is_empty());
-        if let Some(accounting) = snapshot.memory_accounting.as_ref() {
+            .set_visible(mapping_change_count == 0);
+        let mapping_rows = std::mem::take(&mut snapshot.mappings)
+            .into_iter()
+            .map(Rc::new)
+            .collect::<Vec<_>>();
+        if let Some(accounting) = snapshot.memory_accounting.as_mut() {
             let total_unique = accounting.unique_rss();
-            let mut categories = accounting
-                .categories
-                .iter()
-                .filter(|category| category.unique_rss() > 0)
-                .cloned()
-                .collect::<Vec<_>>();
-            categories.sort_by_key(|category| Reverse(category.unique_rss()));
-            replace_boxed_store(
-                &self.memory_store,
-                categories.into_iter().map(|category| KernelMemoryRow {
-                    category,
-                    page_size: accounting.page_size,
-                    total_unique,
-                }),
-            );
-            let mut private_mappings = snapshot
-                .mappings
+            let mut private_mappings = mapping_rows
                 .iter()
                 .filter(|mapping| mapping.private_bytes() > 0)
                 .cloned()
@@ -2521,7 +2494,26 @@ impl KernelView {
             private_mappings.sort_by_key(|mapping| Reverse(mapping.private_bytes()));
             let private_mapping_count = private_mappings.len();
             let private_mappings_empty = private_mappings.is_empty();
-            replace_boxed_store(
+            update_memory_summary(
+                &self.memory_summary,
+                accounting,
+                mapping_count,
+                private_mapping_count,
+            );
+            let mut categories = std::mem::take(&mut accounting.categories)
+                .into_iter()
+                .filter(|category| category.unique_rss() > 0)
+                .collect::<Vec<_>>();
+            categories.sort_by_key(|category| Reverse(category.unique_rss()));
+            replace_boxed_store_if_changed(
+                &self.memory_store,
+                categories.into_iter().map(|category| KernelMemoryRow {
+                    category,
+                    page_size: accounting.page_size,
+                    total_unique,
+                }),
+            );
+            replace_boxed_store_if_changed(
                 &self.private_mapping_store,
                 private_mappings
                     .into_iter()
@@ -2530,12 +2522,6 @@ impl KernelView {
                         mapping,
                         total_unique,
                     }),
-            );
-            update_memory_summary(
-                &self.memory_summary,
-                accounting,
-                snapshot.mappings.len(),
-                private_mapping_count,
             );
             self.memory_empty.set_visible(total_unique == 0);
             self.private_mapping_empty
@@ -2548,63 +2534,116 @@ impl KernelView {
             self.private_mapping_empty.set_visible(true);
         }
         populate_warnings(&self.warnings, &snapshot.warnings);
-        replace_boxed_store(&self.thread_store, snapshot.threads.iter().cloned());
-        replace_boxed_store(&self.signal_store, snapshot.signals.iter().cloned());
-        replace_boxed_store(&self.mapping_store, snapshot.mappings.iter().cloned());
-        replace_boxed_store(
+        replace_boxed_store_if_changed(&self.thread_store, std::mem::take(&mut snapshot.threads));
+        replace_boxed_store_if_changed(&self.signal_store, std::mem::take(&mut snapshot.signals));
+        replace_boxed_store_if_changed(&self.mapping_store, mapping_rows);
+        replace_boxed_store_if_changed(
             &self.descriptor_store,
-            snapshot.file_descriptors.iter().cloned(),
+            std::mem::take(&mut snapshot.file_descriptors),
         );
-        replace_boxed_store(&self.limit_store, snapshot.limits.iter().cloned());
-        replace_boxed_store(&self.process_store, snapshot.process_tree.iter().cloned());
+        replace_boxed_store_if_changed(&self.limit_store, std::mem::take(&mut snapshot.limits));
+        replace_boxed_store_if_changed(
+            &self.process_store,
+            std::mem::take(&mut snapshot.process_tree),
+        );
         self.thread_count
-            .set_text(&format!("{} kernel threads", snapshot.threads.len()));
-        let active_signals = snapshot
-            .signals
-            .iter()
-            .filter(|signal| {
-                signal.pending_process
-                    || signal.pending_threads > 0
-                    || signal.blocked_threads > 0
-                    || signal.ignored
-                    || signal.caught
-            })
-            .count();
+            .set_text(&format!("{thread_count} kernel threads"));
         self.signal_count.set_text(&format!(
-            "{active_signals} active states · {} signals decoded",
-            snapshot.signals.len()
+            "{active_signals} active states · {signal_count} signals decoded",
         ));
         if let Some(accounting) = snapshot.memory_accounting.as_ref() {
             self.mapping_count.set_text(&format!(
                 "{} VMAs · VSS {} · RSS {} · USS {}",
-                snapshot.mappings.len(),
+                mapping_count,
                 crate::kernel::format_bytes(accounting.virtual_bytes),
                 crate::kernel::format_bytes(accounting.rss),
                 crate::kernel::format_bytes(accounting.unique_rss()),
             ));
         } else {
             self.mapping_count
-                .set_text(&format!("{} mappings", snapshot.mappings.len()));
+                .set_text(&format!("{mapping_count} mappings"));
         }
-        self.descriptor_count.set_text(&format!(
-            "{} open file descriptors",
+        self.descriptor_count
+            .set_text(&format!("{} open file descriptors", descriptor_count));
+        self.limit_count
+            .set_text(&format!("{limit_count} resource limits"));
+        self.process_count.set_text(&format!(
+            "{process_count} related processes · ancestors and up to 256 descendants",
+        ));
+        self.threads_empty.set_visible(thread_count == 0);
+        self.signals_empty.set_visible(signal_count == 0);
+        self.mappings_empty.set_visible(mapping_count == 0);
+        self.descriptors_empty.set_visible(descriptor_count == 0);
+        self.limits_empty.set_visible(limit_count == 0);
+        self.processes_empty.set_visible(process_count == 0);
+    }
+
+    fn show_tls_metadata(&self, snapshot: &mut KernelSnapshot) {
+        let modules = std::mem::take(&mut snapshot.tls_modules);
+        let known_tls_symbols = modules
+            .iter()
+            .map(|module| module.symbol_count)
+            .sum::<usize>();
+        let module_count = modules.len();
+        let mut module_rows = Vec::with_capacity(module_count);
+        let mut tls_symbols = Vec::new();
+        for mut module in modules {
+            let symbols = std::mem::take(&mut module.symbols);
+            tls_symbols.reserve(symbols.len());
+            {
+                let module_name = Rc::<str>::from(module.module.as_str());
+                let module_path = Rc::<str>::from(module.path.as_str());
+                tls_symbols.extend(symbols.into_iter().map(|symbol| KernelTlsSymbolRow {
+                    module: Rc::clone(&module_name),
+                    path: Rc::clone(&module_path),
+                    symbol,
+                }));
+            }
+            // The module table displays only aggregate symbol metadata. The
+            // symbol objects themselves now live exclusively in the filtered
+            // symbol table instead of being retained twice.
+            module_rows.push(module);
+        }
+        replace_boxed_store_if_changed(&self.tls_module_store, module_rows);
+        self.tls_module_count.set_text(&format!(
+            "{module_count} ELF module(s) with static TLS templates",
+        ));
+        self.tls_module_count.set_tooltip_text(Some(
+            "ELF PT_TLS template addresses describe module metadata, not live per-thread addresses",
+        ));
+        self.tls_symbol_count
+            .set_text(&if known_tls_symbols == tls_symbols.len() {
+                format!("{known_tls_symbols} named TLS symbol(s)")
+            } else {
+                format!(
+                    "{} of {known_tls_symbols} named TLS symbol(s) shown",
+                    tls_symbols.len()
+                )
+            });
+        self.tls_modules_empty.set_visible(module_count == 0);
+        self.tls_symbols_empty.set_visible(tls_symbols.is_empty());
+        self.tls_metadata
+            .set_visible_child_name(if module_count == 0 {
+                "empty"
+            } else {
+                "content"
+            });
+        replace_boxed_store_if_changed(&self.tls_symbol_store, tls_symbols);
+    }
+
+    fn show_snapshot_status(&self, snapshot: &KernelSnapshot) {
+        self.status.set_text(&format!(
+            "PID {} · {} threads · {} VMAs · {} FDs",
+            snapshot.pid,
+            snapshot.threads.len(),
+            snapshot.mappings.len(),
             snapshot.file_descriptors.len()
         ));
-        self.limit_count
-            .set_text(&format!("{} resource limits", snapshot.limits.len()));
-        self.process_count.set_text(&format!(
-            "{} related processes · ancestors and up to 256 descendants",
-            snapshot.process_tree.len()
-        ));
-        self.threads_empty.set_visible(snapshot.threads.is_empty());
-        self.signals_empty.set_visible(snapshot.signals.is_empty());
-        self.mappings_empty
-            .set_visible(snapshot.mappings.is_empty());
-        self.descriptors_empty
-            .set_visible(snapshot.file_descriptors.is_empty());
-        self.limits_empty.set_visible(snapshot.limits.is_empty());
-        self.processes_empty
-            .set_visible(snapshot.process_tree.is_empty());
+        self.status.set_tooltip_text(Some(&format!(
+            "Linux procfs snapshot for PID {} · collected in {}. Changes compare this capture with the preceding successful snapshot.",
+            snapshot.pid,
+            crate::kernel::format_duration_ns(snapshot.capture_duration_micros.saturating_mul(1_000)),
+        )));
     }
 
     pub(super) fn set_tls_thread(&self, threads: &[ThreadInfo]) {
@@ -2618,6 +2657,7 @@ impl KernelView {
 
     fn set_tls_runtime(
         &self,
+        target: (TargetArchitecture, Option<TargetEndian>, u32),
         register: Option<&str>,
         base: Option<u64>,
         mapping: Option<&str>,
@@ -2625,8 +2665,12 @@ impl KernelView {
         error: Option<&str>,
     ) {
         let thread = self.tls_runtime.borrow().thread.clone();
+        let (architecture, endian, pointer_bits) = target;
         self.tls_runtime.replace(KernelTlsRuntime {
             thread,
+            architecture,
+            endian,
+            pointer_bits,
             register: register.map(str::to_owned),
             base,
             mapping: mapping.map(str::to_owned),
@@ -2637,7 +2681,7 @@ impl KernelView {
     }
 
     fn rebuild_tls_runtime(&self) {
-        replace_boxed_store(
+        replace_boxed_store_if_changed(
             &self.tls_runtime_store,
             tls_runtime_rows(&self.tls_runtime.borrow()),
         );
@@ -2663,6 +2707,7 @@ impl KernelView {
         self.limit_store.remove_all();
         self.process_store.remove_all();
         self.previous_snapshot.replace(None);
+        self.metadata_only_refresh.set(false);
         self.thread_count.set_text("No snapshot");
         self.tls_module_count.set_text("No snapshot");
         self.tls_module_count.set_tooltip_text(None);
@@ -2724,12 +2769,17 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
         return rows;
     };
     let base = runtime.base.unwrap_or_default();
+    let pointer_bits = match runtime.pointer_bits {
+        32 | 64 => runtime.pointer_bits,
+        _ => runtime.architecture.pointer_bits().unwrap_or(64),
+    };
+    let address_width = usize::try_from(pointer_bits / 4).unwrap_or(16).clamp(8, 16);
     rows.extend([
         KernelOverviewRow {
             section: false,
             section_key: section.clone(),
             label: String::from("Thread pointer"),
-            value: format!("${register} = 0x{base:016x}"),
+            value: format!("${register} = 0x{base:0address_width$x}"),
         },
         KernelOverviewRow {
             section: false,
@@ -2760,7 +2810,34 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
         return rows;
     }
 
-    let abi_section = if register == "fs_base" {
+    let Some(endian) = runtime.endian else {
+        let raw_section = "RAW THREAD-POINTER BYTES";
+        rows.push(KernelOverviewRow {
+            section: true,
+            section_key: String::from(raw_section),
+            label: String::from(raw_section),
+            value: String::new(),
+        });
+        for (index, bytes) in runtime.bytes.chunks(16).take(5).enumerate() {
+            rows.push(KernelOverviewRow {
+                section: false,
+                section_key: String::from(raw_section),
+                label: format!("Bytes +0x{:x}", index * 16),
+                value: bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            });
+        }
+        return rows;
+    };
+
+    let abi_section = if runtime.architecture == TargetArchitecture::X86_64
+        && pointer_bits == 64
+        && register == "fs_base"
+        && endian == TargetEndian::Little
+    {
         "GLIBC X86-64 TCB HEAD"
     } else {
         "THREAD-POINTER WORDS"
@@ -2771,7 +2848,7 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
         label: String::from(abi_section),
         value: String::new(),
     });
-    if register == "fs_base" {
+    if abi_section == "GLIBC X86-64 TCB HEAD" {
         for (label, offset, size) in [
             ("TCB pointer", 0usize, 8usize),
             ("Dynamic thread vector (DTV)", 8, 8),
@@ -2784,7 +2861,7 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
             ("vgetcpu cache", 56, 8),
             ("Feature flags", 64, 4),
         ] {
-            if let Some(value) = tls_little_endian_value(&runtime.bytes, offset, size) {
+            if let Some(value) = tls_value(&runtime.bytes, offset, size, TargetEndian::Little) {
                 rows.push(KernelOverviewRow {
                     section: false,
                     section_key: String::from(abi_section),
@@ -2794,24 +2871,29 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
             }
         }
     } else {
-        for (index, bytes) in runtime.bytes.as_chunks::<8>().0.iter().take(10).enumerate() {
-            let value = u64::from_le_bytes(*bytes);
+        let word_size = usize::try_from(pointer_bits / 8).unwrap_or(8).clamp(4, 8);
+        for (index, bytes) in runtime.bytes.chunks_exact(word_size).take(10).enumerate() {
+            let Some(value) = tls_value(bytes, 0, word_size, endian) else {
+                continue;
+            };
             rows.push(KernelOverviewRow {
                 section: false,
                 section_key: String::from(abi_section),
-                label: format!("Word +0x{:x}", index * 8),
-                value: format!("0x{value:016x}"),
+                label: format!("Word +0x{:x}", index * word_size),
+                value: format!("0x{value:0width$x}", width = word_size * 2),
             });
         }
     }
     rows
 }
 
-fn tls_little_endian_value(bytes: &[u8], offset: usize, size: usize) -> Option<u64> {
+fn tls_value(bytes: &[u8], offset: usize, size: usize, endian: TargetEndian) -> Option<u64> {
     let bytes = bytes.get(offset..offset.checked_add(size)?)?;
-    let mut value = [0_u8; 8];
-    value.get_mut(..size)?.copy_from_slice(bytes);
-    Some(u64::from_le_bytes(value))
+    match size {
+        4 => Some(u64::from(endian.decode_u32(bytes.try_into().ok()?))),
+        8 => Some(endian.decode_u64(bytes.try_into().ok()?)),
+        _ => None,
+    }
 }
 
 fn update_memory_summary(
@@ -3086,6 +3168,7 @@ impl Ui {
     pub fn show_tls_runtime_for_refresh(
         &self,
         generation: u64,
+        target: (TargetArchitecture, Option<TargetEndian>, u32),
         register: &str,
         base: u64,
         mapping: Option<&str>,
@@ -3096,6 +3179,7 @@ impl Ui {
         }
         match result {
             Ok(memory) => self.kernel_view.set_tls_runtime(
+                target,
                 Some(register),
                 Some(base),
                 mapping,
@@ -3103,6 +3187,7 @@ impl Ui {
                 None,
             ),
             Err(error) => self.kernel_view.set_tls_runtime(
+                target,
                 Some(register),
                 Some(base),
                 mapping,
@@ -3114,8 +3199,18 @@ impl Ui {
 
     pub fn show_tls_runtime_unavailable_for_refresh(&self, generation: u64, error: &str) {
         if self.is_stop_refresh_current(generation) {
-            self.kernel_view
-                .set_tls_runtime(None, None, None, &[], Some(error));
+            self.kernel_view.set_tls_runtime(
+                (
+                    self.target_architecture(),
+                    self.target_endian(),
+                    self.target_pointer_bits(),
+                ),
+                None,
+                None,
+                None,
+                &[],
+                Some(error),
+            );
         }
     }
 
@@ -3138,18 +3233,38 @@ impl Ui {
         Some(generation)
     }
 
-    pub fn show_kernel_snapshot(&self, generation: u64, snapshot: &KernelSnapshot) {
+    pub fn show_kernel_snapshot(&self, generation: u64, mut snapshot: KernelSnapshot) {
         if generation != self.kernel_refresh_generation.get() {
             self.finish_stale_kernel_refresh();
             return;
         }
         self.kernel_view.in_flight.set(false);
-        let mut snapshot = snapshot.clone();
-        snapshot.compare_with(self.kernel_view.previous_snapshot.borrow().as_ref());
-        self.kernel_view.show_snapshot(&snapshot);
-        self.kernel_view.previous_snapshot.replace(Some(snapshot));
-        self.kernel_view.needs_refresh.set(false);
+        let metadata_only = self.kernel_view.metadata_only_refresh.replace(false)
+            && self.kernel_view.previous_snapshot.borrow().is_some();
+        if metadata_only {
+            self.kernel_view.show_snapshot_status(&snapshot);
+            populate_warnings(&self.kernel_view.warnings, &snapshot.warnings);
+            self.kernel_view.show_tls_metadata(&mut snapshot);
+            self.kernel_view
+                .needs_refresh
+                .set(!snapshot.tls_metadata_scanned);
+            self.update_control_sensitivity();
+            self.refresh_kernel_after_stop();
+            return;
+        }
+        snapshot.compare_with_baseline(self.kernel_view.previous_snapshot.borrow().as_ref());
+        let needs_tls_refresh =
+            self.kernel_view.tls_requested.get() && !snapshot.tls_metadata_scanned;
+        let baseline = snapshot.baseline();
+        self.kernel_view.previous_snapshot.replace(Some(baseline));
+        self.kernel_view.show_snapshot(snapshot);
+        self.kernel_view.needs_refresh.set(needs_tls_refresh);
         self.update_control_sensitivity();
+        self.refresh_kernel_after_stop();
+    }
+
+    pub fn kernel_tls_requested(&self) -> bool {
+        self.kernel_view.tls_requested.get()
     }
 
     pub fn show_kernel_error(&self, generation: u64, error: &str) {
@@ -3184,6 +3299,7 @@ impl Ui {
         self.kernel_refresh_generation
             .set(self.kernel_refresh_generation.get().wrapping_add(1));
         self.kernel_view.needs_refresh.set(true);
+        self.kernel_view.metadata_only_refresh.set(false);
         self.update_control_sensitivity();
     }
 
@@ -3257,6 +3373,9 @@ mod memory_view_tests {
         bytes[40..48].copy_from_slice(&0xfeed_face_cafe_beef_u64.to_le_bytes());
         let runtime = KernelTlsRuntime {
             thread: Some(String::from("GDB #1")),
+            architecture: TargetArchitecture::X86_64,
+            endian: Some(TargetEndian::Little),
+            pointer_bits: 64,
             register: Some(String::from("fs_base")),
             base: Some(0x7fff_0000),
             mapping: Some(String::from("rw-p")),
@@ -3271,5 +3390,49 @@ mod memory_view_tests {
         assert!(rows.iter().any(|row| {
             row.label == "Stack canary (+0x28)" && row.value == "0xfeedfacecafebeef"
         }));
+    }
+
+    #[test]
+    fn decodes_generic_tls_with_the_target_pointer_abi() {
+        let runtime = KernelTlsRuntime {
+            thread: Some(String::from("GDB #1")),
+            architecture: TargetArchitecture::X86_64,
+            endian: Some(TargetEndian::Little),
+            pointer_bits: 32,
+            register: Some(String::from("fs_base")),
+            base: Some(0x1000),
+            mapping: None,
+            bytes: [0x1122_3344_u32.to_le_bytes(), 0x5566_7788_u32.to_le_bytes()].concat(),
+            error: None,
+        };
+
+        let rows = tls_runtime_rows(&runtime);
+        assert!(
+            rows.iter()
+                .any(|row| { row.label == "Word +0x4" && row.value == "0x55667788" })
+        );
+        assert!(!rows.iter().any(|row| row.label.contains("canary")));
+    }
+
+    #[test]
+    fn leaves_tls_as_bytes_when_target_endianness_is_unknown() {
+        let runtime = KernelTlsRuntime {
+            thread: None,
+            architecture: TargetArchitecture::PowerPc64,
+            endian: None,
+            pointer_bits: 64,
+            register: Some(String::from("r13")),
+            base: Some(0x1000),
+            mapping: None,
+            bytes: vec![0xaa; 32],
+            error: None,
+        };
+
+        let rows = tls_runtime_rows(&runtime);
+        assert!(
+            rows.iter()
+                .any(|row| row.label == "RAW THREAD-POINTER BYTES")
+        );
+        assert!(!rows.iter().any(|row| row.label.starts_with("Word +")));
     }
 }

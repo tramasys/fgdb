@@ -93,7 +93,9 @@ pub(super) fn insight_label(placeholder: &str) -> gtk::Label {
     label
 }
 
-pub(super) fn build_memory_region_view() -> (gtk::ColumnView, gio::ListStore) {
+pub(super) fn build_memory_region_view(
+    target_pointer_bits: &Rc<Cell<u32>>,
+) -> (gtk::ColumnView, gio::ListStore) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let selection = gtk::NoSelection::new(Some(store.clone()));
     let view = gtk::ColumnView::new(Some(selection));
@@ -109,7 +111,13 @@ pub(super) fn build_memory_region_view() -> (gtk::ColumnView, gio::ListStore) {
         ("REGS", 110, false, MemoryColumn::Registers),
         ("PATH", 280, true, MemoryColumn::Path),
     ] {
-        view.append_column(&memory_region_column(title, width, expand, column));
+        view.append_column(&memory_region_column(
+            title,
+            width,
+            expand,
+            column,
+            Rc::clone(target_pointer_bits),
+        ));
     }
     (view, store)
 }
@@ -119,6 +127,7 @@ pub(super) fn memory_region_column(
     width: i32,
     expand: bool,
     column: MemoryColumn,
+    target_pointer_bits: Rc<Cell<u32>>,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
     factory.connect_setup(move |_, object| {
@@ -146,9 +155,12 @@ pub(super) fn memory_region_column(
         let region = data.borrow::<MemoryRegion>();
         reset_semantic_css(&label);
         label.add_css_class(memory_kind_css(region.kind));
+        let address_width = usize::try_from(target_pointer_bits.get() / 4)
+            .unwrap_or(16)
+            .clamp(8, 16);
         let text = match column {
-            MemoryColumn::Start => format!("0x{:016x}", region.start),
-            MemoryColumn::End => format!("0x{:016x}", region.end),
+            MemoryColumn::Start => format!("0x{:0address_width$x}", region.start),
+            MemoryColumn::End => format!("0x{:0address_width$x}", region.end),
             MemoryColumn::Size => format_memory_size(region.end.saturating_sub(region.start)),
             MemoryColumn::Permissions => region.permissions.clone(),
             MemoryColumn::Registers => region.referenced_by.join(" "),
@@ -159,7 +171,7 @@ pub(super) fn memory_region_column(
         };
         label.set_text(&text);
         label.set_tooltip_text(Some(&format!(
-            "0x{:016x}–0x{:016x} · {}",
+            "0x{:0address_width$x}–0x{:0address_width$x} · {}",
             region.start,
             region.end,
             region.description()
@@ -190,7 +202,7 @@ pub(super) fn add_memory_watch(
     expression: String,
     byte_count: usize,
     format: MemoryWatchFormat,
-) {
+) -> bool {
     let existing = {
         let watches = watches.borrow();
         watches
@@ -208,7 +220,10 @@ pub(super) fn add_memory_watch(
         if let Some(handler) = handler.borrow().as_ref() {
             handler(watch.id, expression, byte_count);
         }
-        return;
+        return true;
+    }
+    if watches.borrow().len() >= MAX_MEMORY_WATCHES {
+        return false;
     }
 
     let id = watches
@@ -312,6 +327,7 @@ pub(super) fn add_memory_watch(
     if let Some(handler) = handler.borrow().as_ref() {
         handler(id, expression, byte_count);
     }
+    true
 }
 
 pub(super) fn memory_watch_column(css_class: &str, tooltip: &str) -> gtk::Label {
@@ -330,15 +346,19 @@ pub(super) fn format_memory_watch(
     begin: u64,
     bytes: &[u8],
     format: MemoryWatchFormat,
+    pointer_bits: u32,
+    endian: TargetEndian,
 ) -> MemoryWatchText {
     use std::fmt::Write as _;
 
     let chunk_size = match format {
         MemoryWatchFormat::Words => 4,
-        MemoryWatchFormat::Bytes | MemoryWatchFormat::Pointers => 8,
+        MemoryWatchFormat::Pointers => usize::try_from(pointer_bits / 8).unwrap_or(8).clamp(4, 8),
+        MemoryWatchFormat::Bytes => 8,
     };
     let line_count = bytes.len().div_ceil(chunk_size);
-    let mut addresses = String::with_capacity(line_count * 19);
+    let address_width = usize::try_from(pointer_bits / 4).unwrap_or(16).clamp(8, 16);
+    let mut addresses = String::with_capacity(line_count * (address_width + 3));
     let mut values = String::with_capacity(bytes.len() * 3 + line_count);
     let mut decoded = String::with_capacity(bytes.len() + line_count);
     for (index, chunk) in bytes.chunks(chunk_size).enumerate() {
@@ -347,21 +367,28 @@ pub(super) fn format_memory_watch(
             values.push('\n');
             decoded.push('\n');
         }
-        let _ = write!(addresses, "0x{:016x}", begin + (index * chunk_size) as u64);
+        let _ = write!(
+            addresses,
+            "0x{:0address_width$x}",
+            begin.saturating_add((index * chunk_size) as u64)
+        );
         match format {
             MemoryWatchFormat::Bytes => push_hex_bytes(&mut values, chunk),
             MemoryWatchFormat::Words => match <[u8; 4]>::try_from(chunk) {
                 Ok(chunk) => {
-                    let _ = write!(values, "0x{:08x}", u32::from_le_bytes(chunk));
+                    let _ = write!(values, "0x{:08x}", endian.decode_u32(chunk));
                 }
                 Err(_) => push_hex_bytes(&mut values, chunk),
             },
-            MemoryWatchFormat::Pointers => match <[u8; 8]>::try_from(chunk) {
-                Ok(chunk) => {
-                    let _ = write!(values, "0x{:016x}", u64::from_le_bytes(chunk));
+            MemoryWatchFormat::Pointers => {
+                if let Ok(chunk) = <[u8; 8]>::try_from(chunk) {
+                    let _ = write!(values, "0x{:016x}", endian.decode_u64(chunk));
+                } else if let Ok(chunk) = <[u8; 4]>::try_from(chunk) {
+                    let _ = write!(values, "0x{:08x}", endian.decode_u32(chunk));
+                } else {
+                    push_hex_bytes(&mut values, chunk);
                 }
-                Err(_) => push_hex_bytes(&mut values, chunk),
-            },
+            }
         }
         decoded.extend(chunk.iter().map(|byte| {
             if byte.is_ascii_graphic() || *byte == b' ' {
@@ -701,7 +728,10 @@ pub(super) fn build_instruction_view() -> (gtk::ColumnView, gio::ListStore, gtk:
             &selection,
             |row| {
                 let marker = if row.current { "›" } else { " " };
-                format!("{marker} {}", full_address(&row.instruction.address))
+                format!(
+                    "{marker} {}",
+                    full_address(&row.instruction.address, row.pointer_bits)
+                )
             },
         ),
         instruction_column(
@@ -842,7 +872,12 @@ pub(super) fn register_column(
         if data.changed && matches!(column, RegisterColumn::Name) {
             label.add_css_class("modified-register");
         }
-        let semantic_class = register_value_css(&data.register);
+        let semantic_class = register_value_css(
+            &data.register,
+            data.architecture,
+            data.endian,
+            data.pointer_bits,
+        );
         match column {
             RegisterColumn::Name => {
                 label.set_text(&format!("${}:", data.register.name));
@@ -853,23 +888,42 @@ pub(super) fn register_column(
             }
             RegisterColumn::Value => {
                 label.add_css_class(semantic_class);
-                let text = register_primary_value(&data.register);
+                let text = register_primary_value(&data.register, data.architecture);
                 label.set_text(&text);
                 label.set_tooltip_text(Some(&format!(
                     "{}\nDouble-click or press Enter to edit",
-                    register_text(&data.register)
+                    register_text(
+                        &data.register,
+                        data.architecture,
+                        data.endian,
+                        data.pointer_bits,
+                    )
                 )));
             }
             RegisterColumn::Details => {
                 label.add_css_class(semantic_class);
                 if is_flags_register(&data.register.name) {
-                    label.set_markup(&flags_details_markup(&data.register.value, data.ring));
+                    label.set_markup(&flags_details_markup(
+                        &data.register.name,
+                        &data.register.value,
+                        data.ring,
+                    ));
                 } else {
-                    label.set_text(&register_details(&data.register));
+                    label.set_text(&register_details(
+                        &data.register,
+                        data.architecture,
+                        data.endian,
+                        data.pointer_bits,
+                    ));
                 }
                 label.set_tooltip_text(Some(&format!(
                     "{}\nDouble-click or press Enter to edit",
-                    register_text(&data.register)
+                    register_text(
+                        &data.register,
+                        data.architecture,
+                        data.endian,
+                        data.pointer_bits,
+                    )
                 )));
             }
         }
@@ -978,9 +1032,15 @@ impl StackWordInspector {
     }
 
     fn show(&self, entry: &StackEntry) {
+        let width = usize::try_from(entry.pointer_bits / 4)
+            .unwrap_or(16)
+            .clamp(8, 16);
         self.address.set_text(&format!(
-            "0x{:016x}  ·  SP+0x{:x}  ·  word {}",
-            entry.address, entry.offset, entry.index
+            "0x{:0width$x}  ·  SP+0x{:x}  ·  word {}",
+            entry.address,
+            entry.offset,
+            entry.index,
+            width = width,
         ));
         self.address.set_tooltip_text(Some(&self.address.text()));
         self.raw.set_text(&entry.value);
@@ -1050,7 +1110,10 @@ pub(super) fn stack_column(
                 .join(","),
             StackColumn::Address => {
                 label.add_css_class("memory-stack");
-                format!("0x{:016x}", entry.address)
+                let width = usize::try_from(entry.pointer_bits / 4)
+                    .unwrap_or(16)
+                    .clamp(8, 16);
+                format!("0x{:0width$x}", entry.address, width = width)
             }
             StackColumn::Value => {
                 label.add_css_class(memory_kind_css(entry.memory_kind));

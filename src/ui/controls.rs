@@ -147,13 +147,21 @@ pub(super) fn remove_marks(buffer: &sourceview5::Buffer, category: &str) {
 }
 
 pub(super) fn addresses_equal(left: &str, right: &str) -> bool {
-    fn normalized(address: &str) -> &str {
-        address
+    fn normalized(address: &str) -> Option<&str> {
+        let address = address.trim();
+        let digits = address
             .strip_prefix("0x")
-            .unwrap_or(address)
-            .trim_start_matches('0')
+            .or_else(|| address.strip_prefix("0X"))
+            .unwrap_or(address);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let digits = digits.trim_start_matches('0');
+        Some(if digits.is_empty() { "0" } else { digits })
     }
-    normalized(left) == normalized(right)
+    normalized(left)
+        .zip(normalized(right))
+        .is_some_and(|(left, right)| left.eq_ignore_ascii_case(right))
 }
 
 pub(super) fn connect_execution_button(
@@ -225,4 +233,18 @@ pub(super) fn set_status_widgets(
     status.set_text(text);
     detail_label.set_text(detail);
     detail_label.set_tooltip_text(Some(detail));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::addresses_equal;
+
+    #[test]
+    fn compares_only_valid_normalized_addresses() {
+        assert!(addresses_equal("0x0000AB", "ab"));
+        assert!(addresses_equal("0", "0x000"));
+        assert!(!addresses_equal("", "0"));
+        assert!(!addresses_equal("0x", "0"));
+        assert!(!addresses_equal("not-an-address", "not-an-address"));
+    }
 }

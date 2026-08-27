@@ -176,17 +176,31 @@ pub(super) fn handle_session_event(ui: &Weak<Ui>, event: SessionEvent) {
     };
 
     match event {
-        SessionEvent::Spawned => ui.set_status(
-            "Connecting",
-            "GDB started; waiting for its secondary MI interface.",
-            None,
-        ),
-        SessionEvent::Failed(message) => ui.set_status(
-            "GDB failed",
-            &format!("Could not start the configured debugger: {message}"),
-            Some("status-error"),
-        ),
+        SessionEvent::Spawned(pid) => {
+            ui.set_debugger_pid(Some(pid));
+            ui.set_status(
+                "Connecting",
+                "GDB started; waiting for its secondary MI interface.",
+                None,
+            );
+        }
+        SessionEvent::Failed(message) => {
+            ui.set_debugger_pid(None);
+            ui.set_controls_ready(false);
+            ui.set_status(
+                "GDB failed",
+                &format!("Could not start the configured debugger: {message}"),
+                Some("status-error"),
+            );
+        }
         SessionEvent::Exited(status) => {
+            ui.set_debugger_pid(None);
+            ui.set_command_pending(false);
+            ui.set_debug_state_stale(true);
+            ui.set_gef_available(false);
+            ui.set_inferior_started(false);
+            ui.reset_target_abi();
+            ui.clear_debugger_state();
             ui.set_status(
                 "GDB exited",
                 &format!("The debugger process exited with status {status}."),

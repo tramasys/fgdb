@@ -1,4 +1,4 @@
-use crate::debugger::{ValueTypeKind, ValueTypeMetadata, Variable};
+use crate::debugger::{TargetArchitecture, ValueTypeKind, ValueTypeMetadata, Variable};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct IntegerFormat {
@@ -463,39 +463,52 @@ fn target_integer_format(metadata: Option<&ValueTypeMetadata>) -> Option<Integer
 pub(super) fn register_integer_format(
     register_expression: &str,
     target_pointer_bits: u32,
+    architecture: TargetArchitecture,
 ) -> Option<IntegerFormat> {
     let name = register_expression.strip_prefix('$')?;
-    if matches!(
-        name,
-        "rip" | "eip" | "pc" | "rsp" | "esp" | "sp" | "rbp" | "ebp" | "fp" | "fs_base" | "gs_base"
-    ) {
+    if architecture.is_dedicated_address_register(name)
+        || is_address_register_name(name)
+        || super::formatting::vector_register_for_architecture(name, architecture)
+        || super::formatting::floating_register_for_architecture(name, architecture)
+    {
         return None;
     }
-    let bits = match target_pointer_bits {
-        16 | 32 | 64 | 128 => target_pointer_bits,
-        _ => 64,
-    };
+    let bits = architecture.scalar_register_bits(name, target_pointer_bits);
     Some(IntegerFormat::unsigned(bits))
 }
 
-pub(super) fn variable_is_address(variable: &Variable) -> bool {
+pub(super) fn variable_is_address(variable: &Variable, architecture: TargetArchitecture) -> bool {
     variable.is_pointer()
         || variable.name.strip_prefix('$').is_some_and(|name| {
-            matches!(
-                name,
-                "rip"
-                    | "eip"
-                    | "pc"
-                    | "rsp"
-                    | "esp"
-                    | "sp"
-                    | "rbp"
-                    | "ebp"
-                    | "fp"
-                    | "fs_base"
-                    | "gs_base"
-            )
+            architecture.is_dedicated_address_register(name) || is_address_register_name(name)
         })
+}
+
+fn is_address_register_name(name: &str) -> bool {
+    matches!(
+        name,
+        "rip"
+            | "eip"
+            | "pc"
+            | "nip"
+            | "pswa"
+            | "rsp"
+            | "esp"
+            | "sp"
+            | "rbp"
+            | "ebp"
+            | "fp"
+            | "lr"
+            | "ra"
+            | "gp"
+            | "tp"
+            | "fs_base"
+            | "gs_base"
+            | "tpidr_el0"
+            | "tpidrro_el0"
+            | "tpidruro"
+            | "tpidrurw"
+    )
 }
 
 pub(super) fn parse_integer_input(
@@ -1047,7 +1060,7 @@ fn fixed_width_integer_format(name: &str, target_pointer_bits: u32) -> Option<In
     if !matches!(bits, 8 | 16 | 32 | 64 | 128) {
         return None;
     }
-    let bits = if fast {
+    let bits = if fast && bits != 8 {
         bits.max(target_pointer_bits)
     } else {
         bits
@@ -1114,33 +1127,12 @@ fn c_integer_typedef_format(name: &str, target_pointer_bits: u32) -> Option<Inte
         "ssizet" | "ptrdifft" | "intptrt" => Some(IntegerFormat::signed(target_pointer_bits)),
         "intmaxt" => Some(IntegerFormat::signed(64)),
         "uintmaxt" => Some(IntegerFormat::unsigned(64)),
-        "sigatomict" | "pidt" | "clockt" | "timet" | "offt" => {
-            Some(IntegerFormat::signed(target_pointer_bits))
-        }
-        "wintt" | "uidt" | "gidt" | "modet" | "devt" | "inot" | "nlinkt" | "socklent" => {
-            Some(IntegerFormat::unsigned(target_pointer_bits))
-        }
+        "sigatomict" | "pidt" => Some(IntegerFormat::signed(32)),
+        "clockt" => Some(IntegerFormat::signed(target_pointer_bits)),
+        "wintt" | "uidt" | "gidt" | "modet" | "socklent" => Some(IntegerFormat::unsigned(32)),
+        // time_t/off_t/dev_t/ino_t/nlink_t vary across Linux time64, LFS and
+        // libc ABIs. GDB type metadata is authoritative; do not guess here.
         _ => None,
-    }
-}
-
-pub(super) fn architecture_pointer_bits(architecture: &str) -> Option<u32> {
-    let architecture = architecture.to_ascii_lowercase();
-    if architecture.contains("64")
-        || architecture.contains("aarch64")
-        || architecture.contains("s390x")
-    {
-        Some(64)
-    } else if architecture.contains("32")
-        || architecture.contains("i386")
-        || architecture.contains("i486")
-        || architecture.contains("i586")
-        || architecture.contains("i686")
-        || architecture.starts_with("arm")
-    {
-        Some(32)
-    } else {
-        None
     }
 }
 

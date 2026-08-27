@@ -1,9 +1,12 @@
 use super::*;
 
-pub(super) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
+pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+    if current_ui.inferior_is_running() {
+        return;
+    }
     current_ui.clear_execution_location();
     let generation = current_ui.start_stop_refresh();
     for varobj in current_ui.local_variable_object_names() {
@@ -158,19 +161,34 @@ fn request_register_values(
     if !stop_refresh_is_current(&ui, generation) {
         return;
     }
-    let numbers = crate::debugger::compact_register_numbers(&names);
+    let architecture = ui.upgrade().map_or(TargetArchitecture::Unknown, |ui| {
+        let current = ui.target_architecture();
+        let detected = if current == TargetArchitecture::Unknown {
+            TargetArchitecture::infer_from_register_names_with_bits(
+                &names,
+                Some(ui.target_pointer_bits()),
+            )
+        } else {
+            current
+        };
+        if detected != TargetArchitecture::Unknown {
+            ui.set_target_architecture(detected);
+            if ui.target_endian().is_none() {
+                ui.set_target_endian(detected.default_endian());
+            }
+        }
+        detected
+    });
+    let numbers = crate::debugger::compact_register_numbers(&names, architecture);
     if numbers.is_empty() {
         finish_empty_register_refresh(&ui, client, generation, &stack_inputs);
         return;
     }
-    let command = format!(
-        "-data-list-register-values x {}",
-        numbers
-            .iter()
-            .map(usize::to_string)
-            .collect::<Vec<_>>()
-            .join(" ")
-    );
+    let mut command = String::with_capacity(32 + numbers.len() * 4);
+    command.push_str("-data-list-register-values x");
+    for number in numbers {
+        let _ = write!(command, " {number}");
+    }
     let ui_for_response = ui.clone();
     let stack_inputs_for_response = Rc::clone(&stack_inputs);
     if client
@@ -221,6 +239,7 @@ pub(super) fn refresh_variable_objects(
         generation,
         variables,
         next_index: 0,
+        created: 0,
     }));
     request_next_variable_object(client, state);
 }
@@ -236,6 +255,9 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
     }
     let next = {
         let mut state = state.borrow_mut();
+        if state.created >= MAX_AUTOMATIC_VARIABLE_OBJECTS {
+            state.next_index = state.variables.len();
+        }
         while state.next_index < state.variables.len()
             && !state.variables[state.next_index].needs_variable_object()
         {
@@ -244,6 +266,7 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
         (state.next_index < state.variables.len()).then(|| {
             let index = state.next_index;
             state.next_index += 1;
+            state.created += 1;
             (index, state.variables[index].name.clone())
         })
     };
@@ -504,11 +527,20 @@ pub(super) fn enrich_registers(
     if !stop_refresh_is_current(&ui, generation) {
         return;
     }
+    if !ui.upgrade().is_some_and(|ui| ui.register_details_visible()) {
+        return;
+    }
+    let Some((endian, architecture, pointer_bits)) = ui.upgrade().and_then(|ui| {
+        ui.target_endian()
+            .map(|endian| (endian, ui.target_architecture(), ui.target_pointer_bits()))
+    }) else {
+        return;
+    };
     let indices = registers
         .iter()
         .enumerate()
         .filter(|(_, register)| {
-            is_pointer_register(&register.name)
+            is_pointer_register(&register.name, architecture)
                 && pointer_address(&register.value).is_some_and(|address| address != 0)
         })
         .map(|(index, _)| index)
@@ -523,6 +555,9 @@ pub(super) fn enrich_registers(
         registers,
         pending: indices.into(),
         active: 0,
+        architecture,
+        endian,
+        pointer_bits,
     }));
     schedule_register_chains(client, refresh);
 }
@@ -567,60 +602,79 @@ pub(super) fn request_register_chain(
         "-data-evaluate-expression {}",
         crate::debugger::quote(&expression)
     );
+    let refresh_for_guard = Rc::clone(&refresh);
     let refresh_for_handler = Rc::clone(&refresh);
     if client
-        .request(&command, move |client, record| {
-            let (ui, generation) = {
-                let state = refresh_for_handler.borrow();
-                (state.ui.clone(), state.generation)
-            };
-            if !stop_refresh_is_current(&ui, generation) {
-                return;
-            }
-            let value = record
-                .is_done()
-                .then(|| crate::debugger::evaluated_value(&record))
-                .flatten();
-            let mut continue_chain = false;
-            let mut string_address = None;
-            if let Some(value) = value
-                && let Some(address) = pointer_address(&value)
-            {
-                let mut state = refresh_for_handler.borrow_mut();
-                let register = &mut state.registers[register_index];
-                let chain = &mut register.pointer_chain;
-                if chain
-                    .iter()
-                    .filter_map(|previous| pointer_address(previous))
-                    .any(|previous| previous == address)
-                {
-                    chain.push(String::from("[loop detected]"));
-                } else {
-                    chain.push(value);
-                    string_address = register_string_address(register, address, depth);
-                    continue_chain =
-                        string_address.is_none() && address != 0 && depth < MAX_POINTER_CHAIN_DEPTH;
+        .request_when(
+            &command,
+            move || {
+                let state = refresh_for_guard.borrow();
+                stop_refresh_is_current(&state.ui, state.generation)
+            },
+            move |client, record| {
+                let (ui, generation) = {
+                    let state = refresh_for_handler.borrow();
+                    (state.ui.clone(), state.generation)
+                };
+                if !stop_refresh_is_current(&ui, generation) {
+                    return;
                 }
-            }
+                let value = record
+                    .is_done()
+                    .then(|| crate::debugger::evaluated_value(&record))
+                    .flatten();
+                let mut continue_chain = false;
+                let mut string_address = None;
+                if let Some(value) = value
+                    && let Some(address) = pointer_address(&value)
+                {
+                    let mut state = refresh_for_handler.borrow_mut();
+                    let endian = state.endian;
+                    let architecture = state.architecture;
+                    let pointer_bits = state.pointer_bits;
+                    let register = &mut state.registers[register_index];
+                    let chain = &mut register.pointer_chain;
+                    if chain
+                        .iter()
+                        .filter_map(|previous| pointer_address(previous))
+                        .any(|previous| previous == address)
+                    {
+                        chain.push(String::from("[loop detected]"));
+                    } else {
+                        chain.push(value);
+                        string_address = register_string_address(
+                            register,
+                            address,
+                            depth,
+                            endian,
+                            pointer_bits,
+                            architecture,
+                        );
+                        continue_chain = string_address.is_none()
+                            && address != 0
+                            && depth < MAX_POINTER_CHAIN_DEPTH;
+                    }
+                }
 
-            if let Some(address) = string_address {
-                request_register_string(
-                    client,
-                    Rc::clone(&refresh_for_handler),
-                    register_index,
-                    address,
-                );
-            } else if continue_chain {
-                request_register_chain(
-                    client,
-                    Rc::clone(&refresh_for_handler),
-                    register_index,
-                    depth + 1,
-                );
-            } else {
-                complete_register_sequence(client, &refresh_for_handler);
-            }
-        })
+                if let Some(address) = string_address {
+                    request_register_string(
+                        client,
+                        Rc::clone(&refresh_for_handler),
+                        register_index,
+                        address,
+                    );
+                } else if continue_chain {
+                    request_register_chain(
+                        client,
+                        Rc::clone(&refresh_for_handler),
+                        register_index,
+                        depth + 1,
+                    );
+                } else {
+                    complete_register_sequence(client, &refresh_for_handler);
+                }
+            },
+        )
         .is_err()
     {
         complete_register_sequence(client, &refresh);
@@ -631,10 +685,17 @@ pub(super) fn register_string_address(
     register: &Register,
     decoded_word: u64,
     depth: usize,
+    endian: TargetEndian,
+    pointer_bits: u32,
+    architecture: TargetArchitecture,
 ) -> Option<u64> {
     if depth == 0
-        || matches!(register.name.as_str(), "rip" | "eip")
-        || !looks_like_string_word(decoded_word)
+        || architecture.is_program_counter(&register.name)
+        || !looks_like_string_word(
+            decoded_word,
+            endian,
+            usize::try_from(pointer_bits / 8).unwrap_or(8).clamp(4, 8),
+        )
     {
         return None;
     }
@@ -765,8 +826,45 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
                 return;
             }
             let pid = crate::debugger::inferior_pid(&record);
-            let mut regions = pid.map(read_memory_regions).unwrap_or_default();
-            annotate_memory_regions(&mut regions, &registers);
+            let debugger_pid = ui.upgrade().and_then(|ui| ui.debugger_pid());
+            if let Some((architecture, endian, pointer_bits)) =
+                pid.zip(debugger_pid).and_then(|(pid, debugger_pid)| {
+                    crate::kernel::read_local_target_abi(pid, debugger_pid)
+                })
+                && let Some(current_ui) = ui.upgrade()
+            {
+                // An ELF class and byte order remain useful even when this
+                // fgdb build does not recognize e_machine. Do not let that
+                // future/unknown machine erase a more specific GDB result.
+                if architecture != TargetArchitecture::Unknown {
+                    current_ui.set_target_architecture(architecture);
+                }
+                current_ui.set_target_endian(Some(endian));
+                current_ui.set_target_pointer_bits(pointer_bits);
+                // Register names can be ambiguous (notably numbered RISC,
+                // MIPS, PowerPC and s390 registers). Rebind rows once the
+                // executable resolves the architecture so grouping, widths
+                // and semantic colors are correct on the first stop.
+                current_ui.show_registers_for_refresh(generation, &registers);
+            }
+            let mut regions = pid
+                .zip(debugger_pid)
+                .map(|(pid, debugger_pid)| read_memory_regions(pid, debugger_pid))
+                .unwrap_or_default();
+            let architecture = ui
+                .upgrade()
+                .map_or(TargetArchitecture::Unknown, |ui| ui.target_architecture());
+            let architecture = if architecture == TargetArchitecture::Unknown {
+                let names = registers
+                    .iter()
+                    .map(|register| register.name.as_str())
+                    .collect::<Vec<_>>();
+                let bits = ui.upgrade().map(|ui| ui.target_pointer_bits());
+                TargetArchitecture::infer_from_register_names_with_bits(&names, bits)
+            } else {
+                architecture
+            };
+            annotate_memory_regions(&mut regions, &registers, architecture);
             if let Some(current_ui) = ui.upgrade() {
                 if pid.is_some() {
                     current_ui.set_inferior_started(true);
@@ -775,7 +873,7 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
                 current_ui.refresh_memory_watches();
                 current_ui.refresh_kernel_after_stop();
             }
-            request_tls_runtime(&ui, client, generation, &registers, &regions);
+            request_tls_runtime(&ui, client, generation, &registers, &regions, architecture);
             request_stack_memory(ui, client, generation, registers, frames, regions);
         })
         .is_err()
@@ -793,20 +891,26 @@ fn request_tls_runtime(
     generation: u64,
     registers: &[Register],
     regions: &[MemoryRegion],
+    architecture: TargetArchitecture,
 ) {
     const TLS_READ_BYTES: usize = 80;
-    let Some((register, base)) = ["fs_base", "gs_base"].into_iter().find_map(|name| {
-        registers
-            .iter()
-            .find(|register| register.name == name)
-            .and_then(|register| pointer_address(&register.value))
-            .filter(|address| *address != 0)
-            .map(|address| (name, address))
-    }) else {
+    let Some((register, base)) = architecture
+        .thread_pointer_candidates()
+        .iter()
+        .copied()
+        .find_map(|name| {
+            registers
+                .iter()
+                .find(|register| register.name == name)
+                .and_then(|register| pointer_address(&register.value))
+                .filter(|address| *address != 0)
+                .map(|address| (name, address))
+        })
+    else {
         if let Some(ui) = ui.upgrade() {
             ui.show_tls_runtime_unavailable_for_refresh(
                 generation,
-                "This target did not expose a non-zero fs_base or gs_base register",
+                "This target did not expose a supported non-zero thread-pointer register",
             );
         }
         return;
@@ -832,6 +936,7 @@ fn request_tls_runtime(
                 if let Some(memory) = memory.as_ref() {
                     ui.show_tls_runtime_for_refresh(
                         generation,
+                        (architecture, ui.target_endian(), ui.target_pointer_bits()),
                         register,
                         base,
                         mapping_for_response.as_deref(),
@@ -840,6 +945,7 @@ fn request_tls_runtime(
                 } else {
                     ui.show_tls_runtime_for_refresh(
                         generation,
+                        (architecture, ui.target_endian(), ui.target_pointer_bits()),
                         register,
                         base,
                         mapping_for_response.as_deref(),
@@ -855,6 +961,7 @@ fn request_tls_runtime(
     {
         ui.show_tls_runtime_for_refresh(
             generation,
+            (architecture, ui.target_endian(), ui.target_pointer_bits()),
             register,
             base,
             mapping.as_deref(),
@@ -874,9 +981,43 @@ pub(super) fn request_stack_memory(
     if !stop_refresh_is_current(&ui, generation) {
         return;
     }
-    let is_64_bit = registers.iter().any(|register| register.name == "rsp");
-    let stack_register = if is_64_bit { "rsp" } else { "esp" };
-    let word_size = if is_64_bit { 8 } else { 4 };
+    let Some((endian, pointer_bits)) = ui.upgrade().and_then(|ui| {
+        ui.target_endian()
+            .map(|endian| (endian, ui.target_pointer_bits()))
+    }) else {
+        if let Some(ui) = ui.upgrade() {
+            ui.show_stack_unavailable_for_refresh(
+                generation,
+                "Stack decoding is unavailable because the target byte order could not be determined",
+            );
+        }
+        return;
+    };
+    let architecture = ui
+        .upgrade()
+        .map_or(TargetArchitecture::Unknown, |ui| ui.target_architecture());
+    let architecture = if architecture == TargetArchitecture::Unknown {
+        let names = registers
+            .iter()
+            .map(|register| register.name.as_str())
+            .collect::<Vec<_>>();
+        let bits = ui.upgrade().map(|ui| ui.target_pointer_bits());
+        TargetArchitecture::infer_from_register_names_with_bits(&names, bits)
+    } else {
+        architecture
+    };
+    let Some(stack_register) =
+        architecture.stack_pointer(registers.iter().map(|register| register.name.as_str()))
+    else {
+        if let Some(ui) = ui.upgrade() {
+            ui.show_stack_unavailable_for_refresh(
+                generation,
+                "Stack decoding is unavailable because no supported stack-pointer register was identified",
+            );
+        }
+        return;
+    };
+    let word_size = usize::try_from(pointer_bits / 8).unwrap_or(8).clamp(4, 8);
     let command = format!(
         "-data-read-memory-bytes ${stack_register} {}",
         word_size * STACK_WORD_COUNT
@@ -889,20 +1030,44 @@ pub(super) fn request_stack_memory(
             }
             let Some(memory) = crate::debugger::memory_block(&record) else {
                 if let Some(ui) = ui.upgrade() {
-                    ui.show_stack_for_refresh(generation, &[]);
+                    ui.show_stack_unavailable_for_refresh(
+                        generation,
+                        record
+                            .error_message()
+                            .unwrap_or("GDB could not read memory at the stack pointer"),
+                    );
                 }
                 return;
             };
-            let entries = build_stack_entries(&memory, word_size, &registers, &frames, &regions);
+            let entries = build_stack_entries(
+                &memory,
+                word_size,
+                endian,
+                architecture,
+                &registers,
+                &frames,
+                &regions,
+            );
             if let Some(ui) = ui.upgrade() {
                 ui.show_stack_for_refresh(generation, &entries);
             }
-            enrich_stack(ui, client, generation, entries, stack_register);
+            enrich_stack(
+                ui,
+                client,
+                generation,
+                entries,
+                stack_register,
+                word_size,
+                endian,
+            );
         })
         .is_err()
         && let Some(ui) = ui_for_request.upgrade()
     {
-        ui.show_stack_for_refresh(generation, &[]);
+        ui.show_stack_unavailable_for_refresh(
+            generation,
+            "The MI channel could not issue the stack-memory request",
+        );
     }
 }
 
@@ -912,8 +1077,13 @@ pub(super) fn enrich_stack(
     generation: u64,
     entries: Vec<StackEntry>,
     stack_register: &'static str,
+    word_size: usize,
+    endian: TargetEndian,
 ) {
     if !stop_refresh_is_current(&ui, generation) {
+        return;
+    }
+    if !ui.upgrade().is_some_and(|ui| ui.stack_details_visible()) {
         return;
     }
     let indices = entries
@@ -937,6 +1107,8 @@ pub(super) fn enrich_stack(
         stack_register,
         pending: indices.into(),
         active: 0,
+        word_size,
+        endian,
     }));
     schedule_stack_chains(client, refresh);
 }
@@ -982,60 +1154,72 @@ pub(super) fn request_stack_chain(
         "-data-evaluate-expression {}",
         crate::debugger::quote(&expression)
     );
+    let refresh_for_guard = Rc::clone(&refresh);
     let refresh_for_handler = Rc::clone(&refresh);
     if client
-        .request(&command, move |client, record| {
-            let (ui, generation) = {
-                let state = refresh_for_handler.borrow();
-                (state.ui.clone(), state.generation)
-            };
-            if !stop_refresh_is_current(&ui, generation) {
-                return;
-            }
-            let value = record
-                .is_done()
-                .then(|| crate::debugger::evaluated_value(&record))
-                .flatten();
-            let mut continue_chain = false;
-            let mut string_address = None;
-            if let Some(value) = value
-                && let Some(address) = pointer_address(&value)
-            {
-                let mut state = refresh_for_handler.borrow_mut();
-                let entry = &mut state.entries[entry_index];
-                let chain = &mut entry.pointer_chain;
-                if chain
-                    .iter()
-                    .filter_map(|previous| pointer_address(previous))
-                    .any(|previous| previous == address)
-                {
-                    chain.push(String::from("[loop detected]"));
-                } else {
-                    chain.push(value);
-                    string_address = stack_string_address(entry, address, depth);
-                    continue_chain =
-                        string_address.is_none() && address != 0 && depth < MAX_POINTER_CHAIN_DEPTH;
+        .request_when(
+            &command,
+            move || {
+                let state = refresh_for_guard.borrow();
+                stop_refresh_is_current(&state.ui, state.generation)
+            },
+            move |client, record| {
+                let (ui, generation) = {
+                    let state = refresh_for_handler.borrow();
+                    (state.ui.clone(), state.generation)
+                };
+                if !stop_refresh_is_current(&ui, generation) {
+                    return;
                 }
-            }
-            if let Some(address) = string_address {
-                request_stack_string(
-                    client,
-                    Rc::clone(&refresh_for_handler),
-                    entry_index,
-                    address,
-                );
-            } else if continue_chain {
-                request_stack_chain(
-                    client,
-                    Rc::clone(&refresh_for_handler),
-                    entry_index,
-                    stack_register,
-                    depth + 1,
-                );
-            } else {
-                complete_stack_sequence(client, &refresh_for_handler);
-            }
-        })
+                let value = record
+                    .is_done()
+                    .then(|| crate::debugger::evaluated_value(&record))
+                    .flatten();
+                let mut continue_chain = false;
+                let mut string_address = None;
+                if let Some(value) = value
+                    && let Some(address) = pointer_address(&value)
+                {
+                    let mut state = refresh_for_handler.borrow_mut();
+                    let endian = state.endian;
+                    let word_size = state.word_size;
+                    let entry = &mut state.entries[entry_index];
+                    let chain = &mut entry.pointer_chain;
+                    if chain
+                        .iter()
+                        .filter_map(|previous| pointer_address(previous))
+                        .any(|previous| previous == address)
+                    {
+                        chain.push(String::from("[loop detected]"));
+                    } else {
+                        chain.push(value);
+                        string_address =
+                            stack_string_address(entry, address, depth, endian, word_size);
+                        continue_chain = string_address.is_none()
+                            && address != 0
+                            && depth < MAX_POINTER_CHAIN_DEPTH;
+                    }
+                }
+                if let Some(address) = string_address {
+                    request_stack_string(
+                        client,
+                        Rc::clone(&refresh_for_handler),
+                        entry_index,
+                        address,
+                    );
+                } else if continue_chain {
+                    request_stack_chain(
+                        client,
+                        Rc::clone(&refresh_for_handler),
+                        entry_index,
+                        stack_register,
+                        depth + 1,
+                    );
+                } else {
+                    complete_stack_sequence(client, &refresh_for_handler);
+                }
+            },
+        )
         .is_err()
     {
         complete_stack_sequence(client, &refresh);
@@ -1046,9 +1230,11 @@ pub(super) fn stack_string_address(
     entry: &StackEntry,
     decoded_word: u64,
     depth: usize,
+    endian: TargetEndian,
+    word_size: usize,
 ) -> Option<u64> {
     if depth == 0
-        || !looks_like_string_word(decoded_word)
+        || !looks_like_string_word(decoded_word, endian, word_size)
         || matches!(entry.memory_kind, MemoryKind::Code | MemoryKind::Rwx)
     {
         return None;
@@ -1123,13 +1309,15 @@ pub(super) fn complete_stack_sequence(client: &MiClient, refresh: &Rc<RefCell<St
         let mut state = refresh.borrow_mut();
         state.active = state.active.saturating_sub(1);
         if state.active == 0 && state.pending.is_empty() {
+            let endian = state.endian;
+            let word_size = state.word_size;
             for entry in &mut state.entries {
                 if entry
                     .pointer_chain
                     .iter()
                     .skip(1)
                     .filter_map(|value| pointer_address(value))
-                    .any(looks_like_string_word)
+                    .any(|value| looks_like_string_word(value, endian, word_size))
                 {
                     entry.memory_kind = MemoryKind::String;
                 }

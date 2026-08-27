@@ -34,7 +34,7 @@ pub(super) fn refresh_expression_watches(ui: Weak<Ui>, client: &MiClient, genera
 fn expression_watch_refresh_is_current(state: &ExpressionWatchRefresh) -> bool {
     state.ui.upgrade().is_some_and(|ui| {
         ui.is_stop_refresh_current(state.generation)
-            && ui.expression_watch_expressions() == state.expressions
+            && ui.expression_watches_match(&state.expressions)
     })
 }
 

@@ -1,9 +1,13 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
-    time::UNIX_EPOCH,
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use goblin::elf::{
@@ -14,16 +18,23 @@ use goblin::elf::{
 
 use super::{KernelSnapshot, KernelTlsModule, KernelTlsSymbol};
 
-const MAX_ELF_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_MODULES: usize = 256;
+const MAX_ELF_BYTES: usize = 64 * 1024 * 1024;
+const MAX_TOTAL_ELF_BYTES: usize = 128 * 1024 * 1024;
+const MAX_SCAN_TIME: Duration = Duration::from_millis(500);
+const MAX_MODULES: usize = 128;
 const MAX_TLS_SYMBOLS_PER_MODULE: usize = 256;
-const MAX_CACHE_ENTRIES: usize = 512;
+// One fully populated process can contribute at most MAX_MODULES entries.
+// Retaining more mostly preserves metadata for old inferiors and can keep tens
+// of thousands of symbol strings alive after the user changes targets.
+const MAX_CACHE_ENTRIES: usize = MAX_MODULES;
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct CacheKey {
     path: String,
     bytes: u64,
     modified_nanos: u128,
+    device: u64,
+    inode: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -43,17 +54,41 @@ struct ModuleCandidate {
     role: String,
 }
 
-static TLS_CACHE: OnceLock<Mutex<HashMap<CacheKey, Option<ParsedTls>>>> = OnceLock::new();
+#[derive(Clone, Debug)]
+struct CacheEntry {
+    parsed: Option<ParsedTls>,
+    last_used: u64,
+}
+
+struct ScanBudget {
+    remaining_bytes: usize,
+    deadline: Instant,
+}
+
+static TLS_CACHE: OnceLock<Mutex<HashMap<CacheKey, CacheEntry>>> = OnceLock::new();
+static TLS_CACHE_CLOCK: AtomicU64 = AtomicU64::new(1);
 
 pub(super) fn populate_tls_metadata(snapshot: &mut KernelSnapshot, root: &Path) {
-    for candidate in module_candidates(snapshot, root)
-        .into_iter()
-        .take(MAX_MODULES)
-    {
-        let Ok(Some(tls)) = cached_tls_analysis(&candidate.open_path, &candidate.display_path)
-        else {
-            continue;
-        };
+    let candidates = module_candidates(snapshot, root);
+    let mut budget = ScanBudget {
+        remaining_bytes: MAX_TOTAL_ELF_BYTES,
+        deadline: Instant::now() + MAX_SCAN_TIME,
+    };
+    let mut skipped = candidates.len().saturating_sub(MAX_MODULES);
+    let mut failures = Vec::new();
+    for candidate in candidates.into_iter().take(MAX_MODULES) {
+        let tls =
+            match cached_tls_analysis(&candidate.open_path, &candidate.display_path, &mut budget) {
+                Ok(Some(tls)) => tls,
+                Ok(None) => continue,
+                Err(error) => {
+                    skipped += 1;
+                    if failures.len() < 3 {
+                        failures.push(format!("{}: {error}", candidate.display_path));
+                    }
+                    continue;
+                }
+            };
         snapshot.tls_modules.push(KernelTlsModule {
             module: module_name(&candidate.display_path),
             path: candidate.display_path,
@@ -65,6 +100,16 @@ pub(super) fn populate_tls_metadata(snapshot: &mut KernelSnapshot, root: &Path) 
             symbol_count: tls.symbol_count,
             symbols: tls.symbols,
         });
+    }
+    if skipped > 0 {
+        let detail = if failures.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", failures.join("; "))
+        };
+        snapshot.warnings.push(format!(
+            "TLS metadata scan skipped {skipped} module(s) because of scan limits or read errors{detail}"
+        ));
     }
     snapshot.tls_modules.sort_by_key(|module| {
         (
@@ -149,12 +194,16 @@ fn module_role(path: &str) -> String {
     }
 }
 
-fn cached_tls_analysis(path: &Path, display_path: &str) -> Result<Option<ParsedTls>, String> {
+fn cached_tls_analysis(
+    path: &Path,
+    display_path: &str,
+    budget: &mut ScanBudget,
+) -> Result<Option<ParsedTls>, String> {
     let metadata = fs::metadata(path).map_err(|error| format!("Cannot inspect ELF: {error}"))?;
-    if metadata.len() > MAX_ELF_BYTES {
+    if metadata.len() > MAX_ELF_BYTES as u64 {
         return Err(format!(
             "ELF exceeds the {} TLS analysis limit",
-            super::format_bytes(MAX_ELF_BYTES)
+            super::format_bytes(MAX_ELF_BYTES as u64)
         ));
     }
     let key = CacheKey {
@@ -165,22 +214,46 @@ fn cached_tls_analysis(path: &Path, display_path: &str) -> Result<Option<ParsedT
             .ok()
             .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
             .map_or(0, |duration| duration.as_nanos()),
+        device: metadata.dev(),
+        inode: metadata.ino(),
     };
     let cache = TLS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(cached) = cache
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .get(&key)
     {
-        return Ok(cached.clone());
+        let mut cache = cache.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(cached) = cache.get_mut(&key) {
+            cached.last_used = TLS_CACHE_CLOCK.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached.parsed.clone());
+        }
     }
-    let bytes = fs::read(path).map_err(|error| format!("Cannot read ELF: {error}"))?;
+    if Instant::now() >= budget.deadline {
+        return Err(String::from("TLS scan time budget exhausted"));
+    }
+    let file_bytes = usize::try_from(metadata.len())
+        .map_err(|_| String::from("ELF size does not fit this platform"))?;
+    if file_bytes > budget.remaining_bytes {
+        return Err(String::from("TLS scan byte budget exhausted"));
+    }
+    budget.remaining_bytes -= file_bytes;
+    let bytes = crate::bounded::read_bytes(path, MAX_ELF_BYTES)
+        .map_err(|error| format!("Cannot read ELF: {error}"))?;
     let parsed = parse_elf_tls(&bytes)?;
     let mut cache = cache.lock().unwrap_or_else(|poison| poison.into_inner());
     if cache.len() >= MAX_CACHE_ENTRIES {
-        cache.clear();
+        let oldest = cache
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest {
+            cache.remove(&oldest);
+        }
     }
-    cache.insert(key, parsed.clone());
+    cache.insert(
+        key,
+        CacheEntry {
+            parsed: parsed.clone(),
+            last_used: TLS_CACHE_CLOCK.fetch_add(1, Ordering::Relaxed),
+        },
+    );
     Ok(parsed)
 }
 

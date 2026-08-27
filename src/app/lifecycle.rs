@@ -10,19 +10,28 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ui.set_command_pending(false);
             ui.set_debug_state_stale(false);
             ui.set_gef_available(false);
+            ui.reset_target_abi();
             ui.set_status(
                 "Ready",
                 "The native controls and terminal share one GDB process.",
                 Some("status-ready"),
             );
             ui.set_controls_ready(true);
+            detect_target_abi(weak_ui, client);
             detect_gef(weak_ui, client);
             request_initial_source(weak_ui, client);
-            refresh_stopped_state(weak_ui, client);
             refresh_breakpoints(weak_ui, client);
             ui.take_modules_dirty();
             refresh_modules(weak_ui, client);
             infer_initial_stop_reason(weak_ui, client);
+        }
+        MiEvent::InferiorStarted => {
+            // A terminal user can load and run a different executable in the
+            // same GDB process. Register-number caches are target-specific and
+            // must not leak across that boundary; the stopped-state refresh
+            // will establish the new ABI from GDB and the traced ELF.
+            ui.reset_target_abi();
+            ui.set_inferior_started(true);
         }
         MiEvent::Running => {
             ui.set_command_pending(false);
@@ -84,7 +93,11 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 refresh_modules(weak_ui, client);
             }
         }
-        MiEvent::SelectionChanged => refresh_stopped_state(weak_ui, client),
+        MiEvent::SelectionChanged => {
+            if !ui.inferior_is_running() {
+                refresh_stopped_state(weak_ui, client);
+            }
+        }
         MiEvent::Error(message) => {
             ui.set_command_pending(false);
             ui.set_status("Command failed", &message, Some("status-error"));
@@ -93,6 +106,9 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ui.set_command_pending(false);
             ui.set_debug_state_stale(true);
             ui.set_gef_available(false);
+            ui.set_inferior_started(false);
+            ui.reset_target_abi();
+            ui.clear_debugger_state();
             ui.set_status(
                 "Disconnected",
                 "The GDB/MI channel was closed.",
@@ -100,6 +116,100 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             );
             ui.set_controls_ready(false);
         }
+    }
+}
+
+fn detect_target_abi(ui: &Weak<Ui>, client: &MiClient) {
+    let weak_ui = ui.clone();
+    if client
+        .request("-gdb-show architecture", move |client, record| {
+            let description = record
+                .is_done()
+                .then(|| record.field("value"))
+                .flatten()
+                .and_then(|value| value.as_const());
+            let architecture = description
+                .map(crate::debugger::TargetArchitecture::from_gdb_description)
+                .unwrap_or_default();
+            if let Some(ui) = weak_ui.upgrade() {
+                ui.set_target_architecture(architecture);
+                if let Some(bits) = description.and_then(
+                    crate::debugger::TargetArchitecture::pointer_bits_from_gdb_description,
+                ) {
+                    ui.set_target_pointer_bits(bits);
+                }
+                if let Some(endian) = description
+                    .and_then(crate::debugger::TargetEndian::from_architecture_description)
+                {
+                    ui.set_target_endian(Some(endian));
+                }
+            }
+            detect_target_pointer_width(&weak_ui, client);
+        })
+        .is_err()
+    {
+        if let Some(ui) = ui.upgrade() {
+            ui.set_target_architecture(TargetArchitecture::Unknown);
+        }
+        detect_target_pointer_width(ui, client);
+    }
+}
+
+fn detect_target_pointer_width(ui: &Weak<Ui>, client: &MiClient) {
+    let weak_ui = ui.clone();
+    if client
+        .request(
+            "-data-evaluate-expression sizeof(void*)",
+            move |client, record| {
+                let bytes = record
+                    .is_done()
+                    .then(|| crate::debugger::evaluated_value(&record))
+                    .flatten()
+                    .and_then(|value| parse_pointer_size(&value));
+                if let (Some(ui), Some(bytes)) = (weak_ui.upgrade(), bytes) {
+                    ui.set_target_pointer_bits(bytes.saturating_mul(8));
+                }
+                detect_target_endian(&weak_ui, client);
+            },
+        )
+        .is_err()
+    {
+        detect_target_endian(ui, client);
+    }
+}
+
+fn parse_pointer_size(value: &str) -> Option<u32> {
+    let value = value.split_whitespace().next()?.trim();
+    value
+        .strip_prefix("0x")
+        .or_else(|| value.strip_prefix("0X"))
+        .map_or_else(
+            || value.parse::<u32>().ok(),
+            |digits| u32::from_str_radix(digits, 16).ok(),
+        )
+        .filter(|bytes| matches!(bytes, 4 | 8))
+}
+
+fn detect_target_endian(ui: &Weak<Ui>, client: &MiClient) {
+    let weak_ui = ui.clone();
+    if client
+        .request("-gdb-show endian", move |client, record| {
+            let endian = record
+                .is_done()
+                .then(|| record.field("value"))
+                .flatten()
+                .and_then(|value| value.as_const())
+                .and_then(crate::debugger::TargetEndian::from_gdb_description);
+            if let Some(ui) = weak_ui.upgrade()
+                && (endian.is_some() || ui.target_endian().is_none())
+            {
+                ui.set_target_endian(endian);
+            }
+            refresh_stopped_state(&weak_ui, client);
+        })
+        .is_err()
+    {
+        refresh_stopped_state(ui, client);
     }
 }
 
@@ -133,4 +243,17 @@ pub(super) fn request_initial_source(ui: &Weak<Ui>, client: &MiClient) {
             ui.show_initial_source(&source_file);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_pointer_size;
+
+    #[test]
+    fn accepts_decimal_and_gdb_hex_pointer_sizes() {
+        assert_eq!(parse_pointer_size("4"), Some(4));
+        assert_eq!(parse_pointer_size("0x8"), Some(8));
+        assert_eq!(parse_pointer_size("16"), None);
+        assert_eq!(parse_pointer_size("not-a-size"), None);
+    }
 }

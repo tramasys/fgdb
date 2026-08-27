@@ -2,6 +2,7 @@ pub(crate) mod context;
 mod mi;
 mod model;
 mod session;
+mod target;
 
 pub use mi::{MiClient, MiEvent, quote};
 pub use model::{
@@ -14,3 +15,4 @@ pub use model::{
     variable_path_expression, variables,
 };
 pub use session::{SessionEvent, launch_gdb};
+pub use target::{TargetArchitecture, TargetEndian};

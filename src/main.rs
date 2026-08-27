@@ -1,4 +1,5 @@
 mod app;
+mod bounded;
 mod breakpoint_gutter;
 mod config;
 mod debugger;

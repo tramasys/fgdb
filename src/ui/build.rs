@@ -463,6 +463,7 @@ pub(super) fn build_workspace(
         terminal_panel,
         status_detail: inspector.status_detail,
         debug_state_panels,
+        inspector_notebook: inspector.root.clone(),
         call_stack_list: left_sidebar.call_stack_list,
         threads_list: left_sidebar.threads_list,
         modules_list: left_sidebar.modules_list,
@@ -772,7 +773,7 @@ pub(super) fn build_inspector(
         .build();
     memory_page.append(&memory_watches_scrolled);
     memory_page.append(&section_title("VIRTUAL MEMORY MAP"));
-    let (memory_regions_view, memory_region_store) = build_memory_region_view();
+    let (memory_regions_view, memory_region_store) = build_memory_region_view(target_pointer_bits);
     let memory_regions_empty = empty_label("Mappings appear when the target is paused");
     let memory_regions_scrolled = gtk::ScrolledWindow::builder()
         .child(&memory_regions_view)
