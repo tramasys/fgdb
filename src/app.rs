@@ -21,7 +21,8 @@ use crate::{
     },
     theme::Theme,
     ui::{
-        BreakpointEditRequest, BreakpointSpec, EventCatchpoint, SessionAction, Ui, WatchpointAccess,
+        BreakpointEditRequest, BreakpointSpec, DisassemblyRequest, DisassemblySyntax,
+        EventCatchpoint, SessionAction, Ui, WatchpointAccess,
     },
 };
 
@@ -73,6 +74,7 @@ struct VariableRefresh {
 mod assignments;
 mod breakpoints;
 mod build;
+mod disassembly;
 mod kernel;
 mod lifecycle;
 mod refresh;
@@ -89,6 +91,7 @@ use build::assignment_expression;
 
 use assignments::*;
 use breakpoints::*;
+use disassembly::*;
 use kernel::*;
 use lifecycle::*;
 pub(crate) use refresh::*;

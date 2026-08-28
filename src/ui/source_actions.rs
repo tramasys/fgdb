@@ -1,7 +1,7 @@
 use super::*;
 
 impl Ui {
-    fn resolve_source_path(&self, reported_path: &str) -> Option<PathBuf> {
+    pub(super) fn resolve_source_path(&self, reported_path: &str) -> Option<PathBuf> {
         const MAX_RESOLVED_SOURCE_PATHS: usize = 4_096;
 
         if let Some(path) = self
@@ -216,6 +216,9 @@ impl Ui {
     }
 
     pub fn clear_debugger_state(&self) {
+        if let Some(handler) = self.disassembly_handler.borrow().as_ref() {
+            handler(DisassemblyRequest::Clear);
+        }
         self.start_stop_refresh();
         self.start_thread_refresh();
         self.clear_execution_location();
@@ -227,7 +230,8 @@ impl Ui {
         self.show_registers(&[]);
         self.show_stack(&[]);
         self.previous_registers.borrow_mut().clear();
-        self.show_instructions(&[], "", None);
+        self.disassembly_source_cache.borrow_mut().clear();
+        self.show_instructions(&[], "", "", None, false);
         self.show_signal(None, None);
         self.memory_region_store.remove_all();
         self.memory_regions.borrow_mut().clear();

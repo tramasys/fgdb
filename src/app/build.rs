@@ -25,6 +25,10 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     ui.connect_debug_controls(&mi_client);
     ui.connect_source_actions();
     ui.connect_session_actions();
+    let disassembly_controller =
+        DisassemblyController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
+    let controller = Rc::clone(&disassembly_controller);
+    ui.set_disassembly_handler(move |request| controller.handle(request));
     let session_controller = SessionController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
     let controller = Rc::clone(&session_controller);
     ui.set_session_handler(move |session| controller.configure(session));

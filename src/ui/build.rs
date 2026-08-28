@@ -646,6 +646,7 @@ pub(super) fn build_workspace(
         instruction_flow: inspector.instruction_flow,
         instruction_arguments: inspector.instruction_arguments,
         instruction_memory: inspector.instruction_memory,
+        disassembly_controls: inspector.disassembly_controls,
         register_groups: inspector.register_groups,
         registers_empty: inspector.registers_empty,
         stack_store: inspector.stack_store,
@@ -753,7 +754,8 @@ pub(super) fn build_inspector(
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
-    let (instructions_view, instructions_store, instructions_selection) = build_instruction_view();
+    let (instructions_view, instructions_store, instructions_selection, source_column) =
+        build_instruction_view();
     let instructions_empty = empty_label("Paused target required");
     let instructions_scrolled = gtk::ScrolledWindow::builder()
         .child(&instructions_view)
@@ -797,7 +799,86 @@ pub(super) fn build_inspector(
     let instructions_header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     instructions_header.add_css_class("subpanel-header");
     instructions_header.append(&instructions_title);
+    let disassembly_range = gtk::Label::new(None);
+    disassembly_range.add_css_class("disassembly-range");
+    disassembly_range.set_ellipsize(pango::EllipsizeMode::Middle);
+    disassembly_range.set_halign(gtk::Align::End);
+    instructions_header.append(&disassembly_range);
     instructions_panel.append(&instructions_header);
+    let disassembly_browser = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    disassembly_browser.add_css_class("disassembly-browser");
+    let disassembly_navigation = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    disassembly_navigation.add_css_class("disassembly-browser-row");
+    let disassembly_actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    disassembly_actions.add_css_class("disassembly-browser-row");
+    let disassembly_back = compact_instruction_button("‹", "Back to the previous location");
+    let disassembly_forward = compact_instruction_button("›", "Forward to the next location");
+    let disassembly_previous = compact_instruction_button("Fn ‹", "Show the preceding function");
+    let disassembly_next = compact_instruction_button("Fn ›", "Show the following function");
+    let disassembly_location = gtk::Entry::builder()
+        .placeholder_text("Address, expression, or symbol")
+        .hexpand(true)
+        .build();
+    disassembly_location.set_tooltip_text(Some(
+        "Examples: $pc, 0x401000, main, malloc, or a register expression",
+    ));
+    let disassembly_go = compact_instruction_button("Go", "Disassemble this location");
+    let disassembly_pc = compact_instruction_button("PC", "Return to the current program counter");
+    let disassembly_mixed = gtk::ToggleButton::with_label("Mixed");
+    disassembly_mixed.add_css_class("inline-action");
+    disassembly_mixed.set_tooltip_text(Some("Show source locations and source text with assembly"));
+    let disassembly_syntax = gtk::DropDown::from_strings(&["Intel", "AT&T"]);
+    disassembly_syntax.add_css_class("disassembly-syntax");
+    disassembly_syntax.set_tooltip_text(Some("Select x86 disassembly syntax"));
+    let disassembly_follow = compact_instruction_button(
+        "Follow",
+        "Follow the selected direct or register-indirect call or branch target",
+    );
+    let disassembly_memory = compact_instruction_button(
+        "Memory",
+        "Open the selected instruction's effective address in Memory",
+    );
+    for widget in [
+        disassembly_back.clone().upcast::<gtk::Widget>(),
+        disassembly_forward.clone().upcast(),
+        disassembly_location.clone().upcast(),
+        disassembly_go.clone().upcast(),
+        disassembly_pc.clone().upcast(),
+    ] {
+        disassembly_navigation.append(&widget);
+    }
+    for widget in [
+        disassembly_previous.clone().upcast::<gtk::Widget>(),
+        disassembly_next.clone().upcast(),
+        disassembly_mixed.clone().upcast(),
+        disassembly_syntax.clone().upcast(),
+        disassembly_follow.clone().upcast(),
+        disassembly_memory.clone().upcast(),
+    ] {
+        disassembly_actions.append(&widget);
+    }
+    disassembly_browser.append(&disassembly_navigation);
+    disassembly_browser.append(&disassembly_actions);
+    let disassembly_controls = DisassemblyControls {
+        root: disassembly_browser.clone(),
+        back: disassembly_back,
+        forward: disassembly_forward,
+        previous_function: disassembly_previous,
+        next_function: disassembly_next,
+        location: disassembly_location,
+        go: disassembly_go,
+        current_pc: disassembly_pc,
+        mixed: disassembly_mixed,
+        syntax: disassembly_syntax,
+        follow: disassembly_follow,
+        open_memory: disassembly_memory,
+        range: disassembly_range,
+        source_column,
+        loading: Rc::new(Cell::new(false)),
+        syntax_applicable: Rc::new(Cell::new(false)),
+        setting_syntax: Rc::new(Cell::new(false)),
+    };
+    instructions_panel.append(&disassembly_browser);
     let instruction_insight = gtk::Box::new(gtk::Orientation::Vertical, 2);
     instruction_insight.add_css_class("instruction-insight");
     let instruction_flow = insight_label("Flow information appears at a branch or call");
@@ -1155,6 +1236,7 @@ pub(super) fn build_inspector(
         instruction_flow,
         instruction_arguments,
         instruction_memory,
+        disassembly_controls,
         register_groups,
         registers_empty,
         stack_store,
@@ -1183,4 +1265,11 @@ pub(super) fn build_inspector(
         memory_add_button,
         kernel_view,
     }
+}
+
+fn compact_instruction_button(label: &str, tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::with_label(label);
+    button.add_css_class("inline-action");
+    button.set_tooltip_text(Some(tooltip));
+    button
 }

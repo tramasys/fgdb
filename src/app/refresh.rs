@@ -51,7 +51,7 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     }
 
     let weak_ui = ui.clone();
-    let _ = client.request("-stack-info-frame", move |client, record| {
+    let _ = client.request("-stack-info-frame", move |_, record| {
         if !stop_refresh_is_current(&weak_ui, generation) {
             return;
         }
@@ -62,22 +62,7 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
             ui.show_execution_location(&frame);
             let pc = frame.address.clone();
             let architecture = frame.architecture.clone();
-            let weak_ui = Rc::downgrade(&ui);
-            let _ = client.request(
-                "-data-disassemble -a $pc --opcodes bytes -- 0",
-                move |_, record| {
-                    if stop_refresh_is_current(&weak_ui, generation)
-                        && record.is_done()
-                        && let Some(ui) = weak_ui.upgrade()
-                    {
-                        ui.show_instructions(
-                            &crate::debugger::instructions(&record),
-                            &pc,
-                            architecture.as_deref(),
-                        );
-                    }
-                },
-            );
+            ui.request_disassembly_for_stop(pc, architecture);
         }
     });
 

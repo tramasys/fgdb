@@ -445,7 +445,9 @@ impl Ui {
         &self,
         instructions: &[Instruction],
         pc: &str,
+        focus: &str,
         architecture: Option<&str>,
+        mixed: bool,
     ) {
         if let Some(description) = architecture {
             let detected = TargetArchitecture::from_gdb_description(description);
@@ -463,6 +465,17 @@ impl Ui {
         }
         self.instructions_selection
             .set_selected(gtk::INVALID_LIST_POSITION);
+        self.disassembly_controls.source_column.set_visible(mixed);
+        let syntax_applicable = matches!(
+            self.target_architecture(),
+            TargetArchitecture::X86 | TargetArchitecture::X86_64
+        );
+        self.disassembly_controls
+            .syntax_applicable
+            .set(syntax_applicable);
+        self.disassembly_controls
+            .syntax
+            .set_sensitive(syntax_applicable);
         let title = architecture.map_or_else(
             || String::from("INSTRUCTIONS"),
             |architecture| format!("INSTRUCTIONS · {architecture} · GDB NATIVE"),
@@ -471,6 +484,14 @@ impl Ui {
         self.instructions_title.set_tooltip_text(Some(&title));
         if instructions.is_empty() {
             self.instructions_empty.set_visible(true);
+            self.instructions_store.remove_all();
+            self.disassembly_controls.range.set_text("");
+            self.disassembly_controls
+                .previous_function
+                .set_sensitive(false);
+            self.disassembly_controls.next_function.set_sensitive(false);
+            self.disassembly_controls.follow.set_sensitive(false);
+            self.disassembly_controls.open_memory.set_sensitive(false);
             self.current_instruction.replace(None);
             self.current_instruction_memory_expression.replace(None);
             self.instruction_flow
@@ -484,35 +505,90 @@ impl Ui {
         self.instructions_empty.set_visible(false);
         let current = instructions
             .iter()
-            .position(|instruction| addresses_equal(&instruction.address, pc))
+            .position(|instruction| addresses_equal(&instruction.address, pc));
+        let selected = instructions
+            .iter()
+            .position(|instruction| addresses_equal(&instruction.address, focus))
+            .or(current)
             .unwrap_or(0);
         self.current_instruction
-            .replace(instructions.get(current).cloned());
-        let start = current.saturating_sub(3);
+            .replace(current.and_then(|position| instructions.get(position).cloned()));
         let rows = instructions
             .iter()
-            .skip(start)
-            .take(9)
             .map(|instruction| InstructionRowData {
                 instruction: instruction.clone(),
                 current: addresses_equal(&instruction.address, pc),
                 pointer_bits: self.target_pointer_bits(),
+                source_text: self.disassembly_source_text(instruction),
             })
             .collect::<Vec<_>>();
-        let selected = rows
-            .iter()
-            .position(|row| row.current)
-            .map(|index| index as u32);
         replace_boxed_store(&self.instructions_store, rows);
-        if let Some(selected) = selected {
-            self.instructions_selection.set_selected(selected);
+        let selected = u32::try_from(selected).unwrap_or(0);
+        self.instructions_selection.set_selected(selected);
+        self.instructions_view
+            .scroll_to(selected, None, gtk::ListScrollFlags::FOCUS, None);
+        if let (Some(first), Some(last)) = (instructions.first(), instructions.last()) {
+            let function = if first.function == "??" {
+                "unknown function"
+            } else {
+                first.function.as_str()
+            };
+            let range = format!(
+                "{function} · {}–{} · {} instructions",
+                full_address(&first.address, self.target_pointer_bits()),
+                full_address(&last.address, self.target_pointer_bits()),
+                instructions.len()
+            );
+            self.disassembly_controls.range.set_text(&range);
+            self.disassembly_controls
+                .range
+                .set_tooltip_text(Some(&range));
+            self.disassembly_controls
+                .location
+                .set_text(&instructions[selected as usize].address);
         }
+        self.disassembly_controls
+            .previous_function
+            .set_sensitive(true);
+        self.disassembly_controls.next_function.set_sensitive(true);
+        self.update_disassembly_selection();
         self.update_instruction_insight();
         self.update_control_sensitivity();
     }
 
+    fn disassembly_source_text(&self, instruction: &Instruction) -> Option<Rc<str>> {
+        const MAX_SOURCE_FILES: usize = 8;
+        const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
+
+        let source = instruction.source.as_ref()?;
+        let path = self.resolve_source_path(source.source_path())?;
+        let lines = if let Some(lines) = self.disassembly_source_cache.borrow().get(&path).cloned()
+        {
+            lines
+        } else {
+            let contents = crate::bounded::read_string(&path, MAX_SOURCE_BYTES).ok()?;
+            let lines = Rc::new(contents.lines().map(Rc::<str>::from).collect::<Vec<_>>());
+            let mut cache = self.disassembly_source_cache.borrow_mut();
+            if cache.len() >= MAX_SOURCE_FILES {
+                cache.clear();
+            }
+            cache.insert(path, Rc::clone(&lines));
+            lines
+        };
+        let index = usize::try_from(source.line).ok()?.checked_sub(1)?;
+        lines.get(index).cloned()
+    }
+
     fn update_instruction_insight(&self) {
         let Some(instruction) = self.current_instruction.borrow().clone() else {
+            self.instruction_flow
+                .set_text("Flow information appears at the current branch or call");
+            self.instruction_flow.set_tooltip_text(None);
+            self.instruction_flow.remove_css_class("branch-taken");
+            self.instruction_flow.remove_css_class("branch-not-taken");
+            self.instruction_arguments.set_visible(false);
+            self.instruction_memory.set_visible(false);
+            self.current_instruction_memory_expression.replace(None);
             return;
         };
         let registers = self.latest_registers.borrow();
@@ -605,6 +681,216 @@ impl Ui {
                 handler(address);
             }
         });
+        let ui = self.clone();
+        self.instructions_selection
+            .connect_selected_notify(move |_| ui.update_disassembly_selection());
+    }
+
+    pub(super) fn connect_disassembly_controls(&self) {
+        let handler = Rc::clone(&self.disassembly_handler);
+        let location = self.disassembly_controls.location.clone();
+        self.disassembly_controls.go.connect_clicked(move |_| {
+            let expression = location.text().trim().to_owned();
+            if !expression.is_empty()
+                && let Some(handler) = handler.borrow().as_ref()
+            {
+                handler(DisassemblyRequest::Navigate(expression));
+            }
+        });
+        let go = self.disassembly_controls.go.clone();
+        self.disassembly_controls
+            .location
+            .connect_activate(move |_| {
+                if go.is_sensitive() {
+                    go.emit_clicked();
+                }
+            });
+        for (button, request) in [
+            (&self.disassembly_controls.back, DisassemblyRequest::Back),
+            (
+                &self.disassembly_controls.forward,
+                DisassemblyRequest::Forward,
+            ),
+            (
+                &self.disassembly_controls.previous_function,
+                DisassemblyRequest::PreviousFunction,
+            ),
+            (
+                &self.disassembly_controls.next_function,
+                DisassemblyRequest::NextFunction,
+            ),
+            (
+                &self.disassembly_controls.current_pc,
+                DisassemblyRequest::Navigate(String::from("$pc")),
+            ),
+        ] {
+            let handler = Rc::clone(&self.disassembly_handler);
+            button.connect_clicked(move |_| {
+                if let Some(handler) = handler.borrow().as_ref() {
+                    handler(request.clone());
+                }
+            });
+        }
+        let handler = Rc::clone(&self.disassembly_handler);
+        self.disassembly_controls
+            .mixed
+            .connect_toggled(move |button| {
+                if let Some(handler) = handler.borrow().as_ref() {
+                    handler(DisassemblyRequest::Mixed(button.is_active()));
+                }
+            });
+        let handler = Rc::clone(&self.disassembly_handler);
+        let setting_syntax = Rc::clone(&self.disassembly_controls.setting_syntax);
+        self.disassembly_controls
+            .syntax
+            .connect_selected_notify(move |syntax| {
+                if setting_syntax.get() {
+                    return;
+                }
+                let syntax = if syntax.selected() == 0 {
+                    DisassemblySyntax::Intel
+                } else {
+                    DisassemblySyntax::Att
+                };
+                if let Some(handler) = handler.borrow().as_ref() {
+                    handler(DisassemblyRequest::Syntax(syntax));
+                }
+            });
+        let ui = self.clone();
+        self.disassembly_controls.follow.connect_clicked(move |_| {
+            let Some(instruction) = ui.selected_instruction() else {
+                return;
+            };
+            let Some(target) = instruction_flow_target(&instruction, ui.target_architecture())
+            else {
+                return;
+            };
+            if let Some(handler) = ui.disassembly_handler.borrow().as_ref() {
+                handler(DisassemblyRequest::Navigate(target));
+            }
+        });
+        let ui = self.clone();
+        self.disassembly_controls
+            .open_memory
+            .connect_clicked(move |_| ui.open_selected_instruction_memory());
+        self.disassembly_controls.back.set_sensitive(false);
+        self.disassembly_controls.forward.set_sensitive(false);
+        self.disassembly_controls
+            .previous_function
+            .set_sensitive(false);
+        self.disassembly_controls.next_function.set_sensitive(false);
+        self.disassembly_controls.follow.set_sensitive(false);
+        self.disassembly_controls.open_memory.set_sensitive(false);
+    }
+
+    fn selected_instruction(&self) -> Option<Instruction> {
+        self.selected_instruction_row().map(|row| row.instruction)
+    }
+
+    fn selected_instruction_row(&self) -> Option<InstructionRowData> {
+        let position = self.instructions_selection.selected();
+        self.instructions_store
+            .item(position)
+            .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+            .map(|item| item.borrow::<InstructionRowData>().clone())
+    }
+
+    fn update_disassembly_selection(&self) {
+        clear_label_selections(&self.instructions_view);
+        let row = self.selected_instruction_row();
+        if let Some(row) = row.as_ref() {
+            self.disassembly_controls
+                .location
+                .set_text(&row.instruction.address);
+        }
+        let instruction = row.as_ref().map(|row| &row.instruction);
+        let registers = self.latest_registers.borrow();
+        let architecture = self.target_architecture();
+        self.disassembly_controls.follow.set_sensitive(
+            instruction
+                .as_ref()
+                .and_then(|instruction| instruction_flow_target(instruction, architecture))
+                .is_some(),
+        );
+        self.disassembly_controls.open_memory.set_sensitive(
+            instruction
+                .as_ref()
+                .and_then(|instruction| {
+                    instruction_memory_expression(instruction, &registers, architecture)
+                })
+                .is_some(),
+        );
+    }
+
+    fn open_selected_instruction_memory(&self) {
+        let Some(instruction) = self.selected_instruction() else {
+            return;
+        };
+        let Some(expression) = instruction_memory_expression(
+            &instruction,
+            &self.latest_registers.borrow(),
+            self.target_architecture(),
+        ) else {
+            return;
+        };
+        if add_memory_watch(
+            &self.memory_watch_list,
+            &self.memory_watches_empty,
+            &self.memory_watches,
+            &self.memory_watch_handler,
+            expression.clone(),
+            128,
+            MemoryWatchFormat::Bytes,
+        ) {
+            self.inspector_notebook.set_current_page(Some(4));
+            self.set_status(
+                "Memory",
+                &format!("Opened effective address {expression}"),
+                Some("status-ready"),
+            );
+        } else {
+            self.set_status(
+                "Memory watch limit",
+                "Remove a memory watch before adding another (limit 256)",
+                Some("status-error"),
+            );
+        }
+    }
+
+    pub(crate) fn set_disassembly_loading(&self, loading: bool) {
+        self.disassembly_controls.loading.set(loading);
+        if loading {
+            self.disassembly_controls.range.set_text("Loading…");
+        }
+        self.update_control_sensitivity();
+    }
+
+    pub(crate) fn set_disassembly_history(&self, can_back: bool, can_forward: bool) {
+        self.disassembly_controls.back.set_sensitive(can_back);
+        self.disassembly_controls.forward.set_sensitive(can_forward);
+    }
+
+    pub(crate) fn set_disassembly_syntax(&self, syntax: DisassemblySyntax) {
+        self.disassembly_controls.setting_syntax.set(true);
+        self.disassembly_controls.syntax.set_selected(match syntax {
+            DisassemblySyntax::Intel => 0,
+            DisassemblySyntax::Att => 1,
+        });
+        self.disassembly_controls.setting_syntax.set(false);
+    }
+
+    pub(crate) fn show_disassembly_error(&self, message: &str) {
+        self.set_disassembly_loading(false);
+        self.disassembly_controls
+            .location
+            .add_css_class("input-error");
+        self.set_status("Disassembly failed", message, Some("status-error"));
+    }
+
+    pub(crate) fn clear_disassembly_error(&self) {
+        self.disassembly_controls
+            .location
+            .remove_css_class("input-error");
     }
 
     pub fn show_signal(&self, name: Option<&str>, meaning: Option<&str>) {

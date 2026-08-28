@@ -1108,6 +1108,130 @@ pub(super) fn instruction_flow_description(
     }
 }
 
+pub(super) fn instruction_flow_target(
+    instruction: &Instruction,
+    architecture: TargetArchitecture,
+) -> Option<String> {
+    let (mnemonic, operands) = split_instruction(&instruction.text);
+    let mnemonic = mnemonic.to_ascii_lowercase();
+    if !is_call_instruction(&mnemonic, operands, architecture)
+        && !is_unconditional_branch(&mnemonic, architecture)
+        && !is_conditional_branch(&mnemonic, architecture)
+    {
+        return None;
+    }
+    if let Some(address) = operands
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, ',' | '(' | ')' | '[' | ']')
+        })
+        .map(|part| {
+            part.trim_matches(|character: char| matches!(character, '*' | '$' | '#' | ';' | ':'))
+        })
+        .find(|part| {
+            part.strip_prefix("0x").is_some_and(|hex| {
+                !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        })
+    {
+        return Some(address.to_owned());
+    }
+    if let (Some(start), Some(end)) = (operands.find('<'), operands.rfind('>'))
+        && start < end
+    {
+        let symbol = operands[start + 1..end].trim();
+        if !symbol.is_empty() {
+            return Some(symbol.to_owned());
+        }
+    }
+    let candidate = operands
+        .split(',')
+        .next_back()?
+        .trim()
+        .trim_start_matches('*')
+        .trim();
+    if candidate.starts_with('[') || candidate.contains(char::is_whitespace) || candidate.is_empty()
+    {
+        return None;
+    }
+    let explicitly_register = candidate.starts_with(['$', '%']);
+    let candidate = candidate.trim_start_matches(['$', '%']);
+    candidate
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b':' | b'@'))
+        .then(|| {
+            if explicitly_register || instruction_operand_is_register(candidate, architecture) {
+                format!("${candidate}")
+            } else {
+                candidate.to_owned()
+            }
+        })
+}
+
+fn instruction_operand_is_register(name: &str, architecture: TargetArchitecture) -> bool {
+    let name = name.to_ascii_lowercase();
+    let numbered = |prefix: char| {
+        name.strip_prefix(prefix).is_some_and(|number| {
+            !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    };
+    match architecture {
+        TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
+            matches!(
+                name.as_str(),
+                "al" | "ah"
+                    | "ax"
+                    | "eax"
+                    | "rax"
+                    | "bl"
+                    | "bh"
+                    | "bx"
+                    | "ebx"
+                    | "rbx"
+                    | "cl"
+                    | "ch"
+                    | "cx"
+                    | "ecx"
+                    | "rcx"
+                    | "dl"
+                    | "dh"
+                    | "dx"
+                    | "edx"
+                    | "rdx"
+                    | "si"
+                    | "esi"
+                    | "rsi"
+                    | "di"
+                    | "edi"
+                    | "rdi"
+                    | "sp"
+                    | "esp"
+                    | "rsp"
+                    | "bp"
+                    | "ebp"
+                    | "rbp"
+                    | "ip"
+                    | "eip"
+                    | "rip"
+            ) || name.strip_prefix('r').is_some_and(|number| {
+                let number = number.trim_end_matches(['b', 'w', 'd']);
+                number
+                    .parse::<u8>()
+                    .is_ok_and(|number| (8..=15).contains(&number))
+            })
+        }
+        TargetArchitecture::Arm | TargetArchitecture::AArch64 => {
+            matches!(name.as_str(), "sp" | "lr" | "pc")
+                || numbered('r')
+                || numbered('x')
+                || numbered('w')
+        }
+        TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64 => {
+            numbered('x') || matches!(name.as_str(), "ra" | "sp" | "gp" | "tp" | "fp")
+        }
+        _ => numbered('r'),
+    }
+}
+
 pub(super) fn instruction_arguments_description(
     instruction: &Instruction,
     registers: &[Register],

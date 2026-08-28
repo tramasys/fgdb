@@ -133,12 +133,15 @@ impl Ui {
             instruction_flow: workspace.instruction_flow,
             instruction_arguments: workspace.instruction_arguments,
             instruction_memory: workspace.instruction_memory,
+            disassembly_controls: workspace.disassembly_controls,
             current_instruction: Rc::new(RefCell::new(None)),
             current_instruction_memory_expression: Rc::new(RefCell::new(None)),
             latest_registers: Rc::new(RefCell::new(Vec::new())),
             latest_registers_generation: Rc::new(Cell::new(None)),
             register_details_generation: Rc::new(Cell::new(None)),
             instruction_memory_handler: Rc::new(RefCell::new(None)),
+            disassembly_handler: Rc::new(RefCell::new(None)),
+            disassembly_source_cache: Rc::new(RefCell::new(HashMap::new())),
             register_groups: workspace.register_groups,
             registers_empty: workspace.registers_empty,
             stack_store: workspace.stack_store,
@@ -222,6 +225,7 @@ impl Ui {
             inferior_started: Rc::new(Cell::new(false)),
         };
         ui.connect_instruction_activation();
+        ui.connect_disassembly_controls();
         ui.connect_local_activation();
         ui.connect_expression_watch_controls();
         ui.connect_register_activation();
@@ -717,6 +721,12 @@ impl Ui {
         self.step_instruction_button.set_sensitive(can_move);
         self.finish_button.set_sensitive(can_move);
         self.until_button.set_sensitive(can_move);
+        self.disassembly_controls
+            .root
+            .set_sensitive(can_inspect && !self.disassembly_controls.loading.get());
+        self.disassembly_controls
+            .syntax
+            .set_sensitive(self.disassembly_controls.syntax_applicable.get());
         self.gef_tools_button
             .set_sensitive(self.gef_available.get() && ready && !running && !pending);
         self.kernel_view
@@ -829,6 +839,16 @@ impl Ui {
 
     pub fn set_instruction_handler(&self, handler: impl Fn(String) + 'static) {
         self.instruction_handler.replace(Some(Rc::new(handler)));
+    }
+
+    pub(crate) fn set_disassembly_handler(&self, handler: impl Fn(DisassemblyRequest) + 'static) {
+        self.disassembly_handler.replace(Some(Rc::new(handler)));
+    }
+
+    pub(crate) fn request_disassembly_for_stop(&self, pc: String, architecture: Option<String>) {
+        if let Some(handler) = self.disassembly_handler.borrow().as_ref() {
+            handler(DisassemblyRequest::Stopped { pc, architecture });
+        }
     }
 
     pub fn set_instruction_memory_handler(&self, handler: impl Fn(String) + 'static) {

@@ -111,6 +111,8 @@ type EventCatchpointHandler = Rc<dyn Fn(EventCatchpoint, Option<String>)>;
 type WatchpointInsertHandler = Rc<dyn Fn(String, WatchpointAccess)>;
 type MemoryWatchHandler = Rc<dyn Fn(u64, String, usize)>;
 type InstructionMemoryHandler = Rc<dyn Fn(String)>;
+type DisassemblyHandler = Rc<dyn Fn(DisassemblyRequest)>;
+type DisassemblySourceCache = Rc<RefCell<HashMap<PathBuf, Rc<Vec<Rc<str>>>>>>;
 type KernelRefreshHandler = Rc<dyn Fn()>;
 type KernelSectionHandler = Rc<dyn Fn(&str, bool)>;
 type DebugSessionHandler = Rc<dyn Fn(DebugSession)>;
@@ -121,6 +123,28 @@ pub enum SessionAction {
     Restart,
     Kill,
     Detach,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DisassemblySyntax {
+    Intel,
+    Att,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DisassemblyRequest {
+    Stopped {
+        pc: String,
+        architecture: Option<String>,
+    },
+    Clear,
+    Navigate(String),
+    Back,
+    Forward,
+    PreviousFunction,
+    NextFunction,
+    Mixed(bool),
+    Syntax(DisassemblySyntax),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -324,6 +348,28 @@ struct InstructionRowData {
     instruction: Instruction,
     current: bool,
     pointer_bits: u32,
+    source_text: Option<Rc<str>>,
+}
+
+#[derive(Clone)]
+struct DisassemblyControls {
+    root: gtk::Box,
+    back: gtk::Button,
+    forward: gtk::Button,
+    previous_function: gtk::Button,
+    next_function: gtk::Button,
+    location: gtk::Entry,
+    go: gtk::Button,
+    current_pc: gtk::Button,
+    mixed: gtk::ToggleButton,
+    syntax: gtk::DropDown,
+    follow: gtk::Button,
+    open_memory: gtk::Button,
+    range: gtk::Label,
+    source_column: gtk::ColumnViewColumn,
+    loading: Rc<Cell<bool>>,
+    syntax_applicable: Rc<Cell<bool>>,
+    setting_syntax: Rc<Cell<bool>>,
 }
 
 #[derive(Clone)]
@@ -881,12 +927,15 @@ pub struct Ui {
     instruction_flow: gtk::Label,
     instruction_arguments: gtk::Label,
     instruction_memory: gtk::Label,
+    disassembly_controls: DisassemblyControls,
     current_instruction: Rc<RefCell<Option<Instruction>>>,
     current_instruction_memory_expression: Rc<RefCell<Option<String>>>,
     latest_registers: Rc<RefCell<Vec<Register>>>,
     latest_registers_generation: Rc<Cell<Option<u64>>>,
     register_details_generation: Rc<Cell<Option<u64>>>,
     instruction_memory_handler: Rc<RefCell<Option<InstructionMemoryHandler>>>,
+    disassembly_handler: Rc<RefCell<Option<DisassemblyHandler>>>,
+    disassembly_source_cache: DisassemblySourceCache,
     register_groups: Vec<RegisterGroupView>,
     registers_empty: gtk::Label,
     stack_store: gio::ListStore,
@@ -1034,6 +1083,7 @@ struct Workspace {
     instruction_flow: gtk::Label,
     instruction_arguments: gtk::Label,
     instruction_memory: gtk::Label,
+    disassembly_controls: DisassemblyControls,
     register_groups: Vec<RegisterGroupView>,
     registers_empty: gtk::Label,
     stack_store: gio::ListStore,
@@ -1088,6 +1138,7 @@ struct Inspector {
     instruction_flow: gtk::Label,
     instruction_arguments: gtk::Label,
     instruction_memory: gtk::Label,
+    disassembly_controls: DisassemblyControls,
     register_groups: Vec<RegisterGroupView>,
     registers_empty: gtk::Label,
     stack_store: gio::ListStore,
@@ -1156,14 +1207,14 @@ mod tests {
         event_catchpoint_command_number, event_catchpoint_command_numbers, flags_markup,
         format_memory_watch, format_register_value, format_register_value_for_architecture,
         format_register_value_for_target, full_address, instruction_arguments_description,
-        instruction_flow_description, instruction_memory_expression, integer_decimal_value,
-        normalized_signal_name, parse_character_input, parse_integer_input, parse_string_input,
-        register_details, register_integer_format, register_value_css, set_breakpoint_enabled,
-        signal_catchpoint_command_number, signal_catchpoint_command_numbers, source_location_score,
-        source_symbol_at_offset, source_tab_title, stop_reason_label, string_edit, thread_os_id,
-        variable_boolean_value, variable_character_format, variable_details,
-        variable_integer_format, variable_is_address, variable_value_parts, vector_field_values,
-        without_generic_arguments,
+        instruction_flow_description, instruction_flow_target, instruction_memory_expression,
+        integer_decimal_value, normalized_signal_name, parse_character_input, parse_integer_input,
+        parse_string_input, register_details, register_integer_format, register_value_css,
+        set_breakpoint_enabled, signal_catchpoint_command_number,
+        signal_catchpoint_command_numbers, source_location_score, source_symbol_at_offset,
+        source_tab_title, stop_reason_label, string_edit, thread_os_id, variable_boolean_value,
+        variable_character_format, variable_details, variable_integer_format, variable_is_address,
+        variable_value_parts, vector_field_values, without_generic_arguments,
     };
     use crate::debugger::{
         Breakpoint, Instruction, Register, SourceLocation, TargetArchitecture, TargetEndian,
@@ -1548,6 +1599,7 @@ mod tests {
             offset: String::from("12"),
             opcodes: Some(String::from("e8 00 00 00 00")),
             text: String::from("call 0x402000 <mmap@plt>"),
+            source: None,
         };
         let registers = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
             .iter()
@@ -1589,6 +1641,54 @@ mod tests {
     }
 
     #[test]
+    fn resolves_direct_symbol_and_register_flow_targets() {
+        let instruction = Instruction {
+            address: String::from("0x401000"),
+            function: String::from("main"),
+            offset: String::from("12"),
+            opcodes: None,
+            text: String::from("call 0x402000 <worker>"),
+            source: None,
+        };
+        assert_eq!(
+            instruction_flow_target(&instruction, TargetArchitecture::X86_64).as_deref(),
+            Some("0x402000")
+        );
+        assert_eq!(
+            instruction_flow_target(
+                &Instruction {
+                    text: String::from("call rax"),
+                    ..instruction.clone()
+                },
+                TargetArchitecture::X86_64,
+            )
+            .as_deref(),
+            Some("$rax")
+        );
+        assert_eq!(
+            instruction_flow_target(
+                &Instruction {
+                    text: String::from("bl worker"),
+                    ..instruction.clone()
+                },
+                TargetArchitecture::AArch64,
+            )
+            .as_deref(),
+            Some("worker")
+        );
+        assert!(
+            instruction_flow_target(
+                &Instruction {
+                    text: String::from("mov rax,rbx"),
+                    ..instruction
+                },
+                TargetArchitecture::X86_64,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn predicts_x86_branches_and_decodes_linux_syscalls() {
         let branch = Instruction {
             address: String::from("0x401000"),
@@ -1596,6 +1696,7 @@ mod tests {
             offset: String::from("12"),
             opcodes: Some(String::from("75 0a")),
             text: String::from("jne 0x40100c <main+0x1c>"),
+            source: None,
         };
         let flags = Register {
             name: String::from("eflags"),
@@ -1713,6 +1814,7 @@ mod tests {
             offset: String::from("4"),
             opcodes: None,
             text: String::from("svc #0"),
+            source: None,
         };
         let aarch64_registers = [
             ("x8", "0x40"),

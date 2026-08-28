@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::mi::{MiListItem, MiRecord, MiResult, MiValue, result_field};
 use super::target::{TargetArchitecture, TargetEndian};
 
@@ -168,6 +170,7 @@ pub struct Instruction {
     pub offset: String,
     pub opcodes: Option<String>,
     pub text: String,
+    pub source: Option<Arc<SourceFile>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -550,22 +553,43 @@ pub fn threads(record: &MiRecord) -> Vec<ThreadInfo> {
 }
 
 pub fn instructions(record: &MiRecord) -> Vec<Instruction> {
-    record
-        .field("asm_insns")
-        .and_then(MiValue::as_list)
-        .into_iter()
-        .flatten()
-        .filter_map(tuple_from_item)
-        .filter_map(|tuple| {
-            Some(Instruction {
-                address: constant(tuple, "address")?.to_owned(),
-                function: constant(tuple, "func-name").unwrap_or("??").to_owned(),
-                offset: constant(tuple, "offset").unwrap_or("0").to_owned(),
-                opcodes: owned_constant(tuple, "opcodes"),
-                text: constant(tuple, "inst")?.to_owned(),
-            })
-        })
-        .collect()
+    let Some(items) = record.field("asm_insns").and_then(MiValue::as_list) else {
+        return Vec::new();
+    };
+    let mut instructions = Vec::new();
+    for tuple in items.iter().filter_map(tuple_from_item) {
+        let source = source_file(tuple);
+        if let Some(nested) = result_field(tuple, "line_asm_insn").and_then(MiValue::as_list) {
+            instructions.extend(
+                nested
+                    .iter()
+                    .filter_map(tuple_from_item)
+                    .filter_map(|tuple| instruction(tuple, source.clone())),
+            );
+        } else if let Some(instruction) = instruction(tuple, source) {
+            instructions.push(instruction);
+        }
+    }
+    instructions
+}
+
+fn instruction(tuple: &[MiResult], source: Option<Arc<SourceFile>>) -> Option<Instruction> {
+    Some(Instruction {
+        address: constant(tuple, "address")?.to_owned(),
+        function: constant(tuple, "func-name").unwrap_or("??").to_owned(),
+        offset: constant(tuple, "offset").unwrap_or("0").to_owned(),
+        opcodes: owned_constant(tuple, "opcodes"),
+        text: constant(tuple, "inst")?.to_owned(),
+        source,
+    })
+}
+
+fn source_file(tuple: &[MiResult]) -> Option<Arc<SourceFile>> {
+    Some(Arc::new(SourceFile {
+        file: constant(tuple, "file")?.to_owned(),
+        fullname: owned_constant(tuple, "fullname"),
+        line: constant(tuple, "line")?.parse().ok()?,
+    }))
 }
 
 pub fn shared_libraries(record: &MiRecord) -> Vec<SharedLibrary> {
@@ -933,6 +957,16 @@ mod tests {
 
         let disassembly = instructions(&parse_record(r#"6^done,asm_insns=[{address="0x12",func-name="main",offset="0",opcodes="90",inst="nop"}]"#).unwrap());
         assert_eq!(disassembly[0].text, "nop");
+        assert!(disassembly[0].source.is_none());
+
+        let mixed = instructions(&parse_record(r#"7^done,asm_insns=[src_and_asm_line={line="42",file="main.c",fullname="/tmp/main.c",line_asm_insn=[{address="0x20",func-name="main",offset="4",opcodes="c3",inst="ret"}]}]"#).unwrap());
+        assert_eq!(mixed.len(), 1);
+        assert_eq!(mixed[0].address, "0x20");
+        assert_eq!(mixed[0].source.as_ref().map(|source| source.line), Some(42));
+        assert_eq!(
+            mixed[0].source.as_ref().map(|source| source.source_path()),
+            Some("/tmp/main.c")
+        );
 
         let libraries = shared_libraries(&parse_record(r#"6^done,shared-libraries=[{target-name="/usr/lib/libc.so.6",host-name="/usr/lib/libc.so.6",symbols-loaded="1",ranges=[{from="0x7000",to="0x9000"}]}]"#).unwrap());
         assert_eq!(libraries.len(), 1);

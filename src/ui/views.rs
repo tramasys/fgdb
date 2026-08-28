@@ -704,7 +704,12 @@ pub(super) fn variable_tooltip(variable: &Variable) -> String {
     )
 }
 
-pub(super) fn build_instruction_view() -> (gtk::ColumnView, gio::ListStore, gtk::SingleSelection) {
+pub(super) fn build_instruction_view() -> (
+    gtk::ColumnView,
+    gio::ListStore,
+    gtk::SingleSelection,
+    gtk::ColumnViewColumn,
+) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
@@ -774,7 +779,29 @@ pub(super) fn build_instruction_view() -> (gtk::ColumnView, gio::ListStore, gtk:
     ] {
         view.append_column(&column);
     }
-    (view, store, selection)
+    let source_column = instruction_column(
+        "SOURCE",
+        280,
+        true,
+        "instruction-source",
+        &selection,
+        |row| {
+            let Some(source) = row.instruction.source.as_ref() else {
+                return String::new();
+            };
+            let file = Path::new(source.source_path())
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            row.source_text.as_ref().map_or_else(
+                || format!("{file}:{}", source.line),
+                |text| format!("{file}:{}  {}", source.line, text.trim()),
+            )
+        },
+    );
+    source_column.set_visible(false);
+    view.append_column(&source_column);
+    (view, store, selection, source_column)
 }
 
 pub(super) fn build_register_view() -> (gtk::Box, Vec<RegisterGroupView>) {
@@ -1213,6 +1240,11 @@ pub(super) fn instruction_column(
         };
         clear_label_selection(&label);
         let data = data.borrow::<InstructionRowData>();
+        if data.instruction.offset == "0" {
+            label.add_css_class("function-boundary-cell");
+        } else {
+            label.remove_css_class("function-boundary-cell");
+        }
         label.set_text(&text(&data));
         label.set_tooltip_text(Some(&format!(
             "{} · {}\n{}\nSelect text to copy; press Enter or double-click outside a text selection to toggle an instruction breakpoint",

@@ -442,6 +442,54 @@ button.instruction-row.current-instruction:hover {{
 
 .instruction-operands {{ color: @app_fg; }}
 
+.instruction-source {{ color: @app_muted; }}
+
+.function-boundary-cell {{
+    box-shadow: inset 0 1px alpha(@app_accent, 0.48);
+}}
+
+.disassembly-range {{
+    padding-right: 4px;
+    color: @app_muted;
+    font-size: 10px;
+}}
+
+.disassembly-browser {{
+    padding: 3px 4px;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}}
+
+.disassembly-browser-row {{ min-height: 23px; }}
+
+.disassembly-browser entry {{
+    min-height: 21px;
+    padding: 0 6px;
+    background: @app_bg;
+    border: 1px solid @app_border;
+}}
+
+.disassembly-browser entry:focus {{ border-color: @app_accent; }}
+.disassembly-browser entry.input-error {{ border-color: @app_danger; }}
+
+.disassembly-browser button.inline-action {{
+    min-height: 21px;
+    padding: 0 7px;
+}}
+
+.disassembly-browser button.inline-action:checked {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.16);
+}}
+
+.disassembly-browser dropdown.disassembly-syntax > button {{
+    min-height: 21px;
+    padding: 0 7px;
+    color: @app_fg;
+    background: @app_raised;
+    border: 0;
+}}
+
 .instruction-insight {{
     padding: 4px 5px;
     background: alpha(@app_fg, 0.025);
