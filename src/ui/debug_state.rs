@@ -870,6 +870,11 @@ impl Ui {
     }
 
     pub(super) fn connect_breakpoint_bulk_controls(&self) {
+        let parent = self.window.clone();
+        let handler = Rc::clone(&self.breakpoint_editor_handler);
+        self.add_breakpoint_button.connect_clicked(move |_| {
+            open_breakpoint_editor(&parent, None, Rc::clone(&handler));
+        });
         let breakpoints = Rc::clone(&self.breakpoints);
         let handler = Rc::clone(&self.breakpoint_bulk_delete_handler);
         self.delete_all_breakpoints_button
@@ -1008,7 +1013,22 @@ impl Ui {
                 "No breakpoints, catchpoints, or watchpoints set",
             ));
         } else {
-            for breakpoint in breakpoints.iter() {
+            let mut locations_by_parent: HashMap<&str, Vec<&Breakpoint>> = HashMap::new();
+            for location in breakpoints
+                .iter()
+                .filter(|breakpoint| breakpoint.is_location())
+            {
+                if let Some(parent) = location.parent_number.as_deref() {
+                    locations_by_parent
+                        .entry(parent)
+                        .or_default()
+                        .push(location);
+                }
+            }
+            for breakpoint in breakpoints
+                .iter()
+                .filter(|breakpoint| !breakpoint.is_location())
+            {
                 let name = if breakpoint.is_watchpoint() {
                     breakpoint
                         .original_location
@@ -1032,6 +1052,18 @@ impl Ui {
                 };
                 let location = match (breakpoint.source_path(), breakpoint.line) {
                     (Some(file), Some(line)) => format!("{file}:{line}"),
+                    _ if breakpoint.location_count > 0 => format!(
+                        "{} resolved location{}",
+                        breakpoint.location_count,
+                        if breakpoint.location_count == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ),
+                    _ if let Some(pending) = breakpoint.pending.as_deref() => {
+                        format!("pending · {pending}")
+                    }
                     _ if breakpoint.is_watchpoint() => breakpoint.kind.clone(),
                     _ if breakpoint.is_catchpoint() => {
                         breakpoint.catch_type.as_deref().map_or_else(
@@ -1053,8 +1085,13 @@ impl Ui {
                 if !breakpoint.enabled {
                     row.add_css_class("breakpoint-row-disabled");
                 }
+                if breakpoint.pending.is_some() {
+                    row.add_css_class("breakpoint-row-pending");
+                }
                 let heading_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
-                let kind = if breakpoint.is_watchpoint() || breakpoint.is_catchpoint() {
+                let kind = if breakpoint.is_logpoint() {
+                    String::from("LOGPOINT")
+                } else if breakpoint.is_watchpoint() || breakpoint.is_catchpoint() {
                     breakpoint.kind.to_ascii_uppercase()
                 } else {
                     String::from("BREAKPOINT")
@@ -1078,13 +1115,25 @@ impl Ui {
                 heading.set_ellipsize(pango::EllipsizeMode::End);
                 heading.set_hexpand(true);
                 heading.set_tooltip_text(Some(&format!("{kind}  {name}")));
-                let condition_button = gtk::Button::with_label(if breakpoint.condition.is_some() {
-                    "Edit condition"
-                } else {
-                    "Condition"
-                });
+                let condition_button = gtk::Button::with_label(
+                    if breakpoint.is_watchpoint() || breakpoint.is_catchpoint() {
+                        if breakpoint.condition.is_some() {
+                            "Edit condition"
+                        } else {
+                            "Condition"
+                        }
+                    } else {
+                        "Edit"
+                    },
+                );
                 condition_button.add_css_class("inline-action");
-                condition_button.set_tooltip_text(Some("Add, edit, or clear a GDB condition"));
+                condition_button.set_tooltip_text(Some(
+                    if breakpoint.is_watchpoint() || breakpoint.is_catchpoint() {
+                        "Add, edit, or clear a GDB condition"
+                    } else {
+                        "Edit location, behavior, restrictions, commands, or logpoint settings"
+                    },
+                ));
                 let delete_button = gtk::Button::with_label("Delete");
                 delete_button.add_css_class("inline-action");
                 delete_button.add_css_class("danger-action");
@@ -1113,8 +1162,44 @@ impl Ui {
                 if let Some(thread) = breakpoint.thread.as_deref() {
                     metadata.push(format!("THREAD {thread}"));
                 }
+                if let Some(inferior) = breakpoint.inferior.as_deref() {
+                    metadata.push(format!("INFERIOR {inferior}"));
+                }
+                if breakpoint.ignore_count > 0 {
+                    metadata.push(format!(
+                        "STOP ON HIT {}",
+                        breakpoint.ignore_count.saturating_add(1)
+                    ));
+                }
                 if breakpoint.disposition.as_deref() == Some("del") {
                     metadata.push(String::from("TEMPORARY"));
+                }
+                if breakpoint.pending.is_some() {
+                    metadata.push(String::from("PENDING"));
+                }
+                if breakpoint.location_count > 0 {
+                    metadata.push(format!(
+                        "{} LOCATION{}",
+                        breakpoint.location_count,
+                        if breakpoint.location_count == 1 {
+                            ""
+                        } else {
+                            "S"
+                        }
+                    ));
+                }
+                if breakpoint.is_logpoint() {
+                    metadata.push(String::from("AUTO-CONTINUE"));
+                } else if !breakpoint.commands.is_empty() {
+                    metadata.push(format!(
+                        "{} COMMAND{}",
+                        breakpoint.commands.len(),
+                        if breakpoint.commands.len() == 1 {
+                            ""
+                        } else {
+                            "S"
+                        }
+                    ));
                 }
                 if !metadata.is_empty() {
                     let metadata = gtk::Label::new(Some(&metadata.join("  ·  ")));
@@ -1131,16 +1216,42 @@ impl Ui {
                     condition.set_tooltip_text(Some(condition.text().as_str()));
                     row.append(&condition);
                 }
+                if !breakpoint.commands.is_empty() {
+                    let command_text = breakpoint
+                        .commands
+                        .iter()
+                        .map(|command| command.trim())
+                        .collect::<Vec<_>>()
+                        .join("  ·  ");
+                    let commands = gtk::Label::new(Some(&format!("DO  {command_text}")));
+                    commands.add_css_class("breakpoint-commands");
+                    commands.set_halign(gtk::Align::Start);
+                    commands.set_ellipsize(pango::EllipsizeMode::End);
+                    commands.set_tooltip_text(Some(&command_text));
+                    enable_stable_text_selection(&commands);
+                    row.append(&commands);
+                }
 
                 let parent = self.window.clone();
                 let breakpoint_for_condition = breakpoint.clone();
                 let condition_handler = Rc::clone(&self.breakpoint_condition_handler);
+                let editor_handler = Rc::clone(&self.breakpoint_editor_handler);
                 condition_button.connect_clicked(move |_| {
-                    open_breakpoint_condition_editor(
-                        &parent,
-                        breakpoint_for_condition.clone(),
-                        Rc::clone(&condition_handler),
-                    );
+                    if breakpoint_for_condition.is_watchpoint()
+                        || breakpoint_for_condition.is_catchpoint()
+                    {
+                        open_breakpoint_condition_editor(
+                            &parent,
+                            breakpoint_for_condition.clone(),
+                            Rc::clone(&condition_handler),
+                        );
+                    } else {
+                        open_breakpoint_editor(
+                            &parent,
+                            Some(breakpoint_for_condition.clone()),
+                            Rc::clone(&editor_handler),
+                        );
+                    }
                 });
                 let number = breakpoint.command_number().to_owned();
                 let enable = !breakpoint.enabled;
@@ -1158,6 +1269,68 @@ impl Ui {
                     }
                 });
                 self.breakpoints_list.append(&row);
+
+                for location in locations_by_parent
+                    .get(breakpoint.number.as_str())
+                    .into_iter()
+                    .flatten()
+                {
+                    let location_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+                    location_row.add_css_class("breakpoint-location-row");
+                    if !location.enabled {
+                        location_row.add_css_class("breakpoint-row-disabled");
+                    }
+                    let badge = gtk::Button::with_label(&format!("#{}", location.number));
+                    badge.add_css_class("breakpoint-badge");
+                    badge.add_css_class("breakpoint-location-badge");
+                    badge.set_focus_on_click(false);
+                    badge.add_css_class(if location.enabled {
+                        "breakpoint-badge-enabled"
+                    } else {
+                        "breakpoint-badge-disabled"
+                    });
+                    badge.set_tooltip_text(Some(if location.enabled {
+                        "Disable only this resolved location"
+                    } else {
+                        "Enable only this resolved location"
+                    }));
+                    let details = gtk::Box::new(gtk::Orientation::Vertical, 0);
+                    details.set_hexpand(true);
+                    let function_text = location.function.as_deref().unwrap_or("resolved location");
+                    let function = gtk::Label::new(Some(&compact_function_name(function_text)));
+                    function.set_halign(gtk::Align::Start);
+                    function.set_ellipsize(pango::EllipsizeMode::End);
+                    function.set_tooltip_text(Some(function_text));
+                    let source = match (location.source_path(), location.line) {
+                        (Some(path), Some(line)) => format!(
+                            "{path}:{line}  ·  {}",
+                            location.address.as_deref().unwrap_or("resolved")
+                        ),
+                        _ => location
+                            .address
+                            .clone()
+                            .unwrap_or_else(|| String::from("resolved")),
+                    };
+                    let source_label = gtk::Label::new(Some(&source));
+                    source_label.add_css_class("muted");
+                    source_label.set_halign(gtk::Align::Start);
+                    source_label.set_ellipsize(pango::EllipsizeMode::Middle);
+                    source_label.set_tooltip_text(Some(&source));
+                    enable_stable_text_selection(&source_label);
+                    details.append(&function);
+                    details.append(&source_label);
+                    location_row.append(&badge);
+                    location_row.append(&details);
+                    let number = location.number.clone();
+                    let enable = !location.enabled;
+                    let enabled_handler = Rc::clone(&self.breakpoint_enabled_handler);
+                    badge.connect_clicked(move |_| {
+                        if let Some(handler) = enabled_handler.borrow().as_ref() {
+                            handler(number.clone(), enable);
+                        }
+                    });
+                    self.breakpoints_list.append(&location_row);
+                }
             }
         }
         for (button, signal, description) in &self.signal_buttons {

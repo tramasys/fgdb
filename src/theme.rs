@@ -103,6 +103,7 @@ impl Theme {
 @define-color app_border {border};
 @define-color app_fg {foreground};
 @define-color app_muted {muted};
+@define-color app_placeholder alpha(@app_muted, 0.74);
 @define-color app_accent {accent};
 @define-color app_accent_hover {accent_hover};
 @define-color app_success {success};
@@ -131,6 +132,8 @@ window.fgdb-window.solid-csd:backdrop,
     border: 0;
     box-shadow: none;
 }}
+
+entry > text > placeholder {{ color: @app_placeholder; }}
 
 headerbar.topbar {{
     min-height: 34px;
@@ -255,6 +258,24 @@ headerbar.topbar button.window-control.close:active {{
     color: @app_muted;
 }}
 
+.breakpoint-row-pending {{
+    border-left: 2px solid @app_warning;
+}}
+
+.breakpoint-location-row {{
+    min-height: 34px;
+    padding: 2px 4px 2px 22px;
+    background: alpha(@app_fg, 0.025);
+    border-left: 1px solid alpha(@app_accent, 0.34);
+}}
+
+.breakpoint-location-row:hover {{ background: alpha(@app_fg, 0.075); }}
+
+button.breakpoint-location-badge {{
+    min-width: 36px;
+    font-size: 10px;
+}}
+
 button.breakpoint-badge {{
     min-width: 24px;
     min-height: 20px;
@@ -308,6 +329,11 @@ button.breakpoint-badge-disabled:checked {{
 .breakpoint-metadata {{
     color: @app_accent;
     font-size: 10px;
+    padding: 1px 3px;
+}}
+
+.breakpoint-commands {{
+    color: @app_success;
     padding: 1px 3px;
 }}
 
@@ -946,6 +972,78 @@ window.value-editor entry {{
 }}
 
 window.value-editor entry:focus {{ border-color: @app_accent; }}
+
+window.breakpoint-editor textview {{
+    border: 1px solid @app_border;
+}}
+
+window.breakpoint-editor textview:focus-within {{ border-color: @app_accent; }}
+
+window.breakpoint-editor checkbutton {{
+    min-height: 23px;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    border: 0;
+}}
+
+window.breakpoint-editor checkbutton:hover,
+window.breakpoint-editor checkbutton:focus,
+window.breakpoint-editor checkbutton:focus-visible {{
+    background: transparent;
+    border: 0;
+}}
+
+window.breakpoint-editor checkbutton > check {{
+    min-width: 14px;
+    min-height: 14px;
+    margin: 0 5px 0 0;
+    padding: 0;
+    border: 1px solid @app_border;
+    box-shadow: none;
+}}
+
+window.breakpoint-editor checkbutton:hover > check,
+window.breakpoint-editor checkbutton:focus > check,
+window.breakpoint-editor checkbutton:focus-visible > check,
+window.breakpoint-editor checkbutton:checked > check {{
+    min-width: 14px;
+    min-height: 14px;
+    margin: 0 5px 0 0;
+    padding: 0;
+    border-width: 1px;
+    box-shadow: none;
+}}
+
+window.breakpoint-editor spinbutton {{
+    min-height: 32px;
+    padding: 0;
+    color: @app_fg;
+    background: @app_bg;
+    border: 1px solid @app_border;
+}}
+
+window.breakpoint-editor spinbutton:hover {{ border-color: @app_border; }}
+window.breakpoint-editor spinbutton:focus-within {{ border-color: @app_accent; }}
+
+window.breakpoint-editor spinbutton > button {{
+    min-width: 28px;
+    min-height: 30px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}}
+
+window.breakpoint-editor > box > box:last-child > button,
+window.breakpoint-editor > box > box:last-child > button:hover,
+window.breakpoint-editor > box > box:last-child > button:focus,
+window.breakpoint-editor > box > box:last-child > button:focus-visible,
+window.breakpoint-editor > box > box:last-child > button:active {{
+    min-height: 23px;
+    margin: 0;
+    padding: 1px 7px;
+    border: 0;
+}}
 
 window.value-editor dropdown.value-editor-select > button {{
     min-height: 28px;

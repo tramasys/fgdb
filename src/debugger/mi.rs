@@ -1009,6 +1009,22 @@ impl<'a> Parser<'a> {
 
     fn tuple_inner(&mut self) -> Result<MiValue, String> {
         self.expect(b'{')?;
+        // GDB renders breakpoint command lists as `script={"silent",...}`.
+        // That is a braced value list rather than the result tuple required by
+        // the published MI grammar, but frontends still need to accept GDB's
+        // own output. Keep ordinary `{name=value}` tuples unchanged.
+        if self.peek() == Some(b'"') {
+            let mut items = Vec::new();
+            loop {
+                self.bump_item()?;
+                items.push(MiListItem::Value(self.value()?));
+                if self.consume(b'}') {
+                    break;
+                }
+                self.expect(b',')?;
+            }
+            return Ok(MiValue::List(items));
+        }
         let mut results = Vec::new();
         if !self.consume(b'}') {
             loop {

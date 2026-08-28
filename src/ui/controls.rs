@@ -5,6 +5,7 @@ pub(super) fn breakpoint_command_numbers(
     watchpoints: bool,
 ) -> Vec<String> {
     let mut numbers = Vec::new();
+    let mut seen = HashSet::new();
     for breakpoint in breakpoints.iter().filter(|breakpoint| {
         if watchpoints {
             breakpoint.is_watchpoint()
@@ -17,7 +18,7 @@ pub(super) fn breakpoint_command_numbers(
         }
     }) {
         let number = breakpoint.command_number();
-        if !numbers.iter().any(|existing| existing == number) {
+        if seen.insert(number) {
             numbers.push(number.to_owned());
         }
     }
@@ -26,12 +27,13 @@ pub(super) fn breakpoint_command_numbers(
 
 pub(super) fn signal_catchpoint_command_numbers(breakpoints: &[Breakpoint]) -> Vec<String> {
     let mut numbers = Vec::new();
+    let mut seen = HashSet::new();
     for breakpoint in breakpoints
         .iter()
         .filter(|breakpoint| breakpoint.is_signal_catchpoint())
     {
         let number = breakpoint.command_number();
-        if !numbers.iter().any(|existing| existing == number) {
+        if seen.insert(number) {
             numbers.push(number.to_owned());
         }
     }
@@ -40,13 +42,14 @@ pub(super) fn signal_catchpoint_command_numbers(breakpoints: &[Breakpoint]) -> V
 
 pub(super) fn event_catchpoint_command_numbers(breakpoints: &[Breakpoint]) -> Vec<String> {
     let mut numbers = Vec::new();
+    let mut seen = HashSet::new();
     for breakpoint in breakpoints.iter().filter(|breakpoint| {
         EventCatchpoint::ALL
             .iter()
             .any(|(event, _, _)| event.matches(breakpoint))
     }) {
         let number = breakpoint.command_number();
-        if !numbers.iter().any(|existing| existing == number) {
+        if seen.insert(number) {
             numbers.push(number.to_owned());
         }
     }
@@ -131,8 +134,14 @@ pub(super) fn set_breakpoint_enabled(
     enabled: bool,
 ) -> bool {
     let mut changed = false;
+    let location_only = number.contains('.');
     for breakpoint in breakpoints {
-        if breakpoint.command_number() == number && breakpoint.enabled != enabled {
+        let matches = if location_only {
+            breakpoint.number == number
+        } else {
+            breakpoint.command_number() == number
+        };
+        if matches && breakpoint.enabled != enabled {
             breakpoint.enabled = enabled;
             changed = true;
         }

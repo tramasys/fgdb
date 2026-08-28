@@ -185,7 +185,13 @@ pub struct Breakpoint {
     pub catch_type: Option<String>,
     pub disposition: Option<String>,
     pub hit_count: u64,
+    pub ignore_count: u64,
     pub thread: Option<String>,
+    pub inferior: Option<String>,
+    pub pending: Option<String>,
+    pub commands: Vec<String>,
+    pub parent_number: Option<String>,
+    pub location_count: usize,
 }
 
 impl Breakpoint {
@@ -213,6 +219,22 @@ impl Breakpoint {
         self.number
             .split_once('.')
             .map_or(self.number.as_str(), |(root, _)| root)
+    }
+
+    pub fn is_location(&self) -> bool {
+        self.parent_number.is_some()
+    }
+
+    pub fn is_logpoint(&self) -> bool {
+        self.kind == "dprintf"
+            || (self
+                .commands
+                .first()
+                .is_some_and(|command| command == "silent")
+                && self
+                    .commands
+                    .last()
+                    .is_some_and(|command| matches!(command.trim(), "continue" | "cont" | "c")))
     }
 }
 
@@ -652,7 +674,9 @@ pub fn has_exact_command_completion(record: &MiRecord, command: &str) -> bool {
 }
 
 fn expand_breakpoint(tuple: &[MiResult]) -> Vec<Breakpoint> {
-    let parent = breakpoint(tuple);
+    let Some(mut parent) = breakpoint(tuple) else {
+        return Vec::new();
+    };
     let mut locations: Vec<_> = result_field(tuple, "locations")
         .and_then(MiValue::as_list)
         .into_iter()
@@ -661,33 +685,45 @@ fn expand_breakpoint(tuple: &[MiResult]) -> Vec<Breakpoint> {
         .filter_map(breakpoint)
         .collect();
     if locations.is_empty() {
-        parent.into_iter().collect()
+        vec![parent]
     } else {
-        if let Some(parent) = parent {
-            for location in &mut locations {
-                if location.condition.is_none() {
-                    location.condition.clone_from(&parent.condition);
-                }
-                if location.original_location.is_none() {
-                    location
-                        .original_location
-                        .clone_from(&parent.original_location);
-                }
-                if location.catch_type.is_none() {
-                    location.catch_type.clone_from(&parent.catch_type);
-                }
-                if location.disposition.is_none() {
-                    location.disposition.clone_from(&parent.disposition);
-                }
-                if location.hit_count == 0 {
-                    location.hit_count = parent.hit_count;
-                }
-                if location.thread.is_none() {
-                    location.thread.clone_from(&parent.thread);
-                }
+        parent.location_count = locations.len();
+        for location in &mut locations {
+            location.parent_number = Some(parent.number.clone());
+            if location.condition.is_none() {
+                location.condition.clone_from(&parent.condition);
+            }
+            if location.original_location.is_none() {
+                location
+                    .original_location
+                    .clone_from(&parent.original_location);
+            }
+            if location.catch_type.is_none() {
+                location.catch_type.clone_from(&parent.catch_type);
+            }
+            if location.disposition.is_none() {
+                location.disposition.clone_from(&parent.disposition);
+            }
+            if location.hit_count == 0 {
+                location.hit_count = parent.hit_count;
+            }
+            if location.ignore_count == 0 {
+                location.ignore_count = parent.ignore_count;
+            }
+            if location.thread.is_none() {
+                location.thread.clone_from(&parent.thread);
+            }
+            if location.inferior.is_none() {
+                location.inferior.clone_from(&parent.inferior);
+            }
+            if location.commands.is_empty() {
+                location.commands.clone_from(&parent.commands);
             }
         }
-        locations
+        let mut expanded = Vec::with_capacity(locations.len() + 1);
+        expanded.push(parent);
+        expanded.extend(locations);
+        expanded
     }
 }
 
@@ -710,7 +746,25 @@ fn breakpoint(tuple: &[MiResult]) -> Option<Breakpoint> {
         hit_count: constant(tuple, "times")
             .and_then(|times| times.parse().ok())
             .unwrap_or(0),
+        ignore_count: constant(tuple, "ignore")
+            .and_then(|count| count.parse().ok())
+            .unwrap_or(0),
         thread: owned_constant(tuple, "thread"),
+        inferior: owned_constant(tuple, "inferior"),
+        pending: owned_constant(tuple, "pending"),
+        commands: result_field(tuple, "script")
+            .and_then(MiValue::as_list)
+            .into_iter()
+            .flatten()
+            .filter_map(|item| match item {
+                MiListItem::Value(MiValue::Const(command)) => Some(command.clone()),
+                MiListItem::Result(_) | MiListItem::Value(MiValue::Tuple(_) | MiValue::List(_)) => {
+                    None
+                }
+            })
+            .collect(),
+        parent_number: None,
+        location_count: 0,
     })
 }
 
@@ -931,6 +985,20 @@ mod tests {
         assert_eq!(catchpoints[0].catch_type.as_deref(), Some("throw"));
         assert!(!catchpoints[0].is_signal_catchpoint());
         assert!(catchpoints[1].is_signal_catchpoint());
+
+        let multi = breakpoints(&parse_record(r#"8^done,BreakpointTable={body=[bkpt={number="5",type="breakpoint",disp="keep",enabled="y",addr="<MULTIPLE>",times="2",ignore="3",script={"silent","printf \"hit\\n\"","continue"},original-location="Payload::Payload",locations=[{number="5.1",enabled="y",addr="0x10",func="Payload::Payload()",file="a.cpp",line="9"},{number="5.2",enabled="n",addr="0x20",func="Payload::Payload(Payload&&)",file="a.cpp",line="9"}]}]}"#).unwrap());
+        assert_eq!(multi.len(), 3);
+        assert_eq!(multi[0].location_count, 2);
+        assert_eq!(multi[0].ignore_count, 3);
+        assert!(multi[0].is_logpoint());
+        assert_eq!(multi[0].commands.len(), 3);
+        assert_eq!(multi[1].parent_number.as_deref(), Some("5"));
+        assert_eq!(multi[2].parent_number.as_deref(), Some("5"));
+        assert!(!multi[2].enabled);
+
+        let pending = breakpoints(&parse_record(r#"9^done,BreakpointTable={body=[bkpt={number="6",type="breakpoint",disp="keep",enabled="y",addr="<PENDING>",pending="future_function",times="0",original-location="future_function"}]}"#).unwrap());
+        assert_eq!(pending[0].pending.as_deref(), Some("future_function"));
+        assert_eq!(pending[0].address.as_deref(), Some("<PENDING>"));
     }
 
     #[test]

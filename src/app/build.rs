@@ -343,6 +343,14 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+    ui.set_breakpoint_editor_handler(move |request| {
+        let Some(client) = weak_client.upgrade() else {
+            return;
+        };
+        edit_breakpoint(weak_ui.clone(), &client, request);
+    });
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
     ui.set_watchpoint_insert_handler(move |expression, access| {
         let Some(client) = weak_client.upgrade() else {
             return;

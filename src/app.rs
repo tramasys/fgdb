@@ -20,7 +20,7 @@ use crate::{
         launch_gdb,
     },
     theme::Theme,
-    ui::{EventCatchpoint, Ui, WatchpointAccess},
+    ui::{BreakpointEditRequest, BreakpointSpec, EventCatchpoint, Ui, WatchpointAccess},
 };
 
 const MAX_POINTER_CHAIN_DEPTH: usize = 3;

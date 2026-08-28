@@ -587,6 +587,7 @@ pub(super) fn build_workspace(
         stack_store: inspector.stack_store,
         stack_empty: inspector.stack_empty,
         breakpoints_list: inspector.breakpoints_list,
+        add_breakpoint_button: inspector.add_breakpoint_button,
         delete_all_breakpoints_button: inspector.delete_all_breakpoints_button,
         delete_all_watchpoints_button: inspector.delete_all_watchpoints_button,
         delete_all_catchpoints_button: inspector.delete_all_catchpoints_button,
@@ -882,7 +883,7 @@ pub(super) fn build_inspector(
     let breakpoints_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
     breakpoints_page.add_css_class("sidebar");
     let hint = gtk::Label::new(Some(
-        "Click the source gutter to add a breakpoint. Conditions are shown on each row.",
+        "Use the source gutter for line breakpoints, or Add breakpoint for advanced locations and behavior.",
     ));
     hint.add_css_class("muted");
     hint.set_halign(gtk::Align::Start);
@@ -895,6 +896,13 @@ pub(super) fn build_inspector(
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
     let breakpoint_bulk_actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    let add_breakpoint_button = gtk::Button::with_label("Add breakpoint");
+    add_breakpoint_button.add_css_class("inline-action");
+    add_breakpoint_button.add_css_class("primary-control");
+    add_breakpoint_button.set_tooltip_text(Some(
+        "Add a breakpoint by function, address, source line, or regular expression",
+    ));
+    add_breakpoint_button.set_sensitive(false);
     let delete_all_breakpoints_button = gtk::Button::with_label("Delete all BPs");
     delete_all_breakpoints_button.add_css_class("inline-action");
     delete_all_breakpoints_button.add_css_class("danger-action");
@@ -914,6 +922,10 @@ pub(super) fn build_inspector(
         "Delete event catchpoints, preserving signal catchpoints",
     ));
     delete_all_catchpoints_button.set_sensitive(false);
+    let breakpoint_bulk_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    breakpoint_bulk_spacer.set_hexpand(true);
+    breakpoint_bulk_actions.append(&add_breakpoint_button);
+    breakpoint_bulk_actions.append(&breakpoint_bulk_spacer);
     breakpoint_bulk_actions.append(&delete_all_breakpoints_button);
     breakpoint_bulk_actions.append(&delete_all_watchpoints_button);
     breakpoint_bulk_actions.append(&delete_all_catchpoints_button);
@@ -1084,6 +1096,7 @@ pub(super) fn build_inspector(
         stack_store,
         stack_empty,
         breakpoints_list,
+        add_breakpoint_button,
         delete_all_breakpoints_button,
         delete_all_watchpoints_button,
         delete_all_catchpoints_button,

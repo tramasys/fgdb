@@ -1552,6 +1552,248 @@ pub(super) fn open_breakpoint_condition_editor(
     entry.select_region(0, -1);
 }
 
+pub(super) fn open_breakpoint_editor(
+    parent: &gtk::ApplicationWindow,
+    breakpoint: Option<Breakpoint>,
+    handler: Rc<RefCell<Option<BreakpointEditorHandler>>>,
+) {
+    let original = breakpoint.clone();
+    let spec = breakpoint.as_ref().map_or_else(
+        || BreakpointSpec {
+            location: String::new(),
+            regex: false,
+            enabled: true,
+            temporary: false,
+            allow_pending: false,
+            condition: None,
+            stop_after: 1,
+            thread: None,
+            inferior: None,
+            commands: Vec::new(),
+            logpoint: false,
+        },
+        BreakpointSpec::from_breakpoint,
+    );
+    let title = breakpoint.as_ref().map_or_else(
+        || String::from("Add breakpoint"),
+        |breakpoint| format!("Edit breakpoint #{}", breakpoint.command_number()),
+    );
+    let editor = gtk::Window::builder()
+        .title(title)
+        .transient_for(parent)
+        .modal(true)
+        .default_width(700)
+        .default_height(570)
+        .build();
+    editor.add_css_class("value-editor");
+    editor.add_css_class("breakpoint-editor");
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
+
+    let grid = gtk::Grid::builder()
+        .column_spacing(10)
+        .row_spacing(6)
+        .build();
+    let field_label = |text: &str| {
+        let label = gtk::Label::new(Some(text));
+        label.add_css_class("muted");
+        label.set_halign(gtk::Align::End);
+        label
+    };
+    let location = gtk::Entry::builder()
+        .placeholder_text("function, *0xaddress, or file:line")
+        .hexpand(true)
+        .build();
+    location.set_text(&spec.location);
+    grid.attach(&field_label("Location"), 0, 0, 1, 1);
+    grid.attach(&location, 1, 0, 3, 1);
+
+    let regex = gtk::CheckButton::with_label("Function regex");
+    regex.set_active(spec.regex);
+    regex.set_sensitive(breakpoint.is_none());
+    let enabled = gtk::CheckButton::with_label("Enabled");
+    enabled.set_active(spec.enabled);
+    let temporary = gtk::CheckButton::with_label("Temporary");
+    temporary.set_active(spec.temporary);
+    let pending = gtk::CheckButton::with_label("Allow pending");
+    pending.set_active(spec.allow_pending);
+    let options = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    options.append(&regex);
+    options.append(&enabled);
+    options.append(&temporary);
+    options.append(&pending);
+    grid.attach(&field_label("Behavior"), 0, 1, 1, 1);
+    grid.attach(&options, 1, 1, 3, 1);
+
+    let condition = gtk::Entry::builder()
+        .placeholder_text("optional GDB expression")
+        .hexpand(true)
+        .build();
+    condition.set_text(spec.condition.as_deref().unwrap_or(""));
+    grid.attach(&field_label("Condition"), 0, 2, 1, 1);
+    grid.attach(&condition, 1, 2, 3, 1);
+
+    let stop_after = gtk::SpinButton::with_range(1.0, f64::from(u32::MAX), 1.0);
+    stop_after.set_value(spec.stop_after.max(1) as f64);
+    stop_after.set_width_chars(9);
+    grid.attach(&field_label("Stop on hit"), 0, 3, 1, 1);
+    grid.attach(&stop_after, 1, 3, 1, 1);
+
+    let thread = gtk::Entry::builder()
+        .placeholder_text("all threads")
+        .hexpand(true)
+        .build();
+    thread.set_text(spec.thread.as_deref().unwrap_or(""));
+    let inferior = gtk::Entry::builder()
+        .placeholder_text("all inferiors")
+        .hexpand(true)
+        .build();
+    inferior.set_text(spec.inferior.as_deref().unwrap_or(""));
+    grid.attach(&field_label("Thread"), 0, 4, 1, 1);
+    grid.attach(&thread, 1, 4, 1, 1);
+    grid.attach(&field_label("Inferior"), 2, 4, 1, 1);
+    grid.attach(&inferior, 3, 4, 1, 1);
+    content.append(&grid);
+
+    let command_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    let command_title = gtk::Label::new(Some("COMMANDS"));
+    command_title.add_css_class("section-title");
+    command_title.set_halign(gtk::Align::Start);
+    command_title.set_hexpand(true);
+    let logpoint = gtk::CheckButton::with_label("Logpoint / auto-continue");
+    logpoint.set_active(spec.logpoint);
+    command_header.append(&command_title);
+    command_header.append(&logpoint);
+    content.append(&command_header);
+    let command_hint = gtk::Label::new(Some(
+        "One GDB command per line. Logpoints add ‘silent’ and ‘continue’ automatically.",
+    ));
+    command_hint.add_css_class("muted");
+    command_hint.set_halign(gtk::Align::Start);
+    command_hint.set_wrap(true);
+    content.append(&command_hint);
+    let commands = gtk::TextView::new();
+    commands.set_monospace(true);
+    commands.set_wrap_mode(gtk::WrapMode::None);
+    commands.buffer().set_text(&spec.commands.join("\n"));
+    let commands_scrolled = gtk::ScrolledWindow::builder()
+        .child(&commands)
+        .min_content_height(130)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .build();
+    content.append(&commands_scrolled);
+
+    let validation = gtk::Label::new(None);
+    validation.add_css_class("value-editor-validation");
+    validation.set_halign(gtk::Align::Start);
+    validation.set_wrap(true);
+    content.append(&validation);
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let apply = gtk::Button::with_label(if breakpoint.is_some() {
+        "Apply"
+    } else {
+        "Add breakpoint"
+    });
+    apply.add_css_class("primary-control");
+    actions.append(&cancel);
+    actions.append(&apply);
+    content.append(&actions);
+    editor.set_child(Some(&content));
+    connect_escape_to_close(&editor);
+
+    let update_regex_controls = {
+        let regex = regex.clone();
+        let pending = pending.clone();
+        let thread = thread.clone();
+        let inferior = inferior.clone();
+        move || {
+            let restricted = regex.is_active();
+            pending.set_sensitive(!restricted);
+            thread.set_sensitive(!restricted);
+            inferior.set_sensitive(!restricted);
+        }
+    };
+    update_regex_controls();
+    regex.connect_toggled(move |_| update_regex_controls());
+
+    let commands_for_logpoint = commands.clone();
+    logpoint.connect_toggled(move |toggle| {
+        if !toggle.is_active() {
+            return;
+        }
+        let buffer = commands_for_logpoint.buffer();
+        if buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .trim()
+            .is_empty()
+        {
+            buffer.set_text("printf \"breakpoint hit\\n\"");
+        }
+    });
+
+    let editor_for_apply = editor.clone();
+    let location_for_apply = location.clone();
+    let apply_for_location = apply.clone();
+    location.connect_activate(move |_| apply_for_location.emit_clicked());
+    let apply_for_condition = apply.clone();
+    condition.connect_activate(move |_| apply_for_condition.emit_clicked());
+    apply.connect_clicked(move |_| {
+        let location_text = location_for_apply.text().trim().to_owned();
+        if location_text.is_empty() {
+            validation.set_text("Enter a function, address, source line, or function regex.");
+            location_for_apply.grab_focus();
+            return;
+        }
+        let regex_active = regex.is_active();
+        let buffer = commands.buffer();
+        let command_lines = buffer
+            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect();
+        let optional = |text: glib::GString| {
+            let text = text.trim().to_owned();
+            (!text.is_empty()).then_some(text)
+        };
+        let request = BreakpointEditRequest {
+            original: original.clone(),
+            spec: BreakpointSpec {
+                location: location_text,
+                regex: regex_active,
+                enabled: enabled.is_active(),
+                temporary: temporary.is_active(),
+                allow_pending: !regex_active && pending.is_active(),
+                condition: optional(condition.text()),
+                stop_after: u64::try_from(stop_after.value_as_int()).unwrap_or(1).max(1),
+                thread: (!regex_active).then(|| optional(thread.text())).flatten(),
+                inferior: (!regex_active).then(|| optional(inferior.text())).flatten(),
+                commands: command_lines,
+                logpoint: logpoint.is_active(),
+            },
+        };
+        if let Some(handler) = handler.borrow().as_ref() {
+            handler(request);
+        }
+        editor_for_apply.close();
+    });
+    let editor_for_cancel = editor.clone();
+    cancel.connect_clicked(move |_| editor_for_cancel.close());
+
+    editor.present();
+    location.grab_focus();
+    if breakpoint.is_none() {
+        location.select_region(0, -1);
+    }
+}
+
 pub(super) fn connect_escape_to_close(window: &gtk::Window) {
     let keys = gtk::EventControllerKey::new();
     keys.set_propagation_phase(gtk::PropagationPhase::Capture);

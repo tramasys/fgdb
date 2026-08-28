@@ -137,6 +137,7 @@ impl Ui {
             stack_details_generation: Rc::new(Cell::new(None)),
             stack_empty: workspace.stack_empty,
             breakpoints_list: workspace.breakpoints_list,
+            add_breakpoint_button: workspace.add_breakpoint_button,
             delete_all_breakpoints_button: workspace.delete_all_breakpoints_button,
             delete_all_watchpoints_button: workspace.delete_all_watchpoints_button,
             delete_all_catchpoints_button: workspace.delete_all_catchpoints_button,
@@ -194,6 +195,7 @@ impl Ui {
             source_jump_handler: Rc::new(RefCell::new(None)),
             breakpoint_delete_handler: Rc::new(RefCell::new(None)),
             breakpoint_condition_handler: Rc::new(RefCell::new(None)),
+            breakpoint_editor_handler: Rc::new(RefCell::new(None)),
             breakpoint_enabled_handler: Rc::new(RefCell::new(None)),
             breakpoint_bulk_delete_handler: Rc::new(RefCell::new(None)),
             signal_catchpoint_handler: Rc::new(RefCell::new(None)),
@@ -702,6 +704,8 @@ impl Ui {
         self.load_symbols_button.set_sensitive(can_move);
         let breakpoints = self.breakpoints.borrow();
         let can_edit_stop_points = ready && !running && !pending;
+        self.add_breakpoint_button
+            .set_sensitive(can_edit_stop_points);
         for (button, _, _) in &self.signal_buttons {
             button.set_sensitive(can_edit_stop_points);
         }
@@ -818,6 +822,11 @@ impl Ui {
         handler: impl Fn(String, Option<String>) + 'static,
     ) {
         self.breakpoint_condition_handler
+            .replace(Some(Rc::new(handler)));
+    }
+
+    pub fn set_breakpoint_editor_handler(&self, handler: impl Fn(BreakpointEditRequest) + 'static) {
+        self.breakpoint_editor_handler
             .replace(Some(Rc::new(handler)));
     }
 

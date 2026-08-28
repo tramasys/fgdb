@@ -101,6 +101,7 @@ type ExpressionWatchRefreshHandler = Rc<dyn Fn()>;
 type StringAssignmentHandler = Rc<dyn Fn(Variable, Vec<u8>, StringAssignmentKind)>;
 type VectorAssignmentHandler = Rc<dyn Fn(String, String, Vec<(usize, String)>)>;
 type BreakpointConditionHandler = Rc<dyn Fn(String, Option<String>)>;
+type BreakpointEditorHandler = Rc<dyn Fn(BreakpointEditRequest)>;
 type BreakpointEnabledHandler = Rc<dyn Fn(String, bool)>;
 type BreakpointBulkDeleteHandler = Rc<dyn Fn(Vec<String>)>;
 type BreakpointInsertHandler = Rc<dyn Fn(PathBuf, u32)>;
@@ -112,6 +113,84 @@ type MemoryWatchHandler = Rc<dyn Fn(u64, String, usize)>;
 type InstructionMemoryHandler = Rc<dyn Fn(String)>;
 type KernelRefreshHandler = Rc<dyn Fn()>;
 type KernelSectionHandler = Rc<dyn Fn(&str, bool)>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BreakpointSpec {
+    pub location: String,
+    pub regex: bool,
+    pub enabled: bool,
+    pub temporary: bool,
+    pub allow_pending: bool,
+    pub condition: Option<String>,
+    pub stop_after: u64,
+    pub thread: Option<String>,
+    pub inferior: Option<String>,
+    pub commands: Vec<String>,
+    pub logpoint: bool,
+}
+
+impl BreakpointSpec {
+    fn from_breakpoint(breakpoint: &Breakpoint) -> Self {
+        let logpoint = breakpoint.is_logpoint();
+        let mut commands = breakpoint.commands.clone();
+        if logpoint {
+            if commands.first().is_some_and(|command| command == "silent") {
+                commands.remove(0);
+            }
+            if commands
+                .last()
+                .is_some_and(|command| matches!(command.trim(), "continue" | "cont" | "c"))
+            {
+                commands.pop();
+            }
+        }
+        Self {
+            location: breakpoint
+                .original_location
+                .clone()
+                .or_else(|| breakpoint.address.clone())
+                .unwrap_or_default(),
+            regex: false,
+            enabled: breakpoint.enabled,
+            temporary: breakpoint.disposition.as_deref() == Some("del"),
+            allow_pending: breakpoint.pending.is_some(),
+            condition: breakpoint.condition.clone(),
+            stop_after: breakpoint.ignore_count.saturating_add(1),
+            thread: breakpoint.thread.clone(),
+            inferior: breakpoint.inferior.clone(),
+            commands,
+            logpoint,
+        }
+    }
+
+    pub(crate) fn effective_commands(&self) -> Vec<String> {
+        if !self.logpoint {
+            return self.commands.clone();
+        }
+        let mut commands = Vec::with_capacity(self.commands.len() + 2);
+        if !self
+            .commands
+            .first()
+            .is_some_and(|command| command == "silent")
+        {
+            commands.push(String::from("silent"));
+        }
+        commands.extend(self.commands.iter().cloned());
+        if !commands
+            .last()
+            .is_some_and(|command| matches!(command.trim(), "continue" | "cont" | "c"))
+        {
+            commands.push(String::from("continue"));
+        }
+        commands
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BreakpointEditRequest {
+    pub original: Option<Breakpoint>,
+    pub spec: BreakpointSpec,
+}
 
 struct KernelViewBindings<'a> {
     refresh_handler: &'a Rc<RefCell<Option<KernelRefreshHandler>>>,
@@ -798,6 +877,7 @@ pub struct Ui {
     stack_details_generation: Rc<Cell<Option<u64>>>,
     stack_empty: gtk::Label,
     breakpoints_list: gtk::Box,
+    add_breakpoint_button: gtk::Button,
     delete_all_breakpoints_button: gtk::Button,
     delete_all_watchpoints_button: gtk::Button,
     delete_all_catchpoints_button: gtk::Button,
@@ -855,6 +935,7 @@ pub struct Ui {
     source_jump_handler: Rc<RefCell<Option<SourceJumpHandler>>>,
     breakpoint_delete_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
     breakpoint_condition_handler: Rc<RefCell<Option<BreakpointConditionHandler>>>,
+    breakpoint_editor_handler: Rc<RefCell<Option<BreakpointEditorHandler>>>,
     breakpoint_enabled_handler: Rc<RefCell<Option<BreakpointEnabledHandler>>>,
     breakpoint_bulk_delete_handler: Rc<RefCell<Option<BreakpointBulkDeleteHandler>>>,
     signal_catchpoint_handler: Rc<RefCell<Option<SignalCatchpointHandler>>>,
@@ -927,6 +1008,7 @@ struct Workspace {
     stack_store: gio::ListStore,
     stack_empty: gtk::Label,
     breakpoints_list: gtk::Box,
+    add_breakpoint_button: gtk::Button,
     delete_all_breakpoints_button: gtk::Button,
     delete_all_watchpoints_button: gtk::Button,
     delete_all_catchpoints_button: gtk::Button,
@@ -980,6 +1062,7 @@ struct Inspector {
     stack_store: gio::ListStore,
     stack_empty: gtk::Label,
     breakpoints_list: gtk::Box,
+    add_breakpoint_button: gtk::Button,
     delete_all_breakpoints_button: gtk::Button,
     delete_all_watchpoints_button: gtk::Button,
     delete_all_catchpoints_button: gtk::Button,
@@ -1818,7 +1901,13 @@ mod tests {
             original_location: None,
             disposition: Some(String::from("keep")),
             hit_count: 0,
+            ignore_count: 0,
             thread: None,
+            inferior: None,
+            pending: None,
+            commands: Vec::new(),
+            parent_number: None,
+            location_count: 0,
         };
         let stop_points = vec![
             stop_point("1.1", "breakpoint"),
@@ -1867,6 +1956,9 @@ mod tests {
         assert!(!stop_points[1].enabled);
         assert!(stop_points[2].enabled);
         assert!(!set_breakpoint_enabled(&mut stop_points, "1", false));
+        assert!(set_breakpoint_enabled(&mut stop_points, "1.1", true));
+        assert!(stop_points[0].enabled);
+        assert!(!stop_points[1].enabled);
         stop_points[0].address = Some(String::from("0x0000000000401000"));
         assert_eq!(
             breakpoint_command_number_at_address(&stop_points, "0x401000").as_deref(),
