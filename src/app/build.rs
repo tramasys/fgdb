@@ -205,6 +205,14 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+    ui.set_misc_refresh_handler(move || {
+        let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
+            return;
+        };
+        request_misc_refresh(weak_ui, client);
+    });
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
     ui.set_breakpoint_insert_handler(move |path, line| {
         let Some(client) = weak_client.upgrade() else {
             return;

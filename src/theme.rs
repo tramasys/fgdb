@@ -1604,6 +1604,35 @@ stackswitcher.kernel-tabs button:checked {{
     padding: 0 3px;
 }}
 
+.misc-startup-controls {{
+    min-height: 29px;
+    padding: 3px 5px;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}}
+
+.misc-startup-warning {{
+    padding: 4px 6px;
+    color: @app_danger;
+    background: alpha(@app_danger, 0.08);
+    border-bottom: 1px solid alpha(@app_danger, 0.28);
+}}
+
+.misc-vector-section > .section-title {{
+    min-height: 22px;
+    padding: 2px 6px;
+    color: @app_accent;
+    background: @app_raised;
+    border-bottom: 1px solid @app_border;
+}}
+
+.misc-vector-name {{
+    color: @app_accent;
+    font-weight: 700;
+}}
+
+.misc-vector-table label.debug-table-cell {{ min-height: 23px; }}
+
 .kernel-table-controls {{ padding: 2px 3px; }}
 .kernel-table-summary {{ padding: 3px 4px; }}
 

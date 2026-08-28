@@ -36,7 +36,8 @@ use crate::{
     kernel::{
         KernelBaseline, KernelFileDescriptor, KernelLimit, KernelMapping, KernelMappingChange,
         KernelMemoryCategory, KernelProcess, KernelSignal, KernelSnapshot, KernelThread,
-        KernelTlsModule, KernelTlsSymbol,
+        KernelTlsModule, KernelTlsSymbol, ProcessArgument, ProcessEnvironment,
+        ProcessStartupSnapshot,
     },
     source,
     theme::Theme,
@@ -114,6 +115,7 @@ type InstructionMemoryHandler = Rc<dyn Fn(String)>;
 type DisassemblyHandler = Rc<dyn Fn(DisassemblyRequest)>;
 type DisassemblySourceCache = Rc<RefCell<HashMap<PathBuf, Rc<Vec<Rc<str>>>>>>;
 type KernelRefreshHandler = Rc<dyn Fn()>;
+type MiscRefreshHandler = Rc<dyn Fn()>;
 type KernelSectionHandler = Rc<dyn Fn(&str, bool)>;
 type DebugSessionHandler = Rc<dyn Fn(DebugSession)>;
 type SessionActionHandler = Rc<dyn Fn(SessionAction)>;
@@ -229,6 +231,17 @@ struct KernelViewBindings<'a> {
     refresh_handler: &'a Rc<RefCell<Option<KernelRefreshHandler>>>,
     remembered_disclosures: &'a HashMap<String, bool>,
     section_handler: &'a Rc<RefCell<Option<KernelSectionHandler>>>,
+}
+
+struct MiscViewBindings<'a> {
+    refresh_handler: &'a Rc<RefCell<Option<MiscRefreshHandler>>>,
+}
+
+struct InspectorBindings<'a> {
+    variable_children_handler: &'a Rc<RefCell<Option<VariableChildrenHandler>>>,
+    target_pointer_bits: &'a Rc<Cell<u32>>,
+    kernel: KernelViewBindings<'a>,
+    misc: MiscViewBindings<'a>,
 }
 
 #[derive(Clone)]
@@ -600,6 +613,24 @@ struct KernelView {
     process_store: gio::ListStore,
     process_count: gtk::Label,
     processes_empty: gtk::Label,
+}
+
+#[derive(Clone)]
+struct MiscView {
+    root: gtk::Box,
+    active: Rc<Cell<bool>>,
+    tracking_enabled: Rc<Cell<bool>>,
+    in_flight: Rc<Cell<bool>>,
+    needs_refresh: Rc<Cell<bool>>,
+    refresh_button: gtk::Button,
+    status: gtk::Label,
+    summary: gtk::Label,
+    warning: gtk::Label,
+    arguments_store: gio::ListStore,
+    arguments_empty: gtk::Label,
+    environment_store: gio::ListStore,
+    environment_empty: gtk::Label,
+    startup_split: gtk::Paned,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -989,6 +1020,9 @@ pub struct Ui {
     kernel_view: KernelView,
     kernel_refresh_handler: Rc<RefCell<Option<KernelRefreshHandler>>>,
     kernel_refresh_generation: Rc<Cell<u64>>,
+    misc_view: MiscView,
+    misc_refresh_handler: Rc<RefCell<Option<MiscRefreshHandler>>>,
+    misc_refresh_generation: Rc<Cell<u64>>,
     debugger_pid: Rc<Cell<Option<u32>>>,
     layout: layout::Persistence,
     breakpoints: Rc<RefCell<Vec<Breakpoint>>>,
@@ -1126,6 +1160,7 @@ struct Workspace {
     memory_format: gtk::DropDown,
     memory_add_button: gtk::Button,
     kernel_view: KernelView,
+    misc_view: MiscView,
 }
 
 struct Inspector {
@@ -1182,6 +1217,7 @@ struct Inspector {
     memory_format: gtk::DropDown,
     memory_add_button: gtk::Button,
     kernel_view: KernelView,
+    misc_view: MiscView,
 }
 
 struct LeftSidebar {
@@ -1198,6 +1234,7 @@ mod dialogs;
 mod formatting;
 mod kernel_view;
 mod memory_view;
+mod misc_view;
 mod session;
 mod source_actions;
 mod source_view;
@@ -1211,6 +1248,7 @@ use dialogs::*;
 use formatting::*;
 use kernel_view::*;
 use memory_view::*;
+use misc_view::*;
 use source_view::*;
 use views::*;
 

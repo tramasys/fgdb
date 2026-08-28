@@ -27,14 +27,22 @@ impl Ui {
         let breakpoints = Rc::new(RefCell::new(Vec::new()));
         let variable_children_handler = Rc::new(RefCell::new(None));
         let kernel_refresh_handler = Rc::new(RefCell::new(None));
+        let misc_refresh_handler = Rc::new(RefCell::new(None));
         let kernel_section_handler = Rc::new(RefCell::new(None));
         let remembered_disclosures = layout::remembered_disclosures();
         let target_pointer_bits = Rc::new(Cell::new(usize::BITS));
         let target_pointer_bits_known = Rc::new(Cell::new(false));
-        let kernel_view_bindings = KernelViewBindings {
-            refresh_handler: &kernel_refresh_handler,
-            remembered_disclosures: &remembered_disclosures,
-            section_handler: &kernel_section_handler,
+        let inspector_bindings = InspectorBindings {
+            variable_children_handler: &variable_children_handler,
+            target_pointer_bits: &target_pointer_bits,
+            kernel: KernelViewBindings {
+                refresh_handler: &kernel_refresh_handler,
+                remembered_disclosures: &remembered_disclosures,
+                section_handler: &kernel_section_handler,
+            },
+            misc: MiscViewBindings {
+                refresh_handler: &misc_refresh_handler,
+            },
         };
 
         let workspace = build_workspace(
@@ -42,9 +50,7 @@ impl Ui {
             theme,
             &source_notebook,
             &terminal,
-            &variable_children_handler,
-            &target_pointer_bits,
-            &kernel_view_bindings,
+            &inspector_bindings,
         );
         root.append(&workspace.root);
         root.append(&workspace.status_detail);
@@ -180,6 +186,9 @@ impl Ui {
             kernel_view: workspace.kernel_view,
             kernel_refresh_handler,
             kernel_refresh_generation: Rc::new(Cell::new(0)),
+            misc_view: workspace.misc_view,
+            misc_refresh_handler,
+            misc_refresh_generation: Rc::new(Cell::new(0)),
             debugger_pid: Rc::new(Cell::new(None)),
             layout,
             breakpoints,
@@ -732,6 +741,9 @@ impl Ui {
         self.kernel_view
             .refresh_button
             .set_sensitive(can_inspect && !self.kernel_view.in_flight.get());
+        self.misc_view
+            .refresh_button
+            .set_sensitive(can_inspect && !self.misc_view.in_flight.get());
         self.locals_view.set_sensitive(can_inspect);
         self.locals_edit_button.set_sensitive(
             can_inspect

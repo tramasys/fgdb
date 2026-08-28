@@ -8,6 +8,11 @@ mod elf;
 mod memory;
 mod process;
 mod resources;
+mod startup;
+
+pub(crate) use startup::{
+    ProcessArgument, ProcessEnvironment, ProcessStartupSnapshot, read_process_startup,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct KernelFact {

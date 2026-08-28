@@ -571,9 +571,7 @@ pub(super) fn build_workspace(
     theme: &Theme,
     source_notebook: &gtk::Notebook,
     terminal: &vte4::Terminal,
-    variable_children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
-    target_pointer_bits: &Rc<Cell<u32>>,
-    kernel_view_bindings: &KernelViewBindings<'_>,
+    inspector_bindings: &InspectorBindings<'_>,
 ) -> Workspace {
     let workspace = gtk::Paned::new(gtk::Orientation::Horizontal);
     workspace.add_css_class("workspace-columns");
@@ -583,11 +581,7 @@ pub(super) fn build_workspace(
     workspace.set_shrink_start_child(false);
     workspace.set_resize_start_child(true);
     workspace.set_wide_handle(false);
-    let inspector = build_inspector(
-        variable_children_handler,
-        target_pointer_bits,
-        kernel_view_bindings,
-    );
+    let inspector = build_inspector(inspector_bindings);
     workspace.set_end_child(Some(&inspector.root));
 
     let navigation_and_editor = gtk::Paned::new(gtk::Orientation::Horizontal);
@@ -614,6 +608,11 @@ pub(super) fn build_workspace(
         layout::Pane::new("locals_instructions", &inspector.context_split),
         layout::Pane::with_default_fraction("memory_inspector_map", &inspector.memory_split, 0.5),
         layout::Pane::new("kernel_changes", &inspector.kernel_view.changes_split),
+        layout::Pane::with_default_fraction(
+            "misc_startup_vectors",
+            &inspector.misc_view.startup_split,
+            0.42,
+        ),
     ];
     let mut debug_state_panels = inspector.stale_panels.clone();
     debug_state_panels.push(left_sidebar.root.clone().upcast());
@@ -675,6 +674,7 @@ pub(super) fn build_workspace(
         memory_format: inspector.memory_format,
         memory_add_button: inspector.memory_add_button,
         kernel_view: inspector.kernel_view,
+        misc_view: inspector.misc_view,
     }
 }
 
@@ -728,11 +728,7 @@ pub(super) fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSi
     }
 }
 
-pub(super) fn build_inspector(
-    variable_children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
-    target_pointer_bits: &Rc<Cell<u32>>,
-    kernel_view_bindings: &KernelViewBindings<'_>,
-) -> Inspector {
+pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     let notebook = gtk::Notebook::new();
     notebook.set_size_request(260, 0);
     notebook.set_scrollable(true);
@@ -745,10 +741,15 @@ pub(super) fn build_inspector(
     detail.set_halign(gtk::Align::Start);
     detail.set_ellipsize(pango::EllipsizeMode::Middle);
     detail.set_single_line_mode(true);
-    let (locals_view, locals_store, locals_selection) =
-        build_locals_view(variable_children_handler, target_pointer_bits);
+    let (locals_view, locals_store, locals_selection) = build_locals_view(
+        bindings.variable_children_handler,
+        bindings.target_pointer_bits,
+    );
     let (expression_watches_view, expression_watches_store, expression_watches_selection) =
-        build_locals_view(variable_children_handler, target_pointer_bits);
+        build_locals_view(
+            bindings.variable_children_handler,
+            bindings.target_pointer_bits,
+        );
     let locals_empty = empty_label("Values appear when the target is paused");
     let locals_scrolled = gtk::ScrolledWindow::builder()
         .child(&locals_view)
@@ -1083,7 +1084,7 @@ pub(super) fn build_inspector(
     memory_map_header.append(&memory_map_search);
     memory_map_section.append(&memory_map_header);
     let (memory_regions_view, memory_region_store) =
-        build_memory_region_view(target_pointer_bits, &memory_map_search);
+        build_memory_region_view(bindings.target_pointer_bits, &memory_map_search);
     let memory_regions_empty = empty_label("Mappings appear when the target is paused");
     let memory_regions_scrolled = gtk::ScrolledWindow::builder()
         .child(&memory_regions_view)
@@ -1263,7 +1264,8 @@ pub(super) fn build_inspector(
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
-    let kernel_view = build_kernel_view(kernel_view_bindings);
+    let kernel_view = build_kernel_view(&bindings.kernel);
+    let misc_view = build_misc_view(&bindings.misc);
 
     notebook.append_page(&state, Some(&gtk::Label::new(Some("Context"))));
     notebook.append_page(
@@ -1280,6 +1282,7 @@ pub(super) fn build_inspector(
     notebook.append_page(&signals_page, Some(&gtk::Label::new(Some("Signals"))));
     let kernel_page =
         notebook.append_page(&kernel_view.root, Some(&gtk::Label::new(Some("Kernel"))));
+    let misc_page = notebook.append_page(&misc_view.root, Some(&gtk::Label::new(Some("Misc"))));
     let notebook_for_selection = notebook.clone();
     notebook.connect_switch_page(move |_, _, _| {
         let notebook = notebook_for_selection.clone();
@@ -1289,7 +1292,13 @@ pub(super) fn build_inspector(
         &notebook,
         kernel_page,
         &kernel_view,
-        kernel_view_bindings.refresh_handler,
+        bindings.kernel.refresh_handler,
+    );
+    connect_misc_tab_visibility(
+        &notebook,
+        misc_page,
+        &misc_view,
+        bindings.misc.refresh_handler,
     );
     let stale_panels = vec![
         state.clone().upcast(),
@@ -1299,6 +1308,7 @@ pub(super) fn build_inspector(
         memory_page.clone().upcast(),
         signals_page.clone().upcast(),
         kernel_view.root.clone().upcast(),
+        misc_view.root.clone().upcast(),
     ];
     Inspector {
         root: notebook,
@@ -1354,6 +1364,7 @@ pub(super) fn build_inspector(
         memory_format,
         memory_add_button,
         kernel_view,
+        misc_view,
     }
 }
 

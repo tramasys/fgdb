@@ -44,6 +44,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ui.start_stop_refresh();
             ui.start_thread_refresh();
             ui.invalidate_kernel_refresh();
+            ui.invalidate_misc_refresh();
             ui.clear_execution_location();
             ui.set_status(
                 "Running",
@@ -84,6 +85,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 Some("status-ready"),
             );
             ui.refresh_kernel_after_stop();
+            ui.refresh_misc_after_stop();
         }
         MiEvent::BreakpointsChanged => refresh_breakpoints(weak_ui, client),
         MiEvent::ThreadsChanged => {

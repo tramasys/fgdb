@@ -237,6 +237,7 @@ impl Ui {
         self.memory_regions.borrow_mut().clear();
         self.memory_regions_empty.set_visible(true);
         self.clear_kernel_snapshot();
+        self.clear_misc_snapshot();
         for watch in self.memory_watches.borrow().iter() {
             watch.status.remove_css_class("memory-watch-error");
             watch.status.set_text("target is not paused");
