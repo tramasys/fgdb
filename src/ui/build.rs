@@ -49,7 +49,7 @@ pub(super) fn build_topbar(
     session_summary.append(&session_target_label);
     session_menu.append(&session_summary);
     session_menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    let new_session_button = session_menu_action("New session…", "›");
+    let new_session_button = session_menu_action("New session", "›");
     new_session_button.add_css_class("session-primary-action");
     let restart_session_button = session_menu_action("Restart", "start again");
     let kill_session_button = session_menu_action("Kill inferior", "terminate");
@@ -612,6 +612,7 @@ pub(super) fn build_workspace(
         layout::Pane::new("navigation_source", &navigation_and_editor),
         layout::Pane::new("workspace_terminal", &main_and_terminal),
         layout::Pane::new("locals_instructions", &inspector.context_split),
+        layout::Pane::with_default_fraction("memory_inspector_map", &inspector.memory_split, 0.5),
         layout::Pane::new("kernel_changes", &inspector.kernel_view.changes_split),
     ];
     let mut debug_state_panels = inspector.stale_panels.clone();
@@ -666,9 +667,9 @@ pub(super) fn build_workspace(
         signal_add_button: inspector.signal_add_button,
         delete_all_signal_catchpoints_button: inspector.delete_all_signal_catchpoints_button,
         memory_region_store: inspector.memory_region_store,
+        memory_regions_view: inspector.memory_regions_view,
         memory_regions_empty: inspector.memory_regions_empty,
-        memory_watch_list: inspector.memory_watch_list,
-        memory_watches_empty: inspector.memory_watches_empty,
+        memory_watch_container: inspector.memory_watch_container,
         memory_address_entry: inspector.memory_address_entry,
         memory_size: inspector.memory_size,
         memory_format: inspector.memory_format,
@@ -962,11 +963,26 @@ pub(super) fn build_inspector(
     stack_page.append(&stack_scrolled);
     stack_page.append(&stack_word_inspector.root);
 
-    let memory_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    let memory_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     memory_page.add_css_class("sidebar");
-    memory_page.append(&section_title("ADD MEMORY WATCH"));
     let memory_controls = gtk::Box::new(gtk::Orientation::Vertical, 3);
     memory_controls.add_css_class("memory-watch-command");
+    let memory_command_header = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    let memory_command_title = section_title("MEMORY INSPECTOR");
+    memory_command_title.set_hexpand(true);
+    memory_command_header.append(&memory_command_title);
+    let memory_refresh_all = gtk::Button::with_label("Refresh all");
+    memory_refresh_all.add_css_class("inline-action");
+    memory_refresh_all.set_tooltip_text(Some("Re-read every open memory inspector"));
+    memory_refresh_all.set_sensitive(false);
+    let memory_clear_all = gtk::Button::with_label("Close all");
+    memory_clear_all.add_css_class("inline-action");
+    memory_clear_all.add_css_class("danger-action");
+    memory_clear_all.set_tooltip_text(Some("Close every memory inspector"));
+    memory_clear_all.set_sensitive(false);
+    memory_command_header.append(&memory_refresh_all);
+    memory_command_header.append(&memory_clear_all);
+    memory_controls.append(&memory_command_header);
     let expression_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
     let memory_address_entry = gtk::Entry::builder()
         .placeholder_text("$rsp, ptr + 0x20, or 0x404000")
@@ -974,18 +990,18 @@ pub(super) fn build_inspector(
         .build();
     memory_address_entry
         .set_tooltip_text(Some("Any GDB expression that resolves to a memory address"));
-    let memory_add_button = gtk::Button::with_label("Add watch");
+    let memory_add_button = gtk::Button::with_label("Inspect");
     memory_add_button.add_css_class("inline-action");
     memory_add_button.set_sensitive(false);
     expression_row.append(&memory_address_entry);
     expression_row.append(&memory_add_button);
 
-    let memory_options = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let memory_options = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     memory_options.add_css_class("memory-watch-options");
     memory_options.append(&section_title("LENGTH"));
-    let memory_size = gtk::SpinButton::with_range(8.0, 4096.0, 8.0);
-    memory_size.set_value(128.0);
-    memory_size.set_width_chars(4);
+    let memory_size = gtk::SpinButton::with_range(1.0, 4096.0, 1.0);
+    memory_size.set_value(256.0);
+    memory_size.set_width_chars(5);
     memory_size.set_tooltip_text(Some("Bytes to read"));
     let memory_size_unit = gtk::Label::new(Some("bytes"));
     memory_size_unit.add_css_class("muted");
@@ -995,35 +1011,108 @@ pub(super) fn build_inspector(
     memory_options.append(&memory_size_unit);
     memory_options.append(&memory_options_spacer);
     memory_options.append(&section_title("DISPLAY"));
-    let memory_format = gtk::DropDown::from_strings(&["Bytes", "Words", "Pointers"]);
+    let memory_format = gtk::DropDown::from_strings(&[
+        "Hex bytes",
+        "u16 / i16",
+        "u32 / i32",
+        "u64 / i64",
+        "f32",
+        "f64",
+        "Pointers",
+    ]);
     memory_format.set_selected(0);
     memory_format.set_tooltip_text(Some("How to group and render the memory values"));
     memory_options.append(&memory_format);
     memory_controls.append(&expression_row);
     memory_controls.append(&memory_options);
     memory_page.append(&memory_controls);
-    memory_page.append(&section_title("WATCHES"));
-    let memory_watches_empty = empty_label("No memory watches. Add an expression above.");
-    memory_page.append(&memory_watches_empty);
-    let memory_watch_list = gtk::Box::new(gtk::Orientation::Vertical, 3);
-    let memory_watches_scrolled = gtk::ScrolledWindow::builder()
-        .child(&memory_watch_list)
-        .min_content_height(170)
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Automatic)
+
+    let memory_watch_section = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    memory_watch_section.add_css_class("memory-inspector-section");
+    let memory_watch_header = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    memory_watch_header.add_css_class("subpanel-header");
+    let memory_watch_title = section_title("OPEN INSPECTORS");
+    memory_watch_title.set_hexpand(true);
+    memory_watch_header.append(&memory_watch_title);
+    let memory_watch_hint = gtk::Label::new(Some("changes are compared with the previous read"));
+    memory_watch_hint.add_css_class("muted");
+    memory_watch_header.append(&memory_watch_hint);
+    memory_watch_section.append(&memory_watch_header);
+    let memory_watches_empty = empty_label(
+        "No memory inspectors. Enter an address or expression above, or open a mapping below.",
+    );
+    memory_watches_empty.set_vexpand(true);
+    memory_watches_empty.set_hexpand(true);
+    memory_watches_empty.set_halign(gtk::Align::Fill);
+    memory_watches_empty.set_xalign(0.0);
+    memory_watches_empty.set_wrap(false);
+    memory_watches_empty.set_ellipsize(pango::EllipsizeMode::End);
+    memory_watch_section.append(&memory_watches_empty);
+    let memory_watch_notebook = gtk::Notebook::new();
+    memory_watch_notebook.add_css_class("memory-watch-notebook");
+    memory_watch_notebook.set_scrollable(true);
+    memory_watch_notebook.set_show_border(false);
+    memory_watch_notebook.set_vexpand(true);
+    memory_watch_notebook.set_visible(false);
+    memory_watch_section.append(&memory_watch_notebook);
+    let memory_watch_container = MemoryWatchContainer {
+        notebook: memory_watch_notebook,
+        empty: memory_watches_empty,
+        refresh_all: memory_refresh_all,
+        clear_all: memory_clear_all,
+    };
+
+    let memory_map_section = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    memory_map_section.add_css_class("memory-map-section");
+    let memory_map_header = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    memory_map_header.add_css_class("subpanel-header");
+    let memory_map_title = section_title("VIRTUAL MEMORY MAP");
+    memory_map_title.set_hexpand(true);
+    memory_map_header.append(&memory_map_title);
+    let memory_map_hint = gtk::Label::new(Some("Double-click a mapping to inspect it"));
+    memory_map_hint.add_css_class("muted");
+    memory_map_header.append(&memory_map_hint);
+    let memory_map_search = gtk::SearchEntry::builder()
+        .placeholder_text("Filter mappings")
+        .width_request(190)
         .build();
-    memory_page.append(&memory_watches_scrolled);
-    memory_page.append(&section_title("VIRTUAL MEMORY MAP"));
-    let (memory_regions_view, memory_region_store) = build_memory_region_view(target_pointer_bits);
+    memory_map_search.add_css_class("memory-map-search");
+    memory_map_search.set_tooltip_text(Some(
+        "Filter by address, permissions, register annotation, or backing path",
+    ));
+    memory_map_header.append(&memory_map_search);
+    memory_map_section.append(&memory_map_header);
+    let (memory_regions_view, memory_region_store) =
+        build_memory_region_view(target_pointer_bits, &memory_map_search);
     let memory_regions_empty = empty_label("Mappings appear when the target is paused");
     let memory_regions_scrolled = gtk::ScrolledWindow::builder()
         .child(&memory_regions_view)
-        .min_content_height(190)
+        .min_content_height(48)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
-    memory_page.append(&memory_regions_empty);
-    memory_page.append(&memory_regions_scrolled);
+    memory_map_section.append(&memory_regions_empty);
+    memory_map_section.append(&memory_regions_scrolled);
+
+    let memory_split = gtk::Paned::new(gtk::Orientation::Vertical);
+    memory_split.add_css_class("memory-inspector-split");
+    memory_split.set_shrink_start_child(false);
+    memory_split.set_shrink_end_child(true);
+    memory_split.set_resize_start_child(true);
+    memory_split.set_start_child(Some(&memory_watch_section));
+    memory_split.set_end_child(Some(&memory_map_section));
+    memory_split.set_vexpand(true);
+    memory_split.connect_position_notify(|split| {
+        // GtkPaned otherwise lets the end child collapse completely. Keep the
+        // map header, filter, and first table row reachable while still
+        // allowing an actual 50/50 initial split on compact windows.
+        const MINIMUM_MAP_HEIGHT: i32 = 92;
+        let maximum = split.height().saturating_sub(MINIMUM_MAP_HEIGHT);
+        if maximum > 0 && split.position() > maximum {
+            split.set_position(maximum);
+        }
+    });
+    memory_page.append(&memory_split);
 
     let breakpoints_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
     breakpoints_page.add_css_class("sidebar");
@@ -1256,9 +1345,10 @@ pub(super) fn build_inspector(
         signal_add_button,
         delete_all_signal_catchpoints_button,
         memory_region_store,
+        memory_regions_view,
         memory_regions_empty,
-        memory_watch_list,
-        memory_watches_empty,
+        memory_watch_container,
+        memory_split,
         memory_address_entry,
         memory_size,
         memory_format,

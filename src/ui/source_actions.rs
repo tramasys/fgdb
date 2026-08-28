@@ -240,9 +240,12 @@ impl Ui {
         for watch in self.memory_watches.borrow().iter() {
             watch.status.remove_css_class("memory-watch-error");
             watch.status.set_text("target is not paused");
-            watch.output_addresses.set_text("");
-            watch.output_values.set_text("");
-            watch.output_decoded.set_text("");
+            watch.range.set_text("");
+            watch.store.remove_all();
+            watch.selection.set_selected(gtk::INVALID_LIST_POSITION);
+            watch.follow_button.set_sensitive(false);
+            watch.previous_begin.set(None);
+            watch.previous_bytes.borrow_mut().clear();
         }
     }
 

@@ -487,7 +487,11 @@ struct SourceDocument {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MemoryWatchFormat {
     Bytes,
-    Words,
+    U16,
+    U32,
+    U64,
+    F32,
+    F64,
     Pointers,
 }
 
@@ -514,10 +518,24 @@ struct MemoryWatchView {
     expression: String,
     byte_count: usize,
     format: MemoryWatchFormat,
+    page: gtk::Box,
+    page_offset: Rc<Cell<i64>>,
     status: gtk::Label,
-    output_addresses: gtk::Label,
-    output_values: gtk::Label,
-    output_decoded: gtk::Label,
+    range: gtk::Label,
+    offset: gtk::Label,
+    store: gio::ListStore,
+    selection: gtk::SingleSelection,
+    follow_button: gtk::Button,
+    previous_begin: Rc<Cell<Option<u64>>>,
+    previous_bytes: Rc<RefCell<Vec<u8>>>,
+}
+
+#[derive(Clone)]
+struct MemoryWatchContainer {
+    notebook: gtk::Notebook,
+    empty: gtk::Label,
+    refresh_all: gtk::Button,
+    clear_all: gtk::Button,
 }
 
 #[derive(Clone)]
@@ -649,18 +667,15 @@ struct KernelMemoryUnitRow {
     pages: gtk::Label,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct MemoryWatchText {
-    addresses: String,
-    values: String,
-    decoded: String,
-}
-
 impl MemoryWatchFormat {
     const fn label(self) -> &'static str {
         match self {
-            Self::Bytes => "BYTE VIEW",
-            Self::Words => "32-BIT WORDS",
+            Self::Bytes => "HEX BYTES",
+            Self::U16 => "16-BIT VALUES",
+            Self::U32 => "32-BIT VALUES",
+            Self::U64 => "64-BIT VALUES",
+            Self::F32 => "32-BIT FLOATS",
+            Self::F64 => "64-BIT FLOATS",
             Self::Pointers => "POINTERS",
         }
     }
@@ -961,11 +976,11 @@ pub struct Ui {
     until_condition_entry: gtk::Entry,
     until_condition_button: gtk::Button,
     memory_region_store: gio::ListStore,
+    memory_regions_view: gtk::ColumnView,
     memory_regions_empty: gtk::Label,
     memory_regions: Rc<RefCell<Vec<MemoryRegion>>>,
     memory_watches: Rc<RefCell<Vec<MemoryWatchView>>>,
-    memory_watch_list: gtk::Box,
-    memory_watches_empty: gtk::Label,
+    memory_watch_container: MemoryWatchContainer,
     memory_address_entry: gtk::Entry,
     memory_size: gtk::SpinButton,
     memory_format: gtk::DropDown,
@@ -1103,9 +1118,9 @@ struct Workspace {
     signal_add_button: gtk::Button,
     delete_all_signal_catchpoints_button: gtk::Button,
     memory_region_store: gio::ListStore,
+    memory_regions_view: gtk::ColumnView,
     memory_regions_empty: gtk::Label,
-    memory_watch_list: gtk::Box,
-    memory_watches_empty: gtk::Label,
+    memory_watch_container: MemoryWatchContainer,
     memory_address_entry: gtk::Entry,
     memory_size: gtk::SpinButton,
     memory_format: gtk::DropDown,
@@ -1158,9 +1173,10 @@ struct Inspector {
     signal_add_button: gtk::Button,
     delete_all_signal_catchpoints_button: gtk::Button,
     memory_region_store: gio::ListStore,
+    memory_regions_view: gtk::ColumnView,
     memory_regions_empty: gtk::Label,
-    memory_watch_list: gtk::Box,
-    memory_watches_empty: gtk::Label,
+    memory_watch_container: MemoryWatchContainer,
+    memory_split: gtk::Paned,
     memory_address_entry: gtk::Entry,
     memory_size: gtk::SpinButton,
     memory_format: gtk::DropDown,
@@ -1181,6 +1197,7 @@ mod debug_state;
 mod dialogs;
 mod formatting;
 mod kernel_view;
+mod memory_view;
 mod session;
 mod source_actions;
 mod source_view;
@@ -1193,6 +1210,7 @@ use controls::*;
 use dialogs::*;
 use formatting::*;
 use kernel_view::*;
+use memory_view::*;
 use source_view::*;
 use views::*;
 
@@ -1201,11 +1219,11 @@ mod tests {
     use std::{collections::HashSet, path::Path};
 
     use super::{
-        EventCatchpoint, GEF_COMMAND_CAPABILITIES, IntegerFormat, IntegerRadix, MemoryWatchFormat,
-        RefreshGate, StringStorage, VectorLaneFormat, breakpoint_command_number_at_address,
+        EventCatchpoint, GEF_COMMAND_CAPABILITIES, IntegerFormat, IntegerRadix, RefreshGate,
+        StringStorage, VectorLaneFormat, breakpoint_command_number_at_address,
         breakpoint_command_numbers, compact_function_name, conditional_branch_taken,
         event_catchpoint_command_number, event_catchpoint_command_numbers, flags_markup,
-        format_memory_watch, format_register_value, format_register_value_for_architecture,
+        format_register_value, format_register_value_for_architecture,
         format_register_value_for_target, full_address, instruction_arguments_description,
         instruction_flow_description, instruction_flow_target, instruction_memory_expression,
         integer_decimal_value, normalized_signal_name, parse_character_input, parse_integer_input,
@@ -1918,30 +1936,6 @@ mod tests {
         );
         assert!(vector.contains("uint128 = 0x1"));
         assert_ne!(vector, "{");
-    }
-
-    #[test]
-    fn formats_memory_watches() {
-        let dump = format_memory_watch(
-            0x1000,
-            &[0x41, 0x42, 0, 0xff],
-            MemoryWatchFormat::Bytes,
-            64,
-            TargetEndian::Little,
-        );
-        assert_eq!(dump.addresses, "0x0000000000001000");
-        assert_eq!(dump.values, "41 42 00 ff");
-        assert_eq!(dump.decoded, "AB··");
-
-        let dump32 = format_memory_watch(
-            0x804_9000,
-            &[0, 0, 0, 0],
-            MemoryWatchFormat::Pointers,
-            32,
-            TargetEndian::Little,
-        );
-        assert_eq!(dump32.addresses, "0x08049000");
-        assert_eq!(dump32.values, "0x00000000");
     }
 
     #[test]

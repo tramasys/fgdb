@@ -834,8 +834,7 @@ impl Ui {
             return;
         };
         if add_memory_watch(
-            &self.memory_watch_list,
-            &self.memory_watches_empty,
+            &self.memory_watch_container,
             &self.memory_watches,
             &self.memory_watch_handler,
             expression.clone(),
@@ -1067,8 +1066,7 @@ impl Ui {
     }
 
     pub(super) fn connect_memory_controls(&self) {
-        let list = self.memory_watch_list.clone();
-        let empty = self.memory_watches_empty.clone();
+        let container = self.memory_watch_container.clone();
         let watches = Rc::clone(&self.memory_watches);
         let handler = Rc::clone(&self.memory_watch_handler);
         let expression = self.memory_address_entry.clone();
@@ -1083,13 +1081,16 @@ impl Ui {
             }
             let byte_count = usize::try_from(size.value_as_int()).unwrap_or(128);
             let format = match format.selected() {
-                1 => MemoryWatchFormat::Words,
-                2 => MemoryWatchFormat::Pointers,
+                1 => MemoryWatchFormat::U16,
+                2 => MemoryWatchFormat::U32,
+                3 => MemoryWatchFormat::U64,
+                4 => MemoryWatchFormat::F32,
+                5 => MemoryWatchFormat::F64,
+                6 => MemoryWatchFormat::Pointers,
                 _ => MemoryWatchFormat::Bytes,
             };
             let added = add_memory_watch(
-                &list,
-                &empty,
+                &container,
                 &watches,
                 &handler,
                 expression_text,
@@ -1130,6 +1131,46 @@ impl Ui {
                     && !entry.text().trim().is_empty(),
             );
         });
+
+        let ui = self.clone();
+        self.memory_watch_container
+            .refresh_all
+            .connect_clicked(move |_| ui.refresh_memory_watches());
+
+        let container = self.memory_watch_container.clone();
+        let watches = Rc::clone(&self.memory_watches);
+        self.memory_watch_container
+            .clear_all
+            .connect_clicked(move |_| clear_memory_watches(&container, &watches));
+
+        self.memory_regions_view.set_single_click_activate(false);
+        let container = self.memory_watch_container.clone();
+        let watches = Rc::clone(&self.memory_watches);
+        let handler = Rc::clone(&self.memory_watch_handler);
+        let size = self.memory_size.clone();
+        self.memory_regions_view
+            .connect_activate(move |view, position| {
+                let Some(region) = view
+                    .model()
+                    .and_then(|model| model.item(position))
+                    .and_downcast::<glib::BoxedAnyObject>()
+                else {
+                    return;
+                };
+                let region = region.borrow::<MemoryRegion>();
+                let requested = usize::try_from(size.value_as_int()).unwrap_or(128);
+                let region_size =
+                    usize::try_from(region.end.saturating_sub(region.start)).unwrap_or(usize::MAX);
+                let byte_count = requested.min(region_size).max(1);
+                let _ = add_memory_watch(
+                    &container,
+                    &watches,
+                    &handler,
+                    format!("0x{:x}", region.start),
+                    byte_count,
+                    MemoryWatchFormat::Bytes,
+                );
+            });
     }
 
     pub(super) fn connect_watchpoint_controls(&self) {
@@ -1222,19 +1263,24 @@ impl Ui {
     }
 
     pub fn refresh_memory_watches(&self) {
-        let Some(handler) = self.memory_watch_handler.borrow().clone() else {
+        let watches = self.memory_watches.borrow().clone();
+        if watches.is_empty() {
             return;
-        };
-        for watch in self.memory_watches.borrow().iter() {
-            watch.status.remove_css_class("memory-watch-error");
-            watch.status.set_text("reading…");
-            handler(watch.id, watch.expression.clone(), watch.byte_count);
+        }
+        update_memory_container_state(&self.memory_watch_container, true);
+        for watch in &watches {
+            request_memory_watch(watch, &self.memory_watch_handler);
         }
     }
 
     pub fn show_memory_watch(&self, id: u64, result: Result<&MemoryBlock, &str>) {
-        let watches = self.memory_watches.borrow();
-        let Some(watch) = watches.iter().find(|watch| watch.id == id) else {
+        let watch = self
+            .memory_watches
+            .borrow()
+            .iter()
+            .find(|watch| watch.id == id)
+            .cloned();
+        let Some(watch) = watch else {
             return;
         };
         match result {
@@ -1243,48 +1289,24 @@ impl Ui {
                     (watch.format == MemoryWatchFormat::Bytes).then_some(TargetEndian::Little)
                 });
                 let Some(endian) = endian else {
-                    watch.status.add_css_class("memory-watch-error");
-                    watch
-                        .status
-                        .set_text("Target byte order is unavailable; use Bytes display");
-                    watch.output_addresses.set_text("");
-                    watch.output_values.set_text("");
-                    watch.output_decoded.set_text("");
+                    show_memory_watch_error(
+                        &watch,
+                        "Target byte order is unavailable; use Hex bytes display",
+                    );
+                    update_memory_container_state(&self.memory_watch_container, false);
                     return;
                 };
-                watch.status.remove_css_class("memory-watch-error");
-                let region = self
-                    .memory_regions
-                    .borrow()
-                    .iter()
-                    .find(|region| region.contains(memory.begin))
-                    .map(MemoryRegion::description)
-                    .unwrap_or_else(|| String::from("unmapped"));
-                let width = usize::try_from(self.target_pointer_bits() / 4)
-                    .unwrap_or(16)
-                    .clamp(8, 16);
-                watch
-                    .status
-                    .set_text(&format!("0x{:0width$x} · {region}", memory.begin));
-                let output = format_memory_watch(
-                    memory.begin,
-                    &memory.bytes,
-                    watch.format,
+                show_memory_watch_data(
+                    &watch,
+                    memory,
+                    &self.memory_regions.borrow(),
                     self.target_pointer_bits.get(),
                     endian,
                 );
-                watch.output_addresses.set_text(&output.addresses);
-                watch.output_values.set_text(&output.values);
-                watch.output_decoded.set_text(&output.decoded);
             }
-            Err(error) => {
-                watch.status.add_css_class("memory-watch-error");
-                watch.status.set_text(error);
-                watch.output_addresses.set_text("");
-                watch.output_values.set_text("");
-                watch.output_decoded.set_text("");
-            }
+            Err(error) => show_memory_watch_error(&watch, error),
         }
+        update_memory_container_state(&self.memory_watch_container, false);
     }
 
     pub fn show_breakpoints(&self, breakpoints: Vec<Breakpoint>) {

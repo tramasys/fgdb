@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fmt::Write as _,
     fs, io,
     path::{Path, PathBuf},
@@ -13,6 +13,7 @@ use gtk::{glib, prelude::*};
 use super::KernelSectionHandler;
 
 const SAVE_DELAY: Duration = Duration::from_millis(350);
+const MAPPED_PANE_RESTORE_DELAY: Duration = Duration::from_millis(100);
 const MIN_WINDOW_WIDTH: i32 = 320;
 const MIN_WINDOW_HEIGHT: i32 = 200;
 const MAX_WINDOW_DIMENSION: i32 = 32_768;
@@ -33,6 +34,7 @@ pub(super) fn remembered_disclosures() -> HashMap<String, bool> {
 pub(super) struct Pane {
     key: &'static str,
     widget: gtk::Paned,
+    default_fraction: Option<f64>,
 }
 
 impl Pane {
@@ -40,6 +42,20 @@ impl Pane {
         Self {
             key,
             widget: widget.clone(),
+            default_fraction: None,
+        }
+    }
+
+    pub(super) fn with_default_fraction(
+        key: &'static str,
+        widget: &gtk::Paned,
+        default_fraction: f64,
+    ) -> Self {
+        debug_assert!((0.0..=1.0).contains(&default_fraction));
+        Self {
+            key,
+            widget: widget.clone(),
+            default_fraction: Some(default_fraction.clamp(0.0, 1.0)),
         }
     }
 }
@@ -74,20 +90,50 @@ impl Persistence {
             remembered: RefCell::new(remembered),
             normal_window_size: Cell::new(normal_window_size),
             pending_save: RefCell::new(None),
+            pending_pane_restores: RefCell::new(HashSet::new()),
             restore_started: Cell::new(false),
+            restoring_position: Cell::new(false),
             surface_connected: Cell::new(false),
             ready_to_save: Cell::new(false),
         });
 
         for pane in &state.panes {
             let weak_state = Rc::downgrade(&state);
-            pane.widget.connect_position_notify(move |_| {
+            let key = pane.key;
+            pane.widget.connect_position_notify(move |widget| {
                 let Some(state) = weak_state.upgrade() else {
                     return;
                 };
-                if state.ready_to_save.get() {
+                let restore_pending = state.pending_pane_restores.borrow().contains(key);
+                if state.ready_to_save.get() && !state.restoring_position.get() && !restore_pending
+                {
+                    state.remember_position(key, widget);
                     state.schedule_save();
                 }
+            });
+
+            let weak_state = Rc::downgrade(&state);
+            let key = pane.key;
+            let default_fraction = pane.default_fraction;
+            pane.widget.connect_map(move |widget| {
+                let Some(state) = weak_state.upgrade() else {
+                    return;
+                };
+                if !state.ready_to_save.get() {
+                    return;
+                }
+                state.pending_pane_restores.borrow_mut().insert(key);
+                let widget = widget.clone();
+                let weak_state = Rc::downgrade(&state);
+                glib::timeout_add_local_once(MAPPED_PANE_RESTORE_DELAY, move || {
+                    let Some(state) = weak_state.upgrade() else {
+                        return;
+                    };
+                    if state.ready_to_save.get() && widget.is_mapped() {
+                        state.restore_position(key, default_fraction, &widget);
+                    }
+                    state.pending_pane_restores.borrow_mut().remove(key);
+                });
             });
         }
 
@@ -133,7 +179,9 @@ struct State {
     remembered: RefCell<RememberedLayout>,
     normal_window_size: Cell<WindowSize>,
     pending_save: RefCell<Option<glib::SourceId>>,
+    pending_pane_restores: RefCell<HashSet<&'static str>>,
     restore_started: Cell<bool>,
+    restoring_position: Cell<bool>,
     surface_connected: Cell<bool>,
     ready_to_save: Cell<bool>,
 }
@@ -176,17 +224,69 @@ impl State {
     }
 
     fn restore_positions(&self) {
-        let remembered = self.remembered.borrow();
         for pane in &self.panes {
-            let Some(saved) = remembered.panes.get(pane.key) else {
-                continue;
-            };
-            let maximum = pane.widget.max_position();
-            if maximum <= 0 {
-                continue;
+            if pane.widget.is_mapped() {
+                self.restore_position(pane.key, pane.default_fraction, &pane.widget);
             }
-            pane.widget
-                .set_position(scale_position(*saved, pane.widget.min_position(), maximum));
+        }
+    }
+
+    fn restore_position(
+        &self,
+        key: &'static str,
+        default_fraction: Option<f64>,
+        widget: &gtk::Paned,
+    ) {
+        let maximum = widget.max_position();
+        let minimum = widget.min_position();
+        if !valid_pane_range(minimum, maximum) {
+            return;
+        }
+        // `set_position` emits `position-notify` synchronously. Drop the
+        // immutable RefCell borrow before entering GTK so that callback can
+        // record the applied position without tripping a re-entrant borrow.
+        let saved = self.remembered.borrow().panes.get(key).copied();
+        if let Some(saved) = saved {
+            self.set_position(widget, scale_position(saved, minimum, maximum));
+            return;
+        }
+        let Some(fraction) = default_fraction else {
+            return;
+        };
+        let extent = match widget.orientation() {
+            gtk::Orientation::Horizontal => widget.width(),
+            gtk::Orientation::Vertical => widget.height(),
+            _ => 0,
+        };
+        if extent > 0 {
+            self.set_position(
+                widget,
+                fractional_position(fraction, extent, minimum, maximum),
+            );
+        }
+    }
+
+    fn set_position(&self, widget: &gtk::Paned, position: i32) {
+        self.restoring_position.set(true);
+        widget.set_position(position);
+        self.restoring_position.set(false);
+    }
+
+    fn remember_position(&self, key: &'static str, widget: &gtk::Paned) {
+        if !widget.is_mapped() {
+            return;
+        }
+        let minimum = widget.min_position();
+        let maximum = widget.max_position();
+        let position = widget.position();
+        if valid_live_pane_position(position, minimum, maximum) {
+            self.remembered.borrow_mut().panes.insert(
+                key.to_owned(),
+                PanePosition {
+                    position,
+                    extent: maximum,
+                },
+            );
         }
     }
 
@@ -262,12 +362,17 @@ impl State {
             maximized: self.window.is_maximized(),
         });
         for pane in &self.panes {
+            if !pane.widget.is_mapped() {
+                continue;
+            }
             let maximum = pane.widget.max_position();
-            if maximum > pane.widget.min_position() {
+            let minimum = pane.widget.min_position();
+            let position = pane.widget.position();
+            if valid_live_pane_position(position, minimum, maximum) {
                 remembered.panes.insert(
                     pane.key.to_owned(),
                     PanePosition {
-                        position: pane.widget.position(),
+                        position,
                         extent: maximum,
                     },
                 );
@@ -313,6 +418,18 @@ fn scale_position(saved: PanePosition, minimum: i32, maximum: i32) -> i32 {
         i64::from(saved.position)
     };
     scaled.clamp(i64::from(minimum), i64::from(maximum)) as i32
+}
+
+fn fractional_position(fraction: f64, extent: i32, minimum: i32, maximum: i32) -> i32 {
+    ((f64::from(extent) * fraction).round() as i32).clamp(minimum, maximum)
+}
+
+fn valid_pane_range(minimum: i32, maximum: i32) -> bool {
+    maximum > minimum && maximum <= MAX_WINDOW_DIMENSION
+}
+
+fn valid_live_pane_position(position: i32, minimum: i32, maximum: i32) -> bool {
+    valid_pane_range(minimum, maximum) && position > minimum && position < maximum
 }
 
 fn valid_window_size(width: i32, height: i32) -> bool {
@@ -363,7 +480,7 @@ fn parse_layout(contents: &str) -> RememberedLayout {
         else {
             continue;
         };
-        if position >= 0 && extent > 0 {
+        if valid_live_pane_position(position, 0, extent) {
             remembered
                 .panes
                 .insert(key.trim().to_owned(), PanePosition { position, extent });
@@ -429,7 +546,7 @@ mod tests {
     #[test]
     fn parses_valid_layout_entries_and_ignores_malformed_ones() {
         let parsed = parse_layout(
-            "# layout\nwindow=1440,900,1\nworkspace_inspector=980,1375\ndisclosure.kernel.overview.process=1\ndisclosure.kernel.overview.scheduler=0\ndisclosure.invalid=maybe\nbroken=nope\nnegative=-1,100\n",
+            "# layout\nwindow=1440,900,1\nworkspace_inspector=980,1375\ndisclosure.kernel.overview.process=1\ndisclosure.kernel.overview.scheduler=0\ndisclosure.invalid=maybe\nbroken=nope\nnegative=-1,100\ncollapsed=100,100\nzero=0,100\noversized=1507950899,2147483647\n",
         );
 
         assert_eq!(
@@ -451,6 +568,9 @@ mod tests {
         );
         assert!(!parsed.panes.contains_key("broken"));
         assert!(!parsed.panes.contains_key("negative"));
+        assert!(!parsed.panes.contains_key("collapsed"));
+        assert!(!parsed.panes.contains_key("zero"));
+        assert!(!parsed.panes.contains_key("oversized"));
         assert_eq!(
             parsed.disclosures.get("kernel.overview.process"),
             Some(&true)
@@ -477,5 +597,7 @@ mod tests {
 
         assert_eq!(scale_position(saved, 0, 2_000), 600);
         assert_eq!(scale_position(saved, 700, 2_000), 700);
+        assert_eq!(fractional_position(0.5, 1_000, 0, 900), 500);
+        assert_eq!(fractional_position(0.5, 1_000, 600, 900), 600);
     }
 }

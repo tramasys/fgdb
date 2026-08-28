@@ -95,9 +95,21 @@ pub(super) fn insight_label(placeholder: &str) -> gtk::Label {
 
 pub(super) fn build_memory_region_view(
     target_pointer_bits: &Rc<Cell<u32>>,
+    search: &gtk::SearchEntry,
 ) -> (gtk::ColumnView, gio::ListStore) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-    let selection = gtk::NoSelection::new(Some(store.clone()));
+    let query = Rc::new(RefCell::new(String::new()));
+    let query_for_filter = Rc::clone(&query);
+    let filter = gtk::CustomFilter::new(move |object| {
+        let Some(data) = object.downcast_ref::<glib::BoxedAnyObject>() else {
+            return false;
+        };
+        memory_region_matches_filter(&data.borrow::<MemoryRegion>(), &query_for_filter.borrow())
+    });
+    let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
+    let selection = gtk::SingleSelection::new(Some(filtered));
+    selection.set_autoselect(false);
+    selection.set_can_unselect(true);
     let view = gtk::ColumnView::new(Some(selection));
     view.add_css_class("debug-table");
     view.add_css_class("memory-map-table");
@@ -119,7 +131,31 @@ pub(super) fn build_memory_region_view(
             Rc::clone(target_pointer_bits),
         ));
     }
+    search.connect_search_changed(move |search| {
+        query.replace(search.text().trim().to_ascii_lowercase());
+        filter.changed(gtk::FilterChange::Different);
+    });
     (view, store)
+}
+
+pub(super) fn memory_region_matches_filter(region: &MemoryRegion, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let search_text = format!(
+        "{:x} 0x{:x} {:x} 0x{:x} {} {} {}",
+        region.start,
+        region.start,
+        region.end,
+        region.end,
+        region.permissions,
+        region.referenced_by.join(" "),
+        region.path.as_deref().unwrap_or("anonymous"),
+    )
+    .to_ascii_lowercase();
+    query
+        .split_whitespace()
+        .all(|term| search_text.contains(term))
 }
 
 pub(super) fn memory_region_column(
@@ -138,7 +174,6 @@ pub(super) fn memory_region_column(
         label.add_css_class("debug-table-cell");
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::Middle);
-        enable_stable_text_selection(&label);
         item.set_child(Some(&label));
     });
     factory.connect_bind(move |_, object| {
@@ -191,228 +226,6 @@ pub(super) fn format_memory_size(bytes: u64) -> String {
         format!("{:.1} KiB", bytes as f64 / 1024.0)
     } else {
         format!("{bytes} B")
-    }
-}
-
-pub(super) fn add_memory_watch(
-    list: &gtk::Box,
-    empty: &gtk::Label,
-    watches: &Rc<RefCell<Vec<MemoryWatchView>>>,
-    handler: &Rc<RefCell<Option<MemoryWatchHandler>>>,
-    expression: String,
-    byte_count: usize,
-    format: MemoryWatchFormat,
-) -> bool {
-    let existing = {
-        let watches = watches.borrow();
-        watches
-            .iter()
-            .find(|watch| {
-                watch.expression == expression
-                    && watch.byte_count == byte_count
-                    && watch.format == format
-            })
-            .cloned()
-    };
-    if let Some(watch) = existing {
-        watch.status.remove_css_class("memory-watch-error");
-        watch.status.set_text("reading…");
-        if let Some(handler) = handler.borrow().as_ref() {
-            handler(watch.id, expression, byte_count);
-        }
-        return true;
-    }
-    if watches.borrow().len() >= MAX_MEMORY_WATCHES {
-        return false;
-    }
-
-    let id = watches
-        .borrow()
-        .iter()
-        .map(|watch| watch.id)
-        .max()
-        .unwrap_or(0)
-        .wrapping_add(1);
-    let row = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    row.add_css_class("memory-watch");
-    let header = gtk::Box::new(gtk::Orientation::Horizontal, 3);
-    let title = gtk::Label::new(Some(&expression));
-    title.add_css_class("local-name");
-    title.set_halign(gtk::Align::Start);
-    title.set_ellipsize(pango::EllipsizeMode::Middle);
-    title.set_hexpand(true);
-    title.set_tooltip_text(Some(&expression));
-    let metadata = gtk::Label::new(Some(&format!(
-        "{} · {}",
-        format_memory_size(byte_count as u64),
-        format.label()
-    )));
-    metadata.add_css_class("memory-watch-format");
-    metadata.set_tooltip_text(Some("Requested length and display format"));
-    let refresh = gtk::Button::with_label("Refresh");
-    refresh.add_css_class("inline-action");
-    refresh.set_tooltip_text(Some("Read this memory expression again"));
-    let remove = gtk::Button::with_label("Remove");
-    remove.add_css_class("inline-action");
-    remove.add_css_class("danger-action");
-    remove.set_tooltip_text(Some("Remove this memory watch"));
-    header.append(&title);
-    header.append(&metadata);
-    header.append(&refresh);
-    header.append(&remove);
-    let status = gtk::Label::new(Some("reading…"));
-    status.add_css_class("muted");
-    status.set_halign(gtk::Align::Start);
-    status.set_ellipsize(pango::EllipsizeMode::Middle);
-    let output = gtk::Grid::builder().column_spacing(10).build();
-    output.add_css_class("memory-watch-output");
-    let output_addresses = memory_watch_column(
-        "memory-watch-addresses",
-        "Addresses · select or copy this column independently",
-    );
-    let output_values = memory_watch_column(
-        "memory-watch-values",
-        "Raw hexadecimal values · select or copy this column independently",
-    );
-    let output_decoded = memory_watch_column(
-        "memory-watch-decoded",
-        "Decoded bytes · select or copy this column independently",
-    );
-    output.attach(&output_addresses, 0, 0, 1, 1);
-    output.attach(&output_values, 1, 0, 1, 1);
-    output.attach(&output_decoded, 2, 0, 1, 1);
-    row.append(&header);
-    row.append(&status);
-    row.append(&output);
-    list.append(&row);
-    empty.set_visible(false);
-
-    let weak_watches = Rc::downgrade(watches);
-    let weak_row = row.downgrade();
-    let list_for_remove = list.clone();
-    let empty_for_remove = empty.clone();
-    remove.connect_clicked(move |_| {
-        if let Some(row) = weak_row.upgrade() {
-            list_for_remove.remove(&row);
-        }
-        if let Some(watches) = weak_watches.upgrade() {
-            let is_empty = {
-                let mut watches = watches.borrow_mut();
-                watches.retain(|watch| watch.id != id);
-                watches.is_empty()
-            };
-            empty_for_remove.set_visible(is_empty);
-        }
-    });
-    let handler_for_refresh = Rc::clone(handler);
-    let expression_for_refresh = expression.clone();
-    let status_for_refresh = status.clone();
-    refresh.connect_clicked(move |_| {
-        status_for_refresh.remove_css_class("memory-watch-error");
-        status_for_refresh.set_text("reading…");
-        if let Some(handler) = handler_for_refresh.borrow().as_ref() {
-            handler(id, expression_for_refresh.clone(), byte_count);
-        }
-    });
-    watches.borrow_mut().push(MemoryWatchView {
-        id,
-        expression: expression.clone(),
-        byte_count,
-        format,
-        status,
-        output_addresses,
-        output_values,
-        output_decoded,
-    });
-    if let Some(handler) = handler.borrow().as_ref() {
-        handler(id, expression, byte_count);
-    }
-    true
-}
-
-pub(super) fn memory_watch_column(css_class: &str, tooltip: &str) -> gtk::Label {
-    let label = gtk::Label::new(None);
-    label.add_css_class(css_class);
-    label.set_halign(gtk::Align::Start);
-    label.set_valign(gtk::Align::Start);
-    label.set_xalign(0.0);
-    label.set_yalign(0.0);
-    enable_stable_text_selection(&label);
-    label.set_tooltip_text(Some(tooltip));
-    label
-}
-
-pub(super) fn format_memory_watch(
-    begin: u64,
-    bytes: &[u8],
-    format: MemoryWatchFormat,
-    pointer_bits: u32,
-    endian: TargetEndian,
-) -> MemoryWatchText {
-    use std::fmt::Write as _;
-
-    let chunk_size = match format {
-        MemoryWatchFormat::Words => 4,
-        MemoryWatchFormat::Pointers => usize::try_from(pointer_bits / 8).unwrap_or(8).clamp(4, 8),
-        MemoryWatchFormat::Bytes => 8,
-    };
-    let line_count = bytes.len().div_ceil(chunk_size);
-    let address_width = usize::try_from(pointer_bits / 4).unwrap_or(16).clamp(8, 16);
-    let mut addresses = String::with_capacity(line_count * (address_width + 3));
-    let mut values = String::with_capacity(bytes.len() * 3 + line_count);
-    let mut decoded = String::with_capacity(bytes.len() + line_count);
-    for (index, chunk) in bytes.chunks(chunk_size).enumerate() {
-        if index != 0 {
-            addresses.push('\n');
-            values.push('\n');
-            decoded.push('\n');
-        }
-        let _ = write!(
-            addresses,
-            "0x{:0address_width$x}",
-            begin.saturating_add((index * chunk_size) as u64)
-        );
-        match format {
-            MemoryWatchFormat::Bytes => push_hex_bytes(&mut values, chunk),
-            MemoryWatchFormat::Words => match <[u8; 4]>::try_from(chunk) {
-                Ok(chunk) => {
-                    let _ = write!(values, "0x{:08x}", endian.decode_u32(chunk));
-                }
-                Err(_) => push_hex_bytes(&mut values, chunk),
-            },
-            MemoryWatchFormat::Pointers => {
-                if let Ok(chunk) = <[u8; 8]>::try_from(chunk) {
-                    let _ = write!(values, "0x{:016x}", endian.decode_u64(chunk));
-                } else if let Ok(chunk) = <[u8; 4]>::try_from(chunk) {
-                    let _ = write!(values, "0x{:08x}", endian.decode_u32(chunk));
-                } else {
-                    push_hex_bytes(&mut values, chunk);
-                }
-            }
-        }
-        decoded.extend(chunk.iter().map(|byte| {
-            if byte.is_ascii_graphic() || *byte == b' ' {
-                char::from(*byte)
-            } else {
-                '·'
-            }
-        }));
-    }
-    MemoryWatchText {
-        addresses,
-        values,
-        decoded,
-    }
-}
-
-pub(super) fn push_hex_bytes(output: &mut String, bytes: &[u8]) {
-    use std::fmt::Write as _;
-
-    for (index, byte) in bytes.iter().enumerate() {
-        if index != 0 {
-            output.push(' ');
-        }
-        let _ = write!(output, "{byte:02x}");
     }
 }
 

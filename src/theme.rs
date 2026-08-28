@@ -734,45 +734,157 @@ window.vector-editor dropdown > button {{
 .memory-none {{ color: @app_fg; }}
 
 .memory-watch-command {{
-    padding: 4px;
-    background: alpha(@app_fg, 0.025);
-    border: 1px solid @app_border;
-}}
-
-.memory-watch-options {{
-    min-height: 23px;
-}}
-
-.memory-watch {{
-    padding: 4px;
-    background: alpha(@app_fg, 0.035);
-    border-left: 2px solid @app_border;
+    padding: 5px 6px;
+    background: @app_surface;
+    border: 0;
     border-bottom: 1px solid @app_border;
 }}
 
-.memory-watch:hover {{
-    border-left-color: @app_accent;
+.memory-watch-options {{
+    min-height: 26px;
 }}
 
-.memory-watch-format {{
-    padding: 0 4px;
-    color: @app_muted;
+.memory-watch-command entry {{
+    min-height: 27px;
+    padding: 0 8px;
+}}
+
+.memory-watch-command spinbutton,
+.memory-watch-command dropdown > button {{
+    min-height: 24px;
+    padding-top: 0;
+    padding-bottom: 0;
+}}
+
+.memory-watch-command spinbutton {{ padding: 0; }}
+
+.memory-watch-command spinbutton > text {{
+    min-height: 22px;
+    padding: 0 9px;
+}}
+
+.memory-watch-command spinbutton > button {{
+    min-width: 27px;
+    min-height: 22px;
+    padding: 0 6px;
+}}
+
+.memory-watch-command dropdown > button {{
+    padding-left: 10px;
+    padding-right: 8px;
+}}
+
+.memory-inspector-section,
+.memory-map-section,
+.memory-watch-page {{
+    background: @app_surface;
+}}
+
+.memory-inspector-section > .subpanel-header,
+.memory-map-section > .subpanel-header {{
+    min-height: 25px;
+    padding: 0 6px;
+    background: @app_raised;
+    border-bottom: 1px solid @app_border;
+}}
+
+.memory-map-search {{
+    min-height: 23px;
+    margin: 1px 0;
+}}
+
+entry.memory-map-search > image:first-child {{
+    margin-right: 5px;
+}}
+
+.memory-inspector-split > separator {{
+    min-height: 3px;
+    background: @app_border;
+    border: 0;
+}}
+
+.memory-inspector-split > separator:hover {{ background: @app_accent; }}
+
+notebook.memory-watch-notebook > header {{
     background: @app_bg;
-    font-size: 10px;
+    border-bottom: 1px solid @app_border;
 }}
 
-.memory-watch-error {{
-    color: @app_danger;
+notebook.memory-watch-notebook > header > tabs {{
+    padding: 0;
+    margin: 0;
 }}
 
-.memory-watch-output {{
+notebook.memory-watch-notebook > header > tabs > tab {{
+    min-height: 27px;
+    padding: 0 5px 0 10px;
+}}
+
+notebook.memory-watch-notebook > header > tabs > tab:checked {{
+    color: @app_accent_hover;
+    background: @app_raised;
+    box-shadow: inset 0 -2px @app_accent;
+}}
+
+.memory-watch-tab-close {{
+    min-width: 19px;
+    min-height: 19px;
+    padding: 0;
+    margin: 2px 0 2px 2px;
+    color: @app_muted;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+}}
+
+.memory-watch-tab-close:hover {{
     color: @app_fg;
-    font-size: 10px;
+    background: @app_hover;
 }}
 
-.memory-watch-addresses {{ color: @app_accent; }}
-.memory-watch-values {{ color: @app_fg; }}
-.memory-watch-decoded {{ color: @app_warning; }}
+.memory-watch-toolbar {{
+    min-height: 30px;
+    padding: 3px 5px;
+    background: @app_bg;
+    border-bottom: 1px solid @app_border;
+}}
+
+.memory-watch-expression {{
+    color: @app_accent_hover;
+    font-weight: 700;
+}}
+
+.memory-watch-offset {{
+    min-width: 54px;
+    padding: 0 5px;
+    color: @app_warning;
+    background: alpha(@app_warning, 0.08);
+}}
+
+.memory-watch-summary {{
+    min-height: 27px;
+    padding: 2px 7px;
+    color: @app_fg;
+    background: alpha(@app_fg, 0.025);
+    border-bottom: 1px solid @app_border;
+}}
+
+.memory-watch-range {{ color: @app_muted; }}
+.memory-watch-error {{ color: @app_danger; font-weight: 700; }}
+
+columnview.memory-watch-table row,
+columnview.memory-map-table row {{ min-height: 28px; }}
+
+.memory-watch-cell {{
+    min-height: 24px;
+    padding: 3px 6px;
+    font-size: 12px;
+}}
+
+.memory-row-changed {{
+    color: @app_warning;
+    background: alpha(@app_warning, 0.10);
+}}
 
 .until-menu {{
     min-width: 230px;
