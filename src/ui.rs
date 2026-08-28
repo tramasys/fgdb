@@ -27,7 +27,7 @@ use value::{
 
 use crate::{
     breakpoint_gutter::{BreakpointGutterRenderer, LineStyle},
-    config::LaunchConfig,
+    config::{DebugSession, LaunchConfig},
     debugger::{
         Breakpoint, Instruction, MemoryBlock, MemoryKind, MiClient, Register, SharedLibrary,
         SourceFile, SourceLocation, StackEntry, StackFrame, TargetArchitecture, TargetEndian,
@@ -113,6 +113,15 @@ type MemoryWatchHandler = Rc<dyn Fn(u64, String, usize)>;
 type InstructionMemoryHandler = Rc<dyn Fn(String)>;
 type KernelRefreshHandler = Rc<dyn Fn()>;
 type KernelSectionHandler = Rc<dyn Fn(&str, bool)>;
+type DebugSessionHandler = Rc<dyn Fn(DebugSession)>;
+type SessionActionHandler = Rc<dyn Fn(SessionAction)>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionAction {
+    Restart,
+    Kill,
+    Detach,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BreakpointSpec {
@@ -805,6 +814,15 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 pub struct Ui {
     pub window: gtk::ApplicationWindow,
     pub terminal: vte4::Terminal,
+    session_button: gtk::ToggleButton,
+    session_popover: gtk::Popover,
+    session_kind_label: gtk::Label,
+    session_target_label: gtk::Label,
+    new_session_button: gtk::Button,
+    restart_session_button: gtk::Button,
+    kill_session_button: gtk::Button,
+    detach_session_button: gtk::Button,
+    target_label: gtk::Label,
     terminal_toggle_button: gtk::ToggleButton,
     pub open_source_button: gtk::Button,
     pub load_symbols_button: gtk::Button,
@@ -919,8 +937,12 @@ pub struct Ui {
     module_refresh_gate: Rc<RefreshGate>,
     modules_dirty: Rc<Cell<bool>>,
     command_pending: Rc<Cell<bool>>,
+    session_pending: Rc<Cell<bool>>,
     gef_available: Rc<Cell<bool>>,
-    source_roots: Rc<Vec<PathBuf>>,
+    source_roots: Rc<RefCell<Vec<PathBuf>>>,
+    current_session: Rc<RefCell<Option<DebugSession>>>,
+    session_handler: Rc<RefCell<Option<DebugSessionHandler>>>,
+    session_action_handler: Rc<RefCell<Option<SessionActionHandler>>>,
     frame_selection_handler: Rc<RefCell<Option<FrameSelectionHandler>>>,
     thread_selection_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
     instruction_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
@@ -950,6 +972,15 @@ pub struct Ui {
 
 struct Topbar {
     root: gtk::HeaderBar,
+    session_button: gtk::ToggleButton,
+    session_popover: gtk::Popover,
+    session_kind_label: gtk::Label,
+    session_target_label: gtk::Label,
+    new_session_button: gtk::Button,
+    restart_session_button: gtk::Button,
+    kill_session_button: gtk::Button,
+    detach_session_button: gtk::Button,
+    target_label: gtk::Label,
     open_source_button: gtk::Button,
     load_symbols_button: gtk::Button,
     terminal_toggle_button: gtk::ToggleButton,
@@ -1099,6 +1130,7 @@ mod debug_state;
 mod dialogs;
 mod formatting;
 mod kernel_view;
+mod session;
 mod source_actions;
 mod source_view;
 mod state;

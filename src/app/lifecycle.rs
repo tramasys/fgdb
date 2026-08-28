@@ -123,7 +123,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
     }
 }
 
-fn detect_target_abi(ui: &Weak<Ui>, client: &MiClient) {
+pub(super) fn detect_target_abi(ui: &Weak<Ui>, client: &MiClient) {
     let weak_ui = ui.clone();
     if client
         .request("-gdb-show architecture", move |client, record| {

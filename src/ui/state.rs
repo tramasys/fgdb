@@ -61,10 +61,20 @@ impl Ui {
         window.set_child(Some(&root));
         let layout = layout::Persistence::install(&window, workspace.layout_panes.clone());
         kernel_section_handler.replace(Some(layout.disclosure_handler()));
+        let initial_session = config.initial_session();
 
         let ui = Self {
             window,
             terminal,
+            session_button: topbar.session_button,
+            session_popover: topbar.session_popover,
+            session_kind_label: topbar.session_kind_label,
+            session_target_label: topbar.session_target_label,
+            new_session_button: topbar.new_session_button,
+            restart_session_button: topbar.restart_session_button,
+            kill_session_button: topbar.kill_session_button,
+            detach_session_button: topbar.detach_session_button,
+            target_label: topbar.target_label,
             terminal_toggle_button: topbar.terminal_toggle_button,
             open_source_button: topbar.open_source_button,
             load_symbols_button: topbar.load_symbols_button,
@@ -179,8 +189,12 @@ impl Ui {
             module_refresh_gate: Rc::new(RefreshGate::default()),
             modules_dirty: Rc::new(Cell::new(false)),
             command_pending: Rc::new(Cell::new(false)),
+            session_pending: Rc::new(Cell::new(false)),
             gef_available: Rc::new(Cell::new(false)),
-            source_roots: Rc::new(source::roots(config)),
+            source_roots: Rc::new(RefCell::new(source::roots(config))),
+            current_session: Rc::new(RefCell::new(initial_session)),
+            session_handler: Rc::new(RefCell::new(None)),
+            session_action_handler: Rc::new(RefCell::new(None)),
             frame_selection_handler: Rc::new(RefCell::new(None)),
             thread_selection_handler: Rc::new(RefCell::new(None)),
             instruction_handler: Rc::new(RefCell::new(None)),
@@ -216,6 +230,7 @@ impl Ui {
         ui.connect_breakpoint_bulk_controls();
         ui.connect_event_catchpoint_controls();
         ui.connect_keyboard_shortcuts();
+        ui.update_session_display();
         ui
     }
 
@@ -318,6 +333,7 @@ impl Ui {
                         && ui.inferior_started.get()
                         && !ui.inferior_running.get()
                         && !ui.command_pending.get()
+                        && !ui.session_pending.get()
                     {
                         crate::app::refresh_cached_inspector_details(
                             &Rc::downgrade(&ui),
@@ -333,10 +349,21 @@ impl Ui {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
-            let (command, detail) = if ui.inferior_started.get() {
-                ("-exec-continue", "Continuing the inferior…")
-            } else {
-                ("-exec-run", "Starting the inferior…")
+            let (command, detail) = {
+                let session = ui.current_session.borrow();
+                if ui.inferior_started.get() {
+                    if session
+                        .as_ref()
+                        .is_some_and(|session| !session.supports_execution())
+                    {
+                        return;
+                    }
+                    ("-exec-continue", "Continuing the inferior…")
+                } else if session.as_ref().is_none_or(DebugSession::can_start) {
+                    ("-exec-run", "Starting the inferior…")
+                } else {
+                    return;
+                }
             };
             issue_execution_command(&ui, &client_for_run, command, detail);
         });
@@ -559,6 +586,7 @@ impl Ui {
         if !ready {
             self.inferior_running.set(false);
             self.command_pending.set(false);
+            self.session_pending.set(false);
         }
         self.update_control_sensitivity();
     }
@@ -572,15 +600,30 @@ impl Ui {
         self.inferior_running.get()
     }
 
+    pub fn inferior_has_started(&self) -> bool {
+        self.inferior_started.get()
+    }
+
     pub fn movement_commands_available(&self) -> bool {
         self.debugger_ready.get()
             && self.inferior_started.get()
             && !self.inferior_running.get()
             && !self.command_pending.get()
+            && !self.session_pending.get()
+            && self
+                .current_session
+                .borrow()
+                .as_ref()
+                .is_none_or(DebugSession::supports_execution)
     }
 
     pub fn set_command_pending(&self, pending: bool) {
         self.command_pending.set(pending);
+        self.update_control_sensitivity();
+    }
+
+    pub fn set_session_pending(&self, pending: bool) {
+        self.session_pending.set(pending);
         self.update_control_sensitivity();
     }
 
@@ -651,10 +694,21 @@ impl Ui {
         let ready = self.debugger_ready.get();
         let started = self.inferior_started.get();
         let running = self.inferior_running.get();
-        let pending = self.command_pending.get();
-        let can_move = ready && started && !running && !pending;
+        let pending = self.command_pending.get() || self.session_pending.get();
+        let session = self.current_session.borrow();
+        let supports_execution = session
+            .as_ref()
+            .is_none_or(DebugSession::supports_execution);
+        let can_start = session.as_ref().is_none_or(DebugSession::can_start);
+        let can_inspect = ready && started && !running && !pending;
+        let can_move = can_inspect && supports_execution;
 
-        self.run_button.set_sensitive(ready && !running && !pending);
+        self.run_button.set_sensitive(
+            ready
+                && !running
+                && !pending
+                && ((started && supports_execution) || (!started && can_start)),
+        );
         self.pause_button
             .set_sensitive(ready && started && running && !pending);
         self.next_button.set_sensitive(can_move);
@@ -667,13 +721,13 @@ impl Ui {
             .set_sensitive(self.gef_available.get() && ready && !running && !pending);
         self.kernel_view
             .refresh_button
-            .set_sensitive(can_move && !self.kernel_view.in_flight.get());
-        self.locals_view.set_sensitive(can_move);
+            .set_sensitive(can_inspect && !self.kernel_view.in_flight.get());
+        self.locals_view.set_sensitive(can_inspect);
         self.locals_edit_button.set_sensitive(
-            can_move
+            can_inspect
                 && variable_at(&self.locals_selection, self.locals_selection.selected()).is_some(),
         );
-        self.expression_watches_view.set_sensitive(can_move);
+        self.expression_watches_view.set_sensitive(can_inspect);
         let can_manage_watches = ready && !running && !pending;
         let expression = self.expression_watch_entry.text();
         self.expression_watch_entry
@@ -696,12 +750,38 @@ impl Ui {
                 .is_some(),
         );
         for group in &self.register_groups {
-            group.view.set_sensitive(can_move);
+            group.view.set_sensitive(can_inspect);
         }
         self.memory_add_button
-            .set_sensitive(can_move && !self.memory_address_entry.text().trim().is_empty());
-        self.watchpoint_add_button.set_sensitive(can_move);
-        self.load_symbols_button.set_sensitive(can_move);
+            .set_sensitive(can_inspect && !self.memory_address_entry.text().trim().is_empty());
+        self.watchpoint_add_button.set_sensitive(can_inspect);
+        self.load_symbols_button.set_sensitive(can_inspect);
+        self.session_button.set_sensitive(ready && !pending);
+        let can_replace_session =
+            !started || matches!(session.as_ref(), Some(DebugSession::CoreDump { .. }));
+        self.new_session_button
+            .set_sensitive(ready && !pending && !running && can_replace_session);
+        self.restart_session_button.set_sensitive(
+            ready
+                && started
+                && !running
+                && !pending
+                && session.as_ref().is_some_and(DebugSession::supports_restart),
+        );
+        self.kill_session_button.set_sensitive(
+            ready
+                && started
+                && !running
+                && !pending
+                && session.as_ref().is_some_and(DebugSession::supports_kill),
+        );
+        self.detach_session_button.set_sensitive(
+            ready
+                && started
+                && !running
+                && !pending
+                && session.as_ref().is_some_and(DebugSession::supports_detach),
+        );
         let breakpoints = self.breakpoints.borrow();
         let can_edit_stop_points = ready && !running && !pending;
         self.add_breakpoint_button

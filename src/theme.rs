@@ -338,7 +338,12 @@ button.breakpoint-badge-disabled:checked {{
 }}
 
 .value-editor-validation {{
-    color: @app_error;
+    color: @app_danger;
+    font-weight: 700;
+}}
+
+.field-label {{
+    color: @app_muted;
     font-weight: 700;
 }}
 
@@ -727,6 +732,78 @@ window.vector-editor dropdown > button {{
     background: @app_surface;
 }}
 
+.session-menu {{
+    min-width: 320px;
+    padding: 5px;
+    color: @app_fg;
+    background: @app_surface;
+    border: 1px solid @app_border;
+}}
+
+.session-summary {{
+    padding: 6px 8px 7px;
+    background: alpha(@app_fg, 0.025);
+}}
+
+.session-caption {{
+    color: @app_muted;
+    font-size: 10px;
+    font-weight: 700;
+}}
+
+.session-kind {{
+    color: @app_accent_hover;
+    font-weight: 700;
+}}
+
+.session-target {{
+    color: @app_fg;
+    font-size: 10px;
+}}
+
+.session-menu > separator {{
+    min-height: 1px;
+    margin: 4px 0 3px;
+    background: @app_border;
+}}
+
+.session-menu > button.session-action {{
+    min-height: 29px;
+    margin: 0;
+    padding: 2px 8px;
+    color: @app_fg;
+    background: alpha(@app_fg, 0.025);
+    border: 0;
+    border-left: 2px solid transparent;
+}}
+
+.session-menu > button.session-action:hover,
+.session-menu > button.session-action:focus-visible {{
+    color: @app_fg;
+    background: @app_raised;
+    border-left-color: @app_accent;
+}}
+
+.session-menu > button.session-action:disabled {{
+    color: @app_muted;
+    background: transparent;
+}}
+
+.session-action-label {{ font-weight: 700; }}
+
+.session-action-detail {{
+    color: @app_muted;
+    font-size: 10px;
+}}
+
+.session-menu > button.session-primary-action .session-action-label {{
+    color: @app_accent_hover;
+}}
+
+.session-menu > button.session-action.danger-action .session-action-label {{
+    color: @app_danger;
+}}
+
 .gef-tools-menu {{
     min-width: 300px;
     padding: 1px;
@@ -812,6 +889,15 @@ window.vector-editor dropdown > button {{
 .until-menu > button {{
     min-height: 23px;
     padding: 1px 5px;
+    background: alpha(@app_fg, 0.025);
+    border-left: 2px solid transparent;
+}}
+
+.until-menu > button:hover,
+.until-menu > button:focus-visible {{
+    color: @app_accent_hover;
+    background: @app_raised;
+    border-left-color: @app_accent;
 }}
 
 .until-menu entry,
@@ -962,6 +1048,60 @@ window.value-editor > box {{
     color: @app_fg;
     background: @app_surface;
 }}
+
+window.session-editor,
+window.session-editor > box {{
+    color: @app_fg;
+    background: @app_surface;
+}}
+
+window.session-editor button {{
+    min-height: 27px;
+    padding: 1px 9px;
+}}
+
+notebook.session-tabs > header > tabs {{ padding: 1px 4px; }}
+
+notebook.session-tabs > header > tabs > tab {{
+    min-height: 27px;
+    margin: 0 1px;
+    padding: 0 9px;
+}}
+
+window.session-editor entry,
+window.session-editor spinbutton,
+window.session-editor dropdown > button {{
+    min-height: 27px;
+    padding: 1px 6px;
+    color: @app_fg;
+    background: @app_bg;
+    border: 1px solid @app_border;
+}}
+
+window.session-editor entry:focus,
+window.session-editor spinbutton:focus-within,
+window.session-editor dropdown > button:focus {{ border-color: @app_accent; }}
+
+window.session-editor textview {{
+    padding: 4px;
+    color: @app_fg;
+    background: @app_bg;
+}}
+
+window.session-editor scrolledwindow {{ border: 1px solid @app_border; }}
+
+button.suggested-action {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.16);
+}}
+
+button.suggested-action:hover,
+button.suggested-action:focus-visible {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.25);
+}}
+
+button.danger-action {{ color: @app_danger; }}
 
 window.value-editor entry {{
     min-height: 28px;

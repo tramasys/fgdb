@@ -12,7 +12,7 @@ impl Ui {
         {
             return path;
         }
-        let path = source::resolve(reported_path, &self.source_roots);
+        let path = source::resolve(reported_path, &self.source_roots.borrow());
         let mut cache = self.resolved_source_paths.borrow_mut();
         if cache.len() >= MAX_RESOLVED_SOURCE_PATHS {
             cache.clear();
@@ -279,7 +279,7 @@ impl Ui {
             filters.append(&all_filter);
             dialog.set_filters(Some(&filters));
             dialog.set_default_filter(Some(&source_filter));
-            if let Some(root) = source_roots.first() {
+            if let Some(root) = source_roots.borrow().first() {
                 dialog.set_initial_folder(Some(&gio::File::for_path(root)));
             }
             let window = window.clone();

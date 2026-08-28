@@ -9,7 +9,7 @@ use std::{
 use gtk::prelude::*;
 
 use crate::{
-    config::LaunchConfig,
+    config::{DebugSession, LaunchConfig},
     debugger::{
         MemoryKind, MiClient, MiEvent, Register, SessionEvent, StackEntry, StackFrame,
         TargetArchitecture, TargetEndian, Variable,
@@ -20,7 +20,9 @@ use crate::{
         launch_gdb,
     },
     theme::Theme,
-    ui::{BreakpointEditRequest, BreakpointSpec, EventCatchpoint, Ui, WatchpointAccess},
+    ui::{
+        BreakpointEditRequest, BreakpointSpec, EventCatchpoint, SessionAction, Ui, WatchpointAccess,
+    },
 };
 
 const MAX_POINTER_CHAIN_DEPTH: usize = 3;
@@ -74,6 +76,7 @@ mod build;
 mod kernel;
 mod lifecycle;
 mod refresh;
+mod session;
 mod source_control;
 mod symbols;
 mod type_metadata;
@@ -89,6 +92,7 @@ use breakpoints::*;
 use kernel::*;
 use lifecycle::*;
 pub(crate) use refresh::*;
+use session::*;
 use source_control::*;
 use symbols::*;
 use type_metadata::*;

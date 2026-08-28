@@ -17,16 +17,55 @@ pub(super) fn build_topbar(
     let title_separator = gtk::Label::new(Some("·"));
     title_separator.add_css_class("muted");
     title_group.append(&title_separator);
-    let target = gtk::Label::new(Some(config.target_name()));
-    target.add_css_class("target-label");
-    target.set_ellipsize(pango::EllipsizeMode::Middle);
-    target.set_max_width_chars(32);
-    target.set_tooltip_text(Some(config.target_name()));
-    title_group.append(&target);
+    let target_label = gtk::Label::new(Some(config.target_name()));
+    target_label.add_css_class("target-label");
+    target_label.set_ellipsize(pango::EllipsizeMode::Middle);
+    target_label.set_max_width_chars(32);
+    target_label.set_tooltip_text(Some(config.target_name()));
+    title_group.append(&target_label);
     topbar.set_title_widget(Some(&title_group));
 
     let leading = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     leading.add_css_class("titlebar-actions");
+    let session_popover = gtk::Popover::new();
+    session_popover.set_autohide(true);
+    let session_menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    session_menu.add_css_class("session-menu");
+    let session_summary = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    session_summary.add_css_class("session-summary");
+    let session_caption = gtk::Label::new(Some("DEBUG SESSION"));
+    session_caption.add_css_class("session-caption");
+    session_caption.set_halign(gtk::Align::Start);
+    let session_kind_label = gtk::Label::new(Some("No session"));
+    session_kind_label.add_css_class("session-kind");
+    session_kind_label.set_halign(gtk::Align::Start);
+    let session_target_label = gtk::Label::new(Some("Choose a session"));
+    session_target_label.add_css_class("session-target");
+    session_target_label.set_halign(gtk::Align::Start);
+    session_target_label.set_ellipsize(pango::EllipsizeMode::Middle);
+    session_target_label.set_max_width_chars(42);
+    session_summary.append(&session_caption);
+    session_summary.append(&session_kind_label);
+    session_summary.append(&session_target_label);
+    session_menu.append(&session_summary);
+    session_menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let new_session_button = session_menu_action("New session…", "›");
+    new_session_button.add_css_class("session-primary-action");
+    let restart_session_button = session_menu_action("Restart", "start again");
+    let kill_session_button = session_menu_action("Kill inferior", "terminate");
+    kill_session_button.add_css_class("danger-action");
+    let detach_session_button = session_menu_action("Detach safely", "keep running");
+    session_menu.append(&new_session_button);
+    session_menu.append(&restart_session_button);
+    session_menu.append(&kill_session_button);
+    session_menu.append(&detach_session_button);
+    session_popover.set_child(Some(&session_menu));
+    let session_button = header_popup_button("Session", &session_popover);
+    session_button.add_css_class("toolbar-action");
+    session_button.set_tooltip_text(Some(
+        "Launch a program, attach to a process, inspect a core, connect remotely, restart, kill, or detach",
+    ));
+    leading.append(&session_button);
     let open_source = gtk::Button::with_label("Open source");
     open_source.add_css_class("toolbar-action");
     open_source.set_tooltip_text(Some("Open one or more source files in editor tabs"));
@@ -178,6 +217,15 @@ pub(super) fn build_topbar(
 
     Topbar {
         root: topbar,
+        session_button,
+        session_popover,
+        session_kind_label,
+        session_target_label,
+        new_session_button,
+        restart_session_button,
+        kill_session_button,
+        detach_session_button,
+        target_label,
         open_source_button: open_source,
         load_symbols_button: load_symbols,
         terminal_toggle_button: terminal_toggle,
@@ -200,6 +248,22 @@ pub(super) fn build_topbar(
         until_condition_button,
         status_label: status,
     }
+}
+
+fn session_menu_action(label: &str, detail: &str) -> gtk::Button {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+    let label = gtk::Label::new(Some(label));
+    label.add_css_class("session-action-label");
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+    let detail = gtk::Label::new(Some(detail));
+    detail.add_css_class("session-action-detail");
+    detail.set_halign(gtk::Align::End);
+    row.append(&label);
+    row.append(&detail);
+    let button = gtk::Button::builder().child(&row).build();
+    button.add_css_class("session-action");
+    button
 }
 
 pub(super) fn build_gef_tools_menu(

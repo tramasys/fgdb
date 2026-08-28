@@ -52,6 +52,10 @@ impl MiRecord {
         self.class == "done"
     }
 
+    pub fn is_success(&self) -> bool {
+        self.kind == '^' && self.class != "error" && self.class != "exit"
+    }
+
     pub fn error_message(&self) -> Option<&str> {
         self.field("msg").and_then(MiValue::as_const)
     }
@@ -1237,6 +1241,18 @@ mod tests {
         assert_eq!(
             SESSION_INITIALIZATION_COMMANDS,
             ["-gdb-set mi-async on", "-enable-pretty-printing"]
+        );
+    }
+
+    #[test]
+    fn accepts_all_successful_mi_result_classes_for_session_commands() {
+        for class in ["done", "connected", "running"] {
+            assert!(parse_record(&format!("1^{class}")).unwrap().is_success());
+        }
+        assert!(
+            !parse_record(r#"1^error,msg="failed""#)
+                .unwrap()
+                .is_success()
         );
     }
 
