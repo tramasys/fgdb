@@ -124,12 +124,39 @@ type MiscRefreshHandler = Rc<dyn Fn()>;
 type KernelSectionHandler = Rc<dyn Fn(&str, bool)>;
 type DebugSessionHandler = Rc<dyn Fn(DebugSession)>;
 type SessionActionHandler = Rc<dyn Fn(SessionAction)>;
+type UntilActionHandler = Rc<dyn Fn(UntilAction)>;
+type UntilCancelHandler = Rc<dyn Fn()>;
+type UntilStopHandler = Rc<dyn Fn(Option<&str>, Option<&str>) -> bool>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionAction {
     Restart,
     Kill,
     Detach,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum UntilAction {
+    CurrentLine,
+    FunctionReturns,
+    NextCall,
+    NextReturn,
+    NextSyscall,
+    NextIndirectBranch,
+    NextControlFlow,
+    MemoryAccess,
+    UserCode,
+    LibcCode,
+    RegionChange,
+    Expression(String),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum GefContextControl {
+    #[default]
+    None,
+    ContextCommand,
+    OriginalGef,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -901,16 +928,9 @@ pub(crate) const GEF_COMMAND_CAPABILITIES: &[&str] = &[
     "heap top",
     "heap parse",
     "dt",
-    "exec-until call",
-    "exec-until ret",
-    "exec-until syscall",
-    "exec-until indirect-branch",
-    "exec-until all-branch",
-    "exec-until memaccess",
-    "exec-until user-code",
-    "exec-until libc-code",
-    "exec-until region-change",
-    "exec-until cond",
+    "context off",
+    "context on",
+    "gef config context.enable",
 ];
 
 #[derive(Clone)]
@@ -970,8 +990,6 @@ pub struct Ui {
     pub finish_button: gtk::Button,
     pub until_button: gtk::ToggleButton,
     until_popover: gtk::Popover,
-    gef_until_section: gtk::Widget,
-    gef_until_controls: Vec<GefCapabilityControl>,
     pub gef_tools_button: gtk::ToggleButton,
     gef_tool_controls: Vec<GefCapabilityControl>,
     gef_tool_groups: Vec<GefCapabilityGroup>,
@@ -1048,7 +1066,7 @@ pub struct Ui {
     signal_entry: gtk::Entry,
     signal_add_button: gtk::Button,
     delete_all_signal_catchpoints_button: gtk::Button,
-    until_actions: Vec<(gtk::Button, &'static str)>,
+    until_actions: Vec<(gtk::Button, UntilAction)>,
     until_condition_entry: gtk::Entry,
     until_condition_button: gtk::Button,
     memory_region_store: gio::ListStore,
@@ -1082,10 +1100,15 @@ pub struct Ui {
     command_pending: Rc<Cell<bool>>,
     session_pending: Rc<Cell<bool>>,
     gef_available: Rc<Cell<bool>>,
+    gef_context_control: Rc<Cell<GefContextControl>>,
     source_roots: Rc<RefCell<Vec<PathBuf>>>,
     current_session: Rc<RefCell<Option<DebugSession>>>,
     session_handler: Rc<RefCell<Option<DebugSessionHandler>>>,
     session_action_handler: Rc<RefCell<Option<SessionActionHandler>>>,
+    until_action_handler: Rc<RefCell<Option<UntilActionHandler>>>,
+    until_cancel_handler: Rc<RefCell<Option<UntilCancelHandler>>>,
+    until_stop_handler: Rc<RefCell<Option<UntilStopHandler>>>,
+    native_until_active: Rc<Cell<bool>>,
     frame_selection_handler: Rc<RefCell<Option<FrameSelectionHandler>>>,
     thread_selection_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
     instruction_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
@@ -1136,12 +1159,10 @@ struct Topbar {
     finish_button: gtk::Button,
     until_button: gtk::ToggleButton,
     until_popover: gtk::Popover,
-    gef_until_section: gtk::Widget,
-    gef_until_controls: Vec<GefCapabilityControl>,
     gef_tools_button: gtk::ToggleButton,
     gef_tool_controls: Vec<GefCapabilityControl>,
     gef_tool_groups: Vec<GefCapabilityGroup>,
-    until_actions: Vec<(gtk::Button, &'static str)>,
+    until_actions: Vec<(gtk::Button, UntilAction)>,
     until_condition_entry: gtk::Entry,
     until_condition_button: gtk::Button,
     status_label: gtk::Label,
@@ -1275,10 +1296,10 @@ struct LeftSidebar {
 }
 
 mod build;
-mod controls;
+pub(crate) mod controls;
 mod debug_state;
 mod dialogs;
-mod formatting;
+pub(crate) mod formatting;
 mod kernel_view;
 mod memory_view;
 mod misc_view;
@@ -1305,15 +1326,15 @@ mod tests {
 
     use super::{
         EventCatchpoint, GEF_COMMAND_CAPABILITIES, IntegerFormat, IntegerRadix, RefreshGate,
-        StringStorage, TerminalClipboardAction, VectorLaneFormat,
+        StringStorage, TerminalClipboardAction, UntilAction, VectorLaneFormat,
         breakpoint_command_number_at_address, breakpoint_command_numbers, call_abi_phase,
         compact_function_name, conditional_branch_taken, event_catchpoint_command_number,
         event_catchpoint_command_numbers, flags_markup, format_register_value,
         format_register_value_for_architecture, format_register_value_for_target, full_address,
         instruction_arguments_description, instruction_flow_description, instruction_flow_target,
-        instruction_memory_expression, integer_decimal_value, normalized_signal_name,
-        parse_character_input, parse_integer_input, parse_string_input, register_details,
-        register_integer_format, register_value_css, set_breakpoint_enabled,
+        instruction_matches_until, instruction_memory_expression, integer_decimal_value,
+        normalized_signal_name, parse_character_input, parse_integer_input, parse_string_input,
+        register_details, register_integer_format, register_value_css, set_breakpoint_enabled,
         signal_catchpoint_command_number, signal_catchpoint_command_numbers, source_location_score,
         source_symbol_at_offset, source_tab_title, stop_reason_label, string_edit,
         terminal_clipboard_action, thread_os_id, variable_boolean_value, variable_character_format,
@@ -1370,6 +1391,48 @@ mod tests {
             terminal_clipboard_action(Key::v, control | ModifierType::ALT_MASK, false),
             None
         );
+    }
+
+    #[test]
+    fn classifies_native_until_instruction_events_across_syntaxes() {
+        let instruction = |text: &str| Instruction {
+            address: String::from("0x401000"),
+            function: String::from("main"),
+            offset: String::from("0"),
+            opcodes: None,
+            text: text.to_owned(),
+            source: None,
+        };
+        assert!(instruction_matches_until(
+            &UntilAction::NextCall,
+            &instruction("call 0x402000 <worker>"),
+            TargetArchitecture::X86_64,
+        ));
+        assert!(instruction_matches_until(
+            &UntilAction::NextIndirectBranch,
+            &instruction("call *%rax"),
+            TargetArchitecture::X86_64,
+        ));
+        assert!(!instruction_matches_until(
+            &UntilAction::NextIndirectBranch,
+            &instruction("call 0x402000 <worker>"),
+            TargetArchitecture::X86_64,
+        ));
+        assert!(instruction_matches_until(
+            &UntilAction::MemoryAccess,
+            &instruction("mov 0x10(%rsp),%rax"),
+            TargetArchitecture::X86_64,
+        ));
+        assert!(instruction_matches_until(
+            &UntilAction::NextSyscall,
+            &instruction("svc #0"),
+            TargetArchitecture::AArch64,
+        ));
+        assert!(instruction_matches_until(
+            &UntilAction::NextControlFlow,
+            &instruction("jalr ra,a0,0"),
+            TargetArchitecture::RiscV64,
+        ));
     }
 
     #[test]

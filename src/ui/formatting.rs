@@ -872,6 +872,12 @@ pub(super) fn is_call_instruction(
         TargetArchitecture::AArch64 => matches!(mnemonic, "bl" | "blr"),
         TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64 => {
             matches!(mnemonic, "call" | "jal")
+                || (mnemonic == "jalr"
+                    && operands
+                        .split(',')
+                        .next()
+                        .map(|operand| operand.trim().trim_start_matches(['$', '%']))
+                        .is_none_or(|operand| !matches!(operand, "zero" | "x0")))
         }
         TargetArchitecture::Mips32 | TargetArchitecture::Mips64 => {
             matches!(mnemonic, "jal" | "jalr" | "bal")
@@ -1104,6 +1110,132 @@ fn is_conditional_branch(mnemonic: &str, architecture: TargetArchitecture) -> bo
         TargetArchitecture::S390 | TargetArchitecture::S390x => mnemonic.starts_with('j'),
         TargetArchitecture::LoongArch64 => {
             mnemonic.starts_with('b') && mnemonic != "b" && mnemonic != "bl"
+        }
+        TargetArchitecture::Unknown => false,
+    }
+}
+
+pub(crate) fn instruction_matches_until(
+    action: &UntilAction,
+    instruction: &Instruction,
+    architecture: TargetArchitecture,
+) -> bool {
+    let (mnemonic, operands) = split_instruction(&instruction.text);
+    let mnemonic = mnemonic.to_ascii_lowercase();
+    match action {
+        UntilAction::NextCall => is_call_instruction(&mnemonic, operands, architecture),
+        UntilAction::NextReturn => is_return_instruction(&mnemonic, operands, architecture),
+        UntilAction::NextSyscall => {
+            syscall_architecture(&mnemonic, operands, architecture).is_some()
+        }
+        UntilAction::NextIndirectBranch => is_indirect_branch(&mnemonic, operands, architecture),
+        UntilAction::NextControlFlow => {
+            is_call_instruction(&mnemonic, operands, architecture)
+                || is_return_instruction(&mnemonic, operands, architecture)
+                || is_unconditional_branch(&mnemonic, architecture)
+                || is_conditional_branch(&mnemonic, architecture)
+        }
+        UntilAction::MemoryAccess => instruction_accesses_memory(&mnemonic, operands, architecture),
+        UntilAction::CurrentLine
+        | UntilAction::FunctionReturns
+        | UntilAction::UserCode
+        | UntilAction::LibcCode
+        | UntilAction::RegionChange
+        | UntilAction::Expression(_) => false,
+    }
+}
+
+fn is_indirect_branch(mnemonic: &str, operands: &str, architecture: TargetArchitecture) -> bool {
+    if !is_call_instruction(mnemonic, operands, architecture)
+        && !is_unconditional_branch(mnemonic, architecture)
+        && !is_conditional_branch(mnemonic, architecture)
+    {
+        return false;
+    }
+    let operand = operands.split(',').next_back().unwrap_or(operands).trim();
+    match architecture {
+        TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
+            operand.starts_with('*')
+                || operand.contains(['[', '('])
+                || instruction_operand_is_register(
+                    operand.trim_start_matches(['*', '$', '%']),
+                    architecture,
+                )
+        }
+        TargetArchitecture::Arm => matches!(mnemonic, "bx" | "blx"),
+        TargetArchitecture::AArch64 => matches!(mnemonic, "br" | "blr"),
+        TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64 => {
+            matches!(mnemonic, "jr" | "jalr")
+        }
+        TargetArchitecture::Mips32 | TargetArchitecture::Mips64 => {
+            matches!(mnemonic, "jr" | "jalr")
+        }
+        TargetArchitecture::PowerPc32 | TargetArchitecture::PowerPc64 => {
+            matches!(mnemonic, "bctr" | "bctrl" | "blr" | "blrl")
+        }
+        TargetArchitecture::S390 | TargetArchitecture::S390x => {
+            matches!(mnemonic, "br" | "basr" | "bcr")
+        }
+        TargetArchitecture::LoongArch64 => mnemonic == "jirl",
+        TargetArchitecture::Unknown => operand.starts_with('*') || operand.contains(['[', '(']),
+    }
+}
+
+fn instruction_accesses_memory(
+    mnemonic: &str,
+    operands: &str,
+    architecture: TargetArchitecture,
+) -> bool {
+    if operands.contains('[') || (operands.contains('(') && operands.contains(')')) {
+        return true;
+    }
+    match architecture {
+        TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
+            mnemonic.starts_with("push")
+                || mnemonic.starts_with("pop")
+                || mnemonic.starts_with("movs")
+                || mnemonic.starts_with("cmps")
+                || mnemonic.starts_with("scas")
+                || mnemonic.starts_with("lods")
+                || mnemonic.starts_with("stos")
+                || matches!(mnemonic, "enter" | "leave" | "xlat")
+        }
+        TargetArchitecture::Arm | TargetArchitecture::AArch64 => {
+            mnemonic.starts_with("ldr")
+                || mnemonic.starts_with("str")
+                || mnemonic.starts_with("ldp")
+                || mnemonic.starts_with("stp")
+                || mnemonic.starts_with("ldm")
+                || mnemonic.starts_with("stm")
+        }
+        TargetArchitecture::RiscV32
+        | TargetArchitecture::RiscV64
+        | TargetArchitecture::Mips32
+        | TargetArchitecture::Mips64
+        | TargetArchitecture::LoongArch64 => matches!(
+            mnemonic,
+            "lb" | "lbu"
+                | "lh"
+                | "lhu"
+                | "lw"
+                | "lwu"
+                | "ld"
+                | "sb"
+                | "sh"
+                | "sw"
+                | "sd"
+                | "ll"
+                | "sc"
+        ),
+        TargetArchitecture::PowerPc32 | TargetArchitecture::PowerPc64 => {
+            ["lb", "lh", "lw", "ld", "lm", "ls", "lf", "lv", "st"]
+                .iter()
+                .any(|prefix| mnemonic.starts_with(prefix))
+        }
+        TargetArchitecture::S390 | TargetArchitecture::S390x => {
+            matches!(mnemonic, "l" | "lg" | "ly" | "st" | "stg" | "sty")
+                || mnemonic.starts_with("lm")
+                || mnemonic.starts_with("stm")
         }
         TargetArchitecture::Unknown => false,
     }
@@ -1628,6 +1760,9 @@ pub(super) fn compact_memory_preview(bytes: &[u8]) -> String {
 }
 
 pub(super) fn instruction_symbol_full(instruction: &Instruction) -> String {
+    if instruction.function == "??" {
+        return String::new();
+    }
     let offset = instruction.offset.parse::<u64>().unwrap_or(0);
     if offset == 0 {
         format!("<{}>", instruction.function)

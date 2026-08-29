@@ -445,7 +445,7 @@ button.instruction-row.current-instruction:hover {{
 .instruction-source {{ color: @app_muted; }}
 
 .function-boundary-cell {{
-    box-shadow: inset 0 1px alpha(@app_accent, 0.48);
+    box-shadow: inset 2px 0 alpha(@app_accent, 0.48);
 }}
 
 .disassembly-range {{
@@ -918,9 +918,22 @@ columnview.memory-map-table row {{ min-height: 28px; }}
 }}
 
 .until-menu {{
-    min-width: 230px;
-    padding: 5px;
+    min-width: 330px;
+    padding: 4px;
+    color: @app_fg;
     background: @app_surface;
+    border: 1px solid @app_border;
+}}
+
+.until-summary {{
+    padding: 4px 7px 5px;
+    background: alpha(@app_fg, 0.025);
+}}
+
+.until-menu > separator {{
+    min-height: 1px;
+    margin: 2px 0;
+    background: @app_border;
 }}
 
 .session-menu {{
@@ -1083,18 +1096,34 @@ columnview.memory-map-table row {{ min-height: 28px; }}
     background: @app_border;
 }}
 
-.until-menu > button {{
+.until-menu > button.until-action {{
     min-height: 23px;
-    padding: 1px 5px;
+    margin: 0;
+    padding: 0 7px;
+    color: @app_fg;
     background: alpha(@app_fg, 0.025);
+    border: 0;
     border-left: 2px solid transparent;
 }}
 
-.until-menu > button:hover,
-.until-menu > button:focus-visible {{
-    color: @app_accent_hover;
+.until-menu > button.until-action:hover,
+.until-menu > button.until-action:focus-visible {{
+    color: @app_fg;
     background: @app_raised;
     border-left-color: @app_accent;
+}}
+
+.until-menu > button.until-action:hover .session-action-label,
+.until-menu > button.until-action:focus-visible .session-action-label {{
+    color: @app_accent_hover;
+}}
+
+.until-condition {{ padding: 2px 0 0; }}
+
+.until-condition > button {{
+    min-width: 45px;
+    min-height: 25px;
+    padding: 1px 7px;
 }}
 
 .until-menu entry,

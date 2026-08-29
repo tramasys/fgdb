@@ -166,11 +166,18 @@ struct Abi {
 }
 
 #[derive(Clone, Debug)]
-struct Mapping {
-    start: u64,
-    end: u64,
-    permissions: String,
-    path: String,
+pub(crate) struct ProcessMapping {
+    pub start: u64,
+    pub end: u64,
+    pub permissions: String,
+    pub path: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProcessAddressSpace {
+    pub executable: Option<String>,
+    pub mappings: Vec<ProcessMapping>,
+    pub capped: bool,
 }
 
 pub(crate) fn read_live_misc(
@@ -222,6 +229,23 @@ pub(crate) fn read_live_misc(
         allocator,
         locks,
         warnings,
+    })
+}
+
+pub(crate) fn read_process_address_space(
+    pid: u32,
+    debugger_pid: u32,
+) -> Result<ProcessAddressSpace, String> {
+    let root = crate::kernel::verified_proc_root(pid, debugger_pid)?;
+    let executable = std::fs::read_link(root.join("exe"))
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned());
+    let (mappings, capped) = read_maps(&root.join("maps"))?;
+    crate::kernel::verified_proc_root(pid, debugger_pid)?;
+    Ok(ProcessAddressSpace {
+        executable,
+        mappings,
+        capped,
     })
 }
 
@@ -447,7 +471,7 @@ fn read_abi(path: &Path) -> Option<Abi> {
     })
 }
 
-fn read_maps(path: &Path) -> Result<(Vec<Mapping>, bool), String> {
+fn read_maps(path: &Path) -> Result<(Vec<ProcessMapping>, bool), String> {
     let text = crate::bounded::read_string(path, MAX_MAPS_BYTES)
         .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
     let mut mappings = Vec::new();
@@ -473,7 +497,7 @@ fn read_maps(path: &Path) -> Result<(Vec<Mapping>, bool), String> {
         let _device = fields.next();
         let _inode = fields.next();
         let path = fields.next().unwrap_or("").trim().to_owned();
-        mappings.push(Mapping {
+        mappings.push(ProcessMapping {
             start,
             end,
             permissions,
@@ -483,7 +507,7 @@ fn read_maps(path: &Path) -> Result<(Vec<Mapping>, bool), String> {
     Ok((mappings, capped))
 }
 
-fn parse_auxv(bytes: &[u8], abi: Abi, maps: &[Mapping]) -> Vec<AuxvEntry> {
+fn parse_auxv(bytes: &[u8], abi: Abi, maps: &[ProcessMapping]) -> Vec<AuxvEntry> {
     let word = usize::try_from(abi.pointer_bits / 8)
         .unwrap_or(8)
         .clamp(4, 8);
@@ -557,7 +581,7 @@ fn auxv_name(kind: u64) -> &'static str {
     }
 }
 
-fn interpret_auxv(kind: u64, value: u64, abi: Abi, maps: &[Mapping]) -> String {
+fn interpret_auxv(kind: u64, value: u64, abi: Abi, maps: &[ProcessMapping]) -> String {
     match kind {
         4 | 5 | 11..=14 | 17 => value.to_string(),
         6 | 27 | 28 | 51 => format_bytes(value),
@@ -707,7 +731,7 @@ fn format_hwcap(architecture: TargetArchitecture, second: bool, value: u64) -> S
     }
 }
 
-fn allocator_snapshot(maps: &[Mapping]) -> AllocatorSnapshot {
+fn allocator_snapshot(maps: &[ProcessMapping]) -> AllocatorSnapshot {
     let implementation = maps.iter().find_map(|mapping| {
         let path = mapping.path.to_ascii_lowercase();
         [
@@ -1320,19 +1344,19 @@ mod tests {
     #[test]
     fn identifies_allocator_relevant_regions_without_claiming_chunks() {
         let snapshot = allocator_snapshot(&[
-            Mapping {
+            ProcessMapping {
                 start: 0x1000,
                 end: 0x3000,
                 permissions: String::from("rw-p"),
                 path: String::from("[heap]"),
             },
-            Mapping {
+            ProcessMapping {
                 start: 0x4000,
                 end: 0x8000,
                 permissions: String::from("rw-p"),
                 path: String::new(),
             },
-            Mapping {
+            ProcessMapping {
                 start: 0x9000,
                 end: 0xa000,
                 permissions: String::from("r-xp"),

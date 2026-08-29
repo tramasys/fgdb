@@ -2,6 +2,7 @@ use super::*;
 
 const MAX_DISASSEMBLY_EXPRESSION_BYTES: usize = 512;
 const MAX_DISASSEMBLY_HISTORY: usize = 128;
+const SYMBOLLESS_DISASSEMBLY_BYTES: u64 = 256;
 
 #[derive(Default)]
 struct DisassemblyState {
@@ -311,33 +312,104 @@ impl DisassemblyController {
                     return;
                 }
                 if !record.is_done() {
-                    ui.show_disassembly_error(
-                        record
-                            .error_message()
-                            .unwrap_or("GDB could not disassemble that location"),
+                    drop(ui);
+                    controller.request_address_window(
+                        address,
+                        generation,
+                        history,
+                        SYMBOLLESS_DISASSEMBLY_BYTES,
                     );
                     return;
                 }
                 let instructions = crate::debugger::instructions(&record);
                 if instructions.is_empty() {
-                    ui.show_disassembly_error("GDB returned no instructions for that location");
+                    drop(ui);
+                    controller.request_address_window(
+                        address,
+                        generation,
+                        history,
+                        SYMBOLLESS_DISASSEMBLY_BYTES,
+                    );
                     return;
                 }
-                let focus = format!("0x{address:x}");
-                let (pc, architecture) = {
-                    let state = controller.state.borrow();
-                    (state.pc.clone(), state.architecture.clone())
-                };
-                controller.commit_location(&focus, history, &instructions);
-                ui.show_instructions(&instructions, &pc, &focus, architecture.as_deref(), mixed);
-                ui.clear_disassembly_error();
-                ui.set_disassembly_loading(false);
-                controller.update_history_buttons(&ui);
+                controller.present(address, history, instructions, mixed);
             })
             .is_err()
         {
             self.fail("The GDB/MI channel is unavailable");
         }
+    }
+
+    fn request_address_window(
+        self: &Rc<Self>,
+        address: u64,
+        generation: u64,
+        history: HistoryUpdate,
+        bytes: u64,
+    ) {
+        let end = address.saturating_add(bytes.max(1));
+        let command =
+            format!("-data-disassemble -s 0x{address:x} -e 0x{end:x} --opcodes bytes -- 0");
+        let controller = Rc::clone(self);
+        if self
+            .client
+            .request(&command, move |_, record| {
+                if controller.generation.get() != generation {
+                    return;
+                }
+                let instructions = if record.is_done() {
+                    crate::debugger::instructions(&record)
+                } else {
+                    Vec::new()
+                };
+                if instructions.is_empty() {
+                    if bytes > 1 {
+                        controller.request_address_window(
+                            address,
+                            generation,
+                            history,
+                            bytes.div_ceil(2),
+                        );
+                    } else {
+                        controller.fail(
+                            record
+                                .error_message()
+                                .unwrap_or("GDB cannot read an instruction at that address"),
+                        );
+                    }
+                    return;
+                }
+                controller.present(address, history, instructions, false);
+            })
+            .is_err()
+        {
+            self.fail("The GDB/MI channel is unavailable");
+        }
+    }
+
+    fn present(
+        &self,
+        address: u64,
+        history: HistoryUpdate,
+        instructions: Vec<crate::debugger::Instruction>,
+        mixed: bool,
+    ) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        if ui.inferior_is_running() {
+            return;
+        }
+        let focus = format!("0x{address:x}");
+        let (pc, architecture) = {
+            let state = self.state.borrow();
+            (state.pc.clone(), state.architecture.clone())
+        };
+        self.commit_location(&focus, history, &instructions);
+        ui.show_instructions(&instructions, &pc, &focus, architecture.as_deref(), mixed);
+        ui.clear_disassembly_error();
+        ui.set_disassembly_loading(false);
+        self.update_history_buttons(&ui);
     }
 
     fn commit_location(

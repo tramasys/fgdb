@@ -93,8 +93,6 @@ impl Ui {
             finish_button: topbar.finish_button,
             until_button: topbar.until_button,
             until_popover: topbar.until_popover,
-            gef_until_section: topbar.gef_until_section,
-            gef_until_controls: topbar.gef_until_controls,
             gef_tools_button: topbar.gef_tools_button,
             gef_tool_controls: topbar.gef_tool_controls,
             gef_tool_groups: topbar.gef_tool_groups,
@@ -205,10 +203,15 @@ impl Ui {
             command_pending: Rc::new(Cell::new(false)),
             session_pending: Rc::new(Cell::new(false)),
             gef_available: Rc::new(Cell::new(false)),
+            gef_context_control: Rc::new(Cell::new(GefContextControl::None)),
             source_roots: Rc::new(RefCell::new(source::roots(config))),
             current_session: Rc::new(RefCell::new(initial_session)),
             session_handler: Rc::new(RefCell::new(None)),
             session_action_handler: Rc::new(RefCell::new(None)),
+            until_action_handler: Rc::new(RefCell::new(None)),
+            until_cancel_handler: Rc::new(RefCell::new(None)),
+            until_stop_handler: Rc::new(RefCell::new(None)),
+            native_until_active: Rc::new(Cell::new(false)),
             frame_selection_handler: Rc::new(RefCell::new(None)),
             thread_selection_handler: Rc::new(RefCell::new(None)),
             instruction_handler: Rc::new(RefCell::new(None)),
@@ -382,13 +385,23 @@ impl Ui {
             };
             issue_execution_command(&ui, &client_for_run, command, detail);
         });
-        connect_execution_button(
-            &self.pause_button,
-            self,
-            client,
-            "-exec-interrupt",
-            "Interrupting the inferior…",
-        );
+        let client_for_pause = Rc::clone(client);
+        let weak_ui = Rc::downgrade(self);
+        self.pause_button.connect_clicked(move |_| {
+            let Some(ui) = weak_ui.upgrade() else {
+                return;
+            };
+            if ui.native_until_active() {
+                ui.cancel_native_until();
+            } else {
+                issue_execution_command(
+                    &ui,
+                    &client_for_pause,
+                    "-exec-interrupt",
+                    "Interrupting the inferior…",
+                );
+            }
+        });
         connect_execution_button(
             &self.next_button,
             self,
@@ -424,28 +437,17 @@ impl Ui {
             "-exec-finish",
             "Running until the current function returns…",
         );
-        for (button, command) in &self.until_actions {
-            let client = Rc::clone(client);
-            let command = *command;
+        for (button, action) in &self.until_actions {
+            let action = action.clone();
             let until_popover = self.until_popover.clone();
             let weak_ui = Rc::downgrade(self);
             button.connect_clicked(move |_| {
                 until_popover.popdown();
-                let Some(ui) = weak_ui.upgrade() else {
-                    return;
-                };
-                let command = if command.starts_with('-') {
-                    command.to_owned()
-                } else {
-                    format!(
-                        "-interpreter-exec console {}",
-                        crate::debugger::quote(command)
-                    )
-                };
-                issue_execution_command(&ui, &client, &command, "Running to the selected event…");
+                if let Some(ui) = weak_ui.upgrade() {
+                    ui.request_native_until(action.clone());
+                }
             });
         }
-        let condition_client = Rc::clone(client);
         let condition_entry = self.until_condition_entry.clone();
         let until_popover = self.until_popover.clone();
         let weak_ui = Rc::downgrade(self);
@@ -455,18 +457,8 @@ impl Ui {
                 return;
             }
             until_popover.popdown();
-            let command = format!("exec-until cond {condition}");
-            let command = format!(
-                "-interpreter-exec console {}",
-                crate::debugger::quote(&command)
-            );
             if let Some(ui) = weak_ui.upgrade() {
-                issue_execution_command(
-                    &ui,
-                    &condition_client,
-                    &command,
-                    "Running until the expression becomes true…",
-                );
+                ui.request_native_until(UntilAction::Expression(condition));
             }
         });
         let symbol_client = Rc::clone(client);
@@ -602,6 +594,7 @@ impl Ui {
             self.inferior_running.set(false);
             self.command_pending.set(false);
             self.session_pending.set(false);
+            self.native_until_active.set(false);
         }
         self.update_control_sensitivity();
     }
@@ -652,11 +645,17 @@ impl Ui {
 
     fn set_gef_capabilities(&self, gef_available: bool, capabilities: &HashSet<&'static str>) {
         self.gef_available.set(gef_available);
-        for control in self
-            .gef_tool_controls
-            .iter()
-            .chain(&self.gef_until_controls)
-        {
+        let context_control = if !gef_available {
+            GefContextControl::None
+        } else if capabilities.contains("context off") && capabilities.contains("context on") {
+            GefContextControl::ContextCommand
+        } else if capabilities.contains("gef config context.enable") {
+            GefContextControl::OriginalGef
+        } else {
+            GefContextControl::None
+        };
+        self.gef_context_control.set(context_control);
+        for control in &self.gef_tool_controls {
             control
                 .widget
                 .set_visible(gef_available && capabilities.contains(control.capability));
@@ -675,12 +674,6 @@ impl Ui {
                 .gef_tool_controls
                 .iter()
                 .any(|control| capabilities.contains(control.capability));
-        let until_available = gef_available
-            && self
-                .gef_until_controls
-                .iter()
-                .any(|control| capabilities.contains(control.capability));
-        self.gef_until_section.set_visible(until_available);
         if !tools_available {
             self.gef_tools_button.set_active(false);
         }
@@ -709,7 +702,8 @@ impl Ui {
         let ready = self.debugger_ready.get();
         let started = self.inferior_started.get();
         let running = self.inferior_running.get();
-        let pending = self.command_pending.get() || self.session_pending.get();
+        let until_active = self.native_until_active.get();
+        let pending = self.command_pending.get() || self.session_pending.get() || until_active;
         let session = self.current_session.borrow();
         let supports_execution = session
             .as_ref()
@@ -724,8 +718,12 @@ impl Ui {
                 && !pending
                 && ((started && supports_execution) || (!started && can_start)),
         );
-        self.pause_button
-            .set_sensitive(ready && started && running && !pending);
+        self.pause_button.set_sensitive(
+            ready
+                && started
+                && !self.session_pending.get()
+                && (until_active || (running && !self.command_pending.get())),
+        );
         self.next_button.set_sensitive(can_move);
         self.step_button.set_sensitive(can_move);
         self.next_instruction_button.set_sensitive(can_move);
@@ -834,6 +832,57 @@ impl Ui {
         self.delete_all_watchpoints_button.set_sensitive(
             can_edit_stop_points && breakpoints.iter().any(Breakpoint::is_watchpoint),
         );
+    }
+
+    pub(crate) fn set_until_action_handler(&self, handler: impl Fn(UntilAction) + 'static) {
+        self.until_action_handler.replace(Some(Rc::new(handler)));
+    }
+
+    pub(crate) fn set_until_cancel_handler(&self, handler: impl Fn() + 'static) {
+        self.until_cancel_handler.replace(Some(Rc::new(handler)));
+    }
+
+    pub(crate) fn set_until_stop_handler(
+        &self,
+        handler: impl Fn(Option<&str>, Option<&str>) -> bool + 'static,
+    ) {
+        self.until_stop_handler.replace(Some(Rc::new(handler)));
+    }
+
+    fn request_native_until(&self, action: UntilAction) {
+        if let Some(handler) = self.until_action_handler.borrow().as_ref() {
+            handler(action);
+        }
+    }
+
+    pub(crate) fn cancel_native_until(&self) {
+        if let Some(handler) = self.until_cancel_handler.borrow().as_ref() {
+            handler();
+        }
+    }
+
+    pub(crate) fn handle_native_until_stop(
+        &self,
+        reason: Option<&str>,
+        address: Option<&str>,
+    ) -> bool {
+        self.until_stop_handler
+            .borrow()
+            .as_ref()
+            .is_some_and(|handler| handler(reason, address))
+    }
+
+    pub(crate) fn native_until_active(&self) -> bool {
+        self.native_until_active.get()
+    }
+
+    pub(crate) fn gef_context_control(&self) -> GefContextControl {
+        self.gef_context_control.get()
+    }
+
+    pub(crate) fn set_native_until_active(&self, active: bool) {
+        self.native_until_active.set(active);
+        self.update_control_sensitivity();
     }
 
     pub fn set_frame_selection_handler(&self, handler: impl Fn(u32) + 'static) {

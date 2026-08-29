@@ -26,6 +26,7 @@ pub enum MiEvent {
         reason: Option<String>,
         signal_name: Option<String>,
         signal_meaning: Option<String>,
+        address: Option<String>,
     },
     BreakpointsChanged,
     ThreadsChanged,
@@ -344,7 +345,7 @@ impl MiClient {
 
     pub fn send(&self, command: &str) -> io::Result<u64> {
         self.request(command, |client, record| {
-            if !record.is_done() {
+            if !record.is_success() {
                 let message = record
                     .error_message()
                     .unwrap_or("GDB rejected the command")
@@ -819,12 +820,19 @@ impl MiClient {
                     .field("signal-meaning")
                     .and_then(MiValue::as_const)
                     .map(str::to_owned);
+                let address = record
+                    .field("frame")
+                    .and_then(MiValue::as_tuple)
+                    .and_then(|frame| result_field(frame, "addr"))
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned);
                 (self.event_handler)(
                     self,
                     MiEvent::Stopped {
                         reason,
                         signal_name,
                         signal_meaning,
+                        address,
                     },
                 );
             }

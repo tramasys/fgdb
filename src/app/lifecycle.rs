@@ -35,6 +35,10 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         }
         MiEvent::Running => {
             ui.set_command_pending(false);
+            ui.set_controls_running(true);
+            if ui.native_until_active() {
+                return;
+            }
             ui.set_debug_state_stale(true);
             ui.set_inferior_started(true);
             ui.set_thread_stop_reason(None);
@@ -51,60 +55,46 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 "The inferior is running. Pause it to inspect state.",
                 Some("status-running"),
             );
-            ui.set_controls_running(true);
         }
         MiEvent::Stopped {
             reason,
             signal_name,
             signal_meaning,
+            address,
         } => {
             ui.set_command_pending(false);
-            ui.set_debug_state_stale(false);
             // The preceding *running event marks the inferior as running, but
             // stopped-state queries intentionally refuse to run in that state.
             // Clear it before populating context, source marks, registers and
             // stack data.
             ui.set_controls_running(false);
-            let reason = reason.unwrap_or_else(|| String::from("stopped"));
-            ui.set_thread_stop_reason(Some(&reason));
-            if reason.starts_with("exited") {
-                ui.set_inferior_started(false);
-                ui.clear_debugger_state();
-                refresh_breakpoints(weak_ui, client);
-            } else {
-                ui.set_inferior_started(true);
-                refresh_stopped_state(weak_ui, client);
+            if ui.handle_native_until_stop(reason.as_deref(), address.as_deref()) {
+                return;
             }
-            if ui.take_modules_dirty() {
-                refresh_modules(weak_ui, client);
-            }
-            ui.show_signal(signal_name.as_deref(), signal_meaning.as_deref());
-            ui.set_status(
-                "Paused",
-                &format!("GDB reported: {}", reason.replace('-', " ")),
-                Some("status-ready"),
-            );
-            ui.refresh_kernel_after_stop();
-            ui.refresh_misc_after_stop();
+            drop(ui);
+            finish_stopped_state(weak_ui, client, reason, signal_name, signal_meaning, None);
         }
         MiEvent::BreakpointsChanged => refresh_breakpoints(weak_ui, client),
         MiEvent::ThreadsChanged => {
-            if !ui.inferior_is_running() {
+            if !ui.inferior_is_running() && !ui.native_until_active() {
                 refresh_threads(weak_ui, client);
             }
         }
         MiEvent::LibrariesChanged => {
             ui.mark_modules_dirty();
-            if !ui.inferior_is_running() && ui.take_modules_dirty() {
+            if !ui.inferior_is_running() && !ui.native_until_active() && ui.take_modules_dirty() {
                 refresh_modules(weak_ui, client);
             }
         }
         MiEvent::SelectionChanged => {
-            if !ui.inferior_is_running() {
+            if !ui.inferior_is_running() && !ui.native_until_active() {
                 refresh_stopped_state(weak_ui, client);
             }
         }
         MiEvent::Error(message) => {
+            if ui.native_until_active() {
+                ui.cancel_native_until();
+            }
             ui.set_command_pending(false);
             ui.set_status("Command failed", &message, Some("status-error"));
         }
@@ -123,6 +113,41 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ui.set_controls_ready(false);
         }
     }
+}
+
+pub(super) fn finish_stopped_state(
+    weak_ui: &Weak<Ui>,
+    client: &MiClient,
+    reason: Option<String>,
+    signal_name: Option<String>,
+    signal_meaning: Option<String>,
+    status_detail: Option<String>,
+) {
+    let Some(ui) = weak_ui.upgrade() else {
+        return;
+    };
+    ui.set_command_pending(false);
+    ui.set_debug_state_stale(false);
+    ui.set_controls_running(false);
+    let reason = reason.unwrap_or_else(|| String::from("stopped"));
+    ui.set_thread_stop_reason(Some(&reason));
+    if reason.starts_with("exited") {
+        ui.set_inferior_started(false);
+        ui.clear_debugger_state();
+        refresh_breakpoints(weak_ui, client);
+    } else {
+        ui.set_inferior_started(true);
+        refresh_stopped_state(weak_ui, client);
+    }
+    if ui.take_modules_dirty() {
+        refresh_modules(weak_ui, client);
+    }
+    ui.show_signal(signal_name.as_deref(), signal_meaning.as_deref());
+    let detail =
+        status_detail.unwrap_or_else(|| format!("GDB reported: {}", reason.replace('-', " ")));
+    ui.set_status("Paused", &detail, Some("status-ready"));
+    ui.refresh_kernel_after_stop();
+    ui.refresh_misc_after_stop();
 }
 
 pub(super) fn detect_target_abi(ui: &Weak<Ui>, client: &MiClient) {

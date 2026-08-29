@@ -29,6 +29,13 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         DisassemblyController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
     let controller = Rc::clone(&disassembly_controller);
     ui.set_disassembly_handler(move |request| controller.handle(request));
+    let until_controller = NativeUntilController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
+    let controller = Rc::clone(&until_controller);
+    ui.set_until_action_handler(move |action| controller.start(action));
+    let controller = Rc::clone(&until_controller);
+    ui.set_until_cancel_handler(move || controller.cancel());
+    let controller = Rc::clone(&until_controller);
+    ui.set_until_stop_handler(move |reason, address| controller.on_stopped(reason, address));
     let session_controller = SessionController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
     let controller = Rc::clone(&session_controller);
     ui.set_session_handler(move |session| controller.configure(session));

@@ -577,7 +577,10 @@ fn instruction(tuple: &[MiResult], source: Option<Arc<SourceFile>>) -> Option<In
     Some(Instruction {
         address: constant(tuple, "address")?.to_owned(),
         function: constant(tuple, "func-name").unwrap_or("??").to_owned(),
-        offset: constant(tuple, "offset").unwrap_or("0").to_owned(),
+        // Address-range disassembly has no containing symbol and therefore no
+        // meaningful function offset. Keep that distinct from a real `+0`
+        // function boundary.
+        offset: constant(tuple, "offset").unwrap_or("").to_owned(),
         opcodes: owned_constant(tuple, "opcodes"),
         text: constant(tuple, "inst")?.to_owned(),
         source,
@@ -958,6 +961,13 @@ mod tests {
         let disassembly = instructions(&parse_record(r#"6^done,asm_insns=[{address="0x12",func-name="main",offset="0",opcodes="90",inst="nop"}]"#).unwrap());
         assert_eq!(disassembly[0].text, "nop");
         assert!(disassembly[0].source.is_none());
+
+        let symbol_less = instructions(
+            &parse_record(r#"6^done,asm_insns=[{address="0x13",opcodes="c3",inst="ret"}]"#)
+                .unwrap(),
+        );
+        assert_eq!(symbol_less[0].function, "??");
+        assert!(symbol_less[0].offset.is_empty());
 
         let mixed = instructions(&parse_record(r#"7^done,asm_insns=[src_and_asm_line={line="42",file="main.c",fullname="/tmp/main.c",line_asm_insn=[{address="0x20",func-name="main",offset="4",opcodes="c3",inst="ret"}]}]"#).unwrap());
         assert_eq!(mixed.len(), 1);

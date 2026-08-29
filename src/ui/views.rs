@@ -1053,7 +1053,10 @@ pub(super) fn instruction_column(
         };
         clear_label_selection(&label);
         let data = data.borrow::<InstructionRowData>();
-        if data.instruction.offset == "0" {
+        if class == "instruction-address"
+            && data.instruction.function != "??"
+            && data.instruction.offset == "0"
+        {
             label.add_css_class("function-boundary-cell");
         } else {
             label.remove_css_class("function-boundary-cell");

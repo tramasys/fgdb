@@ -108,68 +108,73 @@ pub(super) fn build_topbar(
         false,
     );
     let until_popover = gtk::Popover::new();
+    until_popover.set_autohide(true);
     let until_menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
     until_menu.add_css_class("until-menu");
-    until_menu.append(&section_title("RUN UNTIL"));
-    let native_until_actions = [
-        ("Current line", "-exec-until"),
-        ("Function returns", "-exec-finish"),
+    let until_summary = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    until_summary.add_css_class("until-summary");
+    let until_caption = gtk::Label::new(Some("RUN UNTIL"));
+    until_caption.add_css_class("session-caption");
+    until_caption.set_halign(gtk::Align::Start);
+    let until_kind = gtk::Label::new(Some("Next matching event"));
+    until_kind.add_css_class("session-kind");
+    until_kind.set_halign(gtk::Align::Start);
+    let until_detail = gtk::Label::new(Some("Live execution path · Pause cancels"));
+    until_detail.add_css_class("session-target");
+    until_detail.set_halign(gtk::Align::Start);
+    until_summary.append(&until_caption);
+    until_summary.append(&until_kind);
+    until_summary.append(&until_detail);
+    until_menu.append(&until_summary);
+    until_menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+    let actions = [
+        ("Current line", "source", UntilAction::CurrentLine),
+        ("Function returns", "frame", UntilAction::FunctionReturns),
+        ("Next call", "instruction", UntilAction::NextCall),
+        ("Next return", "instruction", UntilAction::NextReturn),
+        ("Next syscall", "instruction", UntilAction::NextSyscall),
+        (
+            "Next indirect branch",
+            "instruction",
+            UntilAction::NextIndirectBranch,
+        ),
+        (
+            "Next call / jump / return",
+            "control flow",
+            UntilAction::NextControlFlow,
+        ),
+        ("Memory access", "instruction", UntilAction::MemoryAccess),
+        ("User code", "mapping", UntilAction::UserCode),
+        ("libc code", "mapping", UntilAction::LibcCode),
+        ("Region change", "mapping", UntilAction::RegionChange),
     ];
-    let gef_until_actions = [
-        ("Next call", "exec-until call"),
-        ("Next return", "exec-until ret"),
-        ("Next syscall", "exec-until syscall"),
-        ("Next indirect branch", "exec-until indirect-branch"),
-        ("Next call / jump / return", "exec-until all-branch"),
-        ("Memory access", "exec-until memaccess"),
-        ("User code", "exec-until user-code"),
-        ("libc code", "exec-until libc-code"),
-        ("Region change", "exec-until region-change"),
-    ];
-    let add_until_action = |container: &gtk::Box, label: &'static str, command| {
-        let button = gtk::Button::new();
-        let label = gtk::Label::new(Some(label));
-        label.set_halign(gtk::Align::Start);
-        label.set_hexpand(true);
-        button.set_child(Some(&label));
-        button.set_halign(gtk::Align::Fill);
-        container.append(&button);
-        (button, command)
-    };
-    let mut until_actions = native_until_actions
-        .into_iter()
-        .map(|(label, command)| add_until_action(&until_menu, label, command))
-        .collect::<Vec<_>>();
-    let mut gef_until_controls = Vec::with_capacity(gef_until_actions.len() + 1);
-    let gef_until_section = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    gef_until_section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-    gef_until_section.append(&section_title("GEF EXEC-UNTIL"));
-    for (label, command) in gef_until_actions {
-        let (button, command) = add_until_action(&gef_until_section, label, command);
-        gef_until_controls.push(GefCapabilityControl {
-            widget: button.clone().upcast(),
-            capability: command,
-        });
-        until_actions.push((button, command));
+    let mut until_actions = Vec::with_capacity(actions.len());
+    for (index, (label, detail, action)) in actions.into_iter().enumerate() {
+        if matches!(index, 2 | 8) {
+            until_menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        }
+        let button = session_menu_action(label, detail);
+        button.add_css_class("until-action");
+        until_menu.append(&button);
+        until_actions.push((button, action));
     }
-    let condition_section = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    condition_section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+    until_menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let condition_section = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    condition_section.add_css_class("until-condition");
     let until_condition_entry = gtk::Entry::builder()
         .placeholder_text("$rax == 0")
         .hexpand(true)
         .build();
-    until_condition_entry.set_tooltip_text(Some("GDB expression used by GEF exec-until cond"));
+    until_condition_entry.set_tooltip_text(Some(
+        "Stop when this side-effect-free GDB expression becomes non-zero",
+    ));
     condition_section.append(&until_condition_entry);
-    let until_condition_button = gtk::Button::with_label("Expression");
+    let until_condition_button = gtk::Button::with_label("Run");
     until_condition_button.add_css_class("inline-action");
     condition_section.append(&until_condition_button);
-    gef_until_section.append(&condition_section);
-    gef_until_controls.push(GefCapabilityControl {
-        widget: condition_section.upcast(),
-        capability: "exec-until cond",
-    });
-    gef_until_section.set_visible(false);
-    until_menu.append(&gef_until_section);
+    until_menu.append(&condition_section);
     until_popover.set_child(Some(&until_menu));
     let until = header_popup_button("Until", &until_popover);
     until.add_css_class("debug-control");
@@ -238,8 +243,6 @@ pub(super) fn build_topbar(
         finish_button: finish,
         until_button: until,
         until_popover,
-        gef_until_section: gef_until_section.upcast(),
-        gef_until_controls,
         gef_tools_button: gef_tools.button,
         gef_tool_controls: gef_tools.controls,
         gef_tool_groups: gef_tools.groups,
