@@ -2,21 +2,20 @@ use super::*;
 
 const MIN_MAPPING_DELTA_HEIGHT: i32 = 190;
 const PRIVATE_CATEGORY_TABLE_HEIGHT: i32 = 205;
-const KERNEL_FACT_LABEL_MIN_WIDTH: i32 = 28;
 const KERNEL_FACT_LABEL_MAX_WIDTH: i32 = 42;
-const KERNEL_PAGE_NAMES: [&str; 12] = [
-    "overview",
-    "memory",
-    "private-memory",
-    "changes",
-    "mappings",
-    "resources",
-    "threads",
-    "signals",
-    "file-descriptors",
-    "limits",
-    "process-tree",
-    "tls",
+const KERNEL_PAGES: [(&str, &str); 12] = [
+    ("overview", "Overview"),
+    ("memory", "Memory"),
+    ("private-memory", "Private memory"),
+    ("changes", "Changes"),
+    ("mappings", "Maps"),
+    ("resources", "Resources"),
+    ("threads", "Threads"),
+    ("signals", "Signals"),
+    ("file-descriptors", "FDs"),
+    ("limits", "Limits"),
+    ("process-tree", "Tree"),
+    ("tls", "TLS"),
 ];
 const KERNEL_OVERVIEW_DISCLOSURES: [(&str, &str, bool); 7] = [
     ("PROCESS", "kernel.overview.process", true),
@@ -35,6 +34,14 @@ const KERNEL_OVERVIEW_DISCLOSURES: [(&str, &str, bool); 7] = [
     ),
     ("RUNTIME / ABI", "kernel.overview.runtime-abi", false),
 ];
+
+pub(super) struct SubtabNavigation {
+    pub root: gtk::Box,
+    pub compact_root: gtk::Box,
+    pub scroll: gtk::ScrolledWindow,
+    pub previous: gtk::Button,
+    pub next: gtk::Button,
+}
 
 #[derive(Clone, Copy)]
 enum MappingColumn {
@@ -192,14 +199,10 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     let tls_requested = Rc::new(Cell::new(false));
     let metadata_only_refresh = Rc::new(Cell::new(false));
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    root.set_size_request(-1, 0);
+    root.set_size_request(0, 0);
     root.add_css_class("sidebar");
     root.add_css_class("kernel-page");
 
-    let header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    header.add_css_class("subpanel-header");
-    let title = section_title("LINUX PROCESS SNAPSHOT");
-    title.set_hexpand(true);
     let status = gtk::Label::new(Some("Start the inferior to inspect procfs"));
     status.add_css_class("kernel-status");
     status.add_css_class("muted");
@@ -213,18 +216,13 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
         "Read a new process snapshot from procfs. Detailed smaps accounting may take a moment.",
     ));
     refresh_button.set_sensitive(false);
-    header.append(&title);
-    header.append(&status);
-    header.append(&refresh_button);
-    root.append(&header);
 
     let warnings = gtk::Box::new(gtk::Orientation::Vertical, 2);
     warnings.add_css_class("kernel-warnings");
     warnings.set_visible(false);
-    root.append(&warnings);
 
     let pages = gtk::Stack::new();
-    pages.set_size_request(-1, 0);
+    pages.set_size_request(0, 0);
     pages.set_vexpand(true);
     pages.set_vhomogeneous(false);
     pages.set_hhomogeneous(false);
@@ -297,30 +295,31 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     pages.add_titled(&processes, Some("process-tree"), "Tree");
     pages.add_titled(&tls, Some("tls"), "TLS");
     page_switcher.set_hexpand(true);
-    let page_switcher_scroll = gtk::ScrolledWindow::new();
-    page_switcher_scroll.add_css_class("kernel-tabs-scroll");
-    page_switcher_scroll.set_policy(gtk::PolicyType::External, gtk::PolicyType::Never);
-    page_switcher_scroll.set_overlay_scrolling(true);
-    page_switcher_scroll.set_propagate_natural_height(true);
-    page_switcher_scroll.set_child(Some(&page_switcher));
-    page_switcher_scroll.set_hexpand(true);
-    let previous_page = gtk::Button::with_label("‹");
-    previous_page.add_css_class("kernel-tab-nav-button");
-    previous_page.set_tooltip_text(Some("Previous Kernel view"));
-    let next_page = gtk::Button::with_label("›");
-    next_page.add_css_class("kernel-tab-nav-button");
-    next_page.set_tooltip_text(Some("Next Kernel view"));
-    let page_navigation = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    page_navigation.add_css_class("kernel-tab-navigation");
-    page_navigation.append(&previous_page);
-    page_navigation.append(&page_switcher_scroll);
-    page_navigation.append(&next_page);
-    root.append(&page_navigation);
+    let navigation = build_subtab_navigation(
+        &page_switcher,
+        &pages,
+        &KERNEL_PAGES,
+        "Scroll to earlier Kernel views",
+        "Scroll to later Kernel views",
+    );
+    let page_switcher_scroll = navigation.scroll.clone();
+    let previous_page = navigation.previous.clone();
+    let next_page = navigation.next.clone();
+    navigation.root.append(&status);
+    navigation.root.append(&refresh_button);
+    let compact_refresh_button = gtk::Button::with_label("Refresh");
+    compact_refresh_button.add_css_class("inline-action");
+    compact_refresh_button.set_tooltip_text(refresh_button.tooltip_text().as_deref());
+    compact_refresh_button.set_sensitive(refresh_button.is_sensitive());
+    let compact_refresh_for_sensitivity = compact_refresh_button.clone();
+    refresh_button.connect_sensitive_notify(move |button| {
+        compact_refresh_for_sensitivity.set_sensitive(button.is_sensitive());
+    });
+    navigation.compact_root.append(&compact_refresh_button);
+    root.append(&navigation.root);
+    root.append(&navigation.compact_root);
+    root.append(&warnings);
     root.append(&pages);
-    let scroll_for_previous = page_switcher_scroll.clone();
-    previous_page.connect_clicked(move |_| scroll_kernel_tabs(&scroll_for_previous, -1.0));
-    let scroll_for_next = page_switcher_scroll.clone();
-    next_page.connect_clicked(move |_| scroll_kernel_tabs(&scroll_for_next, 1.0));
     let previous_for_page = previous_page.clone();
     let next_for_page = next_page.clone();
     let scroll_for_page = page_switcher_scroll.clone();
@@ -357,21 +356,16 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
             pages.queue_draw();
         });
     });
-    let adjustment = page_switcher_scroll.hadjustment();
-    let previous_for_adjustment = previous_page.clone();
-    let next_for_adjustment = next_page.clone();
-    adjustment.connect_value_changed(move |adjustment| {
-        update_kernel_tab_arrows(adjustment, &previous_for_adjustment, &next_for_adjustment);
-    });
-    let previous_for_range = previous_page.clone();
-    let next_for_range = next_page.clone();
-    adjustment.connect_changed(move |adjustment| {
-        update_kernel_tab_arrows(adjustment, &previous_for_range, &next_for_range);
-    });
     update_kernel_page_navigation(&pages, &previous_page, &next_page, &page_switcher_scroll);
 
     let handler = Rc::clone(bindings.refresh_handler);
     refresh_button.connect_clicked(move |_| {
+        if let Some(handler) = handler.borrow().as_ref() {
+            handler();
+        }
+    });
+    let handler = Rc::clone(bindings.refresh_handler);
+    compact_refresh_button.connect_clicked(move |_| {
         if let Some(handler) = handler.borrow().as_ref() {
             handler();
         }
@@ -382,6 +376,8 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
 
     KernelView {
         root,
+        wide_subtabs: navigation.root,
+        compact_subtabs: navigation.compact_root,
         active,
         tracking_enabled,
         in_flight,
@@ -459,7 +455,151 @@ pub(super) fn connect_kernel_tab_visibility(
     });
 }
 
-fn scroll_kernel_tabs(scroll: &gtk::ScrolledWindow, direction: f64) {
+pub(super) fn build_subtab_navigation(
+    switcher: &gtk::StackSwitcher,
+    pages: &gtk::Stack,
+    page_specs: &'static [(&'static str, &'static str)],
+    previous_tooltip: &str,
+    next_tooltip: &str,
+) -> SubtabNavigation {
+    // The switcher must keep its natural width inside the viewport. Expanding
+    // it to the viewport makes GTK clip its buttons without exposing an
+    // adjustment, which in turn leaves narrow panes with no way to reach the
+    // hidden tabs.
+    switcher.set_hexpand(false);
+    switcher.set_halign(gtk::Align::Start);
+    switcher.set_size_request(0, -1);
+    let scroll = gtk::ScrolledWindow::new();
+    scroll.add_css_class("kernel-tabs-scroll");
+    scroll.set_policy(gtk::PolicyType::External, gtk::PolicyType::Never);
+    scroll.set_overlay_scrolling(true);
+    scroll.set_propagate_natural_width(false);
+    scroll.set_propagate_natural_height(true);
+    scroll.set_min_content_width(0);
+    scroll.set_size_request(0, -1);
+    scroll.set_child(Some(switcher));
+    scroll.set_hexpand(true);
+    scroll.set_halign(gtk::Align::Fill);
+    let previous = gtk::Button::with_label("‹");
+    previous.add_css_class("kernel-tab-nav-button");
+    previous.set_tooltip_text(Some(previous_tooltip));
+    let next = gtk::Button::with_label("›");
+    next.add_css_class("kernel-tab-nav-button");
+    next.set_tooltip_text(Some(next_tooltip));
+    let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    root.add_css_class("kernel-tab-navigation");
+    root.set_size_request(0, -1);
+    root.set_hexpand(true);
+    root.set_halign(gtk::Align::Fill);
+    root.append(&previous);
+    root.append(&scroll);
+    root.append(&next);
+    let scroll_for_previous = scroll.clone();
+    previous.connect_clicked(move |_| scroll_subtabs(&scroll_for_previous, -1.0));
+    let scroll_for_next = scroll.clone();
+    next.connect_clicked(move |_| scroll_subtabs(&scroll_for_next, 1.0));
+    let adjustment = scroll.hadjustment();
+    let previous_for_adjustment = previous.clone();
+    let next_for_adjustment = next.clone();
+    adjustment.connect_value_changed(move |adjustment| {
+        update_subtab_arrows(adjustment, &previous_for_adjustment, &next_for_adjustment);
+    });
+    let previous_for_range = previous.clone();
+    let next_for_range = next.clone();
+    adjustment.connect_changed(move |adjustment| {
+        update_subtab_arrows(adjustment, &previous_for_range, &next_for_range);
+    });
+    update_subtab_arrows(&adjustment, &previous, &next);
+    let compact_root =
+        build_compact_subtab_navigation(pages, page_specs, previous_tooltip, next_tooltip);
+    SubtabNavigation {
+        root,
+        compact_root,
+        scroll,
+        previous,
+        next,
+    }
+}
+
+fn build_compact_subtab_navigation(
+    pages: &gtk::Stack,
+    page_specs: &'static [(&'static str, &'static str)],
+    previous_tooltip: &str,
+    next_tooltip: &str,
+) -> gtk::Box {
+    let labels = page_specs
+        .iter()
+        .map(|(_, title)| *title)
+        .collect::<Vec<_>>();
+    let selector = gtk::DropDown::from_strings(&labels);
+    selector.add_css_class("kernel-compact-tab-selector");
+    selector.set_hexpand(true);
+    selector.set_tooltip_text(Some("Select a view"));
+    let previous = gtk::Button::with_label("‹");
+    previous.add_css_class("kernel-tab-nav-button");
+    previous.set_tooltip_text(Some(previous_tooltip));
+    let next = gtk::Button::with_label("›");
+    next.add_css_class("kernel-tab-nav-button");
+    next.set_tooltip_text(Some(next_tooltip));
+    let has_multiple_pages = page_specs.len() > 1;
+    previous.set_visible(has_multiple_pages);
+    next.set_visible(has_multiple_pages);
+    let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    root.add_css_class("kernel-tab-navigation");
+    root.add_css_class("kernel-compact-tab-navigation");
+    root.set_hexpand(true);
+    root.append(&previous);
+    root.append(&selector);
+    root.append(&next);
+    root.set_visible(false);
+
+    let pages_for_selector = pages.clone();
+    selector.connect_selected_notify(move |selector| {
+        let index = selector.selected() as usize;
+        if let Some((name, _)) = page_specs.get(index) {
+            pages_for_selector.set_visible_child_name(name);
+        }
+    });
+    let pages_for_previous = pages.clone();
+    previous.connect_clicked(move |_| select_relative_subtab(&pages_for_previous, page_specs, -1));
+    let pages_for_next = pages.clone();
+    next.connect_clicked(move |_| select_relative_subtab(&pages_for_next, page_specs, 1));
+    let selector_for_page = selector.clone();
+    let previous_for_page = previous.clone();
+    let next_for_page = next.clone();
+    let update = move |pages: &gtk::Stack| {
+        let index = selected_subtab_index(pages, page_specs);
+        selector_for_page.set_selected(index as u32);
+        previous_for_page.set_sensitive(index > 0);
+        next_for_page.set_sensitive(index + 1 < page_specs.len());
+    };
+    update(pages);
+    pages.connect_visible_child_notify(update);
+    root
+}
+
+fn selected_subtab_index(pages: &gtk::Stack, page_specs: &[(&str, &str)]) -> usize {
+    pages
+        .visible_child_name()
+        .as_deref()
+        .and_then(|name| {
+            page_specs
+                .iter()
+                .position(|(candidate, _)| *candidate == name)
+        })
+        .unwrap_or(0)
+}
+
+fn select_relative_subtab(pages: &gtk::Stack, page_specs: &[(&str, &str)], direction: isize) {
+    let current = selected_subtab_index(pages, page_specs);
+    let last = page_specs.len().saturating_sub(1);
+    let target = current.saturating_add_signed(direction).min(last);
+    if let Some((name, _)) = page_specs.get(target) {
+        pages.set_visible_child_name(name);
+    }
+}
+
+fn scroll_subtabs(scroll: &gtk::ScrolledWindow, direction: f64) {
     let adjustment = scroll.hadjustment();
     let lower = adjustment.lower();
     let upper = (adjustment.upper() - adjustment.page_size()).max(lower);
@@ -467,11 +607,7 @@ fn scroll_kernel_tabs(scroll: &gtk::ScrolledWindow, direction: f64) {
     adjustment.set_value((adjustment.value() + direction * step).clamp(lower, upper));
 }
 
-fn update_kernel_tab_arrows(
-    adjustment: &gtk::Adjustment,
-    previous: &gtk::Button,
-    next: &gtk::Button,
-) {
+fn update_subtab_arrows(adjustment: &gtk::Adjustment, previous: &gtk::Button, next: &gtk::Button) {
     let overflow = adjustment.upper() - adjustment.lower() > adjustment.page_size() + 1.0;
     previous.set_visible(overflow);
     next.set_visible(overflow);
@@ -491,20 +627,20 @@ fn update_kernel_page_navigation(
         .visible_child_name()
         .as_deref()
         .and_then(|name| {
-            KERNEL_PAGE_NAMES
+            KERNEL_PAGES
                 .iter()
-                .position(|candidate| *candidate == name)
+                .position(|(candidate, _)| *candidate == name)
         })
         .unwrap_or(0);
     let adjustment = scroll.hadjustment();
-    update_kernel_tab_arrows(&adjustment, previous, next);
+    update_subtab_arrows(&adjustment, previous, next);
     let previous = previous.clone();
     let next = next.clone();
     glib::idle_add_local_once(move || {
         let lower = adjustment.lower();
         let upper = adjustment.upper();
         let page_size = adjustment.page_size();
-        let approximate_tab_width = (upper - lower) / KERNEL_PAGE_NAMES.len().max(1) as f64;
+        let approximate_tab_width = (upper - lower) / KERNEL_PAGES.len().max(1) as f64;
         let tab_start = lower + approximate_tab_width * index as f64;
         let tab_end = tab_start + approximate_tab_width;
         let visible_start = adjustment.value();
@@ -514,7 +650,7 @@ fn update_kernel_page_navigation(
         } else if tab_end > visible_end {
             adjustment.set_value((tab_end - page_size).min((upper - page_size).max(lower)));
         }
-        update_kernel_tab_arrows(&adjustment, &previous, &next);
+        update_subtab_arrows(&adjustment, &previous, &next);
     });
 }
 
@@ -553,8 +689,10 @@ fn build_overview(
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
     let factory = gtk::SignalListItemFactory::new();
+    let fact_key_group = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
     let collapsed_for_setup = Rc::clone(&collapsed);
     let section_handler_for_setup = section_handler.clone();
+    let fact_key_group_for_setup = fact_key_group.clone();
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -565,9 +703,9 @@ fn build_overview(
         key.add_css_class("kernel-fact-key");
         key.add_css_class("muted");
         key.set_halign(gtk::Align::Start);
-        key.set_width_chars(KERNEL_FACT_LABEL_MIN_WIDTH);
         key.set_max_width_chars(KERNEL_FACT_LABEL_MAX_WIDTH);
         key.set_ellipsize(pango::EllipsizeMode::End);
+        fact_key_group_for_setup.add_widget(&key);
         let value = gtk::Label::new(None);
         value.add_css_class("kernel-fact-value");
         value.set_halign(gtk::Align::Start);
@@ -680,7 +818,7 @@ fn build_overview(
             row.remove_css_class("kernel-section-expanded");
             key.remove_css_class("section-title");
             key.add_css_class("muted");
-            key.set_width_chars(KERNEL_FACT_LABEL_MIN_WIDTH);
+            key.set_width_chars(-1);
             key.set_max_width_chars(KERNEL_FACT_LABEL_MAX_WIDTH);
             key.set_hexpand(false);
             key.set_ellipsize(pango::EllipsizeMode::End);
@@ -718,6 +856,7 @@ fn build_overview(
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
+    configure_content_scroller(&scrolled);
     (scrolled, store)
 }
 
@@ -751,6 +890,7 @@ fn build_tls() -> (
     module_count.add_css_class("kernel-table-summary");
     module_count.add_css_class("muted");
     module_count.set_halign(gtk::Align::Start);
+    make_responsive_label(&module_count, pango::EllipsizeMode::Middle);
     enable_stable_text_selection(&module_count);
     modules_page.append(&module_count);
     let module_store = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -785,12 +925,13 @@ fn build_tls() -> (
     symbol_count.add_css_class("muted");
     symbol_count.set_hexpand(true);
     symbol_count.set_halign(gtk::Align::Start);
+    make_responsive_label(&symbol_count, pango::EllipsizeMode::Middle);
     enable_stable_text_selection(&symbol_count);
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Filter TLS symbol, module, or path")
-        .width_request(280)
         .build();
     search.add_css_class("kernel-table-search");
+    search.set_max_width_chars(34);
     symbol_controls.append(&symbol_count);
     symbol_controls.append(&search);
     symbols_page.append(&symbol_controls);
@@ -844,6 +985,8 @@ fn build_tls() -> (
     metadata_header.add_css_class("kernel-tls-metadata-header");
     let metadata_title = section_title("ELF TLS METADATA");
     metadata_title.set_hexpand(true);
+    metadata_title.set_ellipsize(pango::EllipsizeMode::End);
+    metadata_title.set_tooltip_text(Some("ELF TLS METADATA"));
     metadata_header.append(&metadata_title);
     metadata_header.append(&metadata_switcher);
     let metadata_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -907,12 +1050,14 @@ fn build_changes() -> (
     controls.add_css_class("kernel-change-controls");
     let title = section_title("MAPPING DELTAS");
     title.set_valign(gtk::Align::Center);
+    title.set_ellipsize(pango::EllipsizeMode::End);
+    title.set_tooltip_text(Some("MAPPING DELTAS"));
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Filter mapping changes")
-        .width_request(210)
         .build();
     search.add_css_class("kernel-table-search");
     search.add_css_class("kernel-change-search");
+    search.set_max_width_chars(26);
     search.set_valign(gtk::Align::Center);
     let count = gtk::Label::new(Some("Capture another snapshot to compare mappings"));
     count.add_css_class("muted");
@@ -921,6 +1066,7 @@ fn build_changes() -> (
     count.set_halign(gtk::Align::End);
     count.set_valign(gtk::Align::Center);
     count.set_ellipsize(pango::EllipsizeMode::Middle);
+    make_responsive_label(&count, pango::EllipsizeMode::Middle);
     controls.append(&title);
     controls.append(&search);
     controls.append(&count);
@@ -980,6 +1126,7 @@ fn build_changes() -> (
         .min_content_height(1)
         .vexpand(true)
         .build();
+    configure_content_scroller(&table_scroll);
     let table_overlay = gtk::Overlay::new();
     table_overlay.set_vexpand(true);
     table_overlay.set_child(Some(&table_scroll));
@@ -1062,6 +1209,7 @@ fn build_signals() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     enable_stable_text_selection(&count);
     count.set_hexpand(true);
     count.set_halign(gtk::Align::Start);
+    make_responsive_label(&count, pango::EllipsizeMode::Middle);
     let active_only = gtk::ToggleButton::with_label("Active only");
     active_only.add_css_class("kernel-signal-filter");
     active_only.set_active(false);
@@ -1149,20 +1297,28 @@ fn table_summary(page: &gtk::Box) -> gtk::Label {
     count.add_css_class("kernel-table-summary");
     count.add_css_class("muted");
     count.set_halign(gtk::Align::Start);
+    make_responsive_label(&count, pango::EllipsizeMode::Middle);
     enable_stable_text_selection(&count);
     page.append(&count);
     count
 }
 
+fn make_responsive_label(label: &gtk::Label, mode: pango::EllipsizeMode) {
+    label.set_single_line_mode(true);
+    label.set_ellipsize(mode);
+    label.connect_label_notify(|label| label.set_tooltip_text(Some(&label.text())));
+    label.set_tooltip_text(Some(&label.text()));
+}
+
 fn append_table(page: &gtk::Box, view: &gtk::ColumnView, empty: &gtk::Label) {
     page.append(empty);
-    page.append(
-        &gtk::ScrolledWindow::builder()
-            .child(view)
-            .min_content_height(1)
-            .vexpand(true)
-            .build(),
-    );
+    let scrolled = gtk::ScrolledWindow::builder()
+        .child(view)
+        .min_content_height(1)
+        .vexpand(true)
+        .build();
+    configure_content_scroller(&scrolled);
+    page.append(&scrolled);
 }
 
 fn append_fixed_height_table(
@@ -1177,8 +1333,16 @@ fn append_fixed_height_table(
         .min_content_height(1)
         .vexpand(false)
         .build();
+    configure_content_scroller(&scrolled);
     scrolled.set_size_request(-1, height);
     page.append(&scrolled);
+}
+
+fn configure_content_scroller(scrolled: &gtk::ScrolledWindow) {
+    scrolled.set_hscrollbar_policy(gtk::PolicyType::Automatic);
+    scrolled.set_min_content_width(0);
+    scrolled.set_propagate_natural_width(false);
+    scrolled.set_size_request(0, -1);
 }
 
 fn build_memory() -> (
@@ -1199,6 +1363,7 @@ fn build_memory() -> (
     meta.add_css_class("muted");
     meta.set_halign(gtk::Align::Start);
     meta.set_xalign(0.0);
+    make_responsive_label(&meta, pango::EllipsizeMode::Middle);
     enable_stable_text_selection(&meta);
     summary_content.append(&meta);
 
@@ -1282,8 +1447,11 @@ fn build_memory() -> (
     let unit_scroll = gtk::ScrolledWindow::new();
     unit_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     unit_scroll.set_min_content_height(1);
+    unit_scroll.set_min_content_width(0);
     unit_scroll.set_vexpand(true);
+    unit_scroll.set_propagate_natural_width(false);
     unit_scroll.set_propagate_natural_height(false);
+    unit_scroll.set_size_request(0, -1);
     unit_scroll.set_child(Some(&unit_grid));
     summary_content.append(&unit_scroll);
     summary_page.append(&summary_content);
@@ -1344,11 +1512,13 @@ fn build_memory() -> (
     mapping_header.add_css_class("kernel-memory-subtitle");
     let mapping_title = section_title("PER-MAPPING PRIVATE MEMORY");
     mapping_title.set_hexpand(true);
+    mapping_title.set_ellipsize(pango::EllipsizeMode::End);
+    mapping_title.set_tooltip_text(Some("PER-MAPPING PRIVATE MEMORY"));
     let mapping_search = gtk::SearchEntry::builder()
         .placeholder_text("Filter address, permissions, or backing")
-        .width_request(280)
         .build();
     mapping_search.add_css_class("kernel-table-search");
+    mapping_search.set_max_width_chars(34);
     mapping_header.append(&mapping_title);
     mapping_header.append(&mapping_search);
     mapping_content.append(&mapping_header);
@@ -1421,13 +1591,17 @@ fn build_memory() -> (
     )
 }
 
-fn build_private_summary() -> (gtk::Grid, KernelPrivateSummaryView) {
-    let grid = gtk::Grid::new();
-    grid.add_css_class("kernel-private-summary-grid");
-    grid.set_column_homogeneous(true);
-    grid.set_column_spacing(1);
-    let mut column = 0;
-    let mut add_value = |title: &str| {
+fn build_private_summary() -> (gtk::FlowBox, KernelPrivateSummaryView) {
+    let summary = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .homogeneous(true)
+        .min_children_per_line(1)
+        .max_children_per_line(4)
+        .column_spacing(1)
+        .row_spacing(1)
+        .build();
+    summary.add_css_class("kernel-private-summary-grid");
+    let add_value = |title: &str| {
         let cell = gtk::Box::new(gtk::Orientation::Vertical, 1);
         cell.add_css_class("kernel-private-summary-cell");
         let title = gtk::Label::new(Some(title));
@@ -1441,8 +1615,7 @@ fn build_private_summary() -> (gtk::Grid, KernelPrivateSummaryView) {
         enable_stable_text_selection(&value);
         cell.append(&title);
         cell.append(&value);
-        grid.attach(&cell, column, 0, 1, 1);
-        column += 1;
+        summary.insert(&cell, -1);
         value
     };
     let total = add_value("TOTAL USS");
@@ -1450,7 +1623,7 @@ fn build_private_summary() -> (gtk::Grid, KernelPrivateSummaryView) {
     let dirty = add_value("PRIVATE DIRTY");
     let mappings = add_value("MAPPINGS");
     (
-        grid,
+        summary,
         KernelPrivateSummaryView {
             total,
             clean,
@@ -1484,6 +1657,7 @@ fn build_mappings() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     let count = gtk::Label::new(Some("No snapshot"));
     count.add_css_class("muted");
     enable_stable_text_selection(&count);
+    make_responsive_label(&count, pango::EllipsizeMode::Middle);
     controls.append(&search);
     controls.append(&count);
     page.append(&controls);
@@ -1538,13 +1712,13 @@ fn build_mappings() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     }
     let empty = empty_label("No detailed mappings available");
     page.append(&empty);
-    page.append(
-        &gtk::ScrolledWindow::builder()
-            .child(&view)
-            .min_content_height(1)
-            .vexpand(true)
-            .build(),
-    );
+    let scrolled = gtk::ScrolledWindow::builder()
+        .child(&view)
+        .min_content_height(1)
+        .vexpand(true)
+        .build();
+    configure_content_scroller(&scrolled);
+    page.append(&scrolled);
 
     let query_for_search = Rc::clone(&query);
     search.connect_search_changed(move |search| {
@@ -1560,6 +1734,7 @@ fn build_descriptors() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     count.add_css_class("kernel-table-summary");
     count.add_css_class("muted");
     count.set_halign(gtk::Align::Start);
+    make_responsive_label(&count, pango::EllipsizeMode::Middle);
     page.append(&count);
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
@@ -1582,13 +1757,13 @@ fn build_descriptors() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     }
     let empty = empty_label("No open file descriptors available");
     page.append(&empty);
-    page.append(
-        &gtk::ScrolledWindow::builder()
-            .child(&view)
-            .min_content_height(1)
-            .vexpand(true)
-            .build(),
-    );
+    let scrolled = gtk::ScrolledWindow::builder()
+        .child(&view)
+        .min_content_height(1)
+        .vexpand(true)
+        .build();
+    configure_content_scroller(&scrolled);
+    page.append(&scrolled);
     (page, store, count, empty)
 }
 
@@ -1598,6 +1773,7 @@ fn build_limits() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     count.add_css_class("kernel-table-summary");
     count.add_css_class("muted");
     count.set_halign(gtk::Align::Start);
+    make_responsive_label(&count, pango::EllipsizeMode::Middle);
     page.append(&count);
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
@@ -1617,13 +1793,13 @@ fn build_limits() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     }
     let empty = empty_label("No resource limits available");
     page.append(&empty);
-    page.append(
-        &gtk::ScrolledWindow::builder()
-            .child(&view)
-            .min_content_height(1)
-            .vexpand(true)
-            .build(),
-    );
+    let scrolled = gtk::ScrolledWindow::builder()
+        .child(&view)
+        .min_content_height(1)
+        .vexpand(true)
+        .build();
+    configure_content_scroller(&scrolled);
+    page.append(&scrolled);
     (page, store, count, empty)
 }
 

@@ -583,6 +583,7 @@ pub(super) fn build_workspace(
     workspace.set_wide_handle(false);
     let inspector = build_inspector(inspector_bindings);
     workspace.set_end_child(Some(&inspector.root));
+    connect_inspector_responsiveness(&workspace, &inspector);
 
     let navigation_and_editor = gtk::Paned::new(gtk::Orientation::Horizontal);
     navigation_and_editor.add_css_class("workspace-columns");
@@ -622,7 +623,7 @@ pub(super) fn build_workspace(
         terminal_panel,
         status_detail: inspector.status_detail,
         debug_state_panels,
-        inspector_notebook: inspector.root.clone(),
+        inspector_notebook: inspector.notebook.clone(),
         call_stack_list: left_sidebar.call_stack_list,
         threads_list: left_sidebar.threads_list,
         modules_list: left_sidebar.modules_list,
@@ -678,6 +679,49 @@ pub(super) fn build_workspace(
     }
 }
 
+fn connect_inspector_responsiveness(workspace: &gtk::Paned, inspector: &Inspector) {
+    const COMPACT_INSPECTOR_WIDTH: i32 = 620;
+    let inspector_notebook = inspector.notebook.clone();
+    let compact_inspector_tabs = inspector.compact_tabs.clone();
+    let kernel_root = inspector.kernel_view.root.clone();
+    let kernel_status = inspector.kernel_view.status.clone();
+    let kernel_wide_subtabs = inspector.kernel_view.wide_subtabs.clone();
+    let kernel_compact_subtabs = inspector.kernel_view.compact_subtabs.clone();
+    let misc_root = inspector.misc_view.root.clone();
+    let misc_status = inspector.misc_view.status.clone();
+    let misc_wide_subtabs = inspector.misc_view.wide_subtabs.clone();
+    let misc_compact_subtabs = inspector.misc_view.compact_subtabs.clone();
+    let update: Rc<dyn Fn(&gtk::Paned)> = Rc::new(move |workspace| {
+        let width = workspace.width().saturating_sub(workspace.position());
+        let compact = width > 0 && width < COMPACT_INSPECTOR_WIDTH;
+        for root in [&kernel_root, &misc_root] {
+            if compact {
+                root.add_css_class("inspector-compact");
+            } else {
+                root.remove_css_class("inspector-compact");
+            }
+        }
+        kernel_status.set_visible(!compact);
+        misc_status.set_visible(!compact);
+        inspector_notebook.set_show_tabs(!compact);
+        compact_inspector_tabs.set_visible(compact);
+        kernel_wide_subtabs.set_visible(!compact);
+        kernel_compact_subtabs.set_visible(compact);
+        misc_wide_subtabs.set_visible(!compact);
+        misc_compact_subtabs.set_visible(compact);
+    });
+    let update_for_position = Rc::clone(&update);
+    workspace.connect_position_notify(move |workspace| update_for_position(workspace));
+    let update_for_allocation = Rc::clone(&update);
+    workspace.connect_max_position_notify(move |workspace| update_for_allocation(workspace));
+    let update_for_map = Rc::clone(&update);
+    workspace.connect_map(move |workspace| {
+        let workspace = workspace.clone();
+        let update = Rc::clone(&update_for_map);
+        glib::idle_add_local_once(move || update(&workspace));
+    });
+}
+
 pub(super) fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSidebar {
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
     sidebar.add_css_class("sidebar");
@@ -730,7 +774,7 @@ pub(super) fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSi
 
 pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     let notebook = gtk::Notebook::new();
-    notebook.set_size_request(260, 0);
+    notebook.set_size_request(0, 0);
     notebook.set_scrollable(true);
     notebook.add_css_class("panel");
 
@@ -1267,22 +1311,17 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     let kernel_view = build_kernel_view(&bindings.kernel);
     let misc_view = build_misc_view(&bindings.misc);
 
-    notebook.append_page(&state, Some(&gtk::Label::new(Some("Context"))));
-    notebook.append_page(
-        &expression_watches_page,
-        Some(&gtk::Label::new(Some("Watches"))),
-    );
-    notebook.append_page(&registers_page, Some(&gtk::Label::new(Some("Registers"))));
-    notebook.append_page(&stack_page, Some(&gtk::Label::new(Some("Stack"))));
-    notebook.append_page(&memory_page, Some(&gtk::Label::new(Some("Memory"))));
-    notebook.append_page(
-        &breakpoints_page,
-        Some(&gtk::Label::new(Some("Breakpoints"))),
-    );
-    notebook.append_page(&signals_page, Some(&gtk::Label::new(Some("Signals"))));
+    append_responsive_inspector_page(&notebook, &state, "Context");
+    append_responsive_inspector_page(&notebook, &expression_watches_page, "Watches");
+    append_responsive_inspector_page(&notebook, &registers_page, "Registers");
+    append_responsive_inspector_page(&notebook, &stack_page, "Stack");
+    append_responsive_inspector_page(&notebook, &memory_page, "Memory");
+    append_responsive_inspector_page(&notebook, &breakpoints_page, "Breakpoints");
+    append_responsive_inspector_page(&notebook, &signals_page, "Signals");
     let kernel_page =
         notebook.append_page(&kernel_view.root, Some(&gtk::Label::new(Some("Kernel"))));
     let misc_page = notebook.append_page(&misc_view.root, Some(&gtk::Label::new(Some("Misc"))));
+    let compact_tabs = build_compact_inspector_navigation(&notebook);
     let notebook_for_selection = notebook.clone();
     notebook.connect_switch_page(move |_, _, _| {
         let notebook = notebook_for_selection.clone();
@@ -1310,8 +1349,15 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         kernel_view.root.clone().upcast(),
         misc_view.root.clone().upcast(),
     ];
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.set_size_request(0, 0);
+    root.set_vexpand(true);
+    root.append(&compact_tabs);
+    root.append(&notebook);
     Inspector {
-        root: notebook,
+        root,
+        notebook,
+        compact_tabs,
         context_split: context,
         status_detail: detail,
         stale_panels,
@@ -1366,6 +1412,86 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         kernel_view,
         misc_view,
     }
+}
+
+fn append_responsive_inspector_page(
+    notebook: &gtk::Notebook,
+    child: &impl IsA<gtk::Widget>,
+    title: &str,
+) -> u32 {
+    let viewport = gtk::ScrolledWindow::new();
+    viewport.add_css_class("inspector-page-viewport");
+    viewport.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
+    viewport.set_overlay_scrolling(true);
+    viewport.set_propagate_natural_width(false);
+    viewport.set_min_content_width(0);
+    viewport.set_size_request(0, 0);
+    viewport.set_hexpand(true);
+    viewport.set_vexpand(true);
+    viewport.set_child(Some(child));
+    notebook.append_page(&viewport, Some(&gtk::Label::new(Some(title))))
+}
+
+fn build_compact_inspector_navigation(notebook: &gtk::Notebook) -> gtk::Box {
+    const PAGES: [&str; 9] = [
+        "Context",
+        "Watches",
+        "Registers",
+        "Stack",
+        "Memory",
+        "Breakpoints",
+        "Signals",
+        "Kernel",
+        "Misc",
+    ];
+    let previous = gtk::Button::with_label("‹");
+    previous.add_css_class("kernel-tab-nav-button");
+    previous.set_tooltip_text(Some("Open the previous inspector"));
+    let selector = gtk::DropDown::from_strings(&PAGES);
+    selector.add_css_class("kernel-compact-tab-selector");
+    selector.set_hexpand(true);
+    selector.set_selected(notebook.current_page().unwrap_or(0));
+    selector.set_tooltip_text(Some("Select an inspector"));
+    let next = gtk::Button::with_label("›");
+    next.add_css_class("kernel-tab-nav-button");
+    next.set_tooltip_text(Some("Open the next inspector"));
+    let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    root.add_css_class("kernel-tab-navigation");
+    root.add_css_class("kernel-compact-tab-navigation");
+    root.set_hexpand(true);
+    root.append(&previous);
+    root.append(&selector);
+    root.append(&next);
+    root.set_visible(false);
+
+    let notebook_for_selector = notebook.clone();
+    selector.connect_selected_notify(move |selector| {
+        let page = selector.selected();
+        if page != gtk::INVALID_LIST_POSITION {
+            notebook_for_selector.set_current_page(Some(page));
+        }
+    });
+    let notebook_for_previous = notebook.clone();
+    previous.connect_clicked(move |_| {
+        let page = notebook_for_previous.current_page().unwrap_or(0);
+        notebook_for_previous.set_current_page(Some(page.saturating_sub(1)));
+    });
+    let notebook_for_next = notebook.clone();
+    next.connect_clicked(move |_| {
+        let page = notebook_for_next.current_page().unwrap_or(0);
+        notebook_for_next.set_current_page(Some((page + 1).min(PAGES.len() as u32 - 1)));
+    });
+    let selector_for_page = selector.clone();
+    let previous_for_page = previous.clone();
+    let next_for_page = next.clone();
+    let update = move |page: u32| {
+        selector_for_page.set_selected(page);
+        previous_for_page.set_sensitive(page > 0);
+        next_for_page.set_sensitive(page + 1 < PAGES.len() as u32);
+    };
+    update(notebook.current_page().unwrap_or(0));
+    notebook.connect_switch_page(move |_, _, page| update(page));
+    root
 }
 
 fn compact_instruction_button(label: &str, tooltip: &str) -> gtk::Button {

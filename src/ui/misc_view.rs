@@ -1,9 +1,11 @@
 use super::*;
 
+const MISC_PAGES: [(&str, &str); 1] = [("startup-vectors", "Args / Env")];
+
 struct StartupWidgets {
     root: gtk::Box,
     split: gtk::Paned,
-    summary: gtk::Label,
+    summary: MiscStartupSummary,
     warning: gtk::Label,
     arguments_store: gio::ListStore,
     arguments_empty: gtk::Label,
@@ -17,15 +19,11 @@ pub(super) fn build_misc_view(bindings: &MiscViewBindings<'_>) -> MiscView {
     let in_flight = Rc::new(Cell::new(false));
     let needs_refresh = Rc::new(Cell::new(true));
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    root.set_size_request(-1, 0);
+    root.set_size_request(0, 0);
     root.add_css_class("sidebar");
     root.add_css_class("kernel-page");
     root.add_css_class("misc-page");
 
-    let header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-    header.add_css_class("subpanel-header");
-    let title = section_title("MISCELLANEOUS PROCESS DATA");
-    title.set_hexpand(true);
     let status = gtk::Label::new(Some("Start and pause a local inferior"));
     status.add_css_class("kernel-status");
     status.add_css_class("muted");
@@ -34,12 +32,9 @@ pub(super) fn build_misc_view(bindings: &MiscViewBindings<'_>) -> MiscView {
     refresh_button.add_css_class("inline-action");
     refresh_button.set_sensitive(false);
     refresh_button.set_tooltip_text(Some("Read argc, argv and envp again from procfs"));
-    header.append(&title);
-    header.append(&status);
-    header.append(&refresh_button);
-    root.append(&header);
 
     let pages = gtk::Stack::new();
+    pages.set_size_request(0, 0);
     pages.set_vexpand(true);
     pages.set_vhomogeneous(false);
     pages.set_hhomogeneous(false);
@@ -48,17 +43,29 @@ pub(super) fn build_misc_view(bindings: &MiscViewBindings<'_>) -> MiscView {
     switcher.add_css_class("kernel-tabs");
     switcher.set_stack(Some(&pages));
     switcher.set_hexpand(true);
-    let navigation = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    navigation.add_css_class("kernel-tab-navigation");
-    navigation.append(&switcher);
-    root.append(&navigation);
+    let navigation = build_subtab_navigation(
+        &switcher,
+        &pages,
+        &MISC_PAGES,
+        "Scroll to earlier Misc views",
+        "Scroll to later Misc views",
+    );
+    navigation.root.append(&status);
+    navigation.root.append(&refresh_button);
+    let compact_refresh_button = gtk::Button::with_label("Refresh");
+    compact_refresh_button.add_css_class("inline-action");
+    compact_refresh_button.set_tooltip_text(refresh_button.tooltip_text().as_deref());
+    compact_refresh_button.set_sensitive(refresh_button.is_sensitive());
+    let compact_refresh_for_sensitivity = compact_refresh_button.clone();
+    refresh_button.connect_sensitive_notify(move |button| {
+        compact_refresh_for_sensitivity.set_sensitive(button.is_sensitive());
+    });
+    navigation.compact_root.append(&compact_refresh_button);
+    root.append(&navigation.root);
+    root.append(&navigation.compact_root);
 
     let startup = build_startup_page();
-    pages.add_titled(
-        &startup.root,
-        Some("startup-vectors"),
-        "Arguments / environment",
-    );
+    pages.add_titled(&startup.root, Some("startup-vectors"), "Args / Env");
     root.append(&pages);
 
     let handler = Rc::clone(bindings.refresh_handler);
@@ -67,9 +74,17 @@ pub(super) fn build_misc_view(bindings: &MiscViewBindings<'_>) -> MiscView {
             handler();
         }
     });
+    let handler = Rc::clone(bindings.refresh_handler);
+    compact_refresh_button.connect_clicked(move |_| {
+        if let Some(handler) = handler.borrow().as_ref() {
+            handler();
+        }
+    });
 
     MiscView {
         root,
+        wide_subtabs: navigation.root,
+        compact_subtabs: navigation.compact_root,
         active,
         tracking_enabled,
         in_flight,
@@ -89,20 +104,16 @@ pub(super) fn build_misc_view(bindings: &MiscViewBindings<'_>) -> MiscView {
 fn build_startup_page() -> StartupWidgets {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_vexpand(true);
-    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let controls = gtk::Box::new(gtk::Orientation::Vertical, 3);
     controls.add_css_class("misc-startup-controls");
-    let summary = gtk::Label::new(Some("argc —  ·  argv —  ·  envp —"));
-    summary.set_hexpand(true);
-    summary.set_xalign(0.0);
-    summary.add_css_class("kernel-table-summary");
-    enable_stable_text_selection(&summary);
+    let (summary_view, summary) = build_startup_summary();
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Filter argument, variable, value, or address")
-        .width_chars(36)
         .build();
+    search.set_hexpand(true);
     search.add_css_class("kernel-change-search");
     search.add_css_class("kernel-table-search");
-    controls.append(&summary);
+    controls.append(&summary_view);
     controls.append(&search);
     root.append(&controls);
 
@@ -131,6 +142,7 @@ fn build_startup_page() -> StartupWidgets {
     });
 
     let split = gtk::Paned::new(gtk::Orientation::Vertical);
+    split.add_css_class("misc-startup-split");
     split.set_wide_handle(false);
     split.set_resize_start_child(true);
     split.set_shrink_start_child(false);
@@ -151,6 +163,60 @@ fn build_startup_page() -> StartupWidgets {
         environment_store,
         environment_empty,
     }
+}
+
+fn build_startup_summary() -> (gtk::FlowBox, MiscStartupSummary) {
+    let summary = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .homogeneous(true)
+        .min_children_per_line(2)
+        .max_children_per_line(4)
+        .column_spacing(1)
+        .row_spacing(1)
+        .build();
+    summary.add_css_class("misc-startup-summary");
+    let argc = append_startup_summary_cell(&summary, "ARGC");
+    let argv = append_startup_summary_cell(&summary, "ARGV RANGE");
+    let envp = append_startup_summary_cell(&summary, "ENVP RANGE");
+    let environment = append_startup_summary_cell(&summary, "ENVIRONMENT");
+    set_startup_summary_value(&argc, "—");
+    set_startup_summary_value(&argv, "—");
+    set_startup_summary_value(&envp, "—");
+    set_startup_summary_value(&environment, "—");
+    (
+        summary,
+        MiscStartupSummary {
+            argc,
+            argv,
+            envp,
+            environment,
+        },
+    )
+}
+
+fn append_startup_summary_cell(summary: &gtk::FlowBox, title: &str) -> gtk::Label {
+    let cell = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    cell.add_css_class("misc-startup-summary-cell");
+    let key = gtk::Label::new(Some(title));
+    key.add_css_class("misc-startup-summary-key");
+    key.set_halign(gtk::Align::Start);
+    let value = gtk::Label::new(None);
+    value.add_css_class("misc-startup-summary-value");
+    value.set_hexpand(true);
+    value.set_halign(gtk::Align::Start);
+    value.set_xalign(0.0);
+    value.set_single_line_mode(true);
+    value.set_ellipsize(pango::EllipsizeMode::Middle);
+    enable_stable_text_selection(&value);
+    cell.append(&key);
+    cell.append(&value);
+    summary.insert(&cell, -1);
+    value
+}
+
+fn set_startup_summary_value(label: &gtk::Label, value: &str) {
+    label.set_text(value);
+    label.set_tooltip_text(Some(value));
 }
 
 fn build_arguments_section(
@@ -199,6 +265,7 @@ fn build_arguments_section(
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
+    configure_misc_scroller(&scrolled);
     section.append(&empty);
     section.append(&scrolled);
     (section, store, empty, filter)
@@ -253,9 +320,16 @@ fn build_environment_section(
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
+    configure_misc_scroller(&scrolled);
     section.append(&empty);
     section.append(&scrolled);
     (section, store, empty, filter)
+}
+
+fn configure_misc_scroller(scrolled: &gtk::ScrolledWindow) {
+    scrolled.set_min_content_width(0);
+    scrolled.set_propagate_natural_width(false);
+    scrolled.set_size_request(0, -1);
 }
 
 fn argument_matches(argument: &ProcessArgument, query: &str) -> bool {
@@ -389,11 +463,16 @@ impl MiscView {
         let argument_count = snapshot.arguments.len();
         let environment_count = snapshot.environment.len();
         self.status.set_text(&format!("PID {}", snapshot.pid));
-        self.summary.set_text(&format!(
-            "argc {argument_count}  ·  argv {}  ·  envp {}  ·  {environment_count} environment entries",
-            format_range(snapshot.argument_range),
-            format_range(snapshot.environment_range),
-        ));
+        set_startup_summary_value(&self.summary.argc, &argument_count.to_string());
+        set_startup_summary_value(&self.summary.argv, &format_range(snapshot.argument_range));
+        set_startup_summary_value(
+            &self.summary.envp,
+            &format_range(snapshot.environment_range),
+        );
+        set_startup_summary_value(
+            &self.summary.environment,
+            &format!("{environment_count} entries"),
+        );
         replace_boxed_store_if_changed(&self.arguments_store, snapshot.arguments);
         replace_boxed_store_if_changed(&self.environment_store, snapshot.environment);
         self.arguments_empty.set_visible(argument_count == 0);
@@ -405,7 +484,14 @@ impl MiscView {
 
     fn clear(&self, message: &str) {
         self.status.set_text(message);
-        self.summary.set_text("argc —  ·  argv —  ·  envp —");
+        for value in [
+            &self.summary.argc,
+            &self.summary.argv,
+            &self.summary.envp,
+            &self.summary.environment,
+        ] {
+            set_startup_summary_value(value, "—");
+        }
         self.warning.set_visible(false);
         self.warning.set_text("");
         self.arguments_store.remove_all();

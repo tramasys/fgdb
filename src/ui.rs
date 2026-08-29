@@ -564,6 +564,8 @@ struct StackWordInspector {
 #[derive(Clone)]
 struct KernelView {
     root: gtk::Box,
+    wide_subtabs: gtk::Box,
+    compact_subtabs: gtk::Box,
     active: Rc<Cell<bool>>,
     tracking_enabled: Rc<Cell<bool>>,
     in_flight: Rc<Cell<bool>>,
@@ -616,15 +618,25 @@ struct KernelView {
 }
 
 #[derive(Clone)]
+struct MiscStartupSummary {
+    argc: gtk::Label,
+    argv: gtk::Label,
+    envp: gtk::Label,
+    environment: gtk::Label,
+}
+
+#[derive(Clone)]
 struct MiscView {
     root: gtk::Box,
+    wide_subtabs: gtk::Box,
+    compact_subtabs: gtk::Box,
     active: Rc<Cell<bool>>,
     tracking_enabled: Rc<Cell<bool>>,
     in_flight: Rc<Cell<bool>>,
     needs_refresh: Rc<Cell<bool>>,
     refresh_button: gtk::Button,
     status: gtk::Label,
-    summary: gtk::Label,
+    summary: MiscStartupSummary,
     warning: gtk::Label,
     arguments_store: gio::ListStore,
     arguments_empty: gtk::Label,
@@ -1164,7 +1176,9 @@ struct Workspace {
 }
 
 struct Inspector {
-    root: gtk::Notebook,
+    root: gtk::Box,
+    notebook: gtk::Notebook,
+    compact_tabs: gtk::Box,
     context_split: gtk::Paned,
     status_detail: gtk::Label,
     stale_panels: Vec<gtk::Widget>,

@@ -1565,7 +1565,17 @@ stackswitcher.kernel-tabs {{
 
 scrolledwindow.kernel-tabs-scroll,
 scrolledwindow.kernel-tabs-scroll > viewport {{
+    min-width: 0;
     min-height: 26px;
+    background: @app_surface;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+}}
+
+scrolledwindow.inspector-page-viewport,
+scrolledwindow.inspector-page-viewport > viewport {{
+    min-width: 0;
     background: @app_surface;
     border: 0;
     outline: 0;
@@ -1599,16 +1609,48 @@ stackswitcher.kernel-tabs button:checked {{
     background: alpha(@app_fg, 0.08);
 }}
 
+.kernel-page.inspector-compact stackswitcher.kernel-tabs button {{
+    padding-left: 5px;
+    padding-right: 5px;
+}}
+
+.kernel-page.inspector-compact .subpanel-header {{
+    padding-left: 2px;
+    padding-right: 2px;
+}}
+
 .kernel-status {{
     font-size: 10px;
     padding: 0 3px;
 }}
 
 .misc-startup-controls {{
-    min-height: 29px;
-    padding: 3px 5px;
+    padding: 4px 5px 5px;
     background: @app_surface;
     border-bottom: 1px solid @app_border;
+}}
+
+flowbox.misc-startup-summary > flowboxchild {{
+    min-width: 0;
+    padding: 0;
+    background: transparent;
+}}
+
+.misc-startup-summary-cell {{
+    min-height: 22px;
+    padding: 2px 6px;
+    background: @app_raised;
+}}
+
+.misc-startup-summary-key {{
+    color: @app_muted;
+    font-size: 10px;
+    font-weight: bold;
+}}
+
+.misc-startup-summary-value {{
+    min-width: 0;
+    color: @app_fg;
 }}
 
 .misc-startup-warning {{
@@ -1632,6 +1674,19 @@ stackswitcher.kernel-tabs button:checked {{
 }}
 
 .misc-vector-table label.debug-table-cell {{ min-height: 23px; }}
+
+paned.misc-startup-split > separator {{
+    min-height: 1px;
+    margin: 0;
+    padding: 0;
+    background: @app_surface;
+    background-image: none;
+    border: 0;
+}}
+
+paned.misc-startup-split > separator:hover {{
+    background: alpha(@app_accent, 0.35);
+}}
 
 .kernel-table-controls {{ padding: 2px 3px; }}
 .kernel-table-summary {{ padding: 3px 4px; }}
@@ -1657,6 +1712,10 @@ stackswitcher.kernel-tabs button:checked {{
 
 entry.kernel-table-search > image:first-child {{
     margin-right: 5px;
+}}
+
+entry.kernel-table-search {{
+    min-width: 92px;
 }}
 
 .kernel-change-empty {{
