@@ -769,6 +769,7 @@ fn build_overview(
             key.set_width_chars(-1);
             key.set_max_width_chars(-1);
             key.set_hexpand(true);
+            key.set_xalign(0.0);
             key.set_ellipsize(pango::EllipsizeMode::None);
             value.set_visible(false);
             row.set_cursor_from_name(Some("pointer"));
@@ -781,6 +782,7 @@ fn build_overview(
             key.set_width_chars(-1);
             key.set_max_width_chars(KERNEL_FACT_LABEL_MAX_WIDTH);
             key.set_hexpand(false);
+            key.set_xalign(0.5);
             key.set_ellipsize(pango::EllipsizeMode::End);
             value.set_visible(true);
             row.set_cursor_from_name(None);

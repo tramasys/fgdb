@@ -21,8 +21,9 @@ use crate::{
     },
     theme::Theme,
     ui::{
-        BreakpointEditRequest, BreakpointSpec, DisassemblyRequest, DisassemblySyntax,
-        EventCatchpoint, GefContextControl, SessionAction, Ui, UntilAction, WatchpointAccess,
+        BreakpointEditRequest, BreakpointSpec, CallAbiTargetRequest, DisassemblyRequest,
+        DisassemblySyntax, EventCatchpoint, GefContextControl, SessionAction, Ui, UntilAction,
+        WatchpointAccess,
     },
 };
 

@@ -1210,15 +1210,76 @@ impl Ui {
             return;
         };
         let architecture = self.target_architecture();
-        let phase = call_abi_phase(&context.current, context.previous.as_ref(), architecture);
+        let mut phase = call_abi_phase(&context.current, context.previous.as_ref(), architecture);
+        if let Some(resolution) = context.target_resolution.as_ref() {
+            replace_call_abi_phase_target(&mut phase, resolution);
+        }
         let registers = self.latest_registers.borrow();
         let mut transfer = crate::misc::call_abi_transfer(architecture, phase, &registers);
         let address = full_address(&context.current.address, self.target_pointer_bits());
-        transfer.context = format!("{}  ·  {address}", transfer.context);
+        transfer.context = format!("{}  ·  instruction {address}", transfer.context);
+        let transfer_context = transfer.context.clone();
         self.misc_view.show_call_abi_transfer(transfer);
         self.misc_view
             .call_abi_context
-            .set_tooltip_text(Some(&format!("{address}  {}", context.current.text)));
+            .set_tooltip_text(Some(&format!(
+                "{transfer_context}\n{address}  {}",
+                context.current.text
+            )));
+    }
+
+    pub(crate) fn take_call_abi_target_request(&self) -> Option<CallAbiTargetRequest> {
+        let generation = self.current_stop_refresh_generation();
+        if self.call_abi_instruction_generation.get() != Some(generation) {
+            return None;
+        }
+        let architecture = self.target_architecture();
+        let mut context = self.call_abi_instruction.borrow_mut();
+        let context = context.as_mut()?;
+        let phase = call_abi_phase(&context.current, context.previous.as_ref(), architecture);
+        let expression = call_abi_phase_target(&phase)?.to_owned();
+        if context
+            .target_resolution
+            .as_ref()
+            .is_some_and(|resolution| resolution.expression == expression)
+            || context.pending_target.as_deref() == Some(expression.as_str())
+        {
+            return None;
+        }
+        context.pending_target = Some(expression.clone());
+        Some(CallAbiTargetRequest {
+            generation,
+            instruction_address: context.current.address.clone(),
+            expression,
+        })
+    }
+
+    pub(crate) fn show_call_abi_target_resolution(
+        &self,
+        request: &CallAbiTargetRequest,
+        display: Option<String>,
+    ) {
+        if !self.is_stop_refresh_current(request.generation)
+            || self.call_abi_instruction_generation.get() != Some(request.generation)
+        {
+            return;
+        }
+        let mut context_slot = self.call_abi_instruction.borrow_mut();
+        let Some(context) = context_slot.as_mut() else {
+            return;
+        };
+        if !addresses_equal(&context.current.address, &request.instruction_address)
+            || context.pending_target.as_deref() != Some(request.expression.as_str())
+        {
+            return;
+        }
+        context.pending_target = None;
+        context.target_resolution = Some(CallAbiTargetResolution {
+            expression: request.expression.clone(),
+            display: display.unwrap_or_else(|| request.expression.clone()),
+        });
+        drop(context_slot);
+        self.refresh_call_abi_transfer();
     }
 
     pub fn show_misc_error(&self, generation: u64, error: &str) {
@@ -1284,5 +1345,28 @@ impl Ui {
             && self.inferior_started.get()
             && !self.inferior_running.get()
             && !self.command_pending.get()
+    }
+}
+
+fn call_abi_phase_target(phase: &CallAbiPhase) -> Option<&str> {
+    match phase {
+        CallAbiPhase::OutgoingCall { target } | CallAbiPhase::Returned { target } => {
+            target.as_deref()
+        }
+        CallAbiPhase::IncomingEntry { .. } | CallAbiPhase::Returning | CallAbiPhase::Sequential => {
+            None
+        }
+    }
+}
+
+fn replace_call_abi_phase_target(phase: &mut CallAbiPhase, resolution: &CallAbiTargetResolution) {
+    let target = match phase {
+        CallAbiPhase::OutgoingCall { target } | CallAbiPhase::Returned { target } => target,
+        CallAbiPhase::IncomingEntry { .. } | CallAbiPhase::Returning | CallAbiPhase::Sequential => {
+            return;
+        }
+    };
+    if target.as_deref() == Some(resolution.expression.as_str()) {
+        *target = Some(resolution.display.clone());
     }
 }

@@ -407,9 +407,58 @@ impl DisassemblyController {
         };
         self.commit_location(&focus, history, &instructions);
         ui.show_instructions(&instructions, &pc, &focus, architecture.as_deref(), mixed);
+        if let Some(request) = ui.take_call_abi_target_request() {
+            self.resolve_call_abi_target(request);
+        }
         ui.clear_disassembly_error();
         ui.set_disassembly_loading(false);
         self.update_history_buttons(&ui);
+    }
+
+    fn resolve_call_abi_target(&self, request: CallAbiTargetRequest) {
+        if validate_disassembly_expression(&request.expression).is_err() {
+            if let Some(ui) = self.ui.upgrade() {
+                ui.show_call_abi_target_resolution(&request, None);
+            }
+            return;
+        }
+        let command = format!(
+            "-data-evaluate-expression {}",
+            crate::debugger::quote(&format!("(void*)({})", request.expression))
+        );
+        let weak_ui_for_guard = self.ui.clone();
+        let weak_ui_for_response = self.ui.clone();
+        let generation = request.generation;
+        let request_for_response = request.clone();
+        if self
+            .client
+            .request_when(
+                &command,
+                move || {
+                    weak_ui_for_guard
+                        .upgrade()
+                        .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+                },
+                move |_, record| {
+                    let Some(ui) = weak_ui_for_response.upgrade() else {
+                        return;
+                    };
+                    let display = record
+                        .is_done()
+                        .then(|| crate::debugger::evaluated_value(&record))
+                        .flatten()
+                        .as_deref()
+                        .and_then(|value| {
+                            resolved_call_target_display(&request_for_response.expression, value)
+                        });
+                    ui.show_call_abi_target_resolution(&request_for_response, display);
+                },
+            )
+            .is_err()
+            && let Some(ui) = self.ui.upgrade()
+        {
+            ui.show_call_abi_target_resolution(&request, None);
+        }
     }
 
     fn commit_location(
@@ -536,6 +585,27 @@ fn opcode_byte_count(opcodes: &str) -> usize {
         .max(1)
 }
 
+fn resolved_call_target_display(expression: &str, value: &str) -> Option<String> {
+    const MAX_RESOLVED_TARGET_BYTES: usize = 512;
+
+    let start = value.find("0x").or_else(|| value.find("0X"))?;
+    let value = value.get(start..)?.trim();
+    if value.is_empty() || value.len() > MAX_RESOLVED_TARGET_BYTES {
+        return None;
+    }
+    let expression_address = evaluated_address(expression);
+    let value_address = evaluated_address(value);
+    let has_symbol = value.contains('<') && value.contains('>');
+    if !has_symbol && expression_address == value_address {
+        return None;
+    }
+    if expression.trim().starts_with(['$', '%']) {
+        Some(format!("{} → {value}", expression.trim()))
+    } else {
+        Some(value.to_owned())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -564,5 +634,22 @@ mod tests {
         assert_eq!(opcode_byte_count("e92d4800"), 4);
         assert_eq!(opcode_byte_count("0x1234 0xabcd"), 4);
         assert_eq!(opcode_byte_count("unavailable"), 1);
+    }
+
+    #[test]
+    fn formats_resolved_direct_and_register_call_targets() {
+        assert_eq!(
+            resolved_call_target_display("0x5555555550a0", "(void *) 0x5555555550a0 <malloc@plt>")
+                .as_deref(),
+            Some("0x5555555550a0 <malloc@plt>")
+        );
+        assert_eq!(
+            resolved_call_target_display("$rax", "0x7ffff7e12340 <malloc>").as_deref(),
+            Some("$rax → 0x7ffff7e12340 <malloc>")
+        );
+        assert_eq!(
+            resolved_call_target_display("0x401000", "(void *) 0x401000"),
+            None
+        );
     }
 }

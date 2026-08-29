@@ -400,6 +400,21 @@ struct InstructionRowData {
 struct CallAbiInstructionContext {
     current: Instruction,
     previous: Option<Instruction>,
+    target_resolution: Option<CallAbiTargetResolution>,
+    pending_target: Option<String>,
+}
+
+#[derive(Clone)]
+struct CallAbiTargetResolution {
+    expression: String,
+    display: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct CallAbiTargetRequest {
+    pub generation: u64,
+    pub instruction_address: String,
+    pub expression: String,
 }
 
 #[derive(Clone)]

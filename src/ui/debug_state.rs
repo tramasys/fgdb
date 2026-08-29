@@ -520,6 +520,8 @@ impl Ui {
                     previous: position
                         .checked_sub(1)
                         .and_then(|previous| instructions.get(previous).cloned()),
+                    target_resolution: None,
+                    pending_target: None,
                 }));
             self.call_abi_instruction_generation
                 .set(Some(self.current_stop_refresh_generation()));
