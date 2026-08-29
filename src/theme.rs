@@ -555,18 +555,49 @@ columnview.debug-table > header {{
     border: 0;
 }}
 
-columnview.debug-table > header button {{
+columnview.debug-table.view > header > button {{
     min-height: 23px;
     padding: 0 4px;
     color: @app_muted;
     background: @app_raised;
-    border: 0;
+    background-image: none;
+    border-style: none;
+    border-width: 0;
+    border-color: transparent;
     border-right: 1px solid @app_border;
+    border-bottom: 0;
+    outline-style: none;
+    outline-width: 0;
+    outline-color: transparent;
+    outline-offset: 0;
+    box-shadow: none;
+    transition: none;
 }}
 
-columnview.debug-table > header button:hover {{
+columnview.debug-table.view > header > button:hover,
+columnview.debug-table.view > header > button:focus,
+columnview.debug-table.view > header > button:focus-visible,
+columnview.debug-table.view > header > button:active,
+columnview.debug-table.view > header > button:checked {{
     color: @app_fg;
     background: alpha(@app_accent, 0.12);
+    background-image: none;
+    border-style: none;
+    border-width: 0;
+    border-color: transparent;
+    border-right: 1px solid @app_border;
+    border-bottom: 0;
+    outline-style: none;
+    outline-width: 0;
+    outline-color: transparent;
+    outline-offset: 0;
+    box-shadow: none;
+}}
+
+columnview.debug-table.view > header > button sort-indicator:not(.ascending):not(.descending) {{
+    min-width: 0;
+    min-height: 0;
+    opacity: 0;
 }}
 
 columnview.debug-table row {{
@@ -1016,16 +1047,19 @@ columnview.memory-map-table row {{ min-height: 28px; }}
     font-size: 10px;
 }}
 
-.gutter-breakpoint-menu {{
+.gutter-breakpoint-menu,
+.terminal-context-menu {{
     min-width: 172px;
     padding: 5px;
     background: @app_surface;
     border: 1px solid @app_border;
 }}
 
-.gutter-breakpoint-menu > label {{ padding: 2px 7px 5px; }}
+.gutter-breakpoint-menu > label,
+.terminal-context-menu > label {{ padding: 2px 7px 5px; }}
 
-.gutter-breakpoint-menu > button {{
+.gutter-breakpoint-menu > button,
+.terminal-context-menu > button {{
     min-height: 25px;
     padding: 1px 8px;
     color: @app_fg;
@@ -1034,13 +1068,16 @@ columnview.memory-map-table row {{ min-height: 28px; }}
 }}
 
 .gutter-breakpoint-menu > button:hover,
-.gutter-breakpoint-menu > button:focus-visible {{
+.gutter-breakpoint-menu > button:focus-visible,
+.terminal-context-menu > button:hover,
+.terminal-context-menu > button:focus-visible {{
     color: @app_accent_hover;
     background: @app_raised;
     border-left-color: @app_accent;
 }}
 
-.gutter-breakpoint-menu > separator {{
+.gutter-breakpoint-menu > separator,
+.terminal-context-menu > separator {{
     min-height: 1px;
     margin: 3px 0;
     background: @app_border;
@@ -1619,11 +1656,6 @@ stackswitcher.kernel-tabs button:checked {{
     padding-right: 2px;
 }}
 
-.kernel-status {{
-    font-size: 10px;
-    padding: 0 3px;
-}}
-
 .misc-startup-controls {{
     padding: 4px 5px 5px;
     background: @app_surface;
@@ -1685,6 +1717,41 @@ paned.misc-startup-split > separator {{
 }}
 
 paned.misc-startup-split > separator:hover {{
+    background: alpha(@app_accent, 0.35);
+}}
+
+.misc-data-summary {{
+    min-height: 24px;
+    padding: 3px 7px;
+    color: @app_fg;
+    background: @app_raised;
+    border-bottom: 1px solid @app_border;
+}}
+
+.misc-data-note {{
+    padding: 3px 7px;
+}}
+
+.call-abi-context {{
+    min-height: 24px;
+    padding: 4px 7px;
+    color: @app_accent;
+    background: alpha(@app_accent, 0.08);
+    font-weight: 700;
+}}
+
+.misc-data-table label.debug-table-cell {{ min-height: 23px; }}
+
+paned.misc-data-split > separator {{
+    min-height: 1px;
+    margin: 0;
+    padding: 0;
+    background: @app_surface;
+    background-image: none;
+    border: 0;
+}}
+
+paned.misc-data-split > separator:hover {{
     background: alpha(@app_accent, 0.35);
 }}
 

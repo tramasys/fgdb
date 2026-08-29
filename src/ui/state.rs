@@ -141,6 +141,8 @@ impl Ui {
             instruction_memory: workspace.instruction_memory,
             disassembly_controls: workspace.disassembly_controls,
             current_instruction: Rc::new(RefCell::new(None)),
+            call_abi_instruction: Rc::new(RefCell::new(None)),
+            call_abi_instruction_generation: Rc::new(Cell::new(None)),
             current_instruction_memory_expression: Rc::new(RefCell::new(None)),
             latest_registers: Rc::new(RefCell::new(Vec::new())),
             latest_registers_generation: Rc::new(Cell::new(None)),
@@ -738,12 +740,6 @@ impl Ui {
             .set_sensitive(self.disassembly_controls.syntax_applicable.get());
         self.gef_tools_button
             .set_sensitive(self.gef_available.get() && ready && !running && !pending);
-        self.kernel_view
-            .refresh_button
-            .set_sensitive(can_inspect && !self.kernel_view.in_flight.get());
-        self.misc_view
-            .refresh_button
-            .set_sensitive(can_inspect && !self.misc_view.in_flight.get());
         self.locals_view.set_sensitive(can_inspect);
         self.locals_edit_button.set_sensitive(
             can_inspect

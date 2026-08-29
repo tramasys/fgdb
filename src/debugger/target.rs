@@ -605,6 +605,20 @@ impl TargetArchitecture {
         }
     }
 
+    pub fn call_return_registers(self) -> &'static [&'static str] {
+        match self {
+            Self::X86 => &["eax", "edx"],
+            Self::X86_64 => &["rax", "rdx"],
+            Self::Arm => &["r0", "r1"],
+            Self::AArch64 => &["x0", "x1"],
+            Self::RiscV32 | Self::RiscV64 | Self::LoongArch64 => &["a0", "a1"],
+            Self::Mips32 | Self::Mips64 => &["v0", "v1"],
+            Self::PowerPc32 | Self::PowerPc64 => &["r3", "r4"],
+            Self::S390 | Self::S390x => &["r2", "r3"],
+            Self::Unknown => &[],
+        }
+    }
+
     pub fn syscall_registers(self) -> Option<(&'static str, &'static [&'static str])> {
         match self {
             Self::X86 => Some(("eax", &["ebx", "ecx", "edx", "esi", "edi", "ebp"])),
@@ -1062,6 +1076,18 @@ mod tests {
         assert_eq!(
             TargetArchitecture::RiscV32.syscall_registers().unwrap().0,
             "a7"
+        );
+        assert_eq!(
+            TargetArchitecture::X86_64.call_return_registers(),
+            &["rax", "rdx"]
+        );
+        assert_eq!(
+            TargetArchitecture::AArch64.call_return_registers(),
+            &["x0", "x1"]
+        );
+        assert_eq!(
+            TargetArchitecture::S390x.call_return_registers(),
+            &["r2", "r3"]
         );
         assert_eq!(TargetArchitecture::X86.syscall_name(3), "read");
         assert_eq!(TargetArchitecture::AArch64.syscall_name(63), "read");

@@ -1182,7 +1182,129 @@ pub(super) fn build_terminal(theme: &Theme) -> vte4::Terminal {
     terminal.set_cursor_blink_mode(vte4::CursorBlinkMode::On);
     terminal.set_font(Some(&pango::FontDescription::from_string("Monospace 9.5")));
     theme.style_terminal(&terminal);
+    connect_terminal_clipboard(&terminal);
     terminal
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TerminalClipboardAction {
+    Copy,
+    Paste,
+}
+
+pub(super) fn terminal_clipboard_action(
+    key: gtk::gdk::Key,
+    state: gtk::gdk::ModifierType,
+    has_selection: bool,
+) -> Option<TerminalClipboardAction> {
+    if state.intersects(gtk::gdk::ModifierType::ALT_MASK | gtk::gdk::ModifierType::SUPER_MASK) {
+        return None;
+    }
+    let control = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+    let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+    let insert = matches!(key, gtk::gdk::Key::Insert | gtk::gdk::Key::KP_Insert);
+    if (control && matches!(key, gtk::gdk::Key::v | gtk::gdk::Key::V))
+        || (shift && !control && insert)
+    {
+        return Some(TerminalClipboardAction::Paste);
+    }
+    if (control && !shift && insert)
+        || (control
+            && matches!(key, gtk::gdk::Key::c | gtk::gdk::Key::C)
+            && (shift || has_selection))
+    {
+        return Some(TerminalClipboardAction::Copy);
+    }
+    None
+}
+
+fn connect_terminal_clipboard(terminal: &vte4::Terminal) {
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let terminal_for_keys = terminal.clone();
+    keys.connect_key_pressed(move |_, key, _, state| {
+        match terminal_clipboard_action(key, state, terminal_for_keys.has_selection()) {
+            Some(TerminalClipboardAction::Copy) => {
+                terminal_for_keys.copy_clipboard_format(vte4::Format::Text);
+                gtk::glib::Propagation::Stop
+            }
+            Some(TerminalClipboardAction::Paste) => {
+                terminal_for_keys.paste_clipboard();
+                gtk::glib::Propagation::Stop
+            }
+            None => gtk::glib::Propagation::Proceed,
+        }
+    });
+    terminal.add_controller(keys);
+
+    let right_click = gtk::GestureClick::new();
+    right_click.set_button(3);
+    right_click.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let weak_terminal = terminal.downgrade();
+    right_click.connect_pressed(move |gesture, _, x, y| {
+        let Some(terminal) = weak_terminal.upgrade() else {
+            return;
+        };
+        open_terminal_context_menu(&terminal, x, y);
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+    terminal.add_controller(right_click);
+}
+
+fn open_terminal_context_menu(terminal: &vte4::Terminal, x: f64, y: f64) {
+    let popover = gtk::Popover::builder()
+        .has_arrow(false)
+        .autohide(true)
+        .build();
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    menu.add_css_class("terminal-context-menu");
+    let title = gtk::Label::new(Some("TERMINAL"));
+    title.add_css_class("section-title");
+    title.set_halign(gtk::Align::Start);
+    menu.append(&title);
+
+    let copy = gtk::Button::with_label("Copy");
+    copy.set_sensitive(terminal.has_selection());
+    copy.set_tooltip_text(Some("Copy selected terminal text · Ctrl+Shift+C"));
+    let paste = gtk::Button::with_label("Paste");
+    paste.set_tooltip_text(Some("Paste clipboard text · Ctrl+V or Ctrl+Shift+V"));
+    let select_all = gtk::Button::with_label("Select all");
+    for button in [&copy, &paste, &select_all] {
+        button.set_halign(gtk::Align::Fill);
+        button.set_hexpand(true);
+        menu.append(button);
+    }
+
+    let terminal_for_copy = terminal.clone();
+    let popover_for_copy = popover.clone();
+    copy.connect_clicked(move |_| {
+        terminal_for_copy.copy_clipboard_format(vte4::Format::Text);
+        popover_for_copy.popdown();
+    });
+    let terminal_for_paste = terminal.clone();
+    let popover_for_paste = popover.clone();
+    paste.connect_clicked(move |_| {
+        terminal_for_paste.paste_clipboard();
+        terminal_for_paste.grab_focus();
+        popover_for_paste.popdown();
+    });
+    let terminal_for_select = terminal.clone();
+    let popover_for_select = popover.clone();
+    select_all.connect_clicked(move |_| {
+        terminal_for_select.select_all();
+        popover_for_select.popdown();
+    });
+
+    popover.set_child(Some(&menu));
+    popover.set_parent(terminal);
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+        x.round() as i32,
+        y.round() as i32,
+        1,
+        1,
+    )));
+    popover.connect_closed(|popover| popover.unparent());
+    popover.popup();
 }
 
 pub(super) fn control_button(label: &str, tooltip: &str, suggested: bool) -> gtk::Button {

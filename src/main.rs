@@ -4,6 +4,7 @@ mod breakpoint_gutter;
 mod config;
 mod debugger;
 mod kernel;
+mod misc;
 mod source;
 mod theme;
 mod ui;

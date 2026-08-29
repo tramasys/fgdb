@@ -513,6 +513,18 @@ impl Ui {
             .unwrap_or(0);
         self.current_instruction
             .replace(current.and_then(|position| instructions.get(position).cloned()));
+        if let Some(position) = current {
+            self.call_abi_instruction
+                .replace(Some(CallAbiInstructionContext {
+                    current: instructions[position].clone(),
+                    previous: position
+                        .checked_sub(1)
+                        .and_then(|previous| instructions.get(previous).cloned()),
+                }));
+            self.call_abi_instruction_generation
+                .set(Some(self.current_stop_refresh_generation()));
+            self.refresh_call_abi_transfer();
+        }
         let rows = instructions
             .iter()
             .map(|instruction| InstructionRowData {
@@ -975,6 +987,9 @@ impl Ui {
         drop(latest);
         let generation = self.stop_refresh_generation.get().wrapping_add(1);
         self.stop_refresh_generation.set(generation);
+        self.call_abi_instruction.replace(None);
+        self.call_abi_instruction_generation.set(None);
+        self.misc_view.show_call_abi_pending();
         generation
     }
 
@@ -1000,6 +1015,7 @@ impl Ui {
         if self.is_stop_refresh_current(generation) {
             self.show_registers(registers);
             self.latest_registers_generation.set(Some(generation));
+            self.refresh_call_abi_transfer();
         }
     }
 

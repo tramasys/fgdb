@@ -39,6 +39,11 @@ use crate::{
         KernelTlsModule, KernelTlsSymbol, ProcessArgument, ProcessEnvironment,
         ProcessStartupSnapshot,
     },
+    misc::{
+        AllocatorRegion, AllocatorSnapshot, AuxvEntry, CallAbiFact, CallAbiPhase, CallAbiRegister,
+        CallAbiSnapshot, CoreDumpSnapshot, CoreMappedFile, CoreNote, LiveMiscSnapshot,
+        LockSnapshot, LockWait,
+    },
     source,
     theme::Theme,
 };
@@ -365,6 +370,12 @@ struct InstructionRowData {
 }
 
 #[derive(Clone)]
+struct CallAbiInstructionContext {
+    current: Instruction,
+    previous: Option<Instruction>,
+}
+
+#[derive(Clone)]
 struct DisassemblyControls {
     root: gtk::Box,
     back: gtk::Button,
@@ -572,8 +583,6 @@ struct KernelView {
     needs_refresh: Rc<Cell<bool>>,
     tls_requested: Rc<Cell<bool>>,
     metadata_only_refresh: Rc<Cell<bool>>,
-    refresh_button: gtk::Button,
-    status: gtk::Label,
     warnings: gtk::Box,
     previous_snapshot: Rc<RefCell<Option<KernelBaseline>>>,
     overview_store: gio::ListStore,
@@ -634,8 +643,8 @@ struct MiscView {
     tracking_enabled: Rc<Cell<bool>>,
     in_flight: Rc<Cell<bool>>,
     needs_refresh: Rc<Cell<bool>>,
-    refresh_button: gtk::Button,
-    status: gtk::Label,
+    pages: gtk::Stack,
+    locks_requested: Rc<Cell<bool>>,
     summary: MiscStartupSummary,
     warning: gtk::Label,
     arguments_store: gio::ListStore,
@@ -643,6 +652,28 @@ struct MiscView {
     environment_store: gio::ListStore,
     environment_empty: gtk::Label,
     startup_split: gtk::Paned,
+    auxv_summary: gtk::Label,
+    auxv_store: gio::ListStore,
+    auxv_empty: gtk::Label,
+    call_abi_summary: gtk::Label,
+    call_abi_context: gtk::Label,
+    call_abi_register_store: gio::ListStore,
+    call_abi_register_empty: gtk::Label,
+    call_abi_contract_store: gio::ListStore,
+    call_abi_split: gtk::Paned,
+    allocator_summary: gtk::Label,
+    allocator_store: gio::ListStore,
+    allocator_empty: gtk::Label,
+    lock_summary: gtk::Label,
+    lock_note: gtk::Label,
+    lock_store: gio::ListStore,
+    lock_empty: gtk::Label,
+    core_summary: gtk::Label,
+    core_warning: gtk::Label,
+    core_note_store: gio::ListStore,
+    core_file_store: gio::ListStore,
+    core_empty: gtk::Label,
+    core_split: gtk::Paned,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -987,6 +1018,8 @@ pub struct Ui {
     instruction_memory: gtk::Label,
     disassembly_controls: DisassemblyControls,
     current_instruction: Rc<RefCell<Option<Instruction>>>,
+    call_abi_instruction: Rc<RefCell<Option<CallAbiInstructionContext>>>,
+    call_abi_instruction_generation: Rc<Cell<Option<u64>>>,
     current_instruction_memory_expression: Rc<RefCell<Option<String>>>,
     latest_registers: Rc<RefCell<Vec<Register>>>,
     latest_registers_generation: Rc<Cell<Option<u64>>>,
@@ -1272,24 +1305,26 @@ mod tests {
 
     use super::{
         EventCatchpoint, GEF_COMMAND_CAPABILITIES, IntegerFormat, IntegerRadix, RefreshGate,
-        StringStorage, VectorLaneFormat, breakpoint_command_number_at_address,
-        breakpoint_command_numbers, compact_function_name, conditional_branch_taken,
-        event_catchpoint_command_number, event_catchpoint_command_numbers, flags_markup,
-        format_register_value, format_register_value_for_architecture,
-        format_register_value_for_target, full_address, instruction_arguments_description,
-        instruction_flow_description, instruction_flow_target, instruction_memory_expression,
-        integer_decimal_value, normalized_signal_name, parse_character_input, parse_integer_input,
-        parse_string_input, register_details, register_integer_format, register_value_css,
-        set_breakpoint_enabled, signal_catchpoint_command_number,
-        signal_catchpoint_command_numbers, source_location_score, source_symbol_at_offset,
-        source_tab_title, stop_reason_label, string_edit, thread_os_id, variable_boolean_value,
-        variable_character_format, variable_details, variable_integer_format, variable_is_address,
-        variable_value_parts, vector_field_values, without_generic_arguments,
+        StringStorage, TerminalClipboardAction, VectorLaneFormat,
+        breakpoint_command_number_at_address, breakpoint_command_numbers, call_abi_phase,
+        compact_function_name, conditional_branch_taken, event_catchpoint_command_number,
+        event_catchpoint_command_numbers, flags_markup, format_register_value,
+        format_register_value_for_architecture, format_register_value_for_target, full_address,
+        instruction_arguments_description, instruction_flow_description, instruction_flow_target,
+        instruction_memory_expression, integer_decimal_value, normalized_signal_name,
+        parse_character_input, parse_integer_input, parse_string_input, register_details,
+        register_integer_format, register_value_css, set_breakpoint_enabled,
+        signal_catchpoint_command_number, signal_catchpoint_command_numbers, source_location_score,
+        source_symbol_at_offset, source_tab_title, stop_reason_label, string_edit,
+        terminal_clipboard_action, thread_os_id, variable_boolean_value, variable_character_format,
+        variable_details, variable_integer_format, variable_is_address, variable_value_parts,
+        vector_field_values, without_generic_arguments,
     };
     use crate::debugger::{
         Breakpoint, Instruction, Register, SourceLocation, TargetArchitecture, TargetEndian,
         Variable,
     };
+    use crate::misc::CallAbiPhase;
 
     #[test]
     fn gef_capability_probes_are_unique() {
@@ -1298,6 +1333,43 @@ mod tests {
             .copied()
             .collect::<HashSet<_>>();
         assert_eq!(unique.len(), GEF_COMMAND_CAPABILITIES.len());
+    }
+
+    #[test]
+    fn terminal_clipboard_shortcuts_preserve_gdb_interrupts() {
+        use gtk::gdk::{Key, ModifierType};
+
+        let control = ModifierType::CONTROL_MASK;
+        let shift = ModifierType::SHIFT_MASK;
+        assert_eq!(
+            terminal_clipboard_action(Key::v, control, false),
+            Some(TerminalClipboardAction::Paste)
+        );
+        assert_eq!(
+            terminal_clipboard_action(Key::V, control | shift, false),
+            Some(TerminalClipboardAction::Paste)
+        );
+        assert_eq!(
+            terminal_clipboard_action(Key::Insert, shift, false),
+            Some(TerminalClipboardAction::Paste)
+        );
+        assert_eq!(
+            terminal_clipboard_action(Key::KP_Insert, control, false),
+            Some(TerminalClipboardAction::Copy)
+        );
+        assert_eq!(
+            terminal_clipboard_action(Key::c, control, true),
+            Some(TerminalClipboardAction::Copy)
+        );
+        assert_eq!(terminal_clipboard_action(Key::c, control, false), None);
+        assert_eq!(
+            terminal_clipboard_action(Key::C, control | shift, false),
+            Some(TerminalClipboardAction::Copy)
+        );
+        assert_eq!(
+            terminal_clipboard_action(Key::v, control | ModifierType::ALT_MASK, false),
+            None
+        );
     }
 
     #[test]
@@ -1707,6 +1779,65 @@ mod tests {
             )
             .as_deref(),
             Some("($rbp-0x10)")
+        );
+    }
+
+    #[test]
+    fn classifies_live_call_abi_boundaries_without_guessing_sequential_state() {
+        let call = Instruction {
+            address: String::from("0x401000"),
+            function: String::from("main"),
+            offset: String::from("16"),
+            opcodes: Some(String::from("e8 00 00 00 00")),
+            text: String::from("call 0x402000 <worker>"),
+            source: None,
+        };
+        assert_eq!(
+            call_abi_phase(&call, None, TargetArchitecture::X86_64),
+            CallAbiPhase::OutgoingCall {
+                target: Some(String::from("0x402000")),
+            }
+        );
+
+        let entry = Instruction {
+            address: String::from("0x402000"),
+            function: String::from("worker"),
+            offset: String::from("0"),
+            opcodes: None,
+            text: String::from("push rbp"),
+            source: None,
+        };
+        assert_eq!(
+            call_abi_phase(&entry, None, TargetArchitecture::X86_64),
+            CallAbiPhase::IncomingEntry {
+                function: String::from("worker"),
+            }
+        );
+
+        let after_call = Instruction {
+            address: String::from("0x401005"),
+            function: String::from("main"),
+            offset: String::from("21"),
+            opcodes: None,
+            text: String::from("mov rbx,rax"),
+            source: None,
+        };
+        assert_eq!(
+            call_abi_phase(&after_call, Some(&call), TargetArchitecture::X86_64),
+            CallAbiPhase::Returned {
+                target: Some(String::from("0x402000")),
+            }
+        );
+        assert_eq!(
+            call_abi_phase(
+                &Instruction {
+                    text: String::from("ret"),
+                    ..after_call
+                },
+                None,
+                TargetArchitecture::X86_64,
+            ),
+            CallAbiPhase::Returning
         );
     }
 

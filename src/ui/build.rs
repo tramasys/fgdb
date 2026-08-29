@@ -614,6 +614,16 @@ pub(super) fn build_workspace(
             &inspector.misc_view.startup_split,
             0.42,
         ),
+        layout::Pane::with_default_fraction(
+            "misc_call_abi",
+            &inspector.misc_view.call_abi_split,
+            0.42,
+        ),
+        layout::Pane::with_default_fraction(
+            "misc_core_dump",
+            &inspector.misc_view.core_split,
+            0.34,
+        ),
     ];
     let mut debug_state_panels = inspector.stale_panels.clone();
     debug_state_panels.push(left_sidebar.root.clone().upcast());
@@ -684,11 +694,9 @@ fn connect_inspector_responsiveness(workspace: &gtk::Paned, inspector: &Inspecto
     let inspector_notebook = inspector.notebook.clone();
     let compact_inspector_tabs = inspector.compact_tabs.clone();
     let kernel_root = inspector.kernel_view.root.clone();
-    let kernel_status = inspector.kernel_view.status.clone();
     let kernel_wide_subtabs = inspector.kernel_view.wide_subtabs.clone();
     let kernel_compact_subtabs = inspector.kernel_view.compact_subtabs.clone();
     let misc_root = inspector.misc_view.root.clone();
-    let misc_status = inspector.misc_view.status.clone();
     let misc_wide_subtabs = inspector.misc_view.wide_subtabs.clone();
     let misc_compact_subtabs = inspector.misc_view.compact_subtabs.clone();
     let update: Rc<dyn Fn(&gtk::Paned)> = Rc::new(move |workspace| {
@@ -701,8 +709,6 @@ fn connect_inspector_responsiveness(workspace: &gtk::Paned, inspector: &Inspecto
                 root.remove_css_class("inspector-compact");
             }
         }
-        kernel_status.set_visible(!compact);
-        misc_status.set_visible(!compact);
         inspector_notebook.set_show_tabs(!compact);
         compact_inspector_tabs.set_visible(compact);
         kernel_wide_subtabs.set_visible(!compact);
@@ -1309,7 +1315,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
     let kernel_view = build_kernel_view(&bindings.kernel);
-    let misc_view = build_misc_view(&bindings.misc);
+    let misc_view = build_misc_view();
 
     append_responsive_inspector_page(&notebook, &state, "Context");
     append_responsive_inspector_page(&notebook, &expression_watches_page, "Watches");

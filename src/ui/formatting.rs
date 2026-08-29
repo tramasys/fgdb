@@ -861,7 +861,11 @@ pub(super) fn split_instruction(instruction: &str) -> (&str, &str) {
     }
 }
 
-fn is_call_instruction(mnemonic: &str, operands: &str, architecture: TargetArchitecture) -> bool {
+pub(super) fn is_call_instruction(
+    mnemonic: &str,
+    operands: &str,
+    architecture: TargetArchitecture,
+) -> bool {
     match architecture {
         TargetArchitecture::X86 | TargetArchitecture::X86_64 => mnemonic.starts_with("call"),
         TargetArchitecture::Arm => matches!(mnemonic, "bl" | "blx"),
@@ -893,8 +897,12 @@ fn is_call_instruction(mnemonic: &str, operands: &str, architecture: TargetArchi
     }
 }
 
-fn is_return_instruction(mnemonic: &str, operands: &str, architecture: TargetArchitecture) -> bool {
-    if mnemonic == "ret" || mnemonic.starts_with("ret.") {
+pub(super) fn is_return_instruction(
+    mnemonic: &str,
+    operands: &str,
+    architecture: TargetArchitecture,
+) -> bool {
+    if mnemonic.starts_with("ret") {
         return true;
     }
     match architecture {
@@ -927,6 +935,66 @@ fn is_return_instruction(mnemonic: &str, operands: &str, architecture: TargetArc
         }
         _ => false,
     }
+}
+
+pub(super) fn call_abi_phase(
+    current: &Instruction,
+    previous: Option<&Instruction>,
+    architecture: TargetArchitecture,
+) -> CallAbiPhase {
+    let (mnemonic, operands) = split_instruction(&current.text);
+    let mnemonic = mnemonic.to_ascii_lowercase();
+    if is_call_instruction(&mnemonic, operands, architecture) {
+        return CallAbiPhase::OutgoingCall {
+            target: instruction_flow_target(current, architecture),
+        };
+    }
+    if is_return_instruction(&mnemonic, operands, architecture) {
+        return CallAbiPhase::Returning;
+    }
+    let offset = current.offset.trim();
+    let at_function_entry = offset
+        .strip_prefix("0x")
+        .map_or_else(
+            || offset.parse::<u64>(),
+            |offset| u64::from_str_radix(offset, 16),
+        )
+        .is_ok_and(|offset| offset == 0);
+    if at_function_entry && current.function != "??" {
+        return CallAbiPhase::IncomingEntry {
+            function: current.function.clone(),
+        };
+    }
+    if let Some(previous) = previous.filter(|previous| instructions_are_adjacent(previous, current))
+    {
+        let (mnemonic, operands) = split_instruction(&previous.text);
+        let mnemonic = mnemonic.to_ascii_lowercase();
+        if is_call_instruction(&mnemonic, operands, architecture) {
+            return CallAbiPhase::Returned {
+                target: instruction_flow_target(previous, architecture),
+            };
+        }
+    }
+    CallAbiPhase::Sequential
+}
+
+fn instructions_are_adjacent(previous: &Instruction, current: &Instruction) -> bool {
+    let (Some(previous_address), Some(current_address), Some(opcodes)) = (
+        hex_value(&previous.address),
+        hex_value(&current.address),
+        previous.opcodes.as_deref(),
+    ) else {
+        return false;
+    };
+    let byte_count = opcodes.split_whitespace().try_fold(0_u64, |total, opcode| {
+        let opcode = opcode.strip_prefix("0x").unwrap_or(opcode);
+        (!opcode.is_empty()
+            && opcode.len().is_multiple_of(2)
+            && opcode.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| total.saturating_add(u64::try_from(opcode.len() / 2).unwrap_or(u64::MAX)))
+    });
+    byte_count.and_then(|byte_count| previous_address.checked_add(byte_count))
+        == Some(current_address)
 }
 
 fn syscall_architecture(

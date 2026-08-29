@@ -923,6 +923,7 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
                 if pid.is_some() {
                     current_ui.set_inferior_started(true);
                 }
+                current_ui.show_call_abi_for_refresh(generation, &frames);
                 current_ui.show_memory_regions_for_refresh(generation, &regions);
                 current_ui.refresh_memory_watches();
                 current_ui.refresh_kernel_after_stop();

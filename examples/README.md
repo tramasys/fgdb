@@ -22,6 +22,11 @@ cargo run -- target/debug-fixtures/c-page-target
 | `c-tls-target` | `c_tls_checkpoint` | Per-thread initialized and zero-filled TLS, aggregate TLS objects, thread-pointer bases and distinct values across named pthreads |
 | `c-thread-target` | `c_threads_checkpoint` | Named pthreads in futex/poll waits, per-thread signal masks, a pending signal and atomic values |
 | `c-process-target` | `c_process_checkpoint` | Fork catchpoints and a live parent/child/grandchild hierarchy |
+| `c-misc-auxv-target` | `c_misc_auxv_checkpoint` | Misc → Args / Env and Auxv with arguments, environment ranges, entry metadata, HWCAP and vDSO values |
+| `c-misc-frame-target` | `c_misc_frame_checkpoint` | Misc → Call ABI with incoming integer/pointer slots at function entry and nested call/return boundaries |
+| `c-misc-allocator-target` | `c_misc_allocator_checkpoint` | Misc → Allocator with brk allocations, a large allocator mapping and an explicit anonymous mapping |
+| `c-misc-locks-target` | `c_misc_locks_checkpoint` | Misc → Locks with two waiters sharing one futex address and a third waiter on another address |
+| `c-misc-core-target` | `c_misc_core_checkpoint` | Misc → Core dump with an intentional SIGSEGV, nested crash frames, heap state and anonymous mappings |
 | `cpp-debug-target` | `debugger_checkpoint` | Integer families, STL containers, structs, pointer cycles, watchpoints, threads, signals and exceptions |
 | `cpp-object-target` | `cpp_objects_checkpoint` | Virtual dispatch, multiple inheritance, templates, smart pointers, variants, lambdas and nested exceptions |
 | `rust-debug-target` | `rust_debugger_checkpoint` | Rust enums, `Option`, `Result`, collections, trait objects, `Rc` cycles, primitives, Unicode and a named worker thread |
@@ -57,3 +62,40 @@ The default targets use `-O0`, full debug information, frame pointers and disabl
 Set `break c_tls_checkpoint` and run to the `threads-ready` stop. The main thread and two named workers remain alive with different copies of the initialized TLS scalars, string buffer, aggregate object and 4 KiB zero-filled block. Switch GDB threads, then compare the variables with **Kernel → TLS** and the `$fs_base` or `$gs_base` register.
 
 Continue once to the `main-mutated` stop to verify that the selected thread's live TLS values change without affecting either worker. The executable itself declares a `PT_TLS` template, so its module and named symbols also exercise the ELF metadata tables.
+
+## Misc tab fixtures
+
+Each new Misc view has a deliberately small target:
+
+```bash
+# Args / Env and Auxv: add arguments and an environment entry in the launcher.
+FGDB_FIXTURE_MESSAGE='hello from envp' \
+cargo run -- target/debug-fixtures/c-misc-auxv-target alpha 'two words'
+
+# Call ABI: use `break *c_misc_frame_checkpoint` for the exact function entry,
+# then instruction-step to the printf call and return boundary.
+cargo run -- target/debug-fixtures/c-misc-frame-target
+
+# Allocator mappings. Continue once for the post-MADV_DONTNEED stop.
+cargo run -- target/debug-fixtures/c-misc-allocator-target
+
+# Three futex waiters. Open Misc → Locks at the checkpoint.
+cargo run -- target/debug-fixtures/c-misc-locks-target
+```
+
+Set the breakpoint named in the table before running each live target. For the Auxv fixture, configure the environment through fgdb’s session launcher if you want the entry to appear in **Args / Env** as well as in the program’s locals.
+
+Generate a deterministic core file separately so it is not created during every normal fixture build:
+
+```bash
+make -C examples core
+```
+
+Then open these two files using **Session → New debug session → Core dump**:
+
+```text
+Executable: target/debug-fixtures/c-misc-core-target
+Core dump:  target/debug-fixtures/c-misc-core-target.core
+```
+
+The core stops inside `raise(SIGSEGV)` with `core_crash_leaf`, `core_crash_middle`, `core_crash_outer` and `main` still unwindable. The Misc core view should show `NT_SIGINFO`, `NT_AUXV`, `NT_FILE`, the captured thread, mapped files and the crash signal.

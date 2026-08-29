@@ -203,20 +203,6 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     root.add_css_class("sidebar");
     root.add_css_class("kernel-page");
 
-    let status = gtk::Label::new(Some("Start the inferior to inspect procfs"));
-    status.add_css_class("kernel-status");
-    status.add_css_class("muted");
-    status.set_ellipsize(pango::EllipsizeMode::Middle);
-    status.set_tooltip_text(Some(
-        "Opening Kernel enables asynchronous stop-to-stop tracking. Detailed procfs reads stay off the GTK thread.",
-    ));
-    let refresh_button = gtk::Button::with_label("Refresh");
-    refresh_button.add_css_class("inline-action");
-    refresh_button.set_tooltip_text(Some(
-        "Read a new process snapshot from procfs. Detailed smaps accounting may take a moment.",
-    ));
-    refresh_button.set_sensitive(false);
-
     let warnings = gtk::Box::new(gtk::Orientation::Vertical, 2);
     warnings.add_css_class("kernel-warnings");
     warnings.set_visible(false);
@@ -305,17 +291,6 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     let page_switcher_scroll = navigation.scroll.clone();
     let previous_page = navigation.previous.clone();
     let next_page = navigation.next.clone();
-    navigation.root.append(&status);
-    navigation.root.append(&refresh_button);
-    let compact_refresh_button = gtk::Button::with_label("Refresh");
-    compact_refresh_button.add_css_class("inline-action");
-    compact_refresh_button.set_tooltip_text(refresh_button.tooltip_text().as_deref());
-    compact_refresh_button.set_sensitive(refresh_button.is_sensitive());
-    let compact_refresh_for_sensitivity = compact_refresh_button.clone();
-    refresh_button.connect_sensitive_notify(move |button| {
-        compact_refresh_for_sensitivity.set_sensitive(button.is_sensitive());
-    });
-    navigation.compact_root.append(&compact_refresh_button);
     root.append(&navigation.root);
     root.append(&navigation.compact_root);
     root.append(&warnings);
@@ -358,19 +333,6 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     });
     update_kernel_page_navigation(&pages, &previous_page, &next_page, &page_switcher_scroll);
 
-    let handler = Rc::clone(bindings.refresh_handler);
-    refresh_button.connect_clicked(move |_| {
-        if let Some(handler) = handler.borrow().as_ref() {
-            handler();
-        }
-    });
-    let handler = Rc::clone(bindings.refresh_handler);
-    compact_refresh_button.connect_clicked(move |_| {
-        if let Some(handler) = handler.borrow().as_ref() {
-            handler();
-        }
-    });
-
     let tls_runtime = Rc::new(RefCell::new(KernelTlsRuntime::default()));
     replace_boxed_store_if_changed(&tls_runtime_store, tls_runtime_rows(&tls_runtime.borrow()));
 
@@ -384,8 +346,6 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
         needs_refresh,
         tls_requested,
         metadata_only_refresh,
-        refresh_button,
-        status,
         warnings,
         previous_snapshot: Rc::new(RefCell::new(None)),
         overview_store,
@@ -2623,7 +2583,6 @@ impl KernelView {
                     || signal.caught
             })
             .count();
-        self.show_snapshot_status(&snapshot);
         replace_boxed_store_if_changed(&self.overview_store, overview_rows(&snapshot));
         replace_boxed_store_if_changed(&self.resource_store, resource_rows(&snapshot));
         self.show_tls_metadata(&mut snapshot);
@@ -2807,21 +2766,6 @@ impl KernelView {
         replace_boxed_store_if_changed(&self.tls_symbol_store, tls_symbols);
     }
 
-    fn show_snapshot_status(&self, snapshot: &KernelSnapshot) {
-        self.status.set_text(&format!(
-            "PID {} · {} threads · {} VMAs · {} FDs",
-            snapshot.pid,
-            snapshot.threads.len(),
-            snapshot.mappings.len(),
-            snapshot.file_descriptors.len()
-        ));
-        self.status.set_tooltip_text(Some(&format!(
-            "Linux procfs snapshot for PID {} · collected in {}. Changes compare this capture with the preceding successful snapshot.",
-            snapshot.pid,
-            crate::kernel::format_duration_ns(snapshot.capture_duration_micros.saturating_mul(1_000)),
-        )));
-    }
-
     pub(super) fn set_tls_thread(&self, threads: &[ThreadInfo]) {
         self.tls_runtime.borrow_mut().thread =
             threads.iter().find(|thread| thread.current).map(|thread| {
@@ -2863,9 +2807,7 @@ impl KernelView {
         );
     }
 
-    fn clear(&self, status: &str) {
-        self.status.set_text(status);
-        self.status.set_tooltip_text(None);
+    fn clear(&self) {
         clear_box(&self.warnings);
         self.warnings.set_visible(false);
         self.overview_store.remove_all();
@@ -3401,10 +3343,6 @@ impl Ui {
         let generation = self.kernel_refresh_generation.get().wrapping_add(1);
         self.kernel_refresh_generation.set(generation);
         self.kernel_view.in_flight.set(true);
-        self.kernel_view.status.set_text("Reading /proc…");
-        self.kernel_view.status.set_tooltip_text(Some(
-            "Detailed smaps parsing runs outside the GTK main thread",
-        ));
         self.update_control_sensitivity();
         Some(generation)
     }
@@ -3418,7 +3356,6 @@ impl Ui {
         let metadata_only = self.kernel_view.metadata_only_refresh.replace(false)
             && self.kernel_view.previous_snapshot.borrow().is_some();
         if metadata_only {
-            self.kernel_view.show_snapshot_status(&snapshot);
             populate_warnings(&self.kernel_view.warnings, &snapshot.warnings);
             self.kernel_view.show_tls_metadata(&mut snapshot);
             self.kernel_view
@@ -3450,12 +3387,8 @@ impl Ui {
         }
         self.kernel_view.in_flight.set(false);
         self.kernel_view.needs_refresh.set(true);
-        if self.kernel_view.previous_snapshot.borrow().is_some() {
-            self.kernel_view
-                .status
-                .set_text("Refresh failed · showing cached snapshot");
-        } else {
-            self.kernel_view.clear("Kernel data unavailable");
+        if self.kernel_view.previous_snapshot.borrow().is_none() {
+            self.kernel_view.clear();
         }
         populate_warnings(&self.kernel_view.warnings, &[error.to_owned()]);
         self.update_control_sensitivity();
@@ -3491,8 +3424,7 @@ impl Ui {
 
     pub fn clear_kernel_snapshot(&self) {
         self.invalidate_kernel_refresh();
-        self.kernel_view
-            .clear("Start the inferior to inspect procfs");
+        self.kernel_view.clear();
     }
 
     fn kernel_refresh_allowed(&self) -> bool {
