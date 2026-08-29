@@ -25,6 +25,15 @@ pub enum DebugSession {
 }
 
 impl DebugSession {
+    pub fn executable(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Launch { executable, .. } | Self::CoreDump { executable, .. } => Some(executable),
+            Self::Attach { executable, .. } | Self::Remote { executable, .. } => {
+                executable.as_deref()
+            }
+        }
+    }
+
     pub fn title(&self) -> String {
         match self {
             Self::Launch { executable, .. } => executable.to_string_lossy().into_owned(),

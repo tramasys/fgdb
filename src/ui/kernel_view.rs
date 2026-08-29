@@ -2768,10 +2768,12 @@ impl KernelView {
         replace_boxed_store_if_changed(&self.tls_symbol_store, tls_symbols);
     }
 
-    pub(super) fn set_tls_thread(&self, threads: &[ThreadInfo]) {
+    pub(super) fn set_tls_thread(&self, threads: &[ThreadInfo], executable_name: Option<&str>) {
         self.tls_runtime.borrow_mut().thread =
             threads.iter().find(|thread| thread.current).map(|thread| {
-                let name = thread.name.as_deref().unwrap_or("unnamed");
+                let reported_name = thread.name.as_deref().unwrap_or("unnamed");
+                let name =
+                    tls_thread_display_name(reported_name, executable_name, thread.id == "1");
                 format!("GDB #{} · {} · {name}", thread.id, thread.target_id)
             });
         self.rebuild_tls_runtime();
@@ -2858,6 +2860,21 @@ impl KernelView {
         self.tls_runtime.replace(KernelTlsRuntime::default());
         self.rebuild_tls_runtime();
     }
+}
+
+fn tls_thread_display_name<'a>(
+    reported_name: &'a str,
+    executable_name: Option<&'a str>,
+    main_thread: bool,
+) -> &'a str {
+    executable_name
+        .filter(|executable_name| {
+            main_thread
+                && (15..=16).contains(&reported_name.len())
+                && executable_name.len() > reported_name.len()
+                && executable_name.starts_with(reported_name)
+        })
+        .unwrap_or(reported_name)
 }
 
 fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
@@ -3440,6 +3457,22 @@ impl Ui {
 #[cfg(test)]
 mod memory_view_tests {
     use super::*;
+
+    #[test]
+    fn expands_only_kernel_truncated_main_thread_names() {
+        assert_eq!(
+            tls_thread_display_name("c-misc-allocator", Some("c-misc-allocator-target"), true,),
+            "c-misc-allocator-target"
+        );
+        assert_eq!(
+            tls_thread_display_name("custom-worker-1", Some("custom-worker-1-target"), false),
+            "custom-worker-1"
+        );
+        assert_eq!(
+            tls_thread_display_name("worker", Some("worker-service"), true),
+            "worker"
+        );
+    }
 
     #[test]
     fn overview_disclosures_default_to_process_only_and_restore_overrides() {

@@ -305,7 +305,16 @@ impl Ui {
     }
 
     pub fn show_threads(&self, threads: &[ThreadInfo]) {
-        self.kernel_view.set_tls_thread(threads);
+        let executable_name = self
+            .current_session
+            .borrow()
+            .as_ref()
+            .and_then(DebugSession::executable)
+            .and_then(std::path::Path::file_name)
+            .and_then(std::ffi::OsStr::to_str)
+            .map(str::to_owned);
+        self.kernel_view
+            .set_tls_thread(threads, executable_name.as_deref());
         clear_box(&self.threads_list);
         if threads.is_empty() {
             self.threads_list

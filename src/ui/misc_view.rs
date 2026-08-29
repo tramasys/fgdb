@@ -1034,7 +1034,7 @@ impl MiscView {
     fn show_call_abi(&self, snapshot: CallAbiSnapshot) {
         let current = snapshot.current_frame.as_ref().map_or_else(
             || String::from("no selected frame"),
-            |frame| format!("#{} {} at {}", frame.level, frame.function, frame.address),
+            |frame| format!("#{} {}", frame.level, frame.function),
         );
         self.call_abi_summary.set_text(&format!(
             "{}  ·  {}  ·  {}-bit pointers  ·  {current}",
