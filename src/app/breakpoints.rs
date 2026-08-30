@@ -587,6 +587,7 @@ pub(super) fn refresh_modules(ui: &Weak<Ui>, client: &MiClient) {
     if !current_ui.begin_module_refresh() {
         return;
     }
+    let inferior_id = current_ui.selected_inferior_id();
     drop(current_ui);
     let weak_ui = ui.clone();
     let weak_ui_for_error = ui.clone();
@@ -595,7 +596,7 @@ pub(super) fn refresh_modules(ui: &Weak<Ui>, client: &MiClient) {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
-            if record.is_done() {
+            if record.is_done() && ui.selected_inferior_id() == inferior_id {
                 ui.show_modules(&crate::debugger::shared_libraries(&record));
             }
             let refresh_again = ui.finish_module_refresh();
@@ -629,11 +630,17 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
         if !ui.is_thread_refresh_current(generation) {
             return;
         }
+        let selection_changed = ui.reconcile_stop_owner_from_threads(&threads);
+        let threads = ui.threads_for_selected_inferior(threads);
         if !threads.is_empty() {
             ui.set_inferior_started(true);
         }
         ui.show_threads_for_refresh(generation, &threads);
         drop(ui);
+        if selection_changed {
+            refresh_modules(&weak_ui, client);
+            detect_target_abi(&weak_ui, client);
+        }
         if !threads.iter().any(|thread| {
             thread.current
                 && thread

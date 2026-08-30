@@ -419,6 +419,15 @@ pub(crate) fn read_local_target_abi(
     crate::debugger::TargetArchitecture::from_elf_ident(&bytes)
 }
 
+pub(crate) fn read_local_parent_pid(pid: u32, debugger_pid: u32) -> Option<u32> {
+    let root = verified_proc_root(pid, debugger_pid).ok()?;
+    let status = crate::bounded::read_string(&root.join("status"), 1024 * 1024).ok()?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:"))
+        .and_then(|value| value.trim().parse().ok())
+}
+
 fn verify_tracer(pid: u32, debugger_pid: u32, status: &str) -> Result<(), String> {
     let tracer = status
         .lines()

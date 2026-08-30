@@ -37,10 +37,10 @@ use crate::{
     breakpoint_gutter::{BreakpointGutterRenderer, LineStyle},
     config::{ConfigurationReport, DebugSession, LaunchConfig},
     debugger::{
-        Breakpoint, GdbCapabilities, Instruction, MemoryBlock, MemoryKind, MiClient, Register,
-        SharedLibrary, SourceFile, SourceLocation, StackEntry, StackFrame, TargetArchitecture,
-        TargetEndian, ThreadInfo, ValueTypeKind, ValueTypeMetadata, Variable,
-        context::MemoryRegion,
+        Breakpoint, GdbCapabilities, InferiorInfo, InferiorState, Instruction, MemoryBlock,
+        MemoryKind, MiClient, Register, SharedLibrary, SourceFile, SourceLocation, StackEntry,
+        StackFrame, TargetArchitecture, TargetEndian, ThreadInfo, ValueTypeKind, ValueTypeMetadata,
+        Variable, context::MemoryRegion,
     },
     kernel::{
         KernelBaseline, KernelFileDescriptor, KernelLimit, KernelMapping, KernelMappingChange,
@@ -187,6 +187,7 @@ type SourceJumpHandler = Rc<dyn Fn(PathBuf, u32)>;
 type SourceDiscoveryHandler = Rc<dyn Fn(SourceDiscoveryRequest)>;
 type SourceTreePathHandler = Rc<dyn Fn(PathBuf)>;
 type SourceTreeRefreshHandler = Rc<dyn Fn()>;
+type InferiorActionHandler = Rc<dyn Fn(InferiorAction)>;
 type SignalCatchpointHandler = Rc<dyn Fn(String, Option<String>)>;
 type EventCatchpointHandler = Rc<dyn Fn(EventCatchpoint, Option<String>)>;
 type WatchpointInsertHandler = Rc<dyn Fn(String, WatchpointAccess)>;
@@ -209,6 +210,31 @@ pub enum SessionAction {
     Restart,
     Kill,
     Detach,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ForkFollowMode {
+    Parent,
+    Child,
+}
+
+impl ForkFollowMode {
+    pub(crate) const fn gdb_value(self) -> &'static str {
+        match self {
+            Self::Parent => "parent",
+            Self::Child => "child",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum InferiorAction {
+    Select(String),
+    Resume(String),
+    Interrupt(String),
+    SetFollowFork(ForkFollowMode),
+    SetDetachOnFork(bool),
+    Refresh,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -739,6 +765,39 @@ struct SourceTreeControls {
     refresh_handler: Rc<RefCell<Option<SourceTreeRefreshHandler>>>,
 }
 
+#[derive(Clone)]
+struct InferiorControls {
+    summary: gtk::Box,
+    page: gtk::Box,
+    selector: gtk::DropDown,
+    selector_model: gtk::StringList,
+    selector_ids: Rc<RefCell<Vec<String>>>,
+    selector_updating: Rc<Cell<bool>>,
+    selected_state: gtk::Label,
+    stop_owner: gtk::Label,
+    list: gtk::Box,
+    cards: Rc<RefCell<Vec<(String, InferiorCardControls)>>>,
+    follow_parent: gtk::ToggleButton,
+    follow_child: gtk::ToggleButton,
+    detach_on_fork: gtk::CheckButton,
+    switch_parent: gtk::Button,
+    switch_child: gtk::Button,
+    refresh: gtk::Button,
+    action_handler: Rc<RefCell<Option<InferiorActionHandler>>>,
+}
+
+#[derive(Clone)]
+struct InferiorCardControls {
+    root: gtk::Box,
+    name: gtk::Label,
+    state: gtk::Label,
+    facts: gtk::Label,
+    relationship: gtk::Label,
+    select: gtk::Button,
+    execution: gtk::Button,
+    execution_action: Rc<RefCell<Option<InferiorAction>>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MemoryWatchFormat {
     Bytes,
@@ -1261,6 +1320,19 @@ pub struct Ui {
     selected_thread_id: Rc<RefCell<Option<String>>>,
     modules_list: gtk::Box,
     latest_modules: Rc<RefCell<Vec<SharedLibrary>>>,
+    inferior_controls: InferiorControls,
+    inferiors: Rc<RefCell<Vec<InferiorInfo>>>,
+    selected_inferior_id: Rc<RefCell<Option<String>>>,
+    stop_owner_inferior_id: Rc<RefCell<Option<String>>>,
+    stop_owner_thread_id: Rc<RefCell<Option<String>>>,
+    inferior_parents: Rc<RefCell<HashMap<String, String>>>,
+    pending_fork_parents: Rc<RefCell<HashMap<u32, String>>>,
+    inferior_refresh_generation: Rc<Cell<u64>>,
+    fork_policy_generation: Rc<Cell<u64>>,
+    fork_follow_mode: Rc<Cell<Option<ForkFollowMode>>>,
+    detach_on_fork: Rc<Cell<Option<bool>>>,
+    inferior_action_pending: Rc<Cell<bool>>,
+    pending_execution_inferior: Rc<RefCell<Option<String>>>,
     locals_store: gio::ListStore,
     locals_selection: gtk::SingleSelection,
     locals_view: gtk::ColumnView,
@@ -1447,10 +1519,12 @@ struct Workspace {
     status_detail: gtk::Label,
     source_navigation: SourceNavigationControls,
     source_tree: SourceTreeControls,
+    left_navigation: gtk::Notebook,
     inspector_notebook: gtk::Notebook,
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
     modules_list: gtk::Box,
+    inferior_controls: InferiorControls,
     locals_store: gio::ListStore,
     locals_selection: gtk::SingleSelection,
     locals_view: gtk::ColumnView,
@@ -1562,10 +1636,12 @@ struct Inspector {
 
 struct LeftSidebar {
     root: gtk::Box,
+    navigation: gtk::Notebook,
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
     modules_list: gtk::Box,
     source_tree: SourceTreeControls,
+    inferior_controls: InferiorControls,
 }
 
 mod build;
@@ -1573,6 +1649,7 @@ pub(crate) mod controls;
 mod debug_state;
 mod dialogs;
 pub(crate) mod formatting;
+mod inferiors;
 mod kernel_view;
 mod memory_view;
 mod misc_view;

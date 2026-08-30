@@ -20,18 +20,34 @@ use nix::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MiEvent {
     Ready(GdbCapabilities),
-    InferiorStarted,
-    Running,
+    InferiorsChanged,
+    InferiorStarted {
+        id: String,
+        pid: Option<u32>,
+    },
+    InferiorExited {
+        id: String,
+        exit_code: Option<String>,
+    },
+    Running {
+        thread_id: Option<String>,
+    },
     Stopped {
         reason: Option<String>,
         signal_name: Option<String>,
         signal_meaning: Option<String>,
         address: Option<String>,
         thread_id: Option<String>,
+        fork_pid: Option<u32>,
+        all_stopped: bool,
     },
     BreakpointsChanged,
-    ThreadsChanged,
-    LibrariesChanged,
+    ThreadsChanged {
+        group_id: Option<String>,
+    },
+    LibrariesChanged {
+        group_id: Option<String>,
+    },
     SelectionChanged,
     Error(String),
     Disconnected,
@@ -1071,7 +1087,11 @@ impl MiClient {
                 }
             }
             '*' if record.class == "running" => {
-                (self.event_handler)(self, MiEvent::Running);
+                let thread_id = record
+                    .field("thread-id")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned);
+                (self.event_handler)(self, MiEvent::Running { thread_id });
             }
             '*' if record.class == "stopped" => {
                 let reason = record
@@ -1096,6 +1116,12 @@ impl MiClient {
                     .field("thread-id")
                     .and_then(MiValue::as_const)
                     .map(str::to_owned);
+                let fork_pid = record
+                    .field("newpid")
+                    .and_then(MiValue::as_const)
+                    .and_then(|pid| pid.parse().ok());
+                let all_stopped =
+                    record.field("stopped-threads").and_then(MiValue::as_const) == Some("all");
                 (self.event_handler)(
                     self,
                     MiEvent::Stopped {
@@ -1104,6 +1130,8 @@ impl MiClient {
                         signal_meaning,
                         address,
                         thread_id,
+                        fork_pid,
+                        all_stopped,
                     },
                 );
             }
@@ -1111,13 +1139,53 @@ impl MiClient {
                 (self.event_handler)(self, MiEvent::BreakpointsChanged);
             }
             '=' if matches!(record.class.as_str(), "thread-created" | "thread-exited") => {
-                (self.event_handler)(self, MiEvent::ThreadsChanged);
+                let group_id = record
+                    .field("group-id")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned);
+                (self.event_handler)(self, MiEvent::ThreadsChanged { group_id });
             }
             '=' if record.class == "thread-group-started" => {
-                (self.event_handler)(self, MiEvent::InferiorStarted);
+                let Some(id) = record
+                    .field("id")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned)
+                else {
+                    return;
+                };
+                let pid = record
+                    .field("pid")
+                    .and_then(MiValue::as_const)
+                    .and_then(|pid| pid.parse().ok());
+                (self.event_handler)(self, MiEvent::InferiorStarted { id, pid });
+            }
+            '=' if record.class == "thread-group-exited" => {
+                let Some(id) = record
+                    .field("id")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned)
+                else {
+                    return;
+                };
+                let exit_code = record
+                    .field("exit-code")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned);
+                (self.event_handler)(self, MiEvent::InferiorExited { id, exit_code });
+            }
+            '=' if matches!(
+                record.class.as_str(),
+                "thread-group-added" | "thread-group-removed"
+            ) =>
+            {
+                (self.event_handler)(self, MiEvent::InferiorsChanged);
             }
             '=' if matches!(record.class.as_str(), "library-loaded" | "library-unloaded") => {
-                (self.event_handler)(self, MiEvent::LibrariesChanged);
+                let group_id = record
+                    .field("thread-group")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned);
+                (self.event_handler)(self, MiEvent::LibrariesChanged { group_id });
             }
             '=' if matches!(
                 record.class.as_str(),
@@ -1625,6 +1693,64 @@ mod tests {
                 assert!(capabilities.pretty_printing);
                 assert!(capabilities.supports("pending-breakpoints"));
                 assert!(!capabilities.supports("thread-info"));
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn publishes_process_scoped_async_events() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let events_for_client = Rc::clone(&events);
+                let client = super::MiClient::open(move |_, event| {
+                    events_for_client.borrow_mut().push(event);
+                })
+                .unwrap();
+                client.ready.set(true);
+                client.process_line(r#"=thread-group-started,id="i2",pid="4312""#);
+                client.process_line(r#"=thread-created,id="3",group-id="i2""#);
+                client.process_line(r#"=library-loaded,id="libc",thread-group="i2""#);
+                client.process_line(r#"*running,thread-id="all""#);
+                client.process_line(
+                    r#"*stopped,reason="fork",newpid="4313",thread-id="3",stopped-threads="all",frame={addr="0x401000"}"#,
+                );
+                client.process_line(r#"=thread-group-exited,id="i2",exit-code="0""#);
+
+                assert_eq!(
+                    events.borrow().as_slice(),
+                    [
+                        super::MiEvent::InferiorStarted {
+                            id: String::from("i2"),
+                            pid: Some(4312),
+                        },
+                        super::MiEvent::ThreadsChanged {
+                            group_id: Some(String::from("i2")),
+                        },
+                        super::MiEvent::LibrariesChanged {
+                            group_id: Some(String::from("i2")),
+                        },
+                        super::MiEvent::Running {
+                            thread_id: Some(String::from("all")),
+                        },
+                        super::MiEvent::Stopped {
+                            reason: Some(String::from("fork")),
+                            signal_name: None,
+                            signal_meaning: None,
+                            address: Some(String::from("0x401000")),
+                            thread_id: Some(String::from("3")),
+                            fork_pid: Some(4313),
+                            all_stopped: true,
+                        },
+                        super::MiEvent::InferiorExited {
+                            id: String::from("i2"),
+                            exit_code: Some(String::from("0")),
+                        },
+                    ]
+                );
             })
             .unwrap();
     }

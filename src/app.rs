@@ -22,9 +22,9 @@ use crate::{
     theme::Theme,
     ui::{
         BreakpointEditRequest, BreakpointSpec, CallAbiTargetRequest, DisassemblyRequest,
-        DisassemblySyntax, EventCatchpoint, GefContextControl, HeapInspectionAction,
-        HeapInspectionRequest, SessionAction, SourceDiscoveryRequest, Ui, UntilAction,
-        WatchpointAccess,
+        DisassemblySyntax, EventCatchpoint, ForkFollowMode, GefContextControl,
+        HeapInspectionAction, HeapInspectionRequest, InferiorAction, SessionAction,
+        SourceDiscoveryRequest, Ui, UntilAction, WatchpointAccess,
     },
 };
 
@@ -89,6 +89,7 @@ mod backend;
 mod breakpoints;
 mod build;
 mod disassembly;
+mod inferiors;
 mod kernel;
 mod lifecycle;
 mod misc;
@@ -109,6 +110,7 @@ use assignments::*;
 use backend::*;
 use breakpoints::*;
 use disassembly::*;
+use inferiors::*;
 use kernel::*;
 use lifecycle::*;
 use misc::*;

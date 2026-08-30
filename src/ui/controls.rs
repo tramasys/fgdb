@@ -192,13 +192,27 @@ pub(super) fn connect_execution_button(
 }
 
 pub(crate) fn issue_execution_command(ui: &Ui, client: &MiClient, command: &str, detail: &str) {
+    ui.set_pending_execution_inferior(execution_thread_group(command).map(str::to_owned));
     match client.send(command) {
         Ok(_) => {
             ui.set_command_pending(true);
             ui.set_execution_status("Executing", detail);
         }
-        Err(error) => ui.set_status("Command failed", &error.to_string(), Some("status-error")),
+        Err(error) => {
+            ui.set_pending_execution_inferior(None);
+            ui.set_status("Command failed", &error.to_string(), Some("status-error"));
+        }
     }
+}
+
+fn execution_thread_group(command: &str) -> Option<&str> {
+    let mut arguments = command.split_whitespace();
+    while let Some(argument) = arguments.next() {
+        if argument == "--thread-group" {
+            return arguments.next();
+        }
+    }
+    None
 }
 
 pub(super) fn request_signal_catchpoint_toggle(ui: &Ui, signal: &str) {
@@ -261,7 +275,7 @@ pub(super) fn set_status_widgets(
 
 #[cfg(test)]
 mod tests {
-    use super::addresses_equal;
+    use super::{addresses_equal, execution_thread_group};
 
     #[test]
     fn compares_only_valid_normalized_addresses() {
@@ -270,5 +284,18 @@ mod tests {
         assert!(!addresses_equal("", "0"));
         assert!(!addresses_equal("0x", "0"));
         assert!(!addresses_equal("not-an-address", "not-an-address"));
+    }
+
+    #[test]
+    fn identifies_a_targeted_execution_group() {
+        assert_eq!(
+            execution_thread_group("-exec-continue --thread-group i2"),
+            Some("i2")
+        );
+        assert_eq!(execution_thread_group("-exec-next"), None);
+        assert_eq!(
+            execution_thread_group("-exec-interrupt --thread-group"),
+            None
+        );
     }
 }

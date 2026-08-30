@@ -3,7 +3,6 @@ use vte4::prelude::*;
 
 #[derive(Clone, Debug)]
 pub struct Theme {
-    pub name: &'static str,
     pub source_scheme: &'static str,
     pub colors: Colors,
 }
@@ -27,7 +26,6 @@ pub struct Colors {
 impl Theme {
     pub const fn graphite() -> Self {
         Self {
-            name: "Carbon",
             source_scheme: "carbon",
             colors: Colors {
                 background: "#000000",
@@ -230,11 +228,6 @@ headerbar.topbar button.window-control.close:active {{
     background: @app_surface;
 }}
 
-.sidebar-row {{
-    min-height: 24px;
-    padding: 1px 4px;
-}}
-
 .stack-row {{
     min-height: 31px;
     padding: 3px 4px;
@@ -362,8 +355,7 @@ button.stack-frame {{
 button.stack-frame:hover {{ background: @app_raised; }}
 
 button.stack-frame:nth-child(odd),
-.stack-row:nth-child(odd),
-.sidebar-row:nth-child(odd) {{
+.stack-row:nth-child(odd) {{
     background: alpha(@app_fg, 0.035);
 }}
 
@@ -405,6 +397,175 @@ button.stack-frame.current-debug-item:hover {{
 }}
 .module-symbols-loaded {{ color: @app_success; }}
 .module-symbols-missing {{ color: @app_warning; }}
+
+.inferior-summary {{
+    margin: 2px 4px 6px;
+    padding: 6px;
+    background: alpha(@app_fg, 0.018);
+    border: 1px solid @app_border;
+}}
+
+.inferior-summary dropdown.inferior-selector {{
+    min-height: 23px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+}}
+
+.inferior-summary dropdown.inferior-selector > button {{
+    min-height: 27px;
+    padding: 0 7px;
+    color: @app_fg;
+    background: alpha(@app_fg, 0.035);
+    background-image: none;
+    border: 1px solid @app_border;
+    box-shadow: none;
+}}
+
+.inferior-summary dropdown.inferior-selector > button:hover,
+.inferior-summary dropdown.inferior-selector > button:focus,
+.inferior-summary dropdown.inferior-selector > button:focus-visible,
+.inferior-summary dropdown.inferior-selector > button:checked {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.10);
+    background-image: none;
+    border-color: @app_accent;
+    box-shadow: none;
+}}
+
+.inferior-summary dropdown.inferior-selector > button > box {{
+    border-spacing: 5px;
+}}
+
+.inferior-summary dropdown.inferior-selector > button arrow {{
+    min-width: 10px;
+    min-height: 10px;
+    margin: 0;
+    padding: 0;
+    color: @app_muted;
+    opacity: 0.72;
+    -gtk-icon-size: 10px;
+}}
+
+.inferior-selected-state,
+.inferior-card-state {{
+    padding: 0 3px;
+    color: @app_muted;
+    font-size: 9px;
+    font-weight: 700;
+}}
+
+.inferior-selected-state {{
+    min-height: 16px;
+    padding: 1px 5px;
+    background: alpha(@app_fg, 0.035);
+}}
+
+.inferior-stop-owner {{
+    min-height: 18px;
+    margin: 0;
+    padding: 3px 6px;
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.055);
+    border-left: 2px solid alpha(@app_accent, 0.7);
+    font-size: 9px;
+    font-weight: 700;
+}}
+
+.inferior-page {{ background: @app_bg; }}
+
+.inferior-page-header {{
+    min-height: 28px;
+    margin: 4px 6px;
+    padding: 2px 7px;
+    background: alpha(@app_fg, 0.018);
+    border: 1px solid @app_border;
+}}
+
+button.inferior-refresh {{
+    min-width: 20px;
+    min-height: 22px;
+    padding: 0;
+    color: @app_muted;
+    background: transparent;
+    background-image: none;
+    border: 0;
+    box-shadow: none;
+}}
+
+button.inferior-refresh:hover,
+button.inferior-refresh:focus-visible {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.11);
+    background-image: none;
+    box-shadow: none;
+}}
+
+.inferior-navigation,
+.inferior-policy {{
+    margin: 0 6px 6px;
+    padding: 7px;
+    background: alpha(@app_fg, 0.018);
+    border: 1px solid @app_border;
+}}
+
+.inferior-list-title {{
+    margin: 0 6px;
+    padding: 4px 7px 5px;
+}}
+
+.inferior-list-scroll {{ background: @app_bg; }}
+.inferior-list {{ margin: 0 6px 6px; }}
+
+button.inferior-inline-action,
+button.inferior-policy-choice {{
+    min-height: 29px;
+    padding: 2px 7px;
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.06);
+    border: 1px solid alpha(@app_border, 0.85);
+}}
+
+button.inferior-inline-action:hover,
+button.inferior-policy-choice:hover,
+button.inferior-policy-choice:checked {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.17);
+}}
+
+button.inferior-inline-action:disabled,
+button.inferior-policy-choice:disabled {{
+    color: alpha(@app_muted, 0.48);
+    background: transparent;
+}}
+
+.inferior-detach-policy {{
+    min-height: 26px;
+    margin-top: 1px;
+    color: @app_fg;
+    font-size: 11px;
+}}
+
+.inferior-card {{
+    margin-top: 6px;
+    padding: 7px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+    border-left: 2px solid transparent;
+}}
+
+.inferior-card:nth-child(odd) {{ background: alpha(@app_fg, 0.045); }}
+.inferior-card-selected {{ border-left-color: @app_accent; }}
+.inferior-card-stop-owner {{ background: alpha(@app_accent, 0.10); }}
+.inferior-id {{ color: @app_accent_hover; font-weight: 700; }}
+.inferior-name {{ color: @app_fg; }}
+.inferior-facts,
+.inferior-relationship {{ color: @app_muted; font-size: 10px; }}
+.inferior-running {{ color: @app_success; }}
+.inferior-stopped {{ color: @app_accent_hover; }}
+.inferior-exited {{ color: @app_danger; }}
+.inferior-unknown {{ color: @app_muted; }}
 
 button.instruction-row {{
     min-height: 34px;
@@ -1233,7 +1394,6 @@ columnview.memory-map-table row {{ min-height: 28px; }}
     border-color: @app_accent;
 }}
 
-.sidebar-row:hover,
 .stack-row:hover {{ background: @app_raised; }}
 
 button {{
@@ -1787,8 +1947,8 @@ button.source-palette-result:focus-visible {{
 
 .source-tree-toolbar {{
     min-height: 27px;
-    padding: 3px;
-    background: @app_surface;
+    padding: 3px 0 3px 3px;
+    background: @app_bg;
     border-bottom: 1px solid alpha(@app_border, 0.75);
 }}
 
@@ -1804,18 +1964,23 @@ button.source-palette-result:focus-visible {{
 .source-tree-toolbar entry.source-search-entry:focus-within {{ border-color: @app_accent; }}
 
 button.source-tree-refresh {{
-    min-width: 25px;
+    min-width: 18px;
     min-height: 24px;
     padding: 0;
+    margin: 0;
     color: @app_muted;
     background: transparent;
+    background-image: none;
     border: 0;
+    box-shadow: none;
 }}
 
 button.source-tree-refresh:hover,
 button.source-tree-refresh:focus-visible {{
     color: @app_accent_hover;
     background: alpha(@app_accent, 0.11);
+    background-image: none;
+    box-shadow: none;
 }}
 
 .source-tree-status {{

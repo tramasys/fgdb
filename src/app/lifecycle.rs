@@ -29,19 +29,34 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             detect_gef(weak_ui, client);
             request_initial_source(weak_ui, client);
             refresh_breakpoints(weak_ui, client);
+            refresh_inferiors(weak_ui, client);
+            refresh_fork_policy(weak_ui, client);
             ui.take_modules_dirty();
             refresh_modules(weak_ui, client);
         }
-        MiEvent::InferiorStarted => {
+        MiEvent::InferiorsChanged => {
+            refresh_inferiors(weak_ui, client);
+        }
+        MiEvent::InferiorStarted { id, pid } => {
             // A terminal user can load and run a different executable in the
             // same GDB process. Register-number caches are target-specific and
             // must not leak across that boundary; the stopped-state refresh
             // will establish the new ABI from GDB and the traced ELF.
             ui.reset_target_abi();
             ui.invalidate_allocator_probe_cache();
-            ui.set_inferior_started(true);
+            ui.record_inferior_started(&id, pid);
+            refresh_inferiors(weak_ui, client);
         }
-        MiEvent::Running => {
+        MiEvent::InferiorExited { id, exit_code: _ } => {
+            ui.record_inferior_exited(&id);
+            refresh_inferiors(weak_ui, client);
+        }
+        MiEvent::Running { thread_id } => {
+            let selected_affected = ui.mark_inferior_running(thread_id.as_deref());
+            ui.set_inferior_action_pending(false);
+            if !selected_affected {
+                return;
+            }
             // Preserve the disabled state across the pending -> running
             // transition. Clearing `pending` first briefly made every stop-only
             // control sensitive before `running` disabled it again.
@@ -75,6 +90,8 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             signal_meaning,
             address,
             thread_id,
+            fork_pid,
+            all_stopped,
         } => {
             ui.set_command_pending(false);
             ui.set_current_thread_id(thread_id.as_deref());
@@ -90,24 +107,36 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ) {
                 return;
             }
+            ui.record_pending_fork(thread_id.as_deref(), fork_pid);
+            ui.mark_inferior_stopped(thread_id.as_deref(), all_stopped);
+            ui.set_inferior_action_pending(false);
+            refresh_inferiors(weak_ui, client);
             drop(ui);
             finish_stopped_state(weak_ui, client, reason, signal_name, signal_meaning, None);
         }
         MiEvent::BreakpointsChanged => refresh_breakpoints(weak_ui, client),
-        MiEvent::ThreadsChanged => {
+        MiEvent::ThreadsChanged { group_id } => {
             if !ui.inferior_is_running() && !ui.native_until_active() {
-                refresh_threads(weak_ui, client);
+                refresh_inferiors(weak_ui, client);
+                if group_id.is_none() || group_id == ui.selected_inferior_id() {
+                    refresh_threads(weak_ui, client);
+                }
             }
         }
-        MiEvent::LibrariesChanged => {
+        MiEvent::LibrariesChanged { group_id } => {
             ui.invalidate_allocator_probe_cache();
             ui.mark_modules_dirty();
-            if !ui.inferior_is_running() && !ui.native_until_active() && ui.take_modules_dirty() {
+            if !ui.inferior_is_running()
+                && !ui.native_until_active()
+                && (group_id.is_none() || group_id == ui.selected_inferior_id())
+                && ui.take_modules_dirty()
+            {
                 refresh_modules(weak_ui, client);
             }
         }
         MiEvent::SelectionChanged => {
             if !ui.inferior_is_running() && !ui.native_until_active() {
+                refresh_inferiors(weak_ui, client);
                 refresh_stopped_state(weak_ui, client);
             }
         }
@@ -116,14 +145,17 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 ui.cancel_native_until();
             }
             ui.set_command_pending(false);
+            ui.set_pending_execution_inferior(None);
             ui.set_status("Command failed", &message, Some("status-error"));
         }
         MiEvent::Disconnected => {
             ui.set_command_pending(false);
+            ui.set_pending_execution_inferior(None);
             ui.finish_full_resynchronization();
             ui.set_debug_state_stale(true);
             ui.clear_gef_capabilities();
             ui.clear_gdb_capabilities();
+            ui.clear_inferiors();
             ui.set_inferior_started(false);
             ui.reset_target_abi();
             ui.clear_debugger_state();
@@ -154,8 +186,8 @@ pub(super) fn finish_stopped_state(
     let reason = reason.unwrap_or_else(|| String::from("stopped"));
     ui.set_thread_stop_reason(Some(&reason));
     if reason.starts_with("exited") {
-        ui.set_inferior_started(false);
         ui.clear_debugger_state();
+        refresh_inferiors(weak_ui, client);
         refresh_breakpoints(weak_ui, client);
     } else {
         ui.set_inferior_started(true);
@@ -165,8 +197,13 @@ pub(super) fn finish_stopped_state(
         refresh_modules(weak_ui, client);
     }
     ui.show_signal(signal_name.as_deref(), signal_meaning.as_deref());
-    let detail =
-        status_detail.unwrap_or_else(|| format!("GDB reported: {}", reason.replace('-', " ")));
+    let detail = status_detail.unwrap_or_else(|| {
+        let reason = reason.replace('-', " ");
+        ui.stop_owner_summary().map_or_else(
+            || format!("GDB reported: {reason}"),
+            |owner| format!("{owner} stopped: {reason}"),
+        )
+    });
     ui.set_status("Paused", &detail, Some("status-ready"));
 }
 
@@ -438,6 +475,8 @@ pub(super) fn resynchronize_debugger_state(ui: &Weak<Ui>, client: &MiClient) {
     drop(current_ui);
     request_initial_source(ui, client);
     refresh_breakpoints(ui, client);
+    refresh_inferiors(ui, client);
+    refresh_fork_policy(ui, client);
     refresh_modules(ui, client);
     detect_gef(ui, client);
     detect_target_abi(ui, client);

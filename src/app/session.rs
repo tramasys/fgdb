@@ -172,6 +172,7 @@ impl SessionController {
                 ui.set_controls_running(false);
                 ui.set_inferior_started(false);
                 ui.reset_target_abi();
+                ui.clear_inferiors();
                 ui.clear_debugger_state();
                 ui.set_current_session(session.clone());
                 match session {
@@ -190,6 +191,8 @@ impl SessionController {
                         );
                         request_initial_source(&self.ui, &self.client);
                         refresh_breakpoints(&self.ui, &self.client);
+                        refresh_inferiors(&self.ui, &self.client);
+                        refresh_fork_policy(&self.ui, &self.client);
                         refresh_modules(&self.ui, &self.client);
                         establish_session_target(&self.ui, &self.client, session.kind_label());
                     }
@@ -207,6 +210,7 @@ impl SessionController {
                 ui.set_inferior_started(false);
                 ui.set_thread_stop_reason(None);
                 ui.clear_debugger_state();
+                refresh_inferiors(&self.ui, &self.client);
                 ui.set_status(
                     "Inferior terminated",
                     "The debugged process was killed. The session remains configured and can be run again.",
@@ -218,6 +222,7 @@ impl SessionController {
                 ui.set_inferior_started(false);
                 ui.set_thread_stop_reason(None);
                 ui.clear_debugger_state();
+                refresh_inferiors(&self.ui, &self.client);
                 ui.set_status(
                     "Detached",
                     "GDB released the process. It normally continues running outside fgdb.",

@@ -48,8 +48,6 @@ impl Ui {
         };
 
         let workspace = build_workspace(
-            config,
-            theme,
             &source_notebook,
             &terminal,
             &topbar.gef_tools_button,
@@ -65,6 +63,7 @@ impl Ui {
         let terminal_panel = workspace.terminal_panel.clone();
         let terminal_for_toggle = terminal.clone();
         let layout = layout::Persistence::install(&window, workspace.layout_panes.clone());
+        layout.bind_notebook("left_sidebar", &workspace.left_navigation);
         let terminal_visible = layout.terminal_visible();
         topbar.terminal_toggle_button.set_active(terminal_visible);
         terminal_panel.set_visible(terminal_visible);
@@ -155,6 +154,19 @@ impl Ui {
             selected_thread_id: Rc::new(RefCell::new(None)),
             modules_list: workspace.modules_list,
             latest_modules: Rc::new(RefCell::new(Vec::new())),
+            inferior_controls: workspace.inferior_controls,
+            inferiors: Rc::new(RefCell::new(Vec::new())),
+            selected_inferior_id: Rc::new(RefCell::new(None)),
+            stop_owner_inferior_id: Rc::new(RefCell::new(None)),
+            stop_owner_thread_id: Rc::new(RefCell::new(None)),
+            inferior_parents: Rc::new(RefCell::new(HashMap::new())),
+            pending_fork_parents: Rc::new(RefCell::new(HashMap::new())),
+            inferior_refresh_generation: Rc::new(Cell::new(0)),
+            fork_policy_generation: Rc::new(Cell::new(0)),
+            fork_follow_mode: Rc::new(Cell::new(None)),
+            detach_on_fork: Rc::new(Cell::new(None)),
+            inferior_action_pending: Rc::new(Cell::new(false)),
+            pending_execution_inferior: Rc::new(RefCell::new(None)),
             locals_store: workspace.locals_store,
             locals_selection: workspace.locals_selection,
             locals_view: workspace.locals_view,
@@ -513,14 +525,25 @@ impl Ui {
                     {
                         return;
                     }
-                    ("-exec-continue", "Continuing the inferior…")
+                    (
+                        ui.selected_inferior_id().map_or_else(
+                            || String::from("-exec-continue"),
+                            |id| {
+                                crate::debugger::thread_group_argument(&id).map_or_else(
+                                    || String::from("-exec-continue"),
+                                    |id| format!("-exec-continue --thread-group {id}"),
+                                )
+                            },
+                        ),
+                        "Continuing the selected inferior…",
+                    )
                 } else if session.as_ref().is_none_or(DebugSession::can_start) {
-                    ("-exec-run", "Starting the inferior…")
+                    (String::from("-exec-run"), "Starting the inferior…")
                 } else {
                     return;
                 }
             };
-            issue_execution_command(&ui, &client_for_run, command, detail);
+            issue_execution_command(&ui, &client_for_run, &command, detail);
         });
         let client_for_pause = Rc::clone(client);
         let weak_ui = Rc::downgrade(self);
@@ -536,11 +559,20 @@ impl Ui {
                 && !ui.command_pending.get()
                 && !ui.session_pending.get()
             {
+                let command = ui.selected_inferior_id().map_or_else(
+                    || String::from("-exec-interrupt"),
+                    |id| {
+                        crate::debugger::thread_group_argument(&id).map_or_else(
+                            || String::from("-exec-interrupt"),
+                            |id| format!("-exec-interrupt --thread-group {id}"),
+                        )
+                    },
+                );
                 issue_execution_command(
                     &ui,
                     &client_for_pause,
-                    "-exec-interrupt",
-                    "Interrupting the inferior…",
+                    &command,
+                    "Interrupting the selected inferior…",
                 );
             }
         });

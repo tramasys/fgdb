@@ -6,6 +6,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
 
     let ui = Rc::new(Ui::build(application, &launch_config, &theme));
     ui.set_controls_ready(false);
+    ui.connect_inferior_controls();
 
     let ready_hook = Rc::new(RefCell::new(None::<Box<dyn Fn()>>));
     let ready_hook_for_event = Rc::clone(&ready_hook);
@@ -50,6 +51,11 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     ui.set_session_handler(move |session| controller.configure(session));
     let controller = Rc::clone(&session_controller);
     ui.set_session_action_handler(move |action| controller.action(action));
+    let weak_ui = Rc::downgrade(&ui);
+    let client = Rc::clone(&mi_client);
+    ui.set_inferior_action_handler(move |action| {
+        handle_inferior_action(weak_ui.clone(), Rc::clone(&client), action);
+    });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
     ui.set_frame_selection_handler(move |level| {

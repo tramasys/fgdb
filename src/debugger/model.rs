@@ -156,6 +156,7 @@ pub struct StackEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ThreadInfo {
     pub id: String,
+    pub group_id: Option<String>,
     pub target_id: String,
     pub name: Option<String>,
     pub state: String,
@@ -163,6 +164,42 @@ pub struct ThreadInfo {
     pub frame: Option<StackFrame>,
     pub pc_symbol: Option<String>,
     pub current: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum InferiorState {
+    Running,
+    Stopped,
+    Exited,
+    NotStarted,
+    #[default]
+    Unknown,
+}
+
+impl InferiorState {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Stopped => "stopped",
+            Self::Exited => "exited",
+            Self::NotStarted => "not started",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub const fn is_live(self) -> bool {
+        matches!(self, Self::Running | Self::Stopped | Self::Unknown)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InferiorInfo {
+    pub id: String,
+    pub pid: Option<u32>,
+    pub executable: Option<String>,
+    pub exit_code: Option<String>,
+    pub state: InferiorState,
+    pub threads: Vec<ThreadInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -542,6 +579,26 @@ pub fn inferior_pid(record: &MiRecord) -> Option<u32> {
         .find_map(|tuple| constant(tuple, "pid").and_then(|pid| pid.parse().ok()))
 }
 
+pub fn inferior_pid_for_group(record: &MiRecord, group_id: &str) -> Option<u32> {
+    record
+        .field("groups")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .find(|tuple| constant(tuple, "id") == Some(group_id))
+        .and_then(|tuple| constant(tuple, "pid"))
+        .and_then(|pid| pid.parse().ok())
+}
+
+pub fn thread_group_argument(group_id: &str) -> Option<&str> {
+    (!group_id.is_empty()
+        && group_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b':')))
+    .then_some(group_id)
+}
+
 pub fn memory_block(record: &MiRecord) -> Option<MemoryBlock> {
     let tuple = record
         .field("memory")
@@ -589,22 +646,70 @@ pub fn threads(record: &MiRecord) -> Vec<ThreadInfo> {
         .into_iter()
         .flatten()
         .filter_map(tuple_from_item)
+        .filter_map(|tuple| thread_info(tuple, current, None))
+        .collect()
+}
+
+pub fn inferiors(record: &MiRecord, current_thread_id: Option<&str>) -> Vec<InferiorInfo> {
+    record
+        .field("groups")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
         .filter_map(|tuple| {
             let id = constant(tuple, "id")?.to_owned();
-            Some(ThreadInfo {
-                current: current == Some(id.as_str()),
+            let threads = result_field(tuple, "threads")
+                .and_then(MiValue::as_list)
+                .into_iter()
+                .flatten()
+                .filter_map(tuple_from_item)
+                .filter_map(|thread| thread_info(thread, current_thread_id, Some(&id)))
+                .collect::<Vec<_>>();
+            let pid = constant(tuple, "pid").and_then(|pid| pid.parse().ok());
+            let exit_code = owned_constant(tuple, "exit-code");
+            let state = if threads.iter().any(|thread| thread.state == "running") {
+                InferiorState::Running
+            } else if !threads.is_empty() {
+                InferiorState::Stopped
+            } else if exit_code.is_some() {
+                InferiorState::Exited
+            } else if pid.is_none() {
+                InferiorState::NotStarted
+            } else {
+                InferiorState::Unknown
+            };
+            Some(InferiorInfo {
                 id,
-                target_id: constant(tuple, "target-id").unwrap_or("unknown").to_owned(),
-                name: owned_constant(tuple, "name"),
-                state: constant(tuple, "state").unwrap_or("unknown").to_owned(),
-                core: owned_constant(tuple, "core"),
-                frame: result_field(tuple, "frame")
-                    .and_then(MiValue::as_tuple)
-                    .and_then(stack_frame),
-                pc_symbol: None,
+                pid,
+                executable: owned_constant(tuple, "executable"),
+                exit_code,
+                state,
+                threads,
             })
         })
         .collect()
+}
+
+fn thread_info(
+    tuple: &[MiResult],
+    current_thread_id: Option<&str>,
+    group_id: Option<&str>,
+) -> Option<ThreadInfo> {
+    let id = constant(tuple, "id")?.to_owned();
+    Some(ThreadInfo {
+        current: current_thread_id == Some(id.as_str()),
+        id,
+        group_id: owned_constant(tuple, "group-id").or_else(|| group_id.map(str::to_owned)),
+        target_id: constant(tuple, "target-id").unwrap_or("unknown").to_owned(),
+        name: owned_constant(tuple, "name"),
+        state: constant(tuple, "state").unwrap_or("unknown").to_owned(),
+        core: owned_constant(tuple, "core"),
+        frame: result_field(tuple, "frame")
+            .and_then(MiValue::as_tuple)
+            .and_then(stack_frame),
+        pc_symbol: None,
+    })
 }
 
 pub fn instructions(record: &MiRecord) -> Vec<Instruction> {
@@ -902,13 +1007,13 @@ fn owned_constant(tuple: &[MiResult], name: &str) -> Option<String> {
 mod tests {
     use super::{
         breakpoints, compact_register_numbers, current_source, has_exact_command_completion,
-        inferior_pid, inserted_breakpoints, instructions, memory_block, register_names, registers,
-        shared_libraries, source_files, source_locations, stack_frames, threads, variable_children,
-        variable_children_have_more, variable_object, variable_path_expression, variable_updates,
-        variables,
+        inferior_pid, inferior_pid_for_group, inferiors, inserted_breakpoints, instructions,
+        memory_block, register_names, registers, shared_libraries, source_files, source_locations,
+        stack_frames, threads, variable_children, variable_children_have_more, variable_object,
+        variable_path_expression, variable_updates, variables,
     };
     use crate::debugger::mi::parse_record;
-    use crate::debugger::{TargetArchitecture, TargetEndian};
+    use crate::debugger::{InferiorState, TargetArchitecture, TargetEndian};
 
     #[test]
     fn parses_target_byte_order_descriptions() {
@@ -1065,6 +1170,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(inferior_pid(&process), Some(1234));
+
+        let groups = parse_record(
+            r#"8^done,groups=[{id="i1",type="process",pid="1234",executable="/tmp/parent",threads=[{id="1",target-id="Thread 1",state="stopped"}]},{id="i2",type="process",pid="1235",executable="/tmp/child",threads=[{id="2",target-id="Thread 2",name="child",state="running"}]},{id="i3",type="process",executable="/tmp/pending"},{id="i4",type="process",exit-code="0"}]"#,
+        )
+        .unwrap();
+        let parsed = inferiors(&groups, Some("2"));
+        assert_eq!(parsed.len(), 4);
+        assert_eq!(parsed[0].state, InferiorState::Stopped);
+        assert_eq!(parsed[0].threads[0].group_id.as_deref(), Some("i1"));
+        assert_eq!(parsed[1].state, InferiorState::Running);
+        assert!(parsed[1].threads[0].current);
+        assert_eq!(parsed[2].state, InferiorState::NotStarted);
+        assert_eq!(parsed[3].state, InferiorState::Exited);
+        assert_eq!(inferior_pid_for_group(&groups, "i2"), Some(1235));
+        assert_eq!(super::thread_group_argument("i2"), Some("i2"));
+        assert_eq!(super::thread_group_argument("process-2"), Some("process-2"));
+        assert_eq!(super::thread_group_argument("i 2"), None);
+        assert_eq!(super::thread_group_argument("i2\n-exec-run"), None);
+        assert_eq!(super::thread_group_argument("\"i2\""), None);
 
         let memory = memory_block(
             &parse_record(

@@ -1210,6 +1210,120 @@ pub(super) fn source_search_entry(placeholder: &str) -> gtk::Entry {
     entry
 }
 
+pub(super) fn build_inferior_controls() -> InferiorControls {
+    let selector_model = gtk::StringList::new(&["No inferiors"]);
+    let selector = gtk::DropDown::builder()
+        .model(&selector_model)
+        .hexpand(true)
+        .build();
+    selector.add_css_class("inferior-selector");
+    selector.set_sensitive(false);
+    let selected_state = gtk::Label::new(Some("idle"));
+    selected_state.add_css_class("inferior-selected-state");
+    selected_state.set_xalign(1.0);
+    let summary_heading = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let caption = section_title("CURRENT INFERIOR");
+    caption.set_hexpand(true);
+    summary_heading.append(&caption);
+    summary_heading.append(&selected_state);
+    let stop_owner = gtk::Label::new(None);
+    stop_owner.add_css_class("inferior-stop-owner");
+    stop_owner.set_halign(gtk::Align::Fill);
+    stop_owner.set_xalign(0.0);
+    stop_owner.set_ellipsize(pango::EllipsizeMode::End);
+    stop_owner.set_visible(false);
+    let summary = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    summary.add_css_class("inferior-summary");
+    summary.append(&summary_heading);
+    summary.append(&selector);
+    summary.append(&stop_owner);
+
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.add_css_class("inferior-page");
+    let header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    header.add_css_class("inferior-page-header");
+    let heading = section_title("PROCESS DEBUGGING");
+    heading.set_hexpand(true);
+    let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+    refresh.add_css_class("inferior-refresh");
+    refresh.set_tooltip_text(Some("Refresh inferiors and fork settings"));
+    header.append(&heading);
+    header.append(&refresh);
+    page.append(&header);
+
+    let navigation = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    navigation.add_css_class("inferior-navigation");
+    navigation.append(&section_title("RELATIONSHIP NAVIGATION"));
+    let navigation_actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    navigation_actions.set_homogeneous(true);
+    let switch_parent = gtk::Button::with_label("Switch parent");
+    let switch_child = gtk::Button::with_label("Switch child");
+    for button in [&switch_parent, &switch_child] {
+        button.add_css_class("inferior-inline-action");
+        button.set_sensitive(false);
+        navigation_actions.append(button);
+    }
+    navigation.append(&navigation_actions);
+    page.append(&navigation);
+
+    let policy = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    policy.add_css_class("inferior-policy");
+    policy.append(&section_title("FORK POLICY"));
+    let follow = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    follow.set_homogeneous(true);
+    let follow_parent = gtk::ToggleButton::with_label("Follow parent");
+    let follow_child = gtk::ToggleButton::with_label("Follow child");
+    follow_child.set_group(Some(&follow_parent));
+    follow_parent.add_css_class("inferior-policy-choice");
+    follow_child.add_css_class("inferior-policy-choice");
+    follow_parent.set_sensitive(false);
+    follow_child.set_sensitive(false);
+    follow.append(&follow_parent);
+    follow.append(&follow_child);
+    policy.append(&follow);
+    let detach_on_fork = gtk::CheckButton::with_label("Detach the process not being followed");
+    detach_on_fork.add_css_class("inferior-detach-policy");
+    detach_on_fork.set_sensitive(false);
+    detach_on_fork.set_tooltip_text(Some(
+        "Turn this off to retain both parent and child as GDB inferiors",
+    ));
+    policy.append(&detach_on_fork);
+    page.append(&policy);
+
+    let list_title = section_title("INFERIORS");
+    list_title.add_css_class("inferior-list-title");
+    page.append(&list_title);
+    let list = dynamic_list("Inferiors appear when GDB reports thread groups");
+    list.add_css_class("inferior-list");
+    let scrolled = gtk::ScrolledWindow::builder()
+        .child(&list)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+    scrolled.add_css_class("inferior-list-scroll");
+    page.append(&scrolled);
+
+    InferiorControls {
+        summary,
+        page,
+        selector,
+        selector_model,
+        selector_ids: Rc::new(RefCell::new(Vec::new())),
+        selector_updating: Rc::new(Cell::new(false)),
+        selected_state,
+        stop_owner,
+        list,
+        cards: Rc::new(RefCell::new(Vec::new())),
+        follow_parent,
+        follow_child,
+        detach_on_fork,
+        switch_parent,
+        switch_child,
+        refresh,
+        action_handler: Rc::new(RefCell::new(None)),
+    }
+}
+
 pub(super) fn build_source_tree_view() -> SourceTreeControls {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.add_css_class("source-tree-panel");
@@ -1219,6 +1333,7 @@ pub(super) fn build_source_tree_view() -> SourceTreeControls {
     search.set_hexpand(true);
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh.add_css_class("source-tree-refresh");
+    refresh.set_halign(gtk::Align::End);
     refresh.set_tooltip_text(Some("Refresh source tree"));
     toolbar.append(&search);
     toolbar.append(&refresh);
@@ -1732,20 +1847,4 @@ pub(super) fn section_title(text: &str) -> gtk::Label {
     label.add_css_class("section-title");
     label.set_halign(gtk::Align::Start);
     label
-}
-
-pub(super) fn sidebar_row(key: &str, value: &str) -> gtk::Box {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    row.add_css_class("sidebar-row");
-    let key = gtk::Label::new(Some(key));
-    key.add_css_class("muted");
-    key.set_halign(gtk::Align::Start);
-    key.set_width_chars(8);
-    let value = gtk::Label::new(Some(value));
-    value.set_halign(gtk::Align::Start);
-    value.set_ellipsize(pango::EllipsizeMode::Middle);
-    value.set_hexpand(true);
-    row.append(&key);
-    row.append(&value);
-    row
 }

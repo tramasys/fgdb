@@ -1111,28 +1111,36 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
     if !stop_refresh_is_current(&ui, generation) {
         return;
     }
-    let cached = ui
-        .upgrade()
-        .map(|ui| (ui.inferior_pid(), ui.debugger_pid()));
-    if let Some((Some(pid), debugger_pid)) = cached {
+    let cached = ui.upgrade().map(|ui| {
+        (
+            ui.inferior_pid(),
+            ui.debugger_pid(),
+            ui.selected_inferior_id(),
+        )
+    });
+    if let Some((Some(pid), debugger_pid, _)) = cached.as_ref() {
         continue_stack_refresh(
             ui,
             client,
             generation,
             registers,
             frames,
-            Some(pid),
-            debugger_pid,
+            Some(*pid),
+            *debugger_pid,
         );
         return;
     }
+    let selected_inferior = cached.and_then(|(_, _, selected)| selected);
     let ui_for_request = ui.clone();
     if client
         .request("-list-thread-groups", move |client, record| {
             if !stop_refresh_is_current(&ui, generation) {
                 return;
             }
-            let pid = crate::debugger::inferior_pid(&record);
+            let pid = selected_inferior
+                .as_deref()
+                .and_then(|id| crate::debugger::inferior_pid_for_group(&record, id))
+                .or_else(|| crate::debugger::inferior_pid(&record));
             let debugger_pid = ui.upgrade().and_then(|ui| ui.debugger_pid());
             continue_stack_refresh(ui, client, generation, registers, frames, pid, debugger_pid);
         })

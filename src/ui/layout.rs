@@ -18,8 +18,10 @@ const MIN_WINDOW_WIDTH: i32 = 320;
 const MIN_WINDOW_HEIGHT: i32 = 200;
 const MAX_WINDOW_DIMENSION: i32 = 32_768;
 const DISCLOSURE_PREFIX: &str = "disclosure.";
+const NOTEBOOK_PREFIX: &str = "notebook.";
 const TERMINAL_VISIBLE_KEY: &str = "terminal.visible";
 const MAX_LAYOUT_BYTES: usize = 1024 * 1024;
+const MAX_NOTEBOOK_PAGE: u32 = 1024;
 
 fn layout_path() -> PathBuf {
     glib::user_config_dir().join("fgdb/layout.conf")
@@ -176,6 +178,35 @@ impl Persistence {
         if self.0.ready_to_save.get() {
             self.0.schedule_save();
         }
+    }
+
+    pub(super) fn bind_notebook(&self, key: &'static str, notebook: &gtk::Notebook) {
+        let page = self.0.remembered.borrow().notebooks.get(key).copied();
+        if let Some(page) = page.filter(|page| *page < notebook.n_pages()) {
+            notebook.set_current_page(Some(page));
+        }
+
+        let weak_state = Rc::downgrade(&self.0);
+        notebook.connect_switch_page(move |notebook, _, page| {
+            let Some(state) = weak_state.upgrade() else {
+                return;
+            };
+            if page >= notebook.n_pages() || page > MAX_NOTEBOOK_PAGE {
+                return;
+            }
+            let changed = state.remembered.borrow().notebooks.get(key).copied() != Some(page);
+            if !changed {
+                return;
+            }
+            state
+                .remembered
+                .borrow_mut()
+                .notebooks
+                .insert(key.to_owned(), page);
+            if state.ready_to_save.get() {
+                state.schedule_save();
+            }
+        });
     }
 
     pub(super) fn disclosure_handler(&self) -> KernelSectionHandler {
@@ -424,6 +455,7 @@ struct RememberedLayout {
     window: Option<WindowGeometry>,
     terminal_visible: Option<bool>,
     panes: HashMap<String, PanePosition>,
+    notebooks: HashMap<String, u32>,
     disclosures: HashMap<String, bool>,
 }
 
@@ -493,6 +525,15 @@ fn parse_layout(contents: &str) -> RememberedLayout {
             }
             continue;
         }
+        if let Some(key) = key.trim().strip_prefix(NOTEBOOK_PREFIX) {
+            if !key.is_empty()
+                && let Ok(page) = geometry.trim().parse::<u32>()
+                && page <= MAX_NOTEBOOK_PAGE
+            {
+                remembered.notebooks.insert(key.to_owned(), page);
+            }
+            continue;
+        }
         let Some((position, extent)) = geometry.split_once(',') else {
             continue;
         };
@@ -519,7 +560,7 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> io::Result<()> {
-    let mut contents = String::from("# fgdb layout v4\n");
+    let mut contents = String::from("# fgdb layout v5\n");
     if let Some(window) = remembered.window {
         writeln!(
             contents,
@@ -544,6 +585,12 @@ fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> i
             pane.key, position.position, position.extent
         )
         .expect("writing to a String cannot fail");
+    }
+    let mut notebooks = remembered.notebooks.iter().collect::<Vec<_>>();
+    notebooks.sort_unstable_by_key(|(key, _)| *key);
+    for (key, page) in notebooks {
+        writeln!(contents, "{NOTEBOOK_PREFIX}{key}={page}")
+            .expect("writing to a String cannot fail");
     }
     let mut disclosures = remembered.disclosures.iter().collect::<Vec<_>>();
     disclosures.sort_unstable_by_key(|(key, _)| *key);
@@ -571,7 +618,7 @@ mod tests {
     #[test]
     fn parses_valid_layout_entries_and_ignores_malformed_ones() {
         let parsed = parse_layout(
-            "# layout\nwindow=1440,900,1\nterminal.visible=0\nworkspace_inspector=980,1375\ndisclosure.kernel.overview.process=1\ndisclosure.kernel.overview.scheduler=0\ndisclosure.invalid=maybe\nbroken=nope\nnegative=-1,100\ncollapsed=100,100\nzero=0,100\noversized=1507950899,2147483647\n",
+            "# layout\nwindow=1440,900,1\nterminal.visible=0\nworkspace_inspector=980,1375\nnotebook.left_sidebar=4\nnotebook.invalid=2048\ndisclosure.kernel.overview.process=1\ndisclosure.kernel.overview.scheduler=0\ndisclosure.invalid=maybe\nbroken=nope\nnegative=-1,100\ncollapsed=100,100\nzero=0,100\noversized=1507950899,2147483647\n",
         );
 
         assert_eq!(
@@ -592,6 +639,8 @@ mod tests {
             })
         );
         assert_eq!(parsed.terminal_visible, Some(false));
+        assert_eq!(parsed.notebooks.get("left_sidebar"), Some(&4));
+        assert!(!parsed.notebooks.contains_key("invalid"));
         assert!(!parsed.panes.contains_key("broken"));
         assert!(!parsed.panes.contains_key("negative"));
         assert!(!parsed.panes.contains_key("collapsed"));

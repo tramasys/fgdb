@@ -588,8 +588,6 @@ pub(super) fn window_control_button(label: &str, tooltip: &str, class: &str) -> 
 }
 
 pub(super) fn build_workspace(
-    config: &LaunchConfig,
-    theme: &Theme,
     source_notebook: &gtk::Notebook,
     terminal: &vte4::Terminal,
     gef_tools_button: &gtk::ToggleButton,
@@ -612,7 +610,7 @@ pub(super) fn build_workspace(
     navigation_and_editor.set_position(260);
     navigation_and_editor.set_shrink_start_child(false);
     navigation_and_editor.set_resize_start_child(false);
-    let left_sidebar = build_left_sidebar(config, theme);
+    let left_sidebar = build_left_sidebar();
     let source_editor = build_editor_panel(source_notebook);
     navigation_and_editor.set_start_child(Some(&left_sidebar.root));
     navigation_and_editor.set_end_child(Some(&source_editor.root));
@@ -655,10 +653,12 @@ pub(super) fn build_workspace(
         status_detail: inspector.status_detail,
         source_navigation: source_editor.navigation,
         source_tree: left_sidebar.source_tree,
+        left_navigation: left_sidebar.navigation,
         inspector_notebook: inspector.notebook.clone(),
         call_stack_list: left_sidebar.call_stack_list,
         threads_list: left_sidebar.threads_list,
         modules_list: left_sidebar.modules_list,
+        inferior_controls: left_sidebar.inferior_controls,
         locals_store: inspector.locals_store,
         locals_selection: inspector.locals_selection,
         locals_view: inspector.locals_view,
@@ -750,18 +750,10 @@ fn connect_inspector_responsiveness(workspace: &gtk::Paned, inspector: &Inspecto
     });
 }
 
-pub(super) fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSidebar {
+pub(super) fn build_left_sidebar() -> LeftSidebar {
     let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
     sidebar.add_css_class("sidebar");
     sidebar.set_size_request(190, -1);
-
-    let session_rows = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    session_rows.append(&sidebar_row("Target", &config.target_name()));
-    session_rows.append(&sidebar_row("Debugger", &config.gdb_executable));
-    session_rows.append(&sidebar_row("Interface", "GDB/MI 2"));
-    session_rows.append(&sidebar_row("Theme", theme.name));
-    let session = build_disclosure("SESSION", &session_rows, false, "session-disclosure");
-    sidebar.append(&session);
     let call_stack_list = dynamic_list("Frames appear when the target is paused");
     let stack_scrolled = gtk::ScrolledWindow::builder()
         .child(&call_stack_list)
@@ -781,10 +773,15 @@ pub(super) fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSi
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
     let source_tree = build_source_tree_view();
+    let inferior_controls = build_inferior_controls();
     let navigation = gtk::Notebook::new();
     navigation.add_css_class("sidebar-tabs");
     navigation.set_vexpand(true);
     navigation.set_scrollable(true);
+    navigation.append_page(
+        &inferior_controls.page,
+        Some(&gtk::Label::new(Some("Inferiors"))),
+    );
     navigation.append_page(&stack_scrolled, Some(&gtk::Label::new(Some("Call Stack"))));
     navigation.append_page(&threads_scrolled, Some(&gtk::Label::new(Some("Threads"))));
     navigation.append_page(&modules_scrolled, Some(&gtk::Label::new(Some("Modules"))));
@@ -794,13 +791,16 @@ pub(super) fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSi
         let navigation = navigation_for_selection.clone();
         glib::idle_add_local_once(move || clear_label_selections(&navigation));
     });
+    sidebar.append(&inferior_controls.summary);
     sidebar.append(&navigation);
     LeftSidebar {
         root: sidebar,
+        navigation,
         call_stack_list,
         threads_list,
         modules_list,
         source_tree,
+        inferior_controls,
     }
 }
 
