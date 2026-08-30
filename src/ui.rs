@@ -68,11 +68,11 @@ fn set_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive: bool, bus
     widget.set_sensitive(sensitive);
 }
 
-/// Keep a previously available titlebar action visually stable while a short
-/// execution command is in flight. The corresponding signal handlers still
-/// validate debugger state before issuing a command, so this is only a
-/// presentation distinction: durable unavailable states remain insensitive.
-fn set_header_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive: bool, busy: bool) {
+/// Keep a previously available action visually stable while a short execution
+/// command is in flight. The corresponding signal handlers still validate
+/// debugger state before issuing a command, so durable unavailable states
+/// remain insensitive.
+fn set_transient_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive: bool, busy: bool) {
     let widget = widget.upcast_ref::<gtk::Widget>();
     widget.remove_css_class("execution-interlocked");
     if !busy || sensitive || !widget.is_sensitive() {
@@ -515,11 +515,14 @@ struct DisassemblyControls {
     go: gtk::Button,
     current_pc: gtk::Button,
     mixed: gtk::ToggleButton,
-    syntax: gtk::DropDown,
+    syntax_intel: gtk::ToggleButton,
+    syntax_att: gtk::ToggleButton,
     follow: gtk::Button,
     open_memory: gtk::Button,
     range: gtk::Label,
     source_column: gtk::ColumnViewColumn,
+    scrolled: gtk::ScrolledWindow,
+    scroll_generation: Rc<Cell<u64>>,
     loading: Rc<Cell<bool>>,
     syntax_applicable: Rc<Cell<bool>>,
     setting_syntax: Rc<Cell<bool>>,
@@ -759,7 +762,7 @@ struct MiscStartupSummary {
     argc: gtk::Label,
     argv: gtk::Label,
     envp: gtk::Label,
-    environment: gtk::Label,
+    env: gtk::Label,
 }
 
 #[derive(Clone)]
@@ -1173,6 +1176,7 @@ pub struct Ui {
     registers_empty: gtk::Label,
     stack_store: gio::ListStore,
     latest_stack: Rc<RefCell<Vec<StackEntry>>>,
+    displayed_stack: Rc<RefCell<Vec<StackEntry>>>,
     latest_stack_generation: Rc<Cell<Option<u64>>>,
     stack_details_generation: Rc<Cell<Option<u64>>>,
     stack_empty: gtk::Label,

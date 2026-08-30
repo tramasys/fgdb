@@ -54,19 +54,30 @@ impl Ui {
             &inspector_bindings,
         );
         root.append(&workspace.root);
-        root.append(&workspace.status_detail);
+        let workspace_footer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        workspace_footer.add_css_class("workspace-footer");
+        workspace_footer.append(&topbar.terminal_toggle_button);
+        workspace.status_detail.set_hexpand(true);
+        workspace_footer.append(&workspace.status_detail);
+        root.append(&workspace_footer);
         let terminal_panel = workspace.terminal_panel.clone();
         let terminal_for_toggle = terminal.clone();
+        let layout = layout::Persistence::install(&window, workspace.layout_panes.clone());
+        let terminal_visible = layout.terminal_visible();
+        topbar.terminal_toggle_button.set_active(terminal_visible);
+        terminal_panel.set_visible(terminal_visible);
+        let layout_for_terminal = layout.clone();
         topbar
             .terminal_toggle_button
             .connect_toggled(move |button| {
-                terminal_panel.set_visible(button.is_active());
-                if button.is_active() {
+                let visible = button.is_active();
+                terminal_panel.set_visible(visible);
+                layout_for_terminal.set_terminal_visible(visible);
+                if visible {
                     terminal_for_toggle.grab_focus();
                 }
             });
         window.set_child(Some(&root));
-        let layout = layout::Persistence::install(&window, workspace.layout_panes.clone());
         kernel_section_handler.replace(Some(layout.disclosure_handler()));
         let initial_session = config.initial_session();
 
@@ -162,6 +173,7 @@ impl Ui {
             registers_empty: workspace.registers_empty,
             stack_store: workspace.stack_store,
             latest_stack: Rc::new(RefCell::new(Vec::new())),
+            displayed_stack: Rc::new(RefCell::new(Vec::new())),
             latest_stack_generation: Rc::new(Cell::new(None)),
             stack_details_generation: Rc::new(Cell::new(None)),
             stack_empty: workspace.stack_empty,
@@ -749,6 +761,14 @@ impl Ui {
             && !self.native_until_active.get()
     }
 
+    pub(crate) fn stop_point_commands_available(&self) -> bool {
+        self.debugger_ready.get()
+            && !self.inferior_running.get()
+            && !self.command_pending.get()
+            && !self.session_pending.get()
+            && !self.native_until_active.get()
+    }
+
     pub(crate) fn disassembly_commands_available(&self) -> bool {
         self.stopped_inspection_available() && !self.disassembly_controls.loading.get()
     }
@@ -934,7 +954,7 @@ impl Ui {
         }
         self.applied_control_state.replace(Some(state));
 
-        set_header_execution_sensitive(&self.run_button, state.run, state.busy);
+        set_transient_execution_sensitive(&self.run_button, state.run, state.busy);
         self.update_pause_control(
             state.pause,
             state.busy,
@@ -947,11 +967,16 @@ impl Ui {
             &self.step_instruction_button,
             &self.finish_button,
         ] {
-            set_header_execution_sensitive(button, state.move_target, state.busy);
+            set_transient_execution_sensitive(button, state.move_target, state.busy);
         }
-        set_header_execution_sensitive(&self.until_button, state.move_target, state.busy);
-        self.disassembly_controls.syntax.set_sensitive(state.syntax);
-        set_header_execution_sensitive(&self.gef_tools_button, state.gef_tools, state.busy);
+        set_transient_execution_sensitive(&self.until_button, state.move_target, state.busy);
+        self.disassembly_controls
+            .syntax_intel
+            .set_sensitive(state.syntax);
+        self.disassembly_controls
+            .syntax_att
+            .set_sensitive(state.syntax);
+        set_transient_execution_sensitive(&self.gef_tools_button, state.gef_tools, state.busy);
         self.gef_tools_content.set_sensitive(state.gef_tools);
         self.misc_view
             .set_heap_inspector_sensitive(state.inspect, state.busy);
@@ -973,11 +998,11 @@ impl Ui {
         );
         set_execution_sensitive(&self.memory_add_button, state.add_memory, state.busy);
         set_execution_sensitive(&self.watchpoint_add_button, state.inspect, state.busy);
-        set_header_execution_sensitive(&self.load_symbols_button, state.inspect, state.busy);
+        set_transient_execution_sensitive(&self.load_symbols_button, state.inspect, state.busy);
         // Keep the top-level session affordance visually stable during a
         // short execution transition. Its mutating actions remain genuinely
         // insensitive inside the popover until the debugger is ready again.
-        set_header_execution_sensitive(&self.session_button, state.session, state.busy);
+        set_transient_execution_sensitive(&self.session_button, state.session, state.busy);
         set_execution_sensitive(&self.new_session_button, state.new_session, state.busy);
         set_execution_sensitive(
             &self.restart_session_button,
@@ -996,14 +1021,14 @@ impl Ui {
             state.busy,
         );
         for (button, _, _) in &self.signal_buttons {
-            set_execution_sensitive(button, state.edit_stop_points, state.busy);
+            set_transient_execution_sensitive(button, state.edit_stop_points, state.busy);
         }
         for (button, _) in &self.event_catchpoint_buttons {
             set_execution_sensitive(button, state.edit_stop_points, state.busy);
         }
         set_execution_sensitive(&self.signal_entry, state.edit_stop_points, state.busy);
-        set_execution_sensitive(&self.signal_add_button, state.add_signal, state.busy);
-        set_execution_sensitive(
+        set_transient_execution_sensitive(&self.signal_add_button, state.add_signal, state.busy);
+        set_transient_execution_sensitive(
             &self.delete_all_signal_catchpoints_button,
             state.delete_signal_catchpoints,
             state.busy,
@@ -1029,7 +1054,7 @@ impl Ui {
         const VISUAL_DELAY: Duration = Duration::from_millis(150);
         const PENDING_CLASS: &str = "pause-availability-pending";
 
-        set_header_execution_sensitive(&self.pause_button, sensitive, busy);
+        set_transient_execution_sensitive(&self.pause_button, sensitive, busy);
         if sensitive {
             if was_sensitive {
                 return;

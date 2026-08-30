@@ -18,6 +18,7 @@ const MIN_WINDOW_WIDTH: i32 = 320;
 const MIN_WINDOW_HEIGHT: i32 = 200;
 const MAX_WINDOW_DIMENSION: i32 = 32_768;
 const DISCLOSURE_PREFIX: &str = "disclosure.";
+const TERMINAL_VISIBLE_KEY: &str = "terminal.visible";
 const MAX_LAYOUT_BYTES: usize = 1024 * 1024;
 
 fn layout_path() -> PathBuf {
@@ -160,6 +161,21 @@ impl Persistence {
 
     pub(super) fn save(&self) {
         self.0.save_now();
+    }
+
+    pub(super) fn terminal_visible(&self) -> bool {
+        self.0.remembered.borrow().terminal_visible.unwrap_or(true)
+    }
+
+    pub(super) fn set_terminal_visible(&self, visible: bool) {
+        let changed = self.0.remembered.borrow().terminal_visible != Some(visible);
+        if !changed {
+            return;
+        }
+        self.0.remembered.borrow_mut().terminal_visible = Some(visible);
+        if self.0.ready_to_save.get() {
+            self.0.schedule_save();
+        }
     }
 
     pub(super) fn disclosure_handler(&self) -> KernelSectionHandler {
@@ -406,6 +422,7 @@ struct WindowGeometry {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RememberedLayout {
     window: Option<WindowGeometry>,
+    terminal_visible: Option<bool>,
     panes: HashMap<String, PanePosition>,
     disclosures: HashMap<String, bool>,
 }
@@ -464,6 +481,10 @@ fn parse_layout(contents: &str) -> RememberedLayout {
             }
             continue;
         }
+        if key.trim() == TERMINAL_VISIBLE_KEY {
+            remembered.terminal_visible = parse_bool(geometry.trim());
+            continue;
+        }
         if let Some(key) = key.trim().strip_prefix(DISCLOSURE_PREFIX) {
             if !key.is_empty()
                 && let Some(expanded) = parse_bool(geometry.trim())
@@ -498,7 +519,7 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> io::Result<()> {
-    let mut contents = String::from("# fgdb layout v3\n");
+    let mut contents = String::from("# fgdb layout v4\n");
     if let Some(window) = remembered.window {
         writeln!(
             contents,
@@ -508,6 +529,10 @@ fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> i
             u8::from(window.maximized)
         )
         .expect("writing to a String cannot fail");
+    }
+    if let Some(visible) = remembered.terminal_visible {
+        writeln!(contents, "{TERMINAL_VISIBLE_KEY}={}", u8::from(visible))
+            .expect("writing to a String cannot fail");
     }
     for pane in panes {
         let Some(position) = remembered.panes.get(pane.key) else {
@@ -546,7 +571,7 @@ mod tests {
     #[test]
     fn parses_valid_layout_entries_and_ignores_malformed_ones() {
         let parsed = parse_layout(
-            "# layout\nwindow=1440,900,1\nworkspace_inspector=980,1375\ndisclosure.kernel.overview.process=1\ndisclosure.kernel.overview.scheduler=0\ndisclosure.invalid=maybe\nbroken=nope\nnegative=-1,100\ncollapsed=100,100\nzero=0,100\noversized=1507950899,2147483647\n",
+            "# layout\nwindow=1440,900,1\nterminal.visible=0\nworkspace_inspector=980,1375\ndisclosure.kernel.overview.process=1\ndisclosure.kernel.overview.scheduler=0\ndisclosure.invalid=maybe\nbroken=nope\nnegative=-1,100\ncollapsed=100,100\nzero=0,100\noversized=1507950899,2147483647\n",
         );
 
         assert_eq!(
@@ -566,6 +591,7 @@ mod tests {
                 maximized: true,
             })
         );
+        assert_eq!(parsed.terminal_visible, Some(false));
         assert!(!parsed.panes.contains_key("broken"));
         assert!(!parsed.panes.contains_key("negative"));
         assert!(!parsed.panes.contains_key("collapsed"));
@@ -586,6 +612,10 @@ mod tests {
     fn rejects_implausible_window_sizes_and_invalid_states() {
         assert_eq!(parse_layout("window=10,10,0\n").window, None);
         assert_eq!(parse_layout("window=1200,800,maybe\n").window, None);
+        assert_eq!(
+            parse_layout("terminal.visible=maybe\n").terminal_visible,
+            None
+        );
     }
 
     #[test]

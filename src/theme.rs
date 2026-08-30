@@ -460,7 +460,22 @@ button.instruction-row.current-instruction:hover {{
     border-bottom: 1px solid @app_border;
 }}
 
-.disassembly-browser-row {{ min-height: 23px; }}
+.disassembly-browser-row {{
+    min-height: 23px;
+}}
+
+.disassembly-control-group {{
+    min-height: 23px;
+    background: @app_bg;
+    border: 1px solid @app_border;
+}}
+
+.disassembly-control-label {{
+    padding: 0 6px;
+    color: @app_muted;
+    font-size: 9px;
+    font-weight: 700;
+}}
 
 .disassembly-browser entry {{
     min-height: 21px;
@@ -475,19 +490,13 @@ button.instruction-row.current-instruction:hover {{
 .disassembly-browser button.inline-action {{
     min-height: 21px;
     padding: 0 7px;
+    background: alpha(@app_raised, 0.72);
+    border-left: 1px solid @app_border;
 }}
 
 .disassembly-browser button.inline-action:checked {{
     color: @app_accent_hover;
     background: alpha(@app_accent, 0.16);
-}}
-
-.disassembly-browser dropdown.disassembly-syntax > button {{
-    min-height: 21px;
-    padding: 0 7px;
-    color: @app_fg;
-    background: @app_raised;
-    border: 0;
 }}
 
 .instruction-insight {{
@@ -1559,6 +1568,34 @@ headerbar.topbar .execution-controls {{
     font-size: 10px;
 }}
 
+.workspace-footer {{
+    min-height: 22px;
+    background: @app_bg;
+    border-top: 1px solid @app_border;
+}}
+
+.workspace-footer .status-detail {{ border-top: 0; }}
+
+button.terminal-pane-toggle {{
+    min-height: 21px;
+    padding: 0 10px;
+    color: @app_muted;
+    background: @app_surface;
+    border: 0;
+    border-right: 1px solid @app_border;
+}}
+
+button.terminal-pane-toggle:hover {{
+    color: @app_fg;
+    background: @app_raised;
+}}
+
+button.terminal-pane-toggle:checked {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.14);
+    box-shadow: inset 0 2px @app_accent;
+}}
+
 .status-ready {{ color: @app_success; }}
 .status-running {{ color: @app_accent_hover; }}
 .status-error {{ color: @app_danger; }}
@@ -1583,6 +1620,31 @@ button.source-tab-close:hover {{
     color: @app_fg;
     background: alpha(@app_fg, 0.10);
 }}
+
+popover.source-tab-menu > contents {{
+    min-width: 206px;
+    padding: 4px;
+    background: @app_surface;
+    border: 1px solid @app_border;
+}}
+
+.source-tab-menu-action {{
+    min-height: 25px;
+    padding: 1px 8px;
+    color: @app_fg;
+    background: transparent;
+    border: 0;
+}}
+
+.source-tab-menu-action:hover,
+.source-tab-menu-action:focus-visible {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.12);
+}}
+
+.source-tab-menu-action:disabled {{ color: alpha(@app_muted, 0.55); }}
+
+.source-tab-menu-separator {{ margin: 3px 5px; }}
 
 textview,
 textview text {{

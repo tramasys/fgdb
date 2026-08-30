@@ -165,6 +165,208 @@ pub(super) fn update_selected_frame_buttons(buttons: &[(u32, gtk::Button)], sele
     }
 }
 
+#[derive(Clone, Copy)]
+enum SourceTabCloseScope {
+    This,
+    Others,
+    Left,
+    Right,
+    All,
+}
+
+fn source_pages_for_close(
+    notebook: &gtk::Notebook,
+    documents: &Rc<RefCell<Vec<SourceDocument>>>,
+    anchor: &gtk::ScrolledWindow,
+    scope: SourceTabCloseScope,
+) -> Vec<gtk::ScrolledWindow> {
+    let Some(anchor_page) = notebook.page_num(anchor) else {
+        return Vec::new();
+    };
+    documents
+        .borrow()
+        .iter()
+        .filter_map(|document| {
+            let page = notebook.page_num(&document.page)?;
+            let selected = match scope {
+                SourceTabCloseScope::This => document.page == *anchor,
+                SourceTabCloseScope::Others => document.page != *anchor,
+                SourceTabCloseScope::Left => page < anchor_page,
+                SourceTabCloseScope::Right => page > anchor_page,
+                SourceTabCloseScope::All => true,
+            };
+            selected.then(|| document.page.clone())
+        })
+        .collect()
+}
+
+fn close_source_pages(
+    notebook: &gtk::Notebook,
+    documents: &Rc<RefCell<Vec<SourceDocument>>>,
+    pages: &[gtk::ScrolledWindow],
+    style_scheme: Option<&sourceview5::StyleScheme>,
+) {
+    if pages.is_empty() {
+        return;
+    }
+    for page in pages {
+        if let Some(page_number) = notebook.page_num(page) {
+            notebook.remove_page(Some(page_number));
+        }
+    }
+    let empty = {
+        let mut documents = documents.borrow_mut();
+        documents.retain(|document| !pages.contains(&document.page));
+        documents.is_empty()
+    };
+    if empty {
+        append_welcome_source(notebook, style_scheme);
+    }
+}
+
+fn source_tab_menu_button(label: &str) -> gtk::Button {
+    let label = gtk::Label::new(Some(label));
+    label.set_xalign(0.0);
+    let button = gtk::Button::builder().child(&label).hexpand(true).build();
+    button.add_css_class("source-tab-menu-action");
+    button
+}
+
+fn copy_source_text(text: &str) {
+    if let Some(display) = gtk::gdk::Display::default() {
+        display.clipboard().set_text(text);
+    }
+}
+
+fn connect_source_tab_context_menu(
+    document: &SourceDocument,
+    notebook: &gtk::Notebook,
+    documents: &Rc<RefCell<Vec<SourceDocument>>>,
+    style_scheme: Option<&sourceview5::StyleScheme>,
+) {
+    let popover = gtk::Popover::new();
+    popover.add_css_class("source-tab-menu");
+    popover.set_autohide(true);
+    popover.set_has_arrow(false);
+    popover.set_parent(&document.tab);
+
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    menu.add_css_class("source-tab-menu-content");
+    let close = source_tab_menu_button("Close");
+    let close_others = source_tab_menu_button("Close Other Tabs");
+    let close_left = source_tab_menu_button("Close Tabs to the Left");
+    let close_right = source_tab_menu_button("Close Tabs to the Right");
+    let close_all = source_tab_menu_button("Close All Tabs");
+    for button in [&close, &close_others, &close_left, &close_right, &close_all] {
+        menu.append(button);
+    }
+    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    separator.add_css_class("source-tab-menu-separator");
+    menu.append(&separator);
+    let copy_name = source_tab_menu_button("Copy File Name");
+    let copy_path = source_tab_menu_button("Copy Full Path");
+    let copy_path_line = source_tab_menu_button("Copy Path with Line");
+    let copy_directory = source_tab_menu_button("Copy Directory Path");
+    for button in [&copy_name, &copy_path, &copy_path_line, &copy_directory] {
+        menu.append(button);
+    }
+    popover.set_child(Some(&menu));
+
+    for (button, scope) in [
+        (&close, SourceTabCloseScope::This),
+        (&close_others, SourceTabCloseScope::Others),
+        (&close_left, SourceTabCloseScope::Left),
+        (&close_right, SourceTabCloseScope::Right),
+        (&close_all, SourceTabCloseScope::All),
+    ] {
+        let notebook = notebook.clone();
+        let documents = Rc::clone(documents);
+        let page = document.page.clone();
+        let style_scheme = style_scheme.cloned();
+        let popover = popover.downgrade();
+        button.connect_clicked(move |_| {
+            let pages = source_pages_for_close(&notebook, &documents, &page, scope);
+            if let Some(popover) = popover.upgrade() {
+                popover.popdown();
+            }
+            close_source_pages(&notebook, &documents, &pages, style_scheme.as_ref());
+        });
+    }
+
+    let path = document.path.clone();
+    let popover_for_name = popover.downgrade();
+    copy_name.connect_clicked(move |_| {
+        let name = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy();
+        copy_source_text(&name);
+        if let Some(popover) = popover_for_name.upgrade() {
+            popover.popdown();
+        }
+    });
+    let path = document.path.clone();
+    let popover_for_path = popover.downgrade();
+    copy_path.connect_clicked(move |_| {
+        copy_source_text(&path.to_string_lossy());
+        if let Some(popover) = popover_for_path.upgrade() {
+            popover.popdown();
+        }
+    });
+    let path = document.path.clone();
+    let buffer = document.buffer.clone();
+    let popover_for_line = popover.downgrade();
+    copy_path_line.connect_clicked(move |_| {
+        let line = buffer
+            .iter_at_offset(buffer.cursor_position())
+            .line()
+            .saturating_add(1);
+        copy_source_text(&format!("{}:{line}", path.to_string_lossy()));
+        if let Some(popover) = popover_for_line.upgrade() {
+            popover.popdown();
+        }
+    });
+    let directory = document.path.parent().map(Path::to_path_buf);
+    copy_directory.set_sensitive(directory.is_some());
+    let popover_for_directory = popover.downgrade();
+    copy_directory.connect_clicked(move |_| {
+        if let Some(directory) = directory.as_ref() {
+            copy_source_text(&directory.to_string_lossy());
+        }
+        if let Some(popover) = popover_for_directory.upgrade() {
+            popover.popdown();
+        }
+    });
+
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(gtk::gdk::BUTTON_SECONDARY);
+    let notebook = notebook.clone();
+    let page = document.page.clone();
+    let popover_for_click = popover.downgrade();
+    gesture.connect_pressed(move |gesture, _, x, y| {
+        let Some(page_number) = notebook.page_num(&page) else {
+            return;
+        };
+        notebook.set_current_page(Some(page_number));
+        let page_count = notebook.n_pages();
+        close_others.set_sensitive(page_count > 1);
+        close_left.set_sensitive(page_number > 0);
+        close_right.set_sensitive(page_number + 1 < page_count);
+        let Some(popover) = popover_for_click.upgrade() else {
+            return;
+        };
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+            x.round() as i32,
+            y.round() as i32,
+            1,
+            1,
+        )));
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        popover.popup();
+    });
+    document.tab.add_controller(gesture);
+}
+
 pub(super) fn open_source_document(
     path: &Path,
     context: SourceOpenContext<'_>,
@@ -241,24 +443,23 @@ pub(super) fn open_source_document(
         .append_page(&document.page, Some(&document.tab));
     context.notebook.set_tab_reorderable(&document.page, true);
     context.documents.borrow_mut().push(document.clone());
+    connect_source_tab_context_menu(
+        &document,
+        context.notebook,
+        context.documents,
+        context.style_scheme,
+    );
     let notebook_for_close = context.notebook.clone();
     let documents_for_close = Rc::clone(context.documents);
-    let path_for_close = path;
     let page_for_close = document.page.clone();
     let style_scheme_for_close = context.style_scheme.cloned();
     close.connect_clicked(move |_| {
-        let Some(page_number) = notebook_for_close.page_num(&page_for_close) else {
-            return;
-        };
-        notebook_for_close.remove_page(Some(page_number));
-        let empty = {
-            let mut documents = documents_for_close.borrow_mut();
-            documents.retain(|document| document.path != path_for_close);
-            documents.is_empty()
-        };
-        if empty {
-            append_welcome_source(&notebook_for_close, style_scheme_for_close.as_ref());
-        }
+        close_source_pages(
+            &notebook_for_close,
+            &documents_for_close,
+            std::slice::from_ref(&page_for_close),
+            style_scheme_for_close.as_ref(),
+        );
     });
 
     context.notebook.set_current_page(Some(page_number));

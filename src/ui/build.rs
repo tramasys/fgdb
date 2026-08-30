@@ -78,11 +78,10 @@ pub(super) fn build_topbar(
     load_symbols.set_sensitive(false);
     leading.append(&load_symbols);
     let terminal_toggle = gtk::ToggleButton::with_label("Terminal");
-    terminal_toggle.add_css_class("toolbar-action");
     terminal_toggle.add_css_class("toolbar-toggle");
+    terminal_toggle.add_css_class("terminal-pane-toggle");
     terminal_toggle.set_active(true);
     terminal_toggle.set_tooltip_text(Some("Show or hide the interactive GDB terminal · Ctrl+`"));
-    leading.append(&terminal_toggle);
     let gef_tools = build_gef_tools_menu(terminal, &terminal_toggle);
     topbar.pack_start(&leading);
 
@@ -847,56 +846,94 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     instructions_panel.append(&instructions_header);
     let disassembly_browser = gtk::Box::new(gtk::Orientation::Vertical, 1);
     disassembly_browser.add_css_class("disassembly-browser");
-    let disassembly_navigation = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    let disassembly_navigation = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     disassembly_navigation.add_css_class("disassembly-browser-row");
-    let disassembly_actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    let disassembly_actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     disassembly_actions.add_css_class("disassembly-browser-row");
-    let disassembly_back = compact_instruction_button("‹", "Back to the previous location");
-    let disassembly_forward = compact_instruction_button("›", "Forward to the next location");
-    let disassembly_previous = compact_instruction_button("Fn ‹", "Show the preceding function");
-    let disassembly_next = compact_instruction_button("Fn ›", "Show the following function");
+    let disassembly_back = compact_instruction_button("‹", "Back in location history");
+    let disassembly_forward = compact_instruction_button("›", "Forward in location history");
+    let disassembly_previous = compact_instruction_button("‹ Prev", "Show the preceding function");
+    let disassembly_next = compact_instruction_button("Next ›", "Show the following function");
     let disassembly_location = gtk::Entry::builder()
-        .placeholder_text("Address, expression, or symbol")
+        .placeholder_text("Address, symbol, or expression")
         .hexpand(true)
         .build();
     disassembly_location.set_tooltip_text(Some(
         "Examples: $pc, 0x401000, main, malloc, or a register expression",
     ));
-    let disassembly_go = compact_instruction_button("Go", "Disassemble this location");
-    let disassembly_pc = compact_instruction_button("PC", "Return to the current program counter");
-    let disassembly_mixed = gtk::ToggleButton::with_label("Mixed");
+    let disassembly_go = compact_instruction_button(
+        "Show",
+        "Resolve the entered location and disassemble its containing function",
+    );
+    let disassembly_pc = compact_instruction_button(
+        "Current PC",
+        "Return to the instruction where execution is currently stopped",
+    );
+    let disassembly_mixed = gtk::ToggleButton::with_label("Source");
     disassembly_mixed.add_css_class("inline-action");
-    disassembly_mixed.set_tooltip_text(Some("Show source locations and source text with assembly"));
-    let disassembly_syntax = gtk::DropDown::from_strings(&["Intel", "AT&T"]);
-    disassembly_syntax.add_css_class("disassembly-syntax");
-    disassembly_syntax.set_tooltip_text(Some("Select x86 disassembly syntax"));
+    disassembly_mixed.set_tooltip_text(Some("Toggle mixed source and assembly display"));
+    let disassembly_syntax_intel = gtk::ToggleButton::with_label("Intel");
+    disassembly_syntax_intel.add_css_class("inline-action");
+    disassembly_syntax_intel.add_css_class("disassembly-syntax");
+    disassembly_syntax_intel.set_tooltip_text(Some("Use Intel assembly syntax"));
+    disassembly_syntax_intel.set_active(true);
+    let disassembly_syntax_att = gtk::ToggleButton::with_label("AT&T");
+    disassembly_syntax_att.add_css_class("inline-action");
+    disassembly_syntax_att.add_css_class("disassembly-syntax");
+    disassembly_syntax_att.set_tooltip_text(Some("Use AT&T assembly syntax"));
+    disassembly_syntax_att.set_group(Some(&disassembly_syntax_intel));
     let disassembly_follow = compact_instruction_button(
-        "Follow",
+        "Target",
         "Follow the selected direct or register-indirect call or branch target",
     );
     let disassembly_memory = compact_instruction_button(
         "Memory",
         "Open the selected instruction's effective address in Memory",
     );
-    for widget in [
-        disassembly_back.clone().upcast::<gtk::Widget>(),
-        disassembly_forward.clone().upcast(),
-        disassembly_location.clone().upcast(),
-        disassembly_go.clone().upcast(),
-        disassembly_pc.clone().upcast(),
-    ] {
-        disassembly_navigation.append(&widget);
-    }
-    for widget in [
-        disassembly_previous.clone().upcast::<gtk::Widget>(),
-        disassembly_next.clone().upcast(),
-        disassembly_mixed.clone().upcast(),
-        disassembly_syntax.clone().upcast(),
-        disassembly_follow.clone().upcast(),
-        disassembly_memory.clone().upcast(),
-    ] {
-        disassembly_actions.append(&widget);
-    }
+    let history_group = disassembly_control_group(
+        "HISTORY",
+        &[
+            disassembly_back.clone().upcast::<gtk::Widget>(),
+            disassembly_forward.clone().upcast(),
+        ],
+    );
+    let location_group = disassembly_control_group(
+        "LOCATION",
+        &[
+            disassembly_location.clone().upcast::<gtk::Widget>(),
+            disassembly_go.clone().upcast(),
+            disassembly_pc.clone().upcast(),
+        ],
+    );
+    location_group.set_hexpand(true);
+    disassembly_navigation.append(&history_group);
+    disassembly_navigation.append(&location_group);
+
+    let function_group = disassembly_control_group(
+        "FUNCTION",
+        &[
+            disassembly_previous.clone().upcast::<gtk::Widget>(),
+            disassembly_next.clone().upcast(),
+        ],
+    );
+    let view_group = disassembly_control_group(
+        "VIEW",
+        &[
+            disassembly_mixed.clone().upcast::<gtk::Widget>(),
+            disassembly_syntax_intel.clone().upcast(),
+            disassembly_syntax_att.clone().upcast(),
+        ],
+    );
+    let selected_group = disassembly_control_group(
+        "SELECTED",
+        &[
+            disassembly_follow.clone().upcast::<gtk::Widget>(),
+            disassembly_memory.clone().upcast(),
+        ],
+    );
+    disassembly_actions.append(&function_group);
+    disassembly_actions.append(&view_group);
+    disassembly_actions.append(&selected_group);
     disassembly_browser.append(&disassembly_navigation);
     disassembly_browser.append(&disassembly_actions);
     let disassembly_controls = DisassemblyControls {
@@ -908,11 +945,14 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         go: disassembly_go,
         current_pc: disassembly_pc,
         mixed: disassembly_mixed,
-        syntax: disassembly_syntax,
+        syntax_intel: disassembly_syntax_intel,
+        syntax_att: disassembly_syntax_att,
         follow: disassembly_follow,
         open_memory: disassembly_memory,
         range: disassembly_range,
         source_column,
+        scrolled: instructions_scrolled.clone(),
+        scroll_generation: Rc::new(Cell::new(0)),
         loading: Rc::new(Cell::new(false)),
         syntax_applicable: Rc::new(Cell::new(false)),
         setting_syntax: Rc::new(Cell::new(false)),
@@ -1481,4 +1521,16 @@ fn compact_instruction_button(label: &str, tooltip: &str) -> gtk::Button {
     button.add_css_class("inline-action");
     button.set_tooltip_text(Some(tooltip));
     button
+}
+
+fn disassembly_control_group(label: &str, widgets: &[gtk::Widget]) -> gtk::Box {
+    let group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    group.add_css_class("disassembly-control-group");
+    let caption = gtk::Label::new(Some(label));
+    caption.add_css_class("disassembly-control-label");
+    group.append(&caption);
+    for widget in widgets {
+        group.append(widget);
+    }
+    group
 }

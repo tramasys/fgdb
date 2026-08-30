@@ -1,5 +1,53 @@
 use super::*;
 
+fn center_scroll_adjustment(scrolled: &gtk::ScrolledWindow, position: u32, item_count: u32) {
+    if item_count == 0 {
+        return;
+    }
+    let adjustment = scrolled.vadjustment();
+    let lower = adjustment.lower();
+    let upper = adjustment.upper();
+    let page_size = adjustment.page_size();
+    if !lower.is_finite()
+        || !upper.is_finite()
+        || !page_size.is_finite()
+        || upper <= lower + page_size
+    {
+        return;
+    }
+    let row_fraction = (f64::from(position) + 0.5) / f64::from(item_count);
+    let row_center = lower + (upper - lower) * row_fraction;
+    let maximum = (upper - page_size).max(lower);
+    adjustment.set_value((row_center - page_size / 2.0).clamp(lower, maximum));
+}
+
+fn preserve_stack_render_details(entries: &mut [StackEntry], previous: &[StackEntry]) {
+    let previous = previous
+        .iter()
+        .map(|entry| (entry.address, entry))
+        .collect::<HashMap<_, _>>();
+    for entry in entries {
+        if !entry.pointer_chain.is_empty() {
+            continue;
+        }
+        let Some(previous) = previous.get(&entry.address).copied() else {
+            continue;
+        };
+        if previous.pointer_chain.is_empty()
+            || previous.value != entry.value
+            || previous.pointer_bits != entry.pointer_bits
+            || previous.endian != entry.endian
+            || previous.region != entry.region
+        {
+            continue;
+        }
+        entry.pointer_chain.clone_from(&previous.pointer_chain);
+        if previous.memory_kind == MemoryKind::String {
+            entry.memory_kind = MemoryKind::String;
+        }
+    }
+}
+
 impl Ui {
     pub(crate) fn current_thread_id(&self) -> Option<String> {
         self.selected_thread_id.borrow().clone()
@@ -584,11 +632,14 @@ impl Ui {
             .syntax_applicable
             .set(syntax_applicable);
         self.disassembly_controls
-            .syntax
+            .syntax_intel
+            .set_sensitive(syntax_applicable);
+        self.disassembly_controls
+            .syntax_att
             .set_sensitive(syntax_applicable);
         let title = architecture.map_or_else(
             || String::from("INSTRUCTIONS"),
-            |architecture| format!("INSTRUCTIONS · {architecture} · GDB NATIVE"),
+            |architecture| format!("INSTRUCTIONS · {architecture}"),
         );
         self.instructions_title.set_text(&title);
         self.instructions_title.set_tooltip_text(Some(&title));
@@ -649,15 +700,13 @@ impl Ui {
                 instruction,
             })
             .collect::<Vec<_>>();
-        let rows_changed = replace_boxed_store_if_changed(&self.instructions_store, rows);
+        replace_boxed_store_if_changed(&self.instructions_store, rows);
         let selected = u32::try_from(selected).unwrap_or(0);
-        if self.instructions_selection.selected() != selected {
+        let selection_changed = self.instructions_selection.selected() != selected;
+        if selection_changed {
             self.instructions_selection.set_selected(selected);
         }
-        if rows_changed {
-            self.instructions_view
-                .scroll_to(selected, None, gtk::ListScrollFlags::FOCUS, None);
-        }
+        self.center_instruction_row(selected, self.instructions_store.n_items());
         if let (Some(first), Some(last)) = (
             self.instructions_store
                 .item(0)
@@ -694,6 +743,30 @@ impl Ui {
         self.update_disassembly_selection();
         self.update_instruction_insight();
         self.update_control_sensitivity();
+    }
+
+    fn center_instruction_row(&self, position: u32, item_count: u32) {
+        if item_count == 0 || position >= item_count {
+            return;
+        }
+        self.instructions_view
+            .scroll_to(position, None, gtk::ListScrollFlags::FOCUS, None);
+
+        let generation = self
+            .disassembly_controls
+            .scroll_generation
+            .get()
+            .wrapping_add(1);
+        self.disassembly_controls.scroll_generation.set(generation);
+        center_scroll_adjustment(&self.disassembly_controls.scrolled, position, item_count);
+
+        let scrolled = self.disassembly_controls.scrolled.clone();
+        let scroll_generation = Rc::clone(&self.disassembly_controls.scroll_generation);
+        glib::timeout_add_local_once(Duration::from_millis(16), move || {
+            if scroll_generation.get() == generation {
+                center_scroll_adjustment(&scrolled, position, item_count);
+            }
+        });
     }
 
     fn disassembly_source_text(&self, instruction: &Instruction) -> Option<Rc<str>> {
@@ -768,7 +841,7 @@ impl Ui {
             return;
         };
         self.instruction_memory
-            .set_text(&format!("MEM  {expression} · reading…"));
+            .set_text(&format!("MEMORY  {expression} · reading…"));
         self.instruction_memory.set_visible(true);
         if let Some(handler) = self.instruction_memory_handler.borrow().as_ref() {
             handler(expression);
@@ -790,12 +863,12 @@ impl Ui {
                     .unwrap_or(16)
                     .clamp(8, 16);
                 format!(
-                    "MEM  {expression} = 0x{:0width$x}  {}",
+                    "MEMORY  {expression} = 0x{:0width$x}  {}",
                     memory.begin,
                     compact_memory_preview(&memory.bytes)
                 )
             }
-            Err(error) => format!("MEM  {expression} · {error}"),
+            Err(error) => format!("MEMORY  {expression} · {error}"),
         };
         self.instruction_memory.set_text(&text);
         self.instruction_memory.set_tooltip_text(Some(&text));
@@ -879,23 +952,27 @@ impl Ui {
                     handler(DisassemblyRequest::Mixed(button.is_active()));
                 }
             });
-        let handler = Rc::clone(&self.disassembly_handler);
-        let setting_syntax = Rc::clone(&self.disassembly_controls.setting_syntax);
-        self.disassembly_controls
-            .syntax
-            .connect_selected_notify(move |syntax| {
-                if setting_syntax.get() {
+        for (button, syntax) in [
+            (
+                &self.disassembly_controls.syntax_intel,
+                DisassemblySyntax::Intel,
+            ),
+            (
+                &self.disassembly_controls.syntax_att,
+                DisassemblySyntax::Att,
+            ),
+        ] {
+            let handler = Rc::clone(&self.disassembly_handler);
+            let setting_syntax = Rc::clone(&self.disassembly_controls.setting_syntax);
+            button.connect_toggled(move |button| {
+                if setting_syntax.get() || !button.is_active() {
                     return;
                 }
-                let syntax = if syntax.selected() == 0 {
-                    DisassemblySyntax::Intel
-                } else {
-                    DisassemblySyntax::Att
-                };
                 if let Some(handler) = handler.borrow().as_ref() {
                     handler(DisassemblyRequest::Syntax(syntax));
                 }
             });
+        }
         let ui = self.clone();
         self.disassembly_controls.follow.connect_clicked(move |_| {
             let Some(instruction) = ui.selected_instruction() else {
@@ -1011,10 +1088,12 @@ impl Ui {
 
     pub(crate) fn set_disassembly_syntax(&self, syntax: DisassemblySyntax) {
         self.disassembly_controls.setting_syntax.set(true);
-        self.disassembly_controls.syntax.set_selected(match syntax {
-            DisassemblySyntax::Intel => 0,
-            DisassemblySyntax::Att => 1,
-        });
+        self.disassembly_controls
+            .syntax_intel
+            .set_active(syntax == DisassemblySyntax::Intel);
+        self.disassembly_controls
+            .syntax_att
+            .set_active(syntax == DisassemblySyntax::Att);
         self.disassembly_controls.setting_syntax.set(false);
     }
 
@@ -1172,7 +1251,14 @@ impl Ui {
         self.latest_stack_generation.set(None);
         if self.latest_stack.borrow().as_slice() != entries {
             self.latest_stack.replace(entries.to_vec());
-            replace_boxed_store(&self.stack_store, entries.iter().cloned());
+        }
+        self.render_stack(entries);
+    }
+
+    fn render_stack(&self, entries: &[StackEntry]) {
+        if self.displayed_stack.borrow().as_slice() != entries {
+            self.displayed_stack.replace(entries.to_vec());
+            replace_boxed_store_if_changed(&self.stack_store, entries.iter().cloned());
         }
         if entries.is_empty() {
             self.stack_empty
@@ -1185,7 +1271,12 @@ impl Ui {
 
     pub fn show_stack_for_refresh(&self, generation: u64, entries: &[StackEntry]) {
         if self.is_stop_refresh_current(generation) {
-            self.show_stack(entries);
+            if self.latest_stack.borrow().as_slice() != entries {
+                self.latest_stack.replace(entries.to_vec());
+            }
+            let mut rendered = entries.to_vec();
+            preserve_stack_render_details(&mut rendered, &self.displayed_stack.borrow());
+            self.render_stack(&rendered);
             self.latest_stack_generation.set(Some(generation));
         }
     }
@@ -1206,6 +1297,7 @@ impl Ui {
             return;
         }
         self.latest_stack.replace(Vec::new());
+        self.displayed_stack.replace(Vec::new());
         self.latest_stack_generation.set(Some(generation));
         self.stack_store.remove_all();
         self.stack_empty.set_text(reason);
@@ -1395,8 +1487,21 @@ impl Ui {
             });
         let breakpoints = Rc::clone(&self.breakpoints);
         let handler = Rc::clone(&self.breakpoint_bulk_delete_handler);
+        let ready = Rc::clone(&self.debugger_ready);
+        let running = Rc::clone(&self.inferior_running);
+        let command_pending = Rc::clone(&self.command_pending);
+        let session_pending = Rc::clone(&self.session_pending);
+        let until_active = Rc::clone(&self.native_until_active);
         self.delete_all_signal_catchpoints_button
             .connect_clicked(move |_| {
+                if !ready.get()
+                    || running.get()
+                    || command_pending.get()
+                    || session_pending.get()
+                    || until_active.get()
+                {
+                    return;
+                }
                 let numbers = signal_catchpoint_command_numbers(&breakpoints.borrow());
                 if !numbers.is_empty()
                     && let Some(handler) = handler.borrow().as_ref()
@@ -1976,5 +2081,50 @@ fn update_thread_button(button: &gtk::Button, thread: &ThreadInfo, stop_reason: 
         button.add_css_class("current-debug-item");
     } else {
         button.remove_css_class("current-debug-item");
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    fn stack_entry(value: &str, chain: &[&str], region: Option<&str>) -> StackEntry {
+        StackEntry {
+            address: 0x1000,
+            offset: 0,
+            index: 0,
+            pointer_bits: 64,
+            endian: TargetEndian::Little,
+            value: value.to_owned(),
+            pointer_chain: chain.iter().map(|value| (*value).to_owned()).collect(),
+            address_registers: vec![String::from("rsp")],
+            value_registers: Vec::new(),
+            return_frame: None,
+            memory_kind: MemoryKind::Heap,
+            region: region.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn preserves_only_stable_stack_pointer_details_between_refresh_phases() {
+        let mut previous = stack_entry(
+            "0x2000",
+            &["0x2000", "0x3000", "0x6f6c6c6568"],
+            Some("heap"),
+        );
+        previous.memory_kind = MemoryKind::String;
+
+        let mut stable = vec![stack_entry("0x2000", &[], Some("heap"))];
+        preserve_stack_render_details(&mut stable, std::slice::from_ref(&previous));
+        assert_eq!(stable[0].pointer_chain, previous.pointer_chain);
+        assert_eq!(stable[0].memory_kind, MemoryKind::String);
+
+        let mut changed_value = vec![stack_entry("0x2008", &[], Some("heap"))];
+        preserve_stack_render_details(&mut changed_value, std::slice::from_ref(&previous));
+        assert!(changed_value[0].pointer_chain.is_empty());
+
+        let mut changed_region = vec![stack_entry("0x2000", &[], Some("unmapped"))];
+        preserve_stack_render_details(&mut changed_region, &[previous]);
+        assert!(changed_region[0].pointer_chain.is_empty());
     }
 }

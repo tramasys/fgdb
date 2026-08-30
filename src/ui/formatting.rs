@@ -1382,7 +1382,7 @@ pub(super) fn instruction_flow_description(
             });
         (decision.unwrap_or("BRANCH"), operands)
     } else {
-        ("FLOW", "sequential")
+        ("SEQUENTIAL", "next instruction")
     };
     if detail.is_empty() {
         kind.to_owned()

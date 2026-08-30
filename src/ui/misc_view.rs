@@ -1279,29 +1279,57 @@ fn build_startup_summary() -> (gtk::FlowBox, MiscStartupSummary) {
     let summary = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
         .homogeneous(true)
-        .min_children_per_line(2)
-        .max_children_per_line(4)
+        .min_children_per_line(1)
+        .max_children_per_line(3)
         .column_spacing(1)
         .row_spacing(1)
         .build();
     summary.add_css_class("misc-startup-summary");
-    let argc = append_startup_summary_cell(&summary, "ARGC");
+    let (argc, env) = append_startup_counts_cell(&summary);
     let argv = append_startup_summary_cell(&summary, "ARGV RANGE");
     let envp = append_startup_summary_cell(&summary, "ENVP RANGE");
-    let environment = append_startup_summary_cell(&summary, "ENVIRONMENT");
     set_startup_summary_value(&argc, "—");
+    set_startup_summary_value(&env, "—");
     set_startup_summary_value(&argv, "—");
     set_startup_summary_value(&envp, "—");
-    set_startup_summary_value(&environment, "—");
     (
         summary,
         MiscStartupSummary {
             argc,
             argv,
             envp,
-            environment,
+            env,
         },
     )
+}
+
+fn append_startup_counts_cell(summary: &gtk::FlowBox) -> (gtk::Label, gtk::Label) {
+    let cell = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    cell.add_css_class("misc-startup-summary-cell");
+    cell.set_homogeneous(true);
+
+    let argc_group = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let argc_key = gtk::Label::new(Some("ARGC"));
+    argc_key.add_css_class("misc-startup-summary-key");
+    let argc = gtk::Label::new(None);
+    argc.add_css_class("misc-startup-summary-value");
+    enable_stable_text_selection(&argc);
+    argc_group.append(&argc_key);
+    argc_group.append(&argc);
+
+    let env_group = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    let env_key = gtk::Label::new(Some("ENV"));
+    env_key.add_css_class("misc-startup-summary-key");
+    let env = gtk::Label::new(None);
+    env.add_css_class("misc-startup-summary-value");
+    enable_stable_text_selection(&env);
+    env_group.append(&env_key);
+    env_group.append(&env);
+
+    cell.append(&argc_group);
+    cell.append(&env_group);
+    summary.insert(&cell, -1);
+    (argc, env)
 }
 
 fn append_startup_summary_cell(summary: &gtk::FlowBox, title: &str) -> gtk::Label {
@@ -1386,7 +1414,7 @@ fn build_environment_section(
 ) -> (gtk::Box, gio::ListStore, gtk::Label, gtk::CustomFilter) {
     let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
     section.add_css_class("misc-vector-section");
-    section.append(&section_title("ENVP / ENVIRONMENT"));
+    section.append(&section_title("ENVP / ENV"));
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let filter = gtk::CustomFilter::new(move |object| {
         let Some(data) = object.downcast_ref::<glib::BoxedAnyObject>() else {
@@ -1420,7 +1448,7 @@ fn build_environment_section(
     view.append_column(&environment_column("VALUE", 420, true, |row, label| {
         label.set_text(&row.value);
     }));
-    let empty = empty_label("No environment entries are available");
+    let empty = empty_label("No env entries are available");
     let empty_for_filter = empty.clone();
     filtered.connect_items_changed(move |model, _, _, _| {
         empty_for_filter.set_visible(model.n_items() == 0);
@@ -1661,10 +1689,7 @@ impl MiscView {
             &self.summary.envp,
             &format_range(snapshot.environment_range),
         );
-        set_startup_summary_value(
-            &self.summary.environment,
-            &format!("{environment_count} entries"),
-        );
+        set_startup_summary_value(&self.summary.env, &format!("{environment_count} entries"));
         replace_boxed_store_if_changed(&self.arguments_store, snapshot.arguments);
         replace_boxed_store_if_changed(&self.environment_store, snapshot.environment);
         self.arguments_empty.set_visible(argument_count == 0);
@@ -1923,7 +1948,7 @@ impl MiscView {
             &self.summary.argc,
             &self.summary.argv,
             &self.summary.envp,
-            &self.summary.environment,
+            &self.summary.env,
         ] {
             set_startup_summary_value(value, "—");
         }

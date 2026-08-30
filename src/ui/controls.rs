@@ -202,6 +202,9 @@ pub(crate) fn issue_execution_command(ui: &Ui, client: &MiClient, command: &str,
 }
 
 pub(super) fn request_signal_catchpoint_toggle(ui: &Ui, signal: &str) {
+    if !ui.stop_point_commands_available() {
+        return;
+    }
     let Some(signal) = normalized_signal_name(signal) else {
         ui.set_status(
             "Invalid signal",
