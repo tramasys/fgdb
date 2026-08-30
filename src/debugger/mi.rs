@@ -27,6 +27,7 @@ pub enum MiEvent {
         signal_name: Option<String>,
         signal_meaning: Option<String>,
         address: Option<String>,
+        thread_id: Option<String>,
     },
     BreakpointsChanged,
     ThreadsChanged,
@@ -845,6 +846,10 @@ impl MiClient {
                     .and_then(|frame| result_field(frame, "addr"))
                     .and_then(MiValue::as_const)
                     .map(str::to_owned);
+                let thread_id = record
+                    .field("thread-id")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned);
                 (self.event_handler)(
                     self,
                     MiEvent::Stopped {
@@ -852,6 +857,7 @@ impl MiClient {
                         signal_name,
                         signal_meaning,
                         address,
+                        thread_id,
                     },
                 );
             }

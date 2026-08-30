@@ -67,14 +67,20 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             signal_name,
             signal_meaning,
             address,
+            thread_id,
         } => {
             ui.set_command_pending(false);
+            ui.set_current_thread_id(thread_id.as_deref());
             // The preceding *running event marks the inferior as running, but
             // stopped-state queries intentionally refuse to run in that state.
             // Clear it before populating context, source marks, registers and
             // stack data.
             ui.set_controls_running(false);
-            if ui.handle_native_until_stop(reason.as_deref(), address.as_deref()) {
+            if ui.handle_native_until_stop(
+                reason.as_deref(),
+                address.as_deref(),
+                thread_id.as_deref(),
+            ) {
                 return;
             }
             drop(ui);

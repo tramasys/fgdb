@@ -1,6 +1,17 @@
 use super::*;
 
 impl Ui {
+    pub(crate) fn current_thread_id(&self) -> Option<String> {
+        self.selected_thread_id.borrow().clone()
+    }
+
+    pub(crate) fn set_current_thread_id(&self, thread_id: Option<&str>) {
+        let mut selected = self.selected_thread_id.borrow_mut();
+        if selected.as_deref() != thread_id {
+            *selected = thread_id.map(str::to_owned);
+        }
+    }
+
     pub fn show_frames(&self, frames: &[StackFrame]) {
         if self.latest_frames.borrow().as_slice() == frames {
             return;
@@ -359,6 +370,12 @@ impl Ui {
     }
 
     pub fn show_threads(&self, threads: &[ThreadInfo]) {
+        self.set_current_thread_id(
+            threads
+                .iter()
+                .find(|thread| thread.current)
+                .map(|thread| thread.id.as_str()),
+        );
         let executable_name = self
             .current_session
             .borrow()

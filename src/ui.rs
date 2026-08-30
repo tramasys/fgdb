@@ -190,7 +190,7 @@ type DebugSessionHandler = Rc<dyn Fn(DebugSession)>;
 type SessionActionHandler = Rc<dyn Fn(SessionAction)>;
 type UntilActionHandler = Rc<dyn Fn(UntilAction)>;
 type UntilCancelHandler = Rc<dyn Fn()>;
-type UntilStopHandler = Rc<dyn Fn(Option<&str>, Option<&str>) -> bool>;
+type UntilStopHandler = Rc<dyn Fn(Option<&str>, Option<&str>, Option<&str>) -> bool>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionAction {
@@ -1128,6 +1128,7 @@ pub struct Ui {
     threads_list: gtk::Box,
     thread_buttons: Rc<RefCell<Vec<(String, gtk::Button)>>>,
     latest_threads: Rc<RefCell<Option<ThreadRenderState>>>,
+    selected_thread_id: Rc<RefCell<Option<String>>>,
     modules_list: gtk::Box,
     latest_modules: Rc<RefCell<Vec<SharedLibrary>>>,
     locals_store: gio::ListStore,

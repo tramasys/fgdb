@@ -7,9 +7,10 @@ use crate::debugger::Instruction;
 use crate::ui::controls::issue_execution_command;
 
 const MAX_UNTIL_EXPRESSION_BYTES: usize = 4096;
-const DISASSEMBLY_LOOKAHEAD_BYTES: u64 = 128;
+const DISASSEMBLY_LOOKAHEAD_BYTES: u64 = 512;
 const MAX_UNTIL_LOOKAHEAD_INSTRUCTIONS: usize = 256;
 const MAX_TRACKED_UNTIL_PCS: usize = 8192;
+const MIN_NATIVE_ADVANCE_STEPS: u16 = 4;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MappingIdentity {
@@ -25,22 +26,33 @@ enum StopDecision {
     InspectInstruction,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StepCommand {
+    Single,
+    Counted,
+    NativeAdvance,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ObservedInstruction {
     checked: bool,
     safe_steps: u16,
+    advance_target: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LookaheadInstruction {
     address: u64,
     matched: bool,
+    safe_steps: u16,
+    advance_target: Option<u64>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
 struct InstructionWindow {
     current_matched: bool,
     safe_steps: u16,
+    advance_target: Option<u64>,
     lookahead: Vec<LookaheadInstruction>,
 }
 
@@ -63,7 +75,10 @@ struct UntilRun {
     context_control: GefContextControl,
     cancel_requested: bool,
     pending_steps: u64,
+    pending_location: Option<u64>,
     counted_steps_supported: bool,
+    native_advance_supported: bool,
+    thread_id: Option<Rc<str>>,
     condition_command: Option<Rc<str>>,
 }
 
@@ -126,6 +141,10 @@ impl NativeUntilController {
         );
         let can_use_address_space = requires_address_space || searches_instructions(&action);
         let description = action_description(&action);
+        let thread_id = ui
+            .current_thread_id()
+            .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+            .map(Rc::<str>::from);
         let condition_command = if let UntilAction::Expression(expression) = &action {
             Some(
                 format!(
@@ -150,7 +169,10 @@ impl NativeUntilController {
             context_control: GefContextControl::None,
             cancel_requested: false,
             pending_steps: 0,
+            pending_location: None,
             counted_steps_supported: true,
+            native_advance_supported: true,
+            thread_id,
             condition_command,
         }));
         ui.set_native_until_active(true);
@@ -223,15 +245,27 @@ impl NativeUntilController {
         }
     }
 
-    pub(super) fn on_stopped(self: &Rc<Self>, reason: Option<&str>, address: Option<&str>) -> bool {
+    pub(super) fn on_stopped(
+        self: &Rc<Self>,
+        reason: Option<&str>,
+        address: Option<&str>,
+        thread_id: Option<&str>,
+    ) -> bool {
         if self.state.borrow().is_none() {
             return false;
         }
-        let completed_steps = self
-            .state
-            .borrow_mut()
-            .as_mut()
-            .map_or(0, |run| std::mem::take(&mut run.pending_steps));
+        let parsed_address = address.and_then(parse_address);
+        let (completed_steps, pending_location, expected_thread) = {
+            let mut state = self.state.borrow_mut();
+            let Some(run) = state.as_mut() else {
+                return false;
+            };
+            (
+                std::mem::take(&mut run.pending_steps),
+                run.pending_location.take(),
+                run.thread_id.clone(),
+            )
+        };
         if self
             .state
             .borrow()
@@ -248,7 +282,14 @@ impl NativeUntilController {
             }
             return false;
         }
-        if !is_internal_step_stop(reason) {
+        if !is_internal_until_stop(
+            reason,
+            parsed_address,
+            thread_id,
+            completed_steps,
+            pending_location,
+            expected_thread.as_deref(),
+        ) {
             let run = self.state.borrow_mut().take();
             self.next_generation();
             if let Some(run) = run {
@@ -278,7 +319,7 @@ impl NativeUntilController {
                 );
             }
         }
-        if let Some(address) = address.and_then(parse_address) {
+        if let Some(address) = parsed_address {
             self.observe_address(address);
             self.inspect_stop(address, generation);
         } else {
@@ -504,6 +545,13 @@ impl NativeUntilController {
             let Some(state) = state.as_ref() else {
                 return;
             };
+            let advance_or_step = || {
+                if instruction_is_cacheable(state, address) {
+                    StopDecision::InspectInstruction
+                } else {
+                    StopDecision::Step
+                }
+            };
             match &state.action {
                 UntilAction::Expression(_) => StopDecision::EvaluateCondition,
                 UntilAction::UserCode => {
@@ -516,7 +564,7 @@ impl NativeUntilController {
                             {
                                 StopDecision::Complete
                             } else {
-                                StopDecision::Step
+                                advance_or_step()
                             }
                         })
                 }
@@ -530,7 +578,7 @@ impl NativeUntilController {
                             {
                                 StopDecision::Complete
                             } else {
-                                StopDecision::Step
+                                advance_or_step()
                             }
                         })
                 }
@@ -542,7 +590,7 @@ impl NativeUntilController {
                     {
                         StopDecision::Complete
                     } else {
-                        StopDecision::Step
+                        advance_or_step()
                     }
                 }
                 _ => StopDecision::InspectInstruction,
@@ -553,17 +601,26 @@ impl NativeUntilController {
             StopDecision::Complete => self.complete(generation),
             StopDecision::Step => self.issue_step(generation),
             StopDecision::InspectInstruction
-                if let Some(safe_steps) = self.cached_instruction_steps(address) =>
+                if let Some((safe_steps, advance_target)) =
+                    self.cached_instruction_advance(address) =>
             {
-                self.issue_steps(generation, safe_steps);
+                self.issue_steps(generation, safe_steps, advance_target);
             }
             StopDecision::InspectInstruction => {
-                if let Some(matched) = self.take_instruction_lookahead(address) {
-                    if matched {
+                if let Some(instruction) = self.take_instruction_lookahead(address) {
+                    if instruction.matched {
                         self.complete(generation);
                     } else {
-                        self.mark_instruction_checked(address, 1);
-                        self.issue_step(generation);
+                        self.mark_instruction_checked(
+                            address,
+                            instruction.safe_steps,
+                            instruction.advance_target,
+                        );
+                        self.issue_steps(
+                            generation,
+                            u64::from(instruction.safe_steps),
+                            instruction.advance_target,
+                        );
                     }
                 } else {
                     self.request_instruction(address, generation, DISASSEMBLY_LOOKAHEAD_BYTES);
@@ -615,6 +672,7 @@ impl NativeUntilController {
             let InstructionWindow {
                 current_matched,
                 safe_steps,
+                advance_target,
                 lookahead,
             } = {
                 let state = controller.state.borrow();
@@ -635,8 +693,8 @@ impl NativeUntilController {
             if current_matched {
                 controller.complete(generation);
             } else {
-                controller.mark_instruction_checked(address, safe_steps);
-                controller.issue_steps(generation, u64::from(safe_steps));
+                controller.mark_instruction_checked(address, safe_steps, advance_target);
+                controller.issue_steps(generation, u64::from(safe_steps), advance_target);
             }
         }) {
             self.fail(generation, &error.to_string());
@@ -685,56 +743,101 @@ impl NativeUntilController {
     }
 
     fn issue_step(self: &Rc<Self>, generation: u64) {
-        self.issue_steps(generation, 1);
+        self.issue_steps(generation, 1, None);
     }
 
-    fn issue_steps(self: &Rc<Self>, generation: u64, requested_steps: u64) {
+    fn issue_steps(
+        self: &Rc<Self>,
+        generation: u64,
+        requested_steps: u64,
+        advance_target: Option<u64>,
+    ) {
         if !self.is_current(generation) {
             return;
         }
-        let steps = {
+        let (steps, command_kind, native_target, thread_id) = {
             let mut state = self.state.borrow_mut();
             let Some(run) = state.as_mut() else {
                 return;
             };
-            let steps = if run.counted_steps_supported {
-                requested_steps.max(1)
+            let requested_steps = requested_steps.max(1);
+            let native_target = advance_target.filter(|_| {
+                requested_steps >= u64::from(MIN_NATIVE_ADVANCE_STEPS)
+                    && run.native_advance_supported
+                    && run.thread_id.is_some()
+                    && native_advance_is_safe(
+                        run.address_space.as_ref(),
+                        run.current_address,
+                        advance_target,
+                    )
+            });
+            let (steps, command_kind) = if native_target.is_some() {
+                (requested_steps, StepCommand::NativeAdvance)
+            } else if requested_steps == 1 {
+                (1, StepCommand::Single)
+            } else if run.counted_steps_supported {
+                (requested_steps, StepCommand::Counted)
             } else {
-                1
+                (1, StepCommand::Single)
             };
+            let thread_id = run.thread_id.clone();
+            run.pending_location = native_target;
             run.pending_steps = steps;
-            steps
+            (steps, command_kind, native_target, thread_id)
         };
-        let command = if steps == 1 {
-            String::from("-exec-step-instruction")
-        } else {
-            format!(
-                "-interpreter-exec console {}",
-                crate::debugger::quote(&format!("stepi {steps}"))
-            )
+        let command = match command_kind {
+            StepCommand::Single => String::from("-exec-step-instruction"),
+            StepCommand::Counted => {
+                format!(
+                    "-interpreter-exec console {}",
+                    crate::debugger::quote(&format!("stepi {steps}"))
+                )
+            }
+            StepCommand::NativeAdvance => {
+                let (Some(target), Some(thread_id)) = (native_target, thread_id.as_deref()) else {
+                    if let Some(run) = self.state.borrow_mut().as_mut() {
+                        run.pending_steps = 0;
+                        run.pending_location = None;
+                    }
+                    self.fail(generation, "The native Until target became unavailable");
+                    return;
+                };
+                format!("-exec-until --thread {thread_id} *0x{target:x}")
+            }
         };
         let controller = Rc::clone(self);
         if let Err(error) = self.client.request(&command, move |_, record| {
             if !controller.is_current(generation) || record.is_success() {
                 return;
             }
-            if steps > 1 {
-                if let Some(run) = controller.state.borrow_mut().as_mut() {
-                    run.pending_steps = 0;
-                    run.counted_steps_supported = false;
+            match command_kind {
+                StepCommand::NativeAdvance => {
+                    if let Some(run) = controller.state.borrow_mut().as_mut() {
+                        run.pending_steps = 0;
+                        run.pending_location = None;
+                        run.native_advance_supported = false;
+                    }
+                    controller.issue_steps(generation, steps, native_target);
                 }
-                controller.issue_step(generation);
-            } else {
-                controller.fail(
+                StepCommand::Counted => {
+                    if let Some(run) = controller.state.borrow_mut().as_mut() {
+                        run.pending_steps = 0;
+                        run.pending_location = None;
+                        run.counted_steps_supported = false;
+                    }
+                    controller.issue_step(generation);
+                }
+                StepCommand::Single => controller.fail(
                     generation,
                     record
                         .error_message()
                         .unwrap_or("GDB rejected instruction stepping"),
-                );
+                ),
             }
         }) {
             if let Some(run) = self.state.borrow_mut().as_mut() {
                 run.pending_steps = 0;
+                run.pending_location = None;
             }
             self.fail(generation, &error.to_string());
         }
@@ -793,19 +896,20 @@ impl NativeUntilController {
         }
     }
 
-    fn cached_instruction_steps(&self, address: u64) -> Option<u64> {
+    fn cached_instruction_advance(&self, address: u64) -> Option<(u64, Option<u64>)> {
         let state = self.state.borrow();
         let state = state.as_ref()?;
         if !instruction_is_cacheable(state, address) {
             return None;
         }
         let instruction = state.observed_addresses.get(&address)?;
-        instruction
-            .checked
-            .then_some(u64::from(instruction.safe_steps.max(1)))
+        instruction.checked.then_some((
+            u64::from(instruction.safe_steps.max(1)),
+            instruction.advance_target,
+        ))
     }
 
-    fn mark_instruction_checked(&self, address: u64, safe_steps: u16) {
+    fn mark_instruction_checked(&self, address: u64, safe_steps: u16, advance_target: Option<u64>) {
         let mut state = self.state.borrow_mut();
         let Some(state) = state.as_mut() else {
             return;
@@ -815,16 +919,17 @@ impl NativeUntilController {
         {
             instruction.checked = true;
             instruction.safe_steps = safe_steps.max(1);
+            instruction.advance_target = advance_target;
         }
     }
 
-    fn take_instruction_lookahead(&self, address: u64) -> Option<bool> {
+    fn take_instruction_lookahead(&self, address: u64) -> Option<LookaheadInstruction> {
         let state = self.state.borrow();
         let lookahead = &state.as_ref()?.instruction_lookahead;
         lookahead
             .binary_search_by_key(&address, |instruction| instruction.address)
             .ok()
-            .map(|index| lookahead[index].matched)
+            .map(|index| lookahead[index])
     }
 
     fn restore_context(&self, control: GefContextControl, render_current_stop: bool) {
@@ -935,8 +1040,25 @@ fn context_restore_command(
     ))
 }
 
-fn is_internal_step_stop(reason: Option<&str>) -> bool {
-    reason == Some("end-stepping-range")
+fn is_internal_until_stop(
+    reason: Option<&str>,
+    address: Option<u64>,
+    stopped_thread: Option<&str>,
+    pending_steps: u64,
+    pending_location: Option<u64>,
+    expected_thread: Option<&str>,
+) -> bool {
+    if pending_steps == 0 {
+        return false;
+    }
+    match pending_location {
+        Some(location) => {
+            reason == Some("location-reached")
+                && address == Some(location)
+                && expected_thread.is_none_or(|expected| stopped_thread == Some(expected))
+        }
+        None => reason == Some("end-stepping-range"),
+    }
 }
 
 fn searches_instructions(action: &UntilAction) -> bool {
@@ -958,56 +1080,73 @@ fn classify_instruction_window(
     architecture: TargetArchitecture,
     address_space: Option<&crate::misc::ProcessAddressSpace>,
 ) -> InstructionWindow {
-    let Some(current) = instructions.get(current_index) else {
-        return InstructionWindow::default();
-    };
-    let current_matched =
-        crate::ui::formatting::instruction_matches_until(action, current, architecture);
-    let current_address = parse_address(&current.address);
-    let can_batch = matches!(
+    let window = instructions
+        .get(current_index..)
+        .unwrap_or_default()
+        .iter()
+        .take(MAX_UNTIL_LOOKAHEAD_INSTRUCTIONS.saturating_add(1));
+    let can_advance = matches!(
         architecture,
         TargetArchitecture::X86 | TargetArchitecture::X86_64
-    ) && current_address
-        .is_some_and(|address| address_is_cacheable(address_space, address));
-    let mut safe_steps = 1_u16;
-    let mut previous_address = current_address;
-    let mut linear_path =
-        can_batch && !crate::ui::formatting::instruction_ends_linear_flow(current, architecture);
-    let mut lookahead = Vec::with_capacity(
-        instructions
-            .len()
-            .saturating_sub(current_index + 1)
-            .min(MAX_UNTIL_LOOKAHEAD_INSTRUCTIONS),
     );
-    for (offset, instruction) in instructions
-        .iter()
-        .skip(current_index + 1)
-        .take(MAX_UNTIL_LOOKAHEAD_INSTRUCTIONS)
-        .enumerate()
-    {
-        let Some(address) = parse_address(&instruction.address) else {
-            linear_path = false;
+    let classified = window
+        .map(|instruction| {
+            let address = parse_address(&instruction.address);
+            let matched =
+                crate::ui::formatting::instruction_matches_until(action, instruction, architecture);
+            let ends_linear_flow =
+                crate::ui::formatting::instruction_ends_linear_flow(instruction, architecture);
+            let cacheable =
+                address.is_some_and(|address| address_is_cacheable(address_space, address));
+            (address, matched, ends_linear_flow, cacheable)
+        })
+        .collect::<Vec<_>>();
+    let Some((_, current_matched, _, _)) = classified.first().copied() else {
+        return InstructionWindow::default();
+    };
+
+    // Work backwards so every cached address knows the farthest instruction
+    // that can be reached without crossing a match or a control-flow edge.
+    // This makes branch targets inside the same disassembly window just as
+    // cheap as its first instruction instead of reverting to one-step MI
+    // round trips after a jump.
+    let mut advances = vec![(1_u16, None); classified.len()];
+    for index in (0..classified.len()).rev() {
+        let (Some(address), matched, ends_linear_flow, cacheable) = classified[index] else {
             continue;
         };
-        let matched =
-            crate::ui::formatting::instruction_matches_until(action, instruction, architecture);
-        let cacheable = address_is_cacheable(address_space, address);
-        if cacheable {
-            lookahead.push(LookaheadInstruction { address, matched });
+        if !can_advance || matched || ends_linear_flow || !cacheable {
+            continue;
         }
-        if linear_path {
-            let monotonic = previous_address.is_some_and(|previous| address > previous);
-            if !cacheable || !monotonic {
-                linear_path = false;
-                continue;
+        let Some(&(Some(next_address), next_matched, next_ends_flow, next_cacheable)) =
+            classified.get(index + 1)
+        else {
+            continue;
+        };
+        if !next_cacheable || next_address <= address {
+            continue;
+        }
+        advances[index] = if !next_matched && !next_ends_flow {
+            match advances[index + 1].1 {
+                Some(target) => (advances[index + 1].0.saturating_add(1), Some(target)),
+                None => (1, Some(next_address)),
             }
-            safe_steps = u16::try_from(offset + 1).unwrap_or(u16::MAX).max(1);
-            if matched
-                || crate::ui::formatting::instruction_ends_linear_flow(instruction, architecture)
-            {
-                linear_path = false;
-            }
-            previous_address = Some(address);
+        } else {
+            (1, Some(next_address))
+        };
+    }
+
+    let (safe_steps, advance_target) = advances[0];
+    let mut lookahead = Vec::with_capacity(classified.len().saturating_sub(1));
+    for (index, &(address, matched, _, cacheable)) in classified.iter().enumerate().skip(1) {
+        if let (Some(address), true) = (address, cacheable) {
+            let (safe_steps, advance_target) = advances[index];
+            lookahead.push(LookaheadInstruction {
+                address,
+                matched,
+                safe_steps,
+                advance_target,
+            });
         }
     }
     lookahead.sort_unstable_by_key(|instruction| instruction.address);
@@ -1015,6 +1154,7 @@ fn classify_instruction_window(
     InstructionWindow {
         current_matched,
         safe_steps,
+        advance_target,
         lookahead,
     }
 }
@@ -1032,6 +1172,26 @@ fn disassembly_end(
 
 fn instruction_is_cacheable(run: &UntilRun, address: u64) -> bool {
     address_is_cacheable(run.address_space.as_ref(), address)
+}
+
+fn native_advance_is_safe(
+    address_space: Option<&crate::misc::ProcessAddressSpace>,
+    current_address: Option<u64>,
+    target_address: Option<u64>,
+) -> bool {
+    let (Some(address_space), Some(current_address), Some(target_address)) =
+        (address_space, current_address, target_address)
+    else {
+        return false;
+    };
+    let Some(mapping) = mapping_at(&address_space.mappings, current_address) else {
+        return false;
+    };
+    target_address > current_address
+        && target_address < mapping.end
+        && mapping.permissions.contains('x')
+        && !mapping.permissions.contains('w')
+        && !is_dynamic_linker_mapping(mapping, address_space)
 }
 
 fn address_is_cacheable(
@@ -1178,6 +1338,35 @@ fn is_user_code_mapping(
             })
 }
 
+fn is_dynamic_linker_mapping(
+    mapping: &crate::misc::ProcessMapping,
+    address_space: &crate::misc::ProcessAddressSpace,
+) -> bool {
+    if address_space
+        .interpreter
+        .as_deref()
+        .is_some_and(|interpreter| {
+            normalized_mapping_path(&mapping.path) == normalized_mapping_path(interpreter)
+        })
+    {
+        return true;
+    }
+
+    let name = std::path::Path::new(normalized_mapping_path(&mapping.path))
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    name == "ld.so"
+        || name.starts_with("ld.so.")
+        || name.starts_with("ld-linux")
+        || name.starts_with("ld-musl-")
+        || name.starts_with("ld-uclibc")
+        || (name.starts_with("ld-") && name.contains(".so"))
+        || name == "linker"
+        || name == "linker64"
+}
+
 fn is_libc_code_mapping(mapping: &crate::misc::ProcessMapping) -> bool {
     if !mapping.permissions.contains('x') {
         return false;
@@ -1228,12 +1417,55 @@ mod tests {
     }
 
     #[test]
-    fn distinguishes_internal_steps_from_real_debugger_stops() {
-        assert!(is_internal_step_stop(Some("end-stepping-range")));
-        assert!(!is_internal_step_stop(None));
-        assert!(!is_internal_step_stop(Some("breakpoint-hit")));
-        assert!(!is_internal_step_stop(Some("signal-received")));
-        assert!(!is_internal_step_stop(Some("watchpoint-trigger")));
+    fn distinguishes_internal_execution_from_real_debugger_stops() {
+        assert!(is_internal_until_stop(
+            Some("end-stepping-range"),
+            Some(0x1001),
+            Some("1"),
+            1,
+            None,
+            Some("1"),
+        ));
+        assert!(is_internal_until_stop(
+            Some("location-reached"),
+            Some(0x1010),
+            Some("1"),
+            8,
+            Some(0x1010),
+            Some("1"),
+        ));
+        assert!(!is_internal_until_stop(
+            Some("breakpoint-hit"),
+            Some(0x1010),
+            Some("1"),
+            8,
+            Some(0x1010),
+            Some("1"),
+        ));
+        assert!(!is_internal_until_stop(
+            Some("location-reached"),
+            Some(0x1010),
+            Some("2"),
+            8,
+            Some(0x1010),
+            Some("1"),
+        ));
+        assert!(!is_internal_until_stop(
+            Some("location-reached"),
+            Some(0x1011),
+            Some("1"),
+            8,
+            Some(0x1010),
+            Some("1"),
+        ));
+        assert!(!is_internal_until_stop(
+            Some("end-stepping-range"),
+            Some(0x1001),
+            Some("1"),
+            0,
+            None,
+            Some("1"),
+        ));
     }
 
     #[test]
@@ -1256,7 +1488,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_main_and_libc_executable_mappings() {
+    fn allows_main_and_shared_library_code_but_rejects_the_loader() {
         let main = crate::misc::ProcessMapping {
             start: 0x400000,
             end: 0x401000,
@@ -1271,6 +1503,7 @@ mod tests {
         };
         let space = crate::misc::ProcessAddressSpace {
             executable: Some(String::from("/tmp/target")),
+            interpreter: Some(String::from("/usr/lib/ld-linux-x86-64.so.2")),
             mappings: vec![main.clone(), libc.clone()],
             capped: false,
         };
@@ -1278,6 +1511,43 @@ mod tests {
         assert!(!is_user_code_mapping(&libc, &space));
         assert!(is_libc_code_mapping(&libc));
         assert!(!is_libc_code_mapping(&main));
+        assert!(native_advance_is_safe(
+            Some(&space),
+            Some(0x400100),
+            Some(0x400180),
+        ));
+        assert!(native_advance_is_safe(
+            Some(&space),
+            Some(0x7f00_0100),
+            Some(0x7f00_0180),
+        ));
+        assert!(!native_advance_is_safe(
+            Some(&space),
+            Some(0x400100),
+            Some(0x7f00_0180),
+        ));
+
+        let loader = crate::misc::ProcessMapping {
+            start: 0x7f20_0000,
+            end: 0x7f30_0000,
+            permissions: String::from("r-xp"),
+            path: String::from("/usr/lib/ld-linux-x86-64.so.2"),
+        };
+        assert!(is_dynamic_linker_mapping(&loader, &space));
+        assert!(!native_advance_is_safe(
+            Some(&space),
+            Some(0x7f20_0100),
+            Some(0x7f20_0180),
+        ));
+
+        let unknown_interpreter_space = crate::misc::ProcessAddressSpace {
+            interpreter: None,
+            ..space.clone()
+        };
+        assert!(is_dynamic_linker_mapping(
+            &loader,
+            &unknown_interpreter_space
+        ));
 
         for path in [
             "/lib/libc.so.0",
@@ -1298,6 +1568,7 @@ mod tests {
     fn reuses_bounded_disassembly_lookahead_for_read_only_code() {
         let address_space = crate::misc::ProcessAddressSpace {
             executable: Some(String::from("/tmp/target")),
+            interpreter: None,
             mappings: vec![crate::misc::ProcessMapping {
                 start: 0x1000,
                 end: 0x2000,
@@ -1320,16 +1591,21 @@ mod tests {
         );
         assert!(!window.current_matched);
         assert_eq!(window.safe_steps, 2);
+        assert_eq!(window.advance_target, Some(0x1003));
         assert_eq!(
             window.lookahead,
             vec![
                 LookaheadInstruction {
                     address: 0x1002,
                     matched: false,
+                    safe_steps: 1,
+                    advance_target: Some(0x1003),
                 },
                 LookaheadInstruction {
                     address: 0x1003,
                     matched: true,
+                    safe_steps: 1,
+                    advance_target: None,
                 },
             ]
         );
@@ -1344,6 +1620,7 @@ mod tests {
             Some(&writable),
         );
         assert_eq!(window.safe_steps, 1);
+        assert_eq!(window.advance_target, None);
         assert!(window.lookahead.is_empty());
     }
 
@@ -1351,6 +1628,7 @@ mod tests {
     fn counted_steps_stop_before_nonmatching_control_flow() {
         let address_space = crate::misc::ProcessAddressSpace {
             executable: Some(String::from("/tmp/target")),
+            interpreter: None,
             mappings: vec![crate::misc::ProcessMapping {
                 start: 0x1000,
                 end: 0x2000,
@@ -1428,6 +1706,7 @@ mod tests {
         assert!(mapping_at(&mappings, 0x2800).is_none());
         let address_space = crate::misc::ProcessAddressSpace {
             executable: None,
+            interpreter: None,
             mappings: mappings.to_vec(),
             capped: false,
         };

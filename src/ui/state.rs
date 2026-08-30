@@ -117,6 +117,7 @@ impl Ui {
             threads_list: workspace.threads_list,
             thread_buttons: Rc::new(RefCell::new(Vec::new())),
             latest_threads: Rc::new(RefCell::new(None)),
+            selected_thread_id: Rc::new(RefCell::new(None)),
             modules_list: workspace.modules_list,
             latest_modules: Rc::new(RefCell::new(Vec::new())),
             locals_store: workspace.locals_store,
@@ -1073,7 +1074,7 @@ impl Ui {
 
     pub(crate) fn set_until_stop_handler(
         &self,
-        handler: impl Fn(Option<&str>, Option<&str>) -> bool + 'static,
+        handler: impl Fn(Option<&str>, Option<&str>, Option<&str>) -> bool + 'static,
     ) {
         self.until_stop_handler.replace(Some(Rc::new(handler)));
     }
@@ -1094,11 +1095,12 @@ impl Ui {
         &self,
         reason: Option<&str>,
         address: Option<&str>,
+        thread_id: Option<&str>,
     ) -> bool {
         self.until_stop_handler
             .borrow()
             .as_ref()
-            .is_some_and(|handler| handler(reason, address))
+            .is_some_and(|handler| handler(reason, address, thread_id))
     }
 
     pub(crate) fn native_until_active(&self) -> bool {

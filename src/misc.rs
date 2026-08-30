@@ -748,6 +748,7 @@ pub(crate) struct ProcessMapping {
 #[derive(Clone, Debug)]
 pub(crate) struct ProcessAddressSpace {
     pub executable: Option<String>,
+    pub interpreter: Option<String>,
     pub mappings: Vec<ProcessMapping>,
     pub capped: bool,
 }
@@ -810,13 +811,28 @@ pub(crate) fn read_process_address_space(
     debugger_pid: u32,
 ) -> Result<ProcessAddressSpace, String> {
     let root = crate::kernel::verified_proc_root(pid, debugger_pid)?;
+    let abi = read_abi(&root.join("exe"));
     let executable = std::fs::read_link(root.join("exe"))
         .ok()
         .map(|path| path.to_string_lossy().into_owned());
     let (mappings, capped) = read_maps(&root.join("maps"))?;
+    let interpreter = abi
+        .and_then(|abi| {
+            crate::bounded::read_bytes(&root.join("auxv"), MAX_AUXV_BYTES)
+                .ok()
+                .and_then(|bytes| auxv_value(&bytes, abi, 7))
+        })
+        .and_then(|base| {
+            mappings
+                .iter()
+                .find(|mapping| mapping.start <= base && base < mapping.end)
+                .map(|mapping| mapping.path.clone())
+                .filter(|path| !path.is_empty())
+        });
     crate::kernel::verified_proc_root(pid, debugger_pid)?;
     Ok(ProcessAddressSpace {
         executable,
+        interpreter,
         mappings,
         capped,
     })
@@ -1098,6 +1114,17 @@ fn parse_auxv(bytes: &[u8], abi: Abi, maps: &[ProcessMapping]) -> Vec<AuxvEntry>
             })
         })
         .collect()
+}
+
+fn auxv_value(bytes: &[u8], abi: Abi, wanted_kind: u64) -> Option<u64> {
+    let word = usize::try_from(abi.pointer_bits / 8)
+        .unwrap_or(8)
+        .clamp(4, 8);
+    bytes.chunks_exact(word * 2).take(512).find_map(|pair| {
+        let kind = read_word(&pair[..word], abi.endian)?;
+        let value = read_word(&pair[word..], abi.endian)?;
+        (kind == wanted_kind).then_some(value)
+    })
 }
 
 fn read_word(bytes: &[u8], endian: TargetEndian) -> Option<u64> {
