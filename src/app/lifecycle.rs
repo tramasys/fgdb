@@ -6,17 +6,24 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
     };
 
     match event {
-        MiEvent::Ready => {
+        MiEvent::Ready(capabilities) => {
             ui.set_command_pending(false);
             ui.set_debug_state_stale(false);
+            ui.set_gdb_recovery_available(false);
+            ui.set_gdb_capabilities(capabilities.clone());
             ui.clear_gef_capabilities();
             ui.invalidate_allocator_probe_cache();
             ui.reset_target_abi();
-            ui.set_status(
-                "Ready",
-                "The native controls and terminal share one GDB process.",
-                Some("status-ready"),
-            );
+            let detail = if !capabilities.mi_async {
+                "GDB is ready in compatibility mode. It did not accept asynchronous MI mode."
+            } else if !capabilities.pretty_printing {
+                "GDB is ready. Dynamic C++ and Rust pretty printing is unavailable in this build."
+            } else if !capabilities.features_known {
+                "GDB is ready. It did not expose an MI feature list, so optional commands use compatibility defaults."
+            } else {
+                "The native controls and terminal share one GDB process."
+            };
+            ui.set_status("Ready", detail, Some("status-ready"));
             ui.set_controls_ready(true);
             detect_target_abi(weak_ui, client);
             detect_gef(weak_ui, client);
@@ -113,8 +120,10 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         }
         MiEvent::Disconnected => {
             ui.set_command_pending(false);
+            ui.finish_full_resynchronization();
             ui.set_debug_state_stale(true);
             ui.clear_gef_capabilities();
+            ui.clear_gdb_capabilities();
             ui.set_inferior_started(false);
             ui.reset_target_abi();
             ui.clear_debugger_state();
@@ -256,10 +265,23 @@ fn detect_target_endian(ui: &Weak<Ui>, client: &MiClient) {
 }
 
 fn refresh_after_target_abi_detection(ui: &Weak<Ui>, client: &MiClient) {
-    if ui.upgrade().is_some_and(|ui| ui.inferior_has_started()) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+    let started = current_ui.inferior_has_started();
+    let resynchronized = current_ui.finish_full_resynchronization();
+    drop(current_ui);
+    if started {
         refresh_stopped_state(ui, client);
     } else {
         infer_initial_stop_reason(ui, client);
+    }
+    if resynchronized && let Some(ui) = ui.upgrade() {
+        ui.set_status(
+            "Paused",
+            "Debugger state was re-read from GDB.",
+            Some("status-ready"),
+        );
     }
 }
 
@@ -393,6 +415,32 @@ pub(super) fn request_initial_source(ui: &Weak<Ui>, client: &MiClient) {
             ui.show_initial_source(&source_file);
         }
     });
+}
+
+pub(super) fn resynchronize_debugger_state(ui: &Weak<Ui>, client: &MiClient) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+    if !current_ui.stopped_inspection_available() {
+        current_ui.set_status(
+            "Refresh unavailable",
+            "Pause the target before refreshing debugger state.",
+            Some("status-error"),
+        );
+        return;
+    }
+    current_ui.prepare_full_resynchronization();
+    current_ui.set_status(
+        "Refreshing debugger state",
+        "Re-reading target ABI, frames, registers, variables, stop points, modules, memory, and inspectors…",
+        None,
+    );
+    drop(current_ui);
+    request_initial_source(ui, client);
+    refresh_breakpoints(ui, client);
+    refresh_modules(ui, client);
+    detect_gef(ui, client);
+    detect_target_abi(ui, client);
 }
 
 #[cfg(test)]

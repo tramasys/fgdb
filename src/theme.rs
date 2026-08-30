@@ -86,7 +86,7 @@ impl Theme {
 
     pub fn source_style_scheme(&self) -> Option<sourceview5::StyleScheme> {
         let manager = sourceview5::StyleSchemeManager::default();
-        manager.prepend_search_path(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/themes"));
+        manager.prepend_search_path(&format!("resource://{}/themes", crate::RESOURCE_PREFIX));
         manager.force_rescan();
         manager
             .scheme(self.source_scheme)
@@ -207,7 +207,10 @@ headerbar.topbar button.window-control.close:active {{
     border-bottom: 1px solid @app_border;
 }}
 
-.panel-header.terminal-header {{ padding-right: 0; }}
+.panel-header.terminal-header {{
+    padding-right: 0;
+    border-bottom: 0;
+}}
 
 .subpanel-header {{
     min-height: 23px;
@@ -1002,6 +1005,15 @@ columnview.memory-map-table row {{ min-height: 28px; }}
     background: transparent;
 }}
 
+.session-menu > button.session-utility-action {{
+    margin-top: 2px;
+}}
+
+.session-capabilities {{
+    margin: 7px 8px;
+    color: @app_muted;
+}}
+
 .session-action-label {{ font-weight: 700; }}
 
 .session-action-detail {{
@@ -1015,6 +1027,74 @@ columnview.memory-map-table row {{ min-height: 28px; }}
 
 .session-menu > button.session-action.danger-action .session-action-label {{
     color: @app_danger;
+}}
+
+.session-menu > button.session-action.configuration-warning .session-action-label,
+.session-menu > button.session-action.configuration-warning .session-action-detail {{
+    color: @app_danger;
+}}
+
+.configuration-dialog {{
+    color: @app_fg;
+    background: @app_bg;
+}}
+
+.configuration-ok {{ color: @app_success; }}
+.configuration-error {{ color: @app_danger; }}
+
+.configuration-files,
+.configuration-issues,
+.configuration-grid {{
+    padding: 6px;
+    background: @app_surface;
+    border: 1px solid @app_border;
+}}
+
+.configuration-fact {{
+    min-height: 24px;
+    padding: 1px 5px;
+}}
+
+.configuration-fact-name {{
+    min-width: 120px;
+    color: @app_muted;
+    font-weight: 700;
+}}
+
+.configuration-fact-value,
+.configuration-value {{
+    color: @app_fg;
+    font-family: monospace;
+}}
+
+.configuration-issue {{
+    padding: 6px 8px;
+    background: alpha(@app_danger, 0.06);
+    border-left: 2px solid @app_danger;
+}}
+
+.configuration-issue-location {{
+    color: @app_danger;
+    font-family: monospace;
+    font-size: 10px;
+}}
+
+.configuration-grid > label {{
+    min-height: 23px;
+    padding: 3px 6px;
+}}
+
+.configuration-grid-heading {{
+    color: @app_muted;
+    background: @app_raised;
+    font-size: 10px;
+    font-weight: 700;
+}}
+
+.configuration-setting {{
+    min-width: 145px;
+    color: @app_accent_hover;
+    font-family: monospace;
 }}
 
 .gef-tools-menu {{

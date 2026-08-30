@@ -7,9 +7,15 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let ui = Rc::new(Ui::build(application, &launch_config, &theme));
     ui.set_controls_ready(false);
 
+    let ready_hook = Rc::new(RefCell::new(None::<Box<dyn Fn()>>));
+    let ready_hook_for_event = Rc::clone(&ready_hook);
     let weak_ui = Rc::downgrade(&ui);
     let mi_client = match MiClient::open(move |client, event| {
+        let became_ready = matches!(&event, MiEvent::Ready(_));
         handle_mi_event(&weak_ui, client, event);
+        if became_ready && let Some(handler) = ready_hook_for_event.borrow().as_ref() {
+            handler();
+        }
     }) {
         Ok(client) => client,
         Err(error) => {
@@ -25,6 +31,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     ui.connect_debug_controls(&mi_client);
     ui.connect_source_actions();
     ui.connect_session_actions();
+    ui.connect_configuration_actions();
     let disassembly_controller =
         DisassemblyController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
     let controller = Rc::clone(&disassembly_controller);
@@ -564,18 +571,44 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
 
     let weak_ui = Rc::downgrade(&ui);
-    launch_gdb(&ui.terminal, &launch_config, &mi_client, move |event| {
-        handle_session_event(&weak_ui, event)
+    let weak_client = Rc::downgrade(&mi_client);
+    ui.connect_resynchronize_handler(move || {
+        let Some(client) = weak_client.upgrade() else {
+            return;
+        };
+        resynchronize_debugger_state(&weak_ui, &client);
     });
 
+    let backend = BackendController::new(
+        Rc::downgrade(&ui),
+        Rc::clone(&mi_client),
+        Rc::clone(&session_controller),
+        launch_config,
+    );
+    let weak_backend = Rc::downgrade(&backend);
+    ready_hook.replace(Some(Box::new(move || {
+        if let Some(backend) = weak_backend.upgrade() {
+            backend.on_ready();
+        }
+    })));
+    backend.install();
+
     ui.window.present();
+    if ui.has_configuration_issues() {
+        let weak_ui = Rc::downgrade(&ui);
+        gtk::glib::idle_add_local_once(move || {
+            if let Some(ui) = weak_ui.upgrade() {
+                ui.present_configuration_diagnostics();
+            }
+        });
+    }
 
     // GTK owns the widget tree, while the event handlers intentionally keep
     // only weak references to the aggregated UI state. Retain that state until
     // application shutdown without introducing a widget/signal reference cycle.
-    let retained_ui = Rc::new(RefCell::new(Some(ui)));
+    let retained_application = Rc::new(RefCell::new(Some((ui, backend))));
     application.connect_shutdown(move |_| {
-        if let Some(ui) = retained_ui.borrow_mut().take() {
+        if let Some((ui, _backend)) = retained_application.borrow_mut().take() {
             ui.save_layout();
         }
     });

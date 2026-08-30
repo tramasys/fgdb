@@ -9,13 +9,17 @@ license = "MIT"
 autoexamples = false
 
 [dependencies]
+clap = { version = "4.5", default-features = false, features = ["derive", "error-context", "help", "std", "suggestions", "usage"] }
 goblin = { version = "0.10.7", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 gtk = { package = "gtk4", version = "0.11.4", features = ["v4_22"] }
 glib-unix = "0.22.8"
-nix = { version = "0.31.3", default-features = false, features = ["fs", "term"] }
+nix = { version = "0.31.3", default-features = false, features = ["fs", "process", "signal", "term"] }
 shell-words = "1.1.1"
 sourceview5 = { version = "0.11.2", features = ["gtk_v4_18", "v5_18"] }
 vte4 = { version = "0.10.0", features = ["gtk_v4_18", "v0_84"] }
+
+[build-dependencies]
+glib-build-tools = "0.22.0"
 
 [profile.release]
 lto = "thin"

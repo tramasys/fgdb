@@ -25,10 +25,6 @@ pub fn launch_gdb(
     let terminal_for_callback = terminal.clone();
     let spawn_event = on_event.clone();
 
-    terminal.connect_child_exited(move |_, status| {
-        on_event(SessionEvent::Exited(status));
-    });
-
     terminal.spawn_async(
         PtyFlags::DEFAULT,
         Some(working_directory.as_ref()),

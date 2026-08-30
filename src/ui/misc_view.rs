@@ -1666,9 +1666,18 @@ pub(super) fn connect_misc_tab_visibility(
 
 impl MiscView {
     pub(super) fn set_heap_inspector_sensitive(&self, sensitive: bool, busy: bool) {
-        let sensitive = sensitive && !self.heap_inspector_in_flight.get();
+        let inspection_in_flight = self.heap_inspector_in_flight.get();
+        let sensitive = sensitive && !inspection_in_flight;
         for (button, _) in &self.heap_inspector_actions {
-            set_execution_sensitive(button, sensitive && button.is_visible(), busy);
+            // Heap action handlers revalidate the stopped state before doing
+            // any work. Keep previously available buttons sensitive across a
+            // short run or inspection transition so GTK never repaints every
+            // blue action as disabled and enabled again.
+            set_transient_execution_sensitive(
+                button,
+                sensitive && button.is_visible(),
+                busy || inspection_in_flight,
+            );
         }
         set_execution_sensitive(
             &self.heap_inspector_expression,

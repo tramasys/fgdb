@@ -3,7 +3,8 @@ use super::*;
 impl Ui {
     pub fn build(application: &gtk::Application, config: &LaunchConfig, theme: &Theme) -> Self {
         if let Some(display) = gtk::gdk::Display::default() {
-            gtk::IconTheme::for_display(&display).add_search_path(crate::ICON_SEARCH_PATH);
+            gtk::IconTheme::for_display(&display)
+                .add_resource_path(&format!("{}/icons", crate::RESOURCE_PREFIX));
         }
         gtk::Window::set_default_icon_name(crate::APPLICATION_ID);
         let window = gtk::ApplicationWindow::builder()
@@ -13,6 +14,7 @@ impl Ui {
             .default_width(1380)
             .default_height(820)
             .build();
+        crate::install_window_icon(&window);
         window.add_css_class("fgdb-window");
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -92,6 +94,10 @@ impl Ui {
             restart_session_button: topbar.restart_session_button,
             kill_session_button: topbar.kill_session_button,
             detach_session_button: topbar.detach_session_button,
+            restart_gdb_button: topbar.restart_gdb_button,
+            resynchronize_button: topbar.resynchronize_button,
+            configuration_button: topbar.configuration_button,
+            gdb_capabilities_label: topbar.gdb_capabilities_label,
             target_label: topbar.target_label,
             terminal_toggle_button: topbar.terminal_toggle_button,
             open_source_button: topbar.open_source_button,
@@ -234,6 +240,11 @@ impl Ui {
             heap_inspection_handler: Rc::new(RefCell::new(None)),
             source_roots: Rc::new(RefCell::new(source::roots(config))),
             current_session: Rc::new(RefCell::new(initial_session)),
+            gdb_capabilities: Rc::new(RefCell::new(GdbCapabilities::default())),
+            gdb_recovery_available: Rc::new(Cell::new(false)),
+            resynchronization_pending: Rc::new(Cell::new(false)),
+            configuration_report: config.configuration_report().clone(),
+            configuration_dialog: Rc::new(RefCell::new(None)),
             session_handler: Rc::new(RefCell::new(None)),
             session_action_handler: Rc::new(RefCell::new(None)),
             until_action_handler: Rc::new(RefCell::new(None)),
@@ -282,6 +293,69 @@ impl Ui {
 
     pub fn save_layout(&self) {
         self.layout.save();
+    }
+
+    pub fn connect_gdb_recovery_handler(&self, handler: impl Fn() + 'static) {
+        let popover = self.session_popover.clone();
+        self.restart_gdb_button.connect_clicked(move |_| {
+            popover.popdown();
+            handler();
+        });
+    }
+
+    pub fn connect_resynchronize_handler(&self, handler: impl Fn() + 'static) {
+        let popover = self.session_popover.clone();
+        self.resynchronize_button.connect_clicked(move |_| {
+            popover.popdown();
+            handler();
+        });
+    }
+
+    pub fn set_gdb_recovery_available(&self, available: bool) {
+        if self.gdb_recovery_available.replace(available) == available {
+            return;
+        }
+        self.restart_gdb_button.set_visible(available);
+        self.update_control_sensitivity();
+    }
+
+    pub fn set_gdb_capabilities(&self, capabilities: GdbCapabilities) {
+        let summary = capabilities.compatibility_summary();
+        let tooltip = if capabilities.features_known {
+            if capabilities.features.is_empty() {
+                String::from("GDB returned an empty MI feature list")
+            } else {
+                format!("GDB/MI features: {}", capabilities.features.join(", "))
+            }
+        } else {
+            String::from("This GDB did not expose an MI feature list")
+        };
+        self.gdb_capabilities_label.set_text(&summary);
+        self.gdb_capabilities_label.set_tooltip_text(Some(&tooltip));
+        self.gdb_capabilities.replace(capabilities);
+    }
+
+    pub fn clear_gdb_capabilities(&self) {
+        self.gdb_capabilities.replace(GdbCapabilities::default());
+        self.gdb_capabilities_label
+            .set_text("GDB capabilities unavailable");
+        self.gdb_capabilities_label.set_tooltip_text(None);
+    }
+
+    pub fn prepare_full_resynchronization(&self) {
+        self.resynchronization_pending.set(true);
+        self.reset_target_abi();
+        self.invalidate_allocator_probe_cache();
+        self.previous_registers.borrow_mut().clear();
+        self.disassembly_source_cache.borrow_mut().clear();
+        self.start_stop_refresh();
+        self.start_thread_refresh();
+        self.invalidate_kernel_refresh();
+        self.invalidate_misc_refresh();
+    }
+
+    pub fn finish_full_resynchronization(&self) -> bool {
+        self.resynchronization_pending.replace(false)
     }
 
     pub fn set_debugger_pid(&self, pid: Option<u32>) {
@@ -612,6 +686,7 @@ impl Ui {
         let step_instruction = self.step_instruction_button.clone();
         let finish = self.finish_button.clone();
         let terminal_toggle = self.terminal_toggle_button.clone();
+        let resynchronize = self.resynchronize_button.clone();
         let debugger_ready = Rc::clone(&self.debugger_ready);
         let inferior_started = Rc::clone(&self.inferior_started);
         let inferior_running = Rc::clone(&self.inferior_running);
@@ -629,6 +704,14 @@ impl Ui {
             }
             if key == gtk::gdk::Key::grave && control && !shift {
                 terminal_toggle.set_active(!terminal_toggle.is_active());
+                return gtk::glib::Propagation::Stop;
+            }
+            if matches!(key, gtk::gdk::Key::r | gtk::gdk::Key::R)
+                && control
+                && shift
+                && resynchronize.is_sensitive()
+            {
+                resynchronize.emit_clicked();
                 return gtk::glib::Propagation::Stop;
             }
             let button = match (key, control, shift) {
@@ -911,7 +994,7 @@ impl Ui {
                 )
                 .is_some(),
             add_memory: can_inspect && !self.memory_address_entry.text().trim().is_empty(),
-            session: ready && !pending,
+            session: (ready || self.gdb_recovery_available.get()) && !pending,
             new_session: ready && !pending && !running && can_replace_session,
             restart_session: ready
                 && started
@@ -928,6 +1011,8 @@ impl Ui {
                 && !running
                 && !pending
                 && session.as_ref().is_some_and(DebugSession::supports_detach),
+            restart_gdb: self.gdb_recovery_available.get() && !pending,
+            resynchronize: can_inspect,
             edit_stop_points: can_edit_stop_points,
             add_signal: can_edit_stop_points
                 && normalized_signal_name(&self.signal_entry.text()).is_some(),
@@ -1015,6 +1100,8 @@ impl Ui {
             state.detach_session,
             state.busy,
         );
+        set_execution_sensitive(&self.restart_gdb_button, state.restart_gdb, state.busy);
+        set_execution_sensitive(&self.resynchronize_button, state.resynchronize, state.busy);
         set_execution_sensitive(
             &self.add_breakpoint_button,
             state.edit_stop_points,

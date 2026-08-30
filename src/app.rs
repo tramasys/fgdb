@@ -84,6 +84,7 @@ enum VariableRefreshTarget {
 }
 
 mod assignments;
+mod backend;
 mod breakpoints;
 mod build;
 mod disassembly;
@@ -104,6 +105,7 @@ pub use build::build;
 use build::assignment_expression;
 
 use assignments::*;
+use backend::*;
 use breakpoints::*;
 use disassembly::*;
 use kernel::*;

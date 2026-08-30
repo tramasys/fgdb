@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gresources>
+  <gresource prefix="/dev/fgdb/Fgdb">
+    <file>icons/dev.fgdb.Fgdb.png</file>
+    <file>icons/hicolor/16x16/apps/dev.fgdb.Fgdb.png</file>
+    <file>icons/hicolor/24x24/apps/dev.fgdb.Fgdb.png</file>
+    <file>icons/hicolor/32x32/apps/dev.fgdb.Fgdb.png</file>
+    <file>icons/hicolor/48x48/apps/dev.fgdb.Fgdb.png</file>
+    <file>icons/hicolor/64x64/apps/dev.fgdb.Fgdb.png</file>
+    <file>icons/hicolor/128x128/apps/dev.fgdb.Fgdb.png</file>
+    <file>icons/hicolor/256x256/apps/dev.fgdb.Fgdb.png</file>
+    <file>language-specs/assembly.lang</file>
+    <file>themes/carbon.xml</file>
+  </gresource>
+</gresources>

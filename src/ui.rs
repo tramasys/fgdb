@@ -12,6 +12,7 @@ use gtk::{gio, glib, pango, prelude::*};
 use sourceview5::prelude::*;
 use vte4::prelude::*;
 
+mod configuration;
 mod layout;
 mod value;
 
@@ -29,11 +30,12 @@ use value::{
 
 use crate::{
     breakpoint_gutter::{BreakpointGutterRenderer, LineStyle},
-    config::{DebugSession, LaunchConfig},
+    config::{ConfigurationReport, DebugSession, LaunchConfig},
     debugger::{
-        Breakpoint, Instruction, MemoryBlock, MemoryKind, MiClient, Register, SharedLibrary,
-        SourceFile, SourceLocation, StackEntry, StackFrame, TargetArchitecture, TargetEndian,
-        ThreadInfo, ValueTypeKind, ValueTypeMetadata, Variable, context::MemoryRegion,
+        Breakpoint, GdbCapabilities, Instruction, MemoryBlock, MemoryKind, MiClient, Register,
+        SharedLibrary, SourceFile, SourceLocation, StackEntry, StackFrame, TargetArchitecture,
+        TargetEndian, ThreadInfo, ValueTypeKind, ValueTypeMetadata, Variable,
+        context::MemoryRegion,
     },
     kernel::{
         KernelBaseline, KernelFileDescriptor, KernelLimit, KernelMapping, KernelMappingChange,
@@ -101,6 +103,8 @@ struct ControlState {
     restart_session: bool,
     kill_session: bool,
     detach_session: bool,
+    restart_gdb: bool,
+    resynchronize: bool,
     edit_stop_points: bool,
     add_signal: bool,
     delete_signal_catchpoints: bool,
@@ -1095,6 +1099,10 @@ pub struct Ui {
     restart_session_button: gtk::Button,
     kill_session_button: gtk::Button,
     detach_session_button: gtk::Button,
+    restart_gdb_button: gtk::Button,
+    resynchronize_button: gtk::Button,
+    configuration_button: gtk::Button,
+    gdb_capabilities_label: gtk::Label,
     target_label: gtk::Label,
     terminal_toggle_button: gtk::ToggleButton,
     pub open_source_button: gtk::Button,
@@ -1237,6 +1245,11 @@ pub struct Ui {
     heap_inspection_handler: Rc<RefCell<Option<HeapInspectionHandler>>>,
     source_roots: Rc<RefCell<Vec<PathBuf>>>,
     current_session: Rc<RefCell<Option<DebugSession>>>,
+    gdb_capabilities: Rc<RefCell<GdbCapabilities>>,
+    gdb_recovery_available: Rc<Cell<bool>>,
+    resynchronization_pending: Rc<Cell<bool>>,
+    configuration_report: ConfigurationReport,
+    configuration_dialog: Rc<RefCell<Option<gtk::Window>>>,
     session_handler: Rc<RefCell<Option<DebugSessionHandler>>>,
     session_action_handler: Rc<RefCell<Option<SessionActionHandler>>>,
     until_action_handler: Rc<RefCell<Option<UntilActionHandler>>>,
@@ -1280,6 +1293,10 @@ struct Topbar {
     restart_session_button: gtk::Button,
     kill_session_button: gtk::Button,
     detach_session_button: gtk::Button,
+    restart_gdb_button: gtk::Button,
+    resynchronize_button: gtk::Button,
+    configuration_button: gtk::Button,
+    gdb_capabilities_label: gtk::Label,
     target_label: gtk::Label,
     open_source_button: gtk::Button,
     load_symbols_button: gtk::Button,
@@ -1835,6 +1852,21 @@ mod tests {
             ),
             "register-zero"
         );
+
+        let mixed_ymm = "{v4_int64 = {[0x0] = 0x0 <repeats 3 times>, [0x3] = 0x1}}";
+        assert_eq!(
+            register_value_css(
+                &Register {
+                    name: String::from("ymm2"),
+                    value: mixed_ymm.to_owned(),
+                    pointer_chain: Vec::new(),
+                },
+                TargetArchitecture::X86_64,
+                Some(TargetEndian::Little),
+                64,
+            ),
+            "memory-none"
+        );
     }
 
     #[test]
@@ -1852,6 +1884,12 @@ mod tests {
                 "0x0000000000000001",
                 "0x0000000000000001",
             ]
+        );
+
+        let oversized_repeat = "{v4_int64 = {0 <repeats 1000000 times>}}";
+        assert_eq!(
+            vector_field_values(oversized_repeat, "v4_int64", 4, VectorLaneFormat::Int64,).unwrap(),
+            ["0x0000000000000000"; 4]
         );
     }
 

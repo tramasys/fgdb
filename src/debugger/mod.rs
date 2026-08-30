@@ -4,7 +4,7 @@ mod model;
 mod session;
 mod target;
 
-pub use mi::{MiClient, MiEvent, quote};
+pub use mi::{GdbCapabilities, MiClient, MiEvent, quote};
 pub use model::{
     Breakpoint, EnumVariant, Instruction, MemoryBlock, MemoryKind, Register, SharedLibrary,
     SourceFile, SourceLocation, StackEntry, StackFrame, ThreadInfo, ValueTypeKind,
@@ -12,7 +12,7 @@ pub use model::{
     current_source, evaluated_value, executable_source_lines, has_exact_command_completion,
     inferior_pid, inserted_breakpoints, instructions, memory_block, register_names, registers,
     shared_libraries, source_locations, stack_frames, threads, variable_children,
-    variable_children_have_more, variable_object, variable_path_expression, variable_updates,
+    variable_children_have_more, variable_object, variable_path_expression, variable_update_named,
     variables,
 };
 pub use session::{SessionEvent, launch_gdb};

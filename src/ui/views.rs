@@ -712,12 +712,6 @@ pub(super) fn register_column(
         if data.changed && matches!(column, RegisterColumn::Name) {
             label.add_css_class("modified-register");
         }
-        let semantic_class = register_value_css(
-            &data.register,
-            data.architecture,
-            data.endian,
-            data.pointer_bits,
-        );
         match column {
             RegisterColumn::Name => {
                 label.set_text(&format!("${}:", data.register.name));
@@ -727,6 +721,12 @@ pub(super) fn register_column(
                 )));
             }
             RegisterColumn::Value => {
+                let semantic_class = register_value_css(
+                    &data.register,
+                    data.architecture,
+                    data.endian,
+                    data.pointer_bits,
+                );
                 label.add_css_class(semantic_class);
                 let text = register_primary_value(&data.register, data.architecture);
                 label.set_text(&text);
@@ -741,6 +741,12 @@ pub(super) fn register_column(
                 )));
             }
             RegisterColumn::Details => {
+                let semantic_class = register_value_css(
+                    &data.register,
+                    data.architecture,
+                    data.endian,
+                    data.pointer_bits,
+                );
                 label.add_css_class(semantic_class);
                 if is_flags_register(&data.register.name) {
                     label.set_markup(&flags_details_markup(
@@ -1093,7 +1099,7 @@ pub(super) fn build_terminal_panel(
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     header.add_css_class("panel-header");
     header.add_css_class("terminal-header");
-    let title = section_title("TERMINAL");
+    let title = section_title("");
     title.set_hexpand(true);
     header.append(&title);
     header.append(gef_tools_button);
@@ -1143,13 +1149,13 @@ pub(super) fn build_source_buffer(
     style_scheme: Option<&sourceview5::StyleScheme>,
 ) -> sourceview5::Buffer {
     let manager = sourceview5::LanguageManager::default();
-    let bundled_languages = concat!(env!("CARGO_MANIFEST_DIR"), "/assets/language-specs");
+    let bundled_languages = format!("resource://{}/language-specs", crate::RESOURCE_PREFIX);
     if !manager
         .search_path()
         .iter()
         .any(|path| path.as_str() == bundled_languages)
     {
-        manager.prepend_search_path(bundled_languages);
+        manager.prepend_search_path(&bundled_languages);
     }
     let language = path.map_or_else(
         || manager.language("c"),
@@ -1268,10 +1274,6 @@ fn open_terminal_context_menu(terminal: &vte4::Terminal, x: f64, y: f64) {
         .build();
     let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
     menu.add_css_class("terminal-context-menu");
-    let title = gtk::Label::new(Some("TERMINAL"));
-    title.add_css_class("section-title");
-    title.set_halign(gtk::Align::Start);
-    menu.append(&title);
 
     let copy = gtk::Button::with_label("Copy");
     copy.set_sensitive(terminal.has_selection());

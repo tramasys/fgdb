@@ -1560,6 +1560,7 @@ pub(super) fn open_breakpoint_condition_editor(
 pub(super) fn open_breakpoint_editor(
     parent: &gtk::ApplicationWindow,
     breakpoint: Option<Breakpoint>,
+    pending_supported: bool,
     handler: Rc<RefCell<Option<BreakpointEditorHandler>>>,
 ) {
     let original = breakpoint.clone();
@@ -1625,6 +1626,12 @@ pub(super) fn open_breakpoint_editor(
     temporary.set_active(spec.temporary);
     let pending = gtk::CheckButton::with_label("Allow pending");
     pending.set_active(spec.allow_pending);
+    if !pending_supported {
+        pending.set_sensitive(false);
+        pending.set_tooltip_text(Some(
+            "This GDB did not report support for pending breakpoints",
+        ));
+    }
     let options = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     options.append(&regex);
     options.append(&enabled);
@@ -1719,7 +1726,7 @@ pub(super) fn open_breakpoint_editor(
         let inferior = inferior.clone();
         move || {
             let restricted = regex.is_active();
-            pending.set_sensitive(!restricted);
+            pending.set_sensitive(pending_supported && !restricted);
             thread.set_sensitive(!restricted);
             inferior.set_sensitive(!restricted);
         }

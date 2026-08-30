@@ -121,8 +121,7 @@ pub(super) fn register_value_css(
     {
         "memory-writable"
     } else if hex_value(&register.value) == Some(0)
-        || vector_lane_values(&register.name, &register.value)
-            .is_some_and(|lanes| lanes.iter().all(|lane| lane == "0x0000000000000000"))
+        || vector_lanes_are_zero(&register.name, &register.value)
     {
         "register-zero"
     } else {
@@ -302,14 +301,14 @@ pub(super) fn format_vector_register_value(register: &str, value: &str) -> Optio
     if lanes.len() > 1 && lanes.iter().all(|lane| lane == &lanes[0]) {
         return Some(format!("q0…q{} = {}", lanes.len() - 1, lanes[0]));
     }
-    Some(
-        lanes
-            .iter()
-            .enumerate()
-            .map(|(index, lane)| format!("q{index}={lane}"))
-            .collect::<Vec<_>>()
-            .join("  ·  "),
-    )
+    let mut formatted = String::with_capacity(lanes.iter().map(String::len).sum::<usize>() + 8);
+    for (index, lane) in lanes.iter().enumerate() {
+        if index != 0 {
+            formatted.push_str("  ·  ");
+        }
+        let _ = write!(formatted, "q{index}={lane}");
+    }
+    Some(formatted)
 }
 
 pub(super) fn vector_lane_values(register: &str, value: &str) -> Option<Vec<String>> {
@@ -336,17 +335,36 @@ pub(super) fn vector_field_values(
     lane_count: usize,
     format: VectorLaneFormat,
 ) -> Option<Vec<String>> {
+    let mut lanes = Vec::with_capacity(lane_count);
+    visit_vector_field(value, field, lane_count, |lane, repeats| {
+        let lane = format_vector_lane(lane, format);
+        lanes.extend(std::iter::repeat_n(lane, repeats));
+        true
+    })
+    .filter(|complete| *complete)?;
+    Some(lanes)
+}
+
+fn visit_vector_field(
+    value: &str,
+    field: &str,
+    lane_count: usize,
+    mut visitor: impl FnMut(&str, usize) -> bool,
+) -> Option<bool> {
     let field = value
         .find(field)
         .map(|index| &value[index + field.len()..])?;
     let start = field.find('{')? + 1;
     let end = field[start..].find('}')? + start;
-    let mut lanes = Vec::with_capacity(lane_count);
+    let mut visited = 0_usize;
     for part in field[start..end]
         .split(',')
         .map(str::trim)
         .filter(|part| !part.is_empty())
     {
+        if visited == lane_count {
+            break;
+        }
         let (lane, repeats) = if let Some((lane, repeats)) = part.split_once("<repeats") {
             let repeats = repeats
                 .split_whitespace()
@@ -357,11 +375,41 @@ pub(super) fn vector_field_values(
         } else {
             (part, 1)
         };
-        let lane = format_vector_lane(lane, format);
-        lanes.extend(std::iter::repeat_n(lane, repeats));
+        let repeats = repeats.min(lane_count - visited);
+        if repeats != 0 && !visitor(lane, repeats) {
+            return Some(false);
+        }
+        visited += repeats;
     }
-    lanes.truncate(lane_count);
-    (lanes.len() == lane_count).then_some(lanes)
+    Some(visited == lane_count)
+}
+
+fn vector_lanes_are_zero(register: &str, value: &str) -> bool {
+    let Some(register_bytes) = vector_register_bytes(register) else {
+        return false;
+    };
+    let format = VectorLaneFormat::Int64;
+    let lane_count = register_bytes / format.lane_bytes();
+    visit_vector_field(
+        value,
+        &format.field(register_bytes),
+        lane_count,
+        |lane, _| vector_lane_is_zero(lane),
+    )
+    .is_some_and(|complete| complete)
+}
+
+fn vector_lane_is_zero(lane: &str) -> bool {
+    let lane = lane
+        .rsplit_once('=')
+        .map_or(lane, |(_, value)| value)
+        .trim();
+    if let Some(hex) = lane.strip_prefix("0x") {
+        u64::from_str_radix(hex, 16).is_ok_and(|value| value == 0)
+    } else {
+        lane.parse::<u64>().is_ok_and(|value| value == 0)
+            || lane.parse::<i64>().is_ok_and(|value| value == 0)
+    }
 }
 
 pub(super) fn format_vector_lane(lane: &str, format: VectorLaneFormat) -> String {
@@ -379,7 +427,7 @@ pub(super) fn format_vector_lane(lane: &str, format: VectorLaneFormat) -> String
                 format_float(f64::from_bits(bits))
             };
         }
-        return lane.split_whitespace().collect::<Vec<_>>().join(" ");
+        return compact_whitespace(lane);
     }
     let width = format.lane_bytes() * 2;
     if let Some(hex) = lane.strip_prefix("0x")
@@ -399,7 +447,18 @@ pub(super) fn format_vector_lane(lane: &str, format: VectorLaneFormat) -> String
         };
         return format!("0x{:0width$x}", (value as u64) & mask);
     }
-    lane.split_whitespace().collect::<Vec<_>>().join(" ")
+    compact_whitespace(lane)
+}
+
+fn compact_whitespace(value: &str) -> String {
+    let mut compact = String::with_capacity(value.len());
+    for part in value.split_whitespace() {
+        if !compact.is_empty() {
+            compact.push(' ');
+        }
+        compact.push_str(part);
+    }
+    compact
 }
 
 pub(super) fn format_float(value: f64) -> String {
@@ -447,21 +506,20 @@ pub(super) fn ascii_annotation(
         TargetEndian::Little => &bytes[..word_size],
         TargetEndian::Big => &bytes[8 - word_size..],
     };
-    let printable = bytes
+    let printable_len = bytes
         .iter()
         .take_while(|byte| byte.is_ascii_graphic() || **byte == b' ')
-        .copied()
-        .collect::<Vec<_>>();
-    if printable.len() < 2 {
+        .count();
+    if printable_len < 2 {
         return None;
     }
-    let text = printable
+    let text = bytes[..printable_len]
         .iter()
         .flat_map(|byte| std::ascii::escape_default(*byte))
         .map(char::from)
         .collect::<String>();
-    if printable.len() >= 4 {
-        let continuation = if printable.len() == bytes.len() {
+    if printable_len >= 4 {
+        let continuation = if printable_len == bytes.len() {
             "…"
         } else {
             ""

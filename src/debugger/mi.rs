@@ -4,7 +4,7 @@ use std::{
     fs::File,
     io::{self, Read, Write},
     os::fd::{AsRawFd, OwnedFd},
-    path::{Path, PathBuf},
+    path::PathBuf,
     rc::{Rc, Weak},
     time::{Duration, Instant},
 };
@@ -19,7 +19,7 @@ use nix::{
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MiEvent {
-    Ready,
+    Ready(GdbCapabilities),
     InferiorStarted,
     Running,
     Stopped {
@@ -35,6 +35,56 @@ pub enum MiEvent {
     SelectionChanged,
     Error(String),
     Disconnected,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct GdbCapabilities {
+    pub version: Option<String>,
+    pub features_known: bool,
+    pub features: Vec<String>,
+    pub mi_async: bool,
+    pub pretty_printing: bool,
+}
+
+impl GdbCapabilities {
+    pub fn supports(&self, feature: &str) -> bool {
+        !self.features_known || self.features.iter().any(|available| available == feature)
+    }
+
+    pub fn compatibility_summary(&self) -> String {
+        let mut available = Vec::with_capacity(3);
+        if self.mi_async {
+            available.push("MI async");
+        }
+        if self.pretty_printing {
+            available.push("pretty printers");
+        }
+        if self.features_known {
+            available.push("feature list");
+        }
+        let support = if available.is_empty() {
+            String::from("compatibility mode")
+        } else {
+            available.join(" · ")
+        };
+        self.version.as_ref().map_or(support.clone(), |version| {
+            format!("GDB {version} · {support}")
+        })
+    }
+
+    fn set_version_component(&mut self, component: &str, minor: bool) {
+        if component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()) {
+            return;
+        }
+        if minor {
+            if let Some(version) = self.version.as_mut() {
+                version.push('.');
+                version.push_str(component);
+            }
+        } else {
+            self.version = Some(component.to_owned());
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,12 +175,6 @@ const MAX_MI_WRITE_BATCH_BYTES: usize = 256 * 1024;
 const MAX_PENDING_REQUESTS: usize = 4096;
 const MAX_SCOPED_REQUESTS: usize = 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const SESSION_INITIALIZATION_COMMANDS: [&str; 2] = [
-    "-gdb-set mi-async on",
-    // GDB only creates dynamic variable objects backed by C++/Rust Python
-    // visualizers after an MI frontend explicitly enables pretty-printing.
-    "-enable-pretty-printing",
-];
 const REQUEST_TIMEOUT_POLL: Duration = Duration::from_millis(250);
 
 struct PendingRequest {
@@ -264,12 +308,12 @@ enum IoSource {
 }
 
 pub struct MiClient {
-    master: RefCell<File>,
-    _slave: OwnedFd,
-    slave_path: PathBuf,
+    transport: RefCell<MiTransport>,
     incoming: RefCell<Vec<u8>>,
     next_token: Cell<u64>,
     ready: Cell<bool>,
+    initializing: Cell<bool>,
+    capabilities: RefCell<GdbCapabilities>,
     pending: RefCell<HashMap<u64, PendingRequest>>,
     scoped_request: RefCell<Option<ScopedMiRequest>>,
     scoped_queue: RefCell<VecDeque<ScopedMiRequest>>,
@@ -283,27 +327,41 @@ pub struct MiClient {
     discarding_oversized_line: Cell<bool>,
 }
 
+struct MiTransport {
+    master: File,
+    _slave: OwnedFd,
+    slave_path: PathBuf,
+}
+
+fn open_transport() -> io::Result<MiTransport> {
+    let pty = openpty(None, None).map_err(io::Error::other)?;
+    let slave_path = ttyname(&pty.slave).map_err(io::Error::other)?;
+
+    let mut terminal_settings = tcgetattr(&pty.slave).map_err(io::Error::other)?;
+    cfmakeraw(&mut terminal_settings);
+    tcsetattr(&pty.slave, SetArg::TCSANOW, &terminal_settings).map_err(io::Error::other)?;
+
+    let master = File::from(pty.master);
+    let flags = fcntl(&master, FcntlArg::F_GETFL).map_err(io::Error::other)?;
+    let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
+    fcntl(&master, FcntlArg::F_SETFL(flags)).map_err(io::Error::other)?;
+    Ok(MiTransport {
+        master,
+        _slave: pty.slave,
+        slave_path,
+    })
+}
+
 impl MiClient {
     pub fn open(event_handler: impl Fn(&MiClient, MiEvent) + 'static) -> io::Result<Rc<Self>> {
-        let pty = openpty(None, None).map_err(io::Error::other)?;
-        let slave_path = ttyname(&pty.slave).map_err(io::Error::other)?;
-
-        let mut terminal_settings = tcgetattr(&pty.slave).map_err(io::Error::other)?;
-        cfmakeraw(&mut terminal_settings);
-        tcsetattr(&pty.slave, SetArg::TCSANOW, &terminal_settings).map_err(io::Error::other)?;
-
-        let master = File::from(pty.master);
-        let flags = fcntl(&master, FcntlArg::F_GETFL).map_err(io::Error::other)?;
-        let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
-        fcntl(&master, FcntlArg::F_SETFL(flags)).map_err(io::Error::other)?;
-        let master_fd = master.as_raw_fd();
+        let transport = open_transport()?;
         let client = Rc::new_cyclic(|self_weak| Self {
-            master: RefCell::new(master),
-            _slave: pty.slave,
-            slave_path,
+            transport: RefCell::new(transport),
             incoming: RefCell::new(Vec::new()),
             next_token: Cell::new(1),
             ready: Cell::new(false),
+            initializing: Cell::new(false),
+            capabilities: RefCell::new(GdbCapabilities::default()),
             pending: RefCell::new(HashMap::new()),
             scoped_request: RefCell::new(None),
             scoped_queue: RefCell::new(VecDeque::new()),
@@ -316,15 +374,62 @@ impl MiClient {
             timeout_source: RefCell::new(None),
             discarding_oversized_line: Cell::new(false),
         });
+        client.install_sources();
+        Ok(client)
+    }
 
-        let weak_client = Rc::downgrade(&client);
+    pub fn slave_path(&self) -> PathBuf {
+        self.transport.borrow().slave_path.clone()
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.ready.get()
+    }
+
+    pub fn capabilities(&self) -> GdbCapabilities {
+        self.capabilities.borrow().clone()
+    }
+
+    pub fn reconnect(&self) -> io::Result<PathBuf> {
+        if self.connected.replace(false) {
+            self.ready.set(false);
+            self.initializing.set(false);
+            if let Some(source) = self.read_source.borrow_mut().take() {
+                source.remove();
+            }
+            if let Some(source) = self.write_source.borrow_mut().take() {
+                source.remove();
+            }
+            if let Some(source) = self.timeout_source.borrow_mut().take() {
+                source.remove();
+            }
+            self.outgoing.borrow_mut().clear();
+            self.fail_pending_requests("GDB/MI connection replaced");
+        }
+        let transport = open_transport()?;
+        let slave_path = transport.slave_path.clone();
+        self.transport.replace(transport);
+        self.incoming.borrow_mut().clear();
+        self.outgoing.borrow_mut().clear();
+        self.discarding_oversized_line.set(false);
+        self.ready.set(false);
+        self.initializing.set(false);
+        self.capabilities.replace(GdbCapabilities::default());
+        self.connected.set(true);
+        self.install_sources();
+        Ok(slave_path)
+    }
+
+    fn install_sources(&self) {
+        let master_fd = self.transport.borrow().master.as_raw_fd();
+        let weak_client = self.self_weak.clone();
         let source = glib_unix::unix_fd_add_local(
             master_fd,
             glib::IOCondition::IN | glib::IOCondition::HUP | glib::IOCondition::ERR,
             move |_, condition| Self::on_io_ready(&weak_client, condition),
         );
-        client.read_source.replace(Some(source));
-        let weak_client = Rc::downgrade(&client);
+        self.read_source.replace(Some(source));
+        let weak_client = self.self_weak.clone();
         let timeout_source = glib::timeout_add_local(REQUEST_TIMEOUT_POLL, move || {
             let Some(client) = weak_client.upgrade() else {
                 return glib::ControlFlow::Break;
@@ -332,17 +437,7 @@ impl MiClient {
             client.expire_requests();
             glib::ControlFlow::Continue
         });
-        client.timeout_source.replace(Some(timeout_source));
-
-        Ok(client)
-    }
-
-    pub fn slave_path(&self) -> &Path {
-        &self.slave_path
-    }
-
-    pub fn is_ready(&self) -> bool {
-        self.ready.get()
+        self.timeout_source.replace(Some(timeout_source));
     }
 
     pub fn send(&self, command: &str) -> io::Result<u64> {
@@ -539,8 +634,9 @@ impl MiClient {
             return;
         }
         let weak_client = self.self_weak.clone();
+        let master_fd = self.transport.borrow().master.as_raw_fd();
         let source = glib_unix::unix_fd_add_local(
-            self.master.borrow().as_raw_fd(),
+            master_fd,
             glib::IOCondition::OUT | glib::IOCondition::HUP | glib::IOCondition::ERR,
             move |_, condition| Self::on_write_ready(&weak_client, condition),
         );
@@ -560,9 +656,13 @@ impl MiClient {
             return glib::ControlFlow::Break;
         };
         let result = {
-            let mut master = client.master.borrow_mut();
+            let mut transport = client.transport.borrow_mut();
             let mut outgoing = client.outgoing.borrow_mut();
-            drain_outgoing(&mut *master, &mut outgoing, MAX_MI_WRITE_BATCH_BYTES)
+            drain_outgoing(
+                &mut transport.master,
+                &mut outgoing,
+                MAX_MI_WRITE_BATCH_BYTES,
+            )
         };
         match result {
             Ok(true) => {
@@ -596,8 +696,8 @@ impl MiClient {
 
         let mut bytes = [0_u8; 16 * 1024];
         let read_result = {
-            let mut master = client.master.borrow_mut();
-            master.read(&mut bytes)
+            let mut transport = client.transport.borrow_mut();
+            transport.master.read(&mut bytes)
         };
 
         match read_result {
@@ -636,11 +736,24 @@ impl MiClient {
             source.remove();
         }
         self.outgoing.borrow_mut().clear();
-        self.pending.borrow_mut().clear();
-        self.scoped_request.borrow_mut().take();
-        self.scoped_queue.borrow_mut().clear();
+        self.fail_pending_requests("GDB/MI connection closed");
         (self.event_handler)(self, MiEvent::Disconnected);
         glib::ControlFlow::Break
+    }
+
+    fn fail_pending_requests(&self, reason: &str) {
+        let pending = std::mem::take(&mut *self.pending.borrow_mut());
+        let scoped = self.scoped_request.borrow_mut().take();
+        let queued = self.scoped_queue.borrow_mut().drain(..).collect::<Vec<_>>();
+        for request in pending.into_values() {
+            (request.handler)(self, error_record(reason));
+        }
+        if let Some(request) = scoped {
+            (request.handler)(self, error_record(reason));
+        }
+        for request in queued {
+            (request.handler)(self, error_record(reason));
+        }
     }
 
     fn consume(&self, bytes: &[u8]) {
@@ -658,8 +771,14 @@ impl MiClient {
         }
         let complete_end = {
             let mut incoming = self.incoming.borrow_mut();
+            let previous_len = incoming.len();
             incoming.extend_from_slice(bytes);
-            let complete_end = complete_input_end(&incoming);
+            // `incoming` retains only the unterminated suffix after each
+            // consume pass, so a new record terminator can only occur in the
+            // bytes just appended. Searching that suffix keeps assembly of a
+            // large, chunked MI record linear instead of rescanning the full
+            // accumulated record after every PTY read.
+            let complete_end = complete_input_end(bytes).map(|end| previous_len + end);
             if complete_end.is_none() && incoming.len() > MAX_MI_RECORD_BYTES {
                 incoming.clear();
                 self.discarding_oversized_line.set(true);
@@ -759,23 +878,150 @@ impl MiClient {
         self.stop_write_source_if_idle();
     }
 
+    fn begin_initialization(&self) {
+        self.capabilities.replace(GdbCapabilities::default());
+        let weak_client = self.self_weak.clone();
+        if self
+            .request("-list-features", move |client, record| {
+                if record.is_done() {
+                    let mut capabilities = client.capabilities.borrow_mut();
+                    capabilities.features_known = true;
+                    capabilities.features = listed_features(&record);
+                }
+                client.detect_gdb_version();
+            })
+            .is_err()
+            && let Some(client) = weak_client.upgrade()
+        {
+            client.detect_gdb_version();
+        }
+    }
+
+    fn detect_gdb_version(&self) {
+        let weak_client = self.self_weak.clone();
+        if self
+            .request(
+                "-data-evaluate-expression \"$_gdb_major\"",
+                move |client, record| {
+                    if let Some(major) = record
+                        .is_done()
+                        .then(|| record.field("value"))
+                        .flatten()
+                        .and_then(MiValue::as_const)
+                    {
+                        client
+                            .capabilities
+                            .borrow_mut()
+                            .set_version_component(major, false);
+                    }
+                    client.detect_gdb_minor_version();
+                },
+            )
+            .is_err()
+            && let Some(client) = weak_client.upgrade()
+        {
+            client.detect_gdb_minor_version();
+        }
+    }
+
+    fn detect_gdb_minor_version(&self) {
+        let weak_client = self.self_weak.clone();
+        if self
+            .request(
+                "-data-evaluate-expression \"$_gdb_minor\"",
+                move |client, record| {
+                    if let Some(minor) = record
+                        .is_done()
+                        .then(|| record.field("value"))
+                        .flatten()
+                        .and_then(MiValue::as_const)
+                    {
+                        client
+                            .capabilities
+                            .borrow_mut()
+                            .set_version_component(minor, true);
+                    }
+                    client.configure_mi_async();
+                },
+            )
+            .is_err()
+            && let Some(client) = weak_client.upgrade()
+        {
+            client.configure_mi_async();
+        }
+    }
+
+    fn configure_mi_async(&self) {
+        let weak_client = self.self_weak.clone();
+        if self
+            .request("-gdb-set mi-async on", move |client, record| {
+                if record.is_success() {
+                    client.capabilities.borrow_mut().mi_async = true;
+                    client.configure_pretty_printing();
+                } else {
+                    client.configure_legacy_target_async();
+                }
+            })
+            .is_err()
+            && let Some(client) = weak_client.upgrade()
+        {
+            client.configure_legacy_target_async();
+        }
+    }
+
+    fn configure_legacy_target_async(&self) {
+        let weak_client = self.self_weak.clone();
+        if self
+            .request("-gdb-set target-async on", move |client, record| {
+                client.capabilities.borrow_mut().mi_async = record.is_success();
+                client.configure_pretty_printing();
+            })
+            .is_err()
+            && let Some(client) = weak_client.upgrade()
+        {
+            client.configure_pretty_printing();
+        }
+    }
+
+    fn configure_pretty_printing(&self) {
+        let weak_client = self.self_weak.clone();
+        if self
+            .request("-enable-pretty-printing", move |client, record| {
+                client.capabilities.borrow_mut().pretty_printing = record.is_success();
+                client.finish_initialization();
+            })
+            .is_err()
+            && let Some(client) = weak_client.upgrade()
+        {
+            client.finish_initialization();
+        }
+    }
+
+    fn finish_initialization(&self) {
+        if !self.connected.get() || self.ready.replace(true) {
+            return;
+        }
+        self.initializing.set(false);
+        (self.event_handler)(self, MiEvent::Ready(self.capabilities()));
+    }
+
     fn process_line(&self, line: &str) {
         let line = line.trim();
         if line == "(gdb)" {
-            if !self.ready.replace(true) {
-                // Publish Ready only after both initialization commands have
-                // entered the FIFO. Requests issued by the Ready handler are
-                // therefore always written after pretty-printing is enabled.
-                for command in SESSION_INITIALIZATION_COMMANDS {
-                    let _ = self.request(command, |_, _| {});
-                }
-                (self.event_handler)(self, MiEvent::Ready);
+            if !self.ready.get() && !self.initializing.replace(true) {
+                self.begin_initialization();
             }
             return;
         }
 
-        if let Ok(output) = parse_stream_output(line) {
-            if let Ok(response) = parse_record(output.trim())
+        if line.starts_with('~') {
+            // Console stream records matter on this private MI channel only
+            // while a scoped `interpreter-exec mi` request is waiting for its
+            // nested result. Avoid decoding ignored console output, and avoid
+            // constructing a parse error for every ordinary MI record.
+            if self.scoped_request.borrow().is_some()
+                && let Ok(output) = parse_stream_output(line)
+                && let Ok(response) = parse_record(output.trim())
                 && response.kind == '^'
                 && let Some(request) = self.scoped_request.borrow_mut().as_mut()
             {
@@ -883,6 +1129,22 @@ impl MiClient {
             _ => {}
         }
     }
+}
+
+fn listed_features(record: &MiRecord) -> Vec<String> {
+    let mut features = record
+        .field("features")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| match item {
+            MiListItem::Value(MiValue::Const(feature)) => Some(feature.clone()),
+            MiListItem::Value(MiValue::Tuple(_) | MiValue::List(_)) | MiListItem::Result(_) => None,
+        })
+        .collect::<Vec<_>>();
+    features.sort_unstable();
+    features.dedup();
+    features
 }
 
 fn parse_stream_output(input: &str) -> Result<String, String> {
@@ -1135,7 +1397,25 @@ impl<'a> Parser<'a> {
 
     fn c_string(&mut self) -> Result<String, String> {
         self.expect(b'"')?;
-        let mut bytes = Vec::new();
+        let start = self.position;
+        while let Some(byte) = self.peek() {
+            match byte {
+                b'"' => {
+                    let end = self.position;
+                    self.position += 1;
+                    return Ok(std::str::from_utf8(&self.input[start..end])
+                        .expect("MI parser input originates from a Rust string")
+                        .to_owned());
+                }
+                b'\\' => break,
+                _ => self.position += 1,
+            }
+        }
+        if self.peek().is_none() {
+            return Err(String::from("unterminated MI string"));
+        }
+        let mut bytes = Vec::with_capacity(self.position.saturating_sub(start).saturating_add(16));
+        bytes.extend_from_slice(&self.input[start..self.position]);
         loop {
             match self.next() {
                 Some(b'"') => break,
@@ -1258,8 +1538,8 @@ pub fn quote(argument: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MiListItem, MiValue, OutgoingQueue, SESSION_INITIALIZATION_COMMANDS, complete_input_end,
-        drain_outgoing, parse_record, parse_stream_output, quote, result_field, scoped_mi_command,
+        GdbCapabilities, MiListItem, MiValue, OutgoingQueue, complete_input_end, drain_outgoing,
+        listed_features, parse_record, parse_stream_output, quote, result_field, scoped_mi_command,
         validate_mi_command,
     };
 
@@ -1276,11 +1556,77 @@ mod tests {
     }
 
     #[test]
-    fn initializes_mi_async_and_dynamic_pretty_printing() {
+    fn parses_and_sorts_gdb_feature_negotiation() {
+        let record =
+            parse_record(r#"2^done,features=["thread-info","pending-breakpoints","thread-info"]"#)
+                .unwrap();
         assert_eq!(
-            SESSION_INITIALIZATION_COMMANDS,
-            ["-gdb-set mi-async on", "-enable-pretty-printing"]
+            listed_features(&record),
+            ["pending-breakpoints", "thread-info"]
         );
+        let capabilities = GdbCapabilities {
+            version: Some(String::from("17.2")),
+            features_known: true,
+            features: listed_features(&record),
+            mi_async: true,
+            pretty_printing: true,
+        };
+        assert!(capabilities.supports("thread-info"));
+        assert!(!capabilities.supports("data-read-memory-bytes"));
+        assert_eq!(
+            capabilities.compatibility_summary(),
+            "GDB 17.2 · MI async · pretty printers · feature list"
+        );
+        assert!(GdbCapabilities::default().supports("future-mi-command"));
+    }
+
+    #[test]
+    fn replaces_the_transport_without_replacing_the_client() {
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let client = super::MiClient::open(|_, _| {}).unwrap();
+                let first = client.slave_path();
+                let second = client.reconnect().unwrap();
+                assert_ne!(first, second);
+                assert_eq!(client.slave_path(), second);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn publishes_ready_only_after_capability_negotiation() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let events_for_client = Rc::clone(&events);
+                let client = super::MiClient::open(move |_, event| {
+                    events_for_client.borrow_mut().push(event);
+                })
+                .unwrap();
+                client.process_line("(gdb)");
+                assert!(events.borrow().is_empty());
+                client.process_line(
+                    r#"1^done,features=["pending-breakpoints","data-read-memory-bytes"]"#,
+                );
+                client.process_line(r#"2^done,value="17""#);
+                client.process_line(r#"3^done,value="2""#);
+                client.process_line("4^done");
+                client.process_line("5^done");
+                let events = events.borrow();
+                let [super::MiEvent::Ready(capabilities)] = events.as_slice() else {
+                    panic!("expected one negotiated ready event, got {events:?}");
+                };
+                assert_eq!(capabilities.version.as_deref(), Some("17.2"));
+                assert!(capabilities.mi_async);
+                assert!(capabilities.pretty_printing);
+                assert!(capabilities.supports("pending-breakpoints"));
+                assert!(!capabilities.supports("thread-info"));
+            })
+            .unwrap();
     }
 
     #[test]
@@ -1347,6 +1693,17 @@ mod tests {
     }
 
     #[test]
+    fn locates_a_terminator_relative_to_an_existing_partial_record() {
+        let previous = b"17^done,value=\"partial";
+        let appended = b" value\"\n*stopped\nnext";
+        let complete = complete_input_end(appended).map(|end| previous.len() + end);
+        assert_eq!(
+            complete,
+            Some(previous.len() + b" value\"\n*stopped\n".len())
+        );
+    }
+
+    #[test]
     fn parses_nested_stack_frames() {
         let record = parse_record(
             r#"17^done,stack=[frame={level="0",addr="0x1",func="main",fullname="/tmp/a.c",line="8"},frame={level="1",addr="0x2",func="_start"}]"#,
@@ -1382,6 +1739,13 @@ mod tests {
                 MiListItem::Value(MiValue::Const(String::from("line\n"))),
             ]
         );
+    }
+
+    #[test]
+    fn parses_unescaped_and_escaped_strings_through_the_same_model() {
+        let plain = parse_record(r#"1^done,value="plain ASCII value""#).unwrap();
+        let escaped = parse_record(r#"2^done,value="plain\040ASCII\040value""#).unwrap();
+        assert_eq!(plain.field("value"), escaped.field("value"));
     }
 
     #[test]

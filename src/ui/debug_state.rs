@@ -22,6 +22,9 @@ fn center_scroll_adjustment(scrolled: &gtk::ScrolledWindow, position: u32, item_
 }
 
 fn preserve_stack_render_details(entries: &mut [StackEntry], previous: &[StackEntry]) {
+    if previous.is_empty() || entries.iter().all(|entry| !entry.pointer_chain.is_empty()) {
+        return;
+    }
     let previous = previous
         .iter()
         .map(|entry| (entry.address, entry))
@@ -1252,15 +1255,15 @@ impl Ui {
         if self.latest_stack.borrow().as_slice() != entries {
             self.latest_stack.replace(entries.to_vec());
         }
-        self.render_stack(entries);
+        self.render_stack(Cow::Borrowed(entries));
     }
 
-    fn render_stack(&self, entries: &[StackEntry]) {
-        if self.displayed_stack.borrow().as_slice() != entries {
-            self.displayed_stack.replace(entries.to_vec());
+    fn render_stack(&self, entries: Cow<'_, [StackEntry]>) {
+        if self.displayed_stack.borrow().as_slice() != entries.as_ref() {
             replace_boxed_store_if_changed(&self.stack_store, entries.iter().cloned());
+            self.displayed_stack.replace(entries.into_owned());
         }
-        if entries.is_empty() {
+        if self.displayed_stack.borrow().is_empty() {
             self.stack_empty
                 .set_text("Stack values appear when the target is paused");
             self.stack_empty.set_visible(true);
@@ -1276,7 +1279,7 @@ impl Ui {
             }
             let mut rendered = entries.to_vec();
             preserve_stack_render_details(&mut rendered, &self.displayed_stack.borrow());
-            self.render_stack(&rendered);
+            self.render_stack(Cow::Owned(rendered));
             self.latest_stack_generation.set(Some(generation));
         }
     }
@@ -1309,7 +1312,7 @@ impl Ui {
             return;
         }
         if self.memory_regions.borrow().as_slice() != regions {
-            replace_boxed_store(&self.memory_region_store, regions.iter().cloned());
+            replace_boxed_store_if_changed(&self.memory_region_store, regions.iter().cloned());
             self.memory_regions.replace(regions.to_vec());
         }
         self.memory_regions_empty.set_visible(regions.is_empty());
@@ -1449,8 +1452,10 @@ impl Ui {
     pub(super) fn connect_breakpoint_bulk_controls(&self) {
         let parent = self.window.clone();
         let handler = Rc::clone(&self.breakpoint_editor_handler);
+        let capabilities = Rc::clone(&self.gdb_capabilities);
         self.add_breakpoint_button.connect_clicked(move |_| {
-            open_breakpoint_editor(&parent, None, Rc::clone(&handler));
+            let pending_supported = capabilities.borrow().supports("pending-breakpoints");
+            open_breakpoint_editor(&parent, None, pending_supported, Rc::clone(&handler));
         });
         let breakpoints = Rc::clone(&self.breakpoints);
         let handler = Rc::clone(&self.breakpoint_bulk_delete_handler);
@@ -1594,6 +1599,10 @@ impl Ui {
         self.breakpoints.replace(breakpoints);
         clear_box(&self.breakpoints_list);
         let breakpoints = self.breakpoints.borrow();
+        let pending_supported = self
+            .gdb_capabilities
+            .borrow()
+            .supports("pending-breakpoints");
         if breakpoints.is_empty() {
             self.breakpoints_list.append(&empty_label(
                 "No breakpoints, catchpoints, or watchpoints set",
@@ -1835,6 +1844,7 @@ impl Ui {
                         open_breakpoint_editor(
                             &parent,
                             Some(breakpoint_for_condition.clone()),
+                            pending_supported,
                             Rc::clone(&editor_handler),
                         );
                     }

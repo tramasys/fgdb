@@ -1,11 +1,119 @@
 use std::{
-    env, fs,
+    collections::{BTreeMap, BTreeSet},
+    env, fmt, fs,
     io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+use clap::{Parser, error::ErrorKind};
+
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
-const DEFAULT_CONFIG: &str = "# fgdb configuration\n# Environment variables override these values for one launch.\ngdb=gdb\ngdb_args=\nsource_path=\ngef_context=hide\n";
+const DEFAULT_CONFIG: &str = "# fgdb configuration\n# Environment variables override these values for one launch.\ngdb=gdb\ngdb_args=\nsource_path=\ngef_context=hide\nsafe_mode=false\n# working_directory=/path/to/project\n\n# Named profiles can contain these settings and a startup session.\n# [profile example]\n# executable=/path/to/program\n# arguments=--flag 'argument with spaces'\n# working_directory=/path/to/project\n";
+const DEFAULT_SECTION: &str = "<default>";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigurationIssue {
+    source: String,
+    line: Option<usize>,
+    message: String,
+}
+
+impl ConfigurationIssue {
+    fn file(path: &Path, line: Option<usize>, message: impl Into<String>) -> Self {
+        Self {
+            source: path.display().to_string(),
+            line,
+            message: message.into(),
+        }
+    }
+
+    fn external(source: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            source: source.into(),
+            line: None,
+            message: message.into(),
+        }
+    }
+
+    pub fn location(&self) -> String {
+        self.line.map_or_else(
+            || self.source.clone(),
+            |line| format!("{}:{line}", self.source),
+        )
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EffectiveConfigurationEntry {
+    name: String,
+    value: String,
+}
+
+impl EffectiveConfigurationEntry {
+    fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            value: value.into(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConfigurationReport {
+    active_path: PathBuf,
+    loaded_paths: Vec<PathBuf>,
+    created: bool,
+    selected_profile: Option<String>,
+    issues: Vec<ConfigurationIssue>,
+    effective: Vec<EffectiveConfigurationEntry>,
+}
+
+impl ConfigurationReport {
+    pub fn active_path(&self) -> &Path {
+        &self.active_path
+    }
+
+    pub fn loaded_paths(&self) -> &[PathBuf] {
+        &self.loaded_paths
+    }
+
+    pub const fn created(&self) -> bool {
+        self.created
+    }
+
+    pub fn selected_profile(&self) -> Option<&str> {
+        self.selected_profile.as_deref()
+    }
+
+    pub fn issues(&self) -> &[ConfigurationIssue] {
+        &self.issues
+    }
+
+    pub fn effective(&self) -> &[EffectiveConfigurationEntry] {
+        &self.effective
+    }
+
+    pub fn menu_detail(&self) -> String {
+        match self.issues.len() {
+            0 => String::from("loaded"),
+            1 => String::from("1 issue"),
+            count => format!("{count} issues"),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DebugSession {
@@ -123,100 +231,326 @@ pub struct LaunchConfig {
     pub gdb_startup_arguments: Vec<String>,
     pub gef_context_visible: bool,
     pub source_paths: Vec<PathBuf>,
-    pub target_arguments: Vec<String>,
     pub working_directory: PathBuf,
+    pub safe_mode: bool,
+    initial_session: Option<DebugSession>,
+    configuration_report: Arc<ConfigurationReport>,
 }
 
 impl LaunchConfig {
-    pub fn from_process() -> Result<Self, shell_words::ParseError> {
-        let target_arguments = env::args().skip(1).collect();
-        let file_config = read_user_config();
-        let gdb_executable = env::var("FGDB_GDB")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .or(file_config.gdb_executable)
-            .unwrap_or_else(|| String::from("gdb"));
-        let gdb_startup_arguments = env::var("FGDB_GDB_ARGS")
-            .ok()
-            .or(file_config.gdb_startup_arguments)
-            .map_or_else(
-                || Ok(Vec::new()),
-                |arguments| shell_words::split(&arguments),
-            )?;
-        let gef_context_visible = env::var("FGDB_GEF_CONTEXT")
-            .ok()
-            .and_then(|value| parse_gef_context(&value))
-            .or(file_config.gef_context_visible)
-            .unwrap_or(false);
-        let source_paths = env::var_os("FGDB_SOURCE_PATH")
-            .map(|paths| env::split_paths(&paths).collect())
-            .or_else(|| {
-                file_config
-                    .source_path
-                    .as_deref()
-                    .map(|paths| env::split_paths(paths).collect())
-            })
-            .unwrap_or_default();
-        let working_directory = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    pub fn from_process() -> Result<StartupAction, StartupError> {
+        let arguments: Vec<_> = env::args_os().collect();
+        let check_only = arguments
+            .iter()
+            .any(|argument| argument == "--check-config");
+        let cli = match Cli::try_parse_from(arguments) {
+            Ok(cli) => cli,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::DisplayHelp | ErrorKind::DisplayVersion
+                ) =>
+            {
+                return Ok(StartupAction::Print(error.to_string()));
+            }
+            Err(error) => return Err(StartupError::new(error.to_string(), check_only)),
+        };
 
-        Ok(Self {
-            gdb_executable,
-            gdb_startup_arguments,
-            gef_context_visible,
-            source_paths,
-            target_arguments,
-            working_directory,
-        })
+        let mut loaded = read_user_config();
+
+        if cli.check_config {
+            validate_check_config_arguments(&cli)
+                .map_err(|message| StartupError::with_config(message, true, &loaded.path))?;
+            if let Some(profile) = cli.profile.as_deref()
+                && !loaded.config.profiles.contains_key(profile)
+            {
+                return Err(StartupError::with_config(
+                    format!(
+                        "Profile '{profile}' does not exist in {}",
+                        loaded.path.display()
+                    ),
+                    true,
+                    &loaded.path,
+                ));
+            }
+            if !loaded.issues.is_empty() {
+                return Err(StartupError::with_config(
+                    config_check_report(&loaded, cli.profile.as_deref()),
+                    true,
+                    &loaded.path,
+                ));
+            }
+            return Ok(StartupAction::Print(config_check_report(
+                &loaded,
+                cli.profile.as_deref(),
+            )));
+        }
+
+        let (environment, environment_issues) = read_environment_overrides();
+        loaded.issues.extend(environment_issues);
+        let current_directory = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        resolve_launch_config(cli, &loaded, environment, current_directory)
+            .map(StartupAction::Run)
+            .map_err(|message| StartupError::with_config(message, false, &loaded.path))
     }
 
     pub fn gdb_arguments(&self) -> Vec<String> {
         let mut arguments = vec![self.gdb_executable.clone(), String::from("--quiet")];
-        arguments.extend(self.gdb_startup_arguments.iter().cloned());
-        if !self.target_arguments.is_empty() {
+        if self.safe_mode {
+            arguments.push(String::from("--nx"));
+        } else {
+            arguments.extend(self.gdb_startup_arguments.iter().cloned());
+        }
+        if let Some(DebugSession::Launch {
+            executable,
+            arguments: target_arguments,
+            ..
+        }) = self.initial_session.as_ref()
+        {
             arguments.push(String::from("--args"));
-            arguments.extend(self.target_arguments.iter().cloned());
+            arguments.push(executable.to_string_lossy().into_owned());
+            arguments.extend(target_arguments.iter().cloned());
         }
         arguments
     }
 
-    pub fn target_name(&self) -> &str {
-        self.target_arguments
-            .first()
-            .map_or("No target selected", String::as_str)
+    pub fn target_name(&self) -> String {
+        self.initial_session
+            .as_ref()
+            .map_or_else(|| String::from("No target selected"), DebugSession::title)
     }
 
     pub fn initial_session(&self) -> Option<DebugSession> {
-        let (executable, arguments) = self.target_arguments.split_first()?;
-        Some(DebugSession::Launch {
-            executable: PathBuf::from(executable),
-            arguments: arguments.to_vec(),
-            environment: Vec::new(),
-            working_directory: self.working_directory.clone(),
-        })
+        self.initial_session.clone()
+    }
+
+    pub fn needs_deferred_session_configuration(&self) -> bool {
+        self.initial_session
+            .as_ref()
+            .is_some_and(|session| !matches!(session, DebugSession::Launch { .. }))
+    }
+
+    pub fn configuration_report(&self) -> &ConfigurationReport {
+        self.configuration_report.as_ref()
+    }
+}
+
+#[derive(Debug)]
+pub enum StartupAction {
+    Run(LaunchConfig),
+    Print(String),
+}
+
+#[derive(Debug)]
+pub struct StartupError {
+    message: String,
+    check_only: bool,
+    active_config_path: Option<PathBuf>,
+}
+
+impl StartupError {
+    fn new(message: impl Into<String>, check_only: bool) -> Self {
+        Self {
+            message: message.into(),
+            check_only,
+            active_config_path: None,
+        }
+    }
+
+    fn with_config(message: impl Into<String>, check_only: bool, path: &Path) -> Self {
+        Self {
+            message: message.into(),
+            check_only,
+            active_config_path: Some(path.to_path_buf()),
+        }
+    }
+
+    pub const fn should_show_graphically(&self) -> bool {
+        !self.check_only
+    }
+
+    pub fn active_config_path(&self) -> Option<&Path> {
+        self.active_config_path.as_deref()
+    }
+}
+
+impl fmt::Display for StartupError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for StartupError {}
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "fgdb",
+    version,
+    about = "A native GDB frontend",
+    long_about = "A native GDB frontend. Start fgdb without a target, launch an executable, attach to a process, inspect a core dump, or connect to a remote GDB server.",
+    disable_help_subcommand = true
+)]
+struct Cli {
+    /// Attach to a local process ID
+    #[arg(long, value_name = "PID")]
+    attach: Option<u32>,
+
+    /// Open a core dump
+    #[arg(long, value_name = "CORE")]
+    core: Option<PathBuf>,
+
+    /// Connect to a gdbserver endpoint such as localhost:1234
+    #[arg(long, value_name = "HOST:PORT")]
+    remote: Option<String>,
+
+    /// Executable for an attach, core, remote, or launch session
+    #[arg(long, value_name = "EXE")]
+    executable: Option<PathBuf>,
+
+    /// Working directory for GDB and launched programs
+    #[arg(long, value_name = "PATH")]
+    working_directory: Option<PathBuf>,
+
+    /// Apply a named profile from the fgdb configuration file
+    #[arg(long, value_name = "NAME")]
+    profile: Option<String>,
+
+    /// Start GDB without init files or configured startup arguments
+    #[arg(long)]
+    safe_mode: bool,
+
+    /// Validate the configuration file and exit
+    #[arg(long)]
+    check_config: bool,
+
+    /// Executable to launch. Place fgdb options before it.
+    #[arg(value_name = "EXECUTABLE")]
+    target: Option<String>,
+
+    /// Arguments passed to the executable
+    #[arg(value_name = "ARGUMENT", num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
+    target_arguments: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ConfigLayer {
+    gdb_executable: Option<String>,
+    gdb_startup_arguments: Option<String>,
+    gef_context_visible: Option<bool>,
+    source_paths: Option<Vec<PathBuf>>,
+    working_directory: Option<PathBuf>,
+    safe_mode: Option<bool>,
+    executable: Option<PathBuf>,
+    arguments: Option<String>,
+    attach: Option<u32>,
+    core_dump: Option<PathBuf>,
+    remote: Option<String>,
+}
+
+impl ConfigLayer {
+    fn overlay(&mut self, overlay: &Self) {
+        if overlay.attach.is_some() || overlay.core_dump.is_some() || overlay.remote.is_some() {
+            self.attach = None;
+            self.core_dump = None;
+            self.remote = None;
+        }
+        macro_rules! overlay_fields {
+            ($($field:ident),+ $(,)?) => {
+                $(if overlay.$field.is_some() {
+                    self.$field.clone_from(&overlay.$field);
+                })+
+            };
+        }
+        overlay_fields!(
+            gdb_executable,
+            gdb_startup_arguments,
+            gef_context_visible,
+            source_paths,
+            working_directory,
+            safe_mode,
+            executable,
+            arguments,
+            attach,
+            core_dump,
+            remote,
+        );
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct FileConfig {
-    gdb_executable: Option<String>,
-    gdb_startup_arguments: Option<String>,
-    gef_context_visible: Option<bool>,
-    source_path: Option<String>,
+    defaults: ConfigLayer,
+    profiles: BTreeMap<String, ConfigLayer>,
+}
+
+#[derive(Debug)]
+struct LoadedConfig {
+    path: PathBuf,
+    loaded_paths: Vec<PathBuf>,
+    config: FileConfig,
+    created: bool,
+    issues: Vec<ConfigurationIssue>,
+}
+
+#[derive(Debug)]
+struct ParsedConfig {
+    config: FileConfig,
+    locations: BTreeMap<(String, &'static str), usize>,
+    issues: Vec<ConfigurationIssue>,
+}
+
+#[derive(Debug, Default)]
+struct EnvironmentOverrides {
+    layer: ConfigLayer,
+    profile: Option<String>,
 }
 
 fn config_path() -> PathBuf {
     gtk::glib::user_config_dir().join("fgdb/config.conf")
 }
 
-fn read_user_config() -> FileConfig {
+fn read_user_config() -> LoadedConfig {
     let path = config_path();
     match crate::bounded::read_string(&path, MAX_CONFIG_BYTES) {
-        Ok(contents) => parse_user_config(&contents),
+        Ok(contents) => loaded_config_from_contents(path, &contents, false),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let _ = create_default_config(&path);
-            FileConfig::default()
+            match create_default_config(&path) {
+                Ok(()) => loaded_config_from_contents(path, DEFAULT_CONFIG, true),
+                Err(error) => fallback_loaded_config(
+                    path,
+                    format!("Could not create the default configuration: {error}"),
+                ),
+            }
         }
-        Err(_) => FileConfig::default(),
+        Err(error) => {
+            fallback_loaded_config(path, format!("Could not read the configuration: {error}"))
+        }
+    }
+}
+
+fn loaded_config_from_contents(path: PathBuf, contents: &str, created: bool) -> LoadedConfig {
+    let mut parsed = parse_user_config_with_diagnostics(contents, &path);
+    collect_validation_issues(&parsed.config, &parsed.locations, &path, &mut parsed.issues);
+    LoadedConfig {
+        loaded_paths: vec![path.clone()],
+        path,
+        config: parsed.config,
+        created,
+        issues: parsed.issues,
+    }
+}
+
+fn fallback_loaded_config(path: PathBuf, message: String) -> LoadedConfig {
+    let mut parsed = parse_user_config_with_diagnostics(DEFAULT_CONFIG, &path);
+    parsed
+        .issues
+        .push(ConfigurationIssue::file(&path, None, message));
+    LoadedConfig {
+        path,
+        loaded_paths: Vec::new(),
+        config: parsed.config,
+        created: false,
+        issues: parsed.issues,
     }
 }
 
@@ -235,37 +569,756 @@ fn create_default_config(path: &Path) -> std::io::Result<()> {
     file.write_all(DEFAULT_CONFIG.as_bytes())
 }
 
-fn parse_user_config(contents: &str) -> FileConfig {
+#[cfg(test)]
+fn parse_user_config(contents: &str) -> Result<FileConfig, String> {
+    let parsed = parse_user_config_with_diagnostics(contents, Path::new("<memory>"));
+    if let Some(issue) = parsed.issues.first() {
+        Err(format!("{}: {}", issue.location(), issue.message()))
+    } else {
+        Ok(parsed.config)
+    }
+}
+
+fn parse_user_config_with_diagnostics(contents: &str, path: &Path) -> ParsedConfig {
     let mut config = FileConfig::default();
-    for line in contents.lines() {
-        let line = line.trim();
+    let mut profile = Ok(None::<String>);
+    let mut seen = BTreeSet::new();
+    let mut locations = BTreeMap::new();
+    let mut issues = Vec::new();
+
+    for (index, raw_line) in contents.lines().enumerate() {
+        let line_number = index + 1;
+        let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
+        if line.starts_with('[') {
+            profile = parse_profile_header(line).map(Some).map_err(|message| {
+                issues.push(ConfigurationIssue::file(path, Some(line_number), message));
+            });
+            continue;
+        }
         let Some((key, value)) = line.split_once('=') else {
+            issues.push(ConfigurationIssue::file(
+                path,
+                Some(line_number),
+                "Expected KEY=VALUE",
+            ));
             continue;
         };
-        let key = key.trim();
-        let value = value.trim();
-        match key {
-            "gdb" | "gdb_executable" if !value.is_empty() => {
-                config.gdb_executable = Some(unquote_config_value(value).to_owned());
+        let Some(key) = canonical_config_key(key.trim()) else {
+            issues.push(ConfigurationIssue::file(
+                path,
+                Some(line_number),
+                format!("Unknown setting '{}'", key.trim()),
+            ));
+            continue;
+        };
+        let Ok(profile) = &profile else {
+            continue;
+        };
+        let section = profile.as_deref().unwrap_or(DEFAULT_SECTION);
+        if !seen.insert((section.to_owned(), key)) {
+            issues.push(ConfigurationIssue::file(
+                path,
+                Some(line_number),
+                format!("Duplicate '{key}' setting in {section}"),
+            ));
+            continue;
+        }
+        let layer = profile.as_ref().map_or(&mut config.defaults, |name| {
+            config.profiles.entry(name.clone()).or_default()
+        });
+        match set_config_value(layer, key, value.trim()) {
+            Ok(()) => {
+                locations.insert((section.to_owned(), key), line_number);
             }
-            "gdb_args" | "gdb_arguments" => {
-                config.gdb_startup_arguments = Some(value.to_owned());
+            Err(message) => {
+                issues.push(ConfigurationIssue::file(path, Some(line_number), message));
             }
-            "gef_context" | "gef.context" => {
-                if let Some(visible) = parse_gef_context(value) {
-                    config.gef_context_visible = Some(visible);
-                }
-            }
-            "source_path" | "source_paths" => {
-                config.source_path = Some(unquote_config_value(value).to_owned());
-            }
-            _ => {}
         }
     }
-    config
+
+    ParsedConfig {
+        config,
+        locations,
+        issues,
+    }
+}
+
+fn parse_profile_header(line: &str) -> Result<String, String> {
+    let header = line
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .ok_or_else(|| String::from("invalid section header"))?
+        .trim();
+    let name = header
+        .strip_prefix("profile ")
+        .or_else(|| header.strip_prefix("profile."))
+        .map(str::trim)
+        .map(unquote_config_value)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| String::from("expected [profile NAME]"))?;
+    Ok(name.to_owned())
+}
+
+fn canonical_config_key(key: &str) -> Option<&'static str> {
+    match key {
+        "gdb" | "gdb_executable" => Some("gdb"),
+        "gdb_args" | "gdb_arguments" => Some("gdb_args"),
+        "gef_context" | "gef.context" => Some("gef_context"),
+        "source_path" | "source_paths" => Some("source_path"),
+        "working_directory" | "cwd" => Some("working_directory"),
+        "safe_mode" => Some("safe_mode"),
+        "executable" => Some("executable"),
+        "arguments" | "args" => Some("arguments"),
+        "attach" | "pid" => Some("attach"),
+        "core" | "core_dump" => Some("core"),
+        "remote" => Some("remote"),
+        _ => None,
+    }
+}
+
+fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> Result<(), String> {
+    let unquoted = unquote_config_value(value);
+    let required = || {
+        (!unquoted.is_empty())
+            .then_some(unquoted)
+            .ok_or_else(|| format!("'{key}' cannot be empty"))
+    };
+    match key {
+        "gdb" => layer.gdb_executable = Some(required()?.to_owned()),
+        "gdb_args" => layer.gdb_startup_arguments = Some(value.to_owned()),
+        "gef_context" => {
+            layer.gef_context_visible = Some(
+                parse_boolean(unquoted)
+                    .ok_or_else(|| format!("Invalid gef_context value '{value}'"))?,
+            );
+        }
+        "source_path" => {
+            layer.source_paths = Some(env::split_paths(unquoted).collect());
+        }
+        "working_directory" => layer.working_directory = Some(PathBuf::from(required()?)),
+        "safe_mode" => {
+            layer.safe_mode = Some(
+                parse_boolean(unquoted)
+                    .ok_or_else(|| format!("Invalid safe_mode value '{value}'"))?,
+            );
+        }
+        "executable" => layer.executable = Some(PathBuf::from(required()?)),
+        "arguments" => layer.arguments = Some(value.to_owned()),
+        "attach" => {
+            let pid = required()?
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid process ID '{value}'"))?;
+            if pid == 0 {
+                return Err(String::from("Process ID must be greater than zero"));
+            }
+            layer.attach = Some(pid);
+        }
+        "core" => layer.core_dump = Some(PathBuf::from(required()?)),
+        "remote" => layer.remote = Some(required()?.to_owned()),
+        _ => unreachable!("canonical configuration key"),
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_file_config(config: &FileConfig) -> Result<(), String> {
+    validate_config_layer(&config.defaults, "the default configuration")?;
+    for (name, profile) in &config.profiles {
+        let mut merged = config.defaults.clone();
+        merged.overlay(profile);
+        validate_config_layer(&merged, &format!("profile '{name}'"))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn validate_config_layer(layer: &ConfigLayer, context: &str) -> Result<(), String> {
+    let modes = usize::from(layer.attach.is_some())
+        + usize::from(layer.core_dump.is_some())
+        + usize::from(layer.remote.is_some());
+    if modes > 1 {
+        return Err(format!(
+            "Invalid {context}: attach, core, and remote select different session types"
+        ));
+    }
+    if layer.core_dump.is_some() && layer.executable.is_none() {
+        return Err(format!(
+            "Invalid {context}: a core dump requires an executable"
+        ));
+    }
+    for (label, arguments) in [
+        ("gdb_args", layer.gdb_startup_arguments.as_deref()),
+        ("arguments", layer.arguments.as_deref()),
+    ] {
+        if let Some(arguments) = arguments {
+            shell_words::split(arguments)
+                .map_err(|error| format!("Invalid {context} {label}: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_validation_issues(
+    config: &FileConfig,
+    locations: &BTreeMap<(String, &'static str), usize>,
+    path: &Path,
+    issues: &mut Vec<ConfigurationIssue>,
+) {
+    collect_layer_validation_issues(
+        &config.defaults,
+        "the default configuration",
+        DEFAULT_SECTION,
+        None,
+        locations,
+        path,
+        issues,
+    );
+    for (name, profile) in &config.profiles {
+        let mut merged = config.defaults.clone();
+        merged.overlay(profile);
+        collect_layer_validation_issues(
+            &merged,
+            &format!("profile '{name}'"),
+            name,
+            Some(profile),
+            locations,
+            path,
+            issues,
+        );
+    }
+}
+
+fn collect_layer_validation_issues(
+    layer: &ConfigLayer,
+    context: &str,
+    section: &str,
+    declared: Option<&ConfigLayer>,
+    locations: &BTreeMap<(String, &'static str), usize>,
+    path: &Path,
+    issues: &mut Vec<ConfigurationIssue>,
+) {
+    let modes = [
+        ("attach", layer.attach.is_some()),
+        ("core", layer.core_dump.is_some()),
+        ("remote", layer.remote.is_some()),
+    ];
+    let selected_modes = modes
+        .iter()
+        .filter_map(|(key, selected)| selected.then_some(*key))
+        .collect::<Vec<_>>();
+    let validates_session = declared.is_none_or(|layer| {
+        layer.attach.is_some()
+            || layer.core_dump.is_some()
+            || layer.remote.is_some()
+            || layer.executable.is_some()
+    });
+    if validates_session && selected_modes.len() > 1 {
+        let line = selected_modes
+            .iter()
+            .filter_map(|key| configuration_line(locations, section, key))
+            .max();
+        push_configuration_issue(
+            issues,
+            ConfigurationIssue::file(
+                path,
+                line,
+                format!(
+                    "Invalid {context}: attach, core, and remote select different session types"
+                ),
+            ),
+        );
+    }
+    if validates_session && layer.core_dump.is_some() && layer.executable.is_none() {
+        push_configuration_issue(
+            issues,
+            ConfigurationIssue::file(
+                path,
+                configuration_line(locations, section, "core"),
+                format!("Invalid {context}: a core dump requires an executable"),
+            ),
+        );
+    }
+    for (key, arguments) in [
+        ("gdb_args", layer.gdb_startup_arguments.as_deref()),
+        ("arguments", layer.arguments.as_deref()),
+    ] {
+        let declared_here = declared.is_none_or(|layer| match key {
+            "gdb_args" => layer.gdb_startup_arguments.is_some(),
+            "arguments" => layer.arguments.is_some(),
+            _ => false,
+        });
+        if declared_here
+            && let Some(arguments) = arguments
+            && let Err(error) = shell_words::split(arguments)
+        {
+            push_configuration_issue(
+                issues,
+                ConfigurationIssue::file(
+                    path,
+                    configuration_line(locations, section, key),
+                    format!("Invalid {context} {key}: {error}"),
+                ),
+            );
+        }
+    }
+}
+
+fn configuration_line(
+    locations: &BTreeMap<(String, &'static str), usize>,
+    section: &str,
+    key: &'static str,
+) -> Option<usize> {
+    locations
+        .get(&(section.to_owned(), key))
+        .or_else(|| locations.get(&(DEFAULT_SECTION.to_owned(), key)))
+        .copied()
+}
+
+fn push_configuration_issue(issues: &mut Vec<ConfigurationIssue>, issue: ConfigurationIssue) {
+    if !issues.contains(&issue) {
+        issues.push(issue);
+    }
+}
+
+fn sanitize_config_layer(layer: &mut ConfigLayer) {
+    if layer
+        .gdb_startup_arguments
+        .as_deref()
+        .is_some_and(|arguments| shell_words::split(arguments).is_err())
+    {
+        layer.gdb_startup_arguments = None;
+    }
+    if layer
+        .arguments
+        .as_deref()
+        .is_some_and(|arguments| shell_words::split(arguments).is_err())
+    {
+        layer.arguments = None;
+    }
+    let modes = usize::from(layer.attach.is_some())
+        + usize::from(layer.core_dump.is_some())
+        + usize::from(layer.remote.is_some());
+    if modes > 1 {
+        layer.attach = None;
+        layer.core_dump = None;
+        layer.remote = None;
+    } else if layer.core_dump.is_some() && layer.executable.is_none() {
+        layer.core_dump = None;
+    }
+}
+
+fn read_environment_overrides() -> (EnvironmentOverrides, Vec<ConfigurationIssue>) {
+    let mut overrides = EnvironmentOverrides::default();
+    let mut issues = Vec::new();
+    overrides.layer.gdb_executable =
+        environment_string("FGDB_GDB", &mut issues).and_then(|value| {
+            if value.trim().is_empty() {
+                issues.push(ConfigurationIssue::external(
+                    "FGDB_GDB",
+                    "The debugger executable cannot be empty",
+                ));
+                None
+            } else {
+                Some(value)
+            }
+        });
+    overrides.layer.gdb_startup_arguments = environment_string("FGDB_GDB_ARGS", &mut issues)
+        .inspect(|value| {
+            if let Err(error) = shell_words::split(value) {
+                issues.push(ConfigurationIssue::external(
+                    "FGDB_GDB_ARGS",
+                    format!("Invalid GDB startup arguments: {error}"),
+                ));
+            }
+        });
+    overrides.layer.gef_context_visible = environment_string("FGDB_GEF_CONTEXT", &mut issues)
+        .and_then(|value| {
+            parse_boolean(&value).or_else(|| {
+                issues.push(ConfigurationIssue::external(
+                    "FGDB_GEF_CONTEXT",
+                    format!("Invalid value '{value}'"),
+                ));
+                None
+            })
+        });
+    overrides.layer.source_paths =
+        env::var_os("FGDB_SOURCE_PATH").map(|paths| env::split_paths(&paths).collect());
+    overrides.layer.working_directory = env::var_os("FGDB_WORKING_DIRECTORY").map(PathBuf::from);
+    overrides.layer.safe_mode =
+        environment_string("FGDB_SAFE_MODE", &mut issues).and_then(|value| {
+            parse_boolean(&value).or_else(|| {
+                issues.push(ConfigurationIssue::external(
+                    "FGDB_SAFE_MODE",
+                    format!("Invalid value '{value}'"),
+                ));
+                None
+            })
+        });
+    overrides.profile = environment_string("FGDB_PROFILE", &mut issues).and_then(|profile| {
+        if profile.trim().is_empty() {
+            issues.push(ConfigurationIssue::external(
+                "FGDB_PROFILE",
+                "The profile name cannot be empty",
+            ));
+            None
+        } else {
+            Some(profile)
+        }
+    });
+    (overrides, issues)
+}
+
+fn environment_string(name: &str, issues: &mut Vec<ConfigurationIssue>) -> Option<String> {
+    match env::var(name) {
+        Ok(value) => Some(value),
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => {
+            issues.push(ConfigurationIssue::external(
+                name,
+                "The value is not valid UTF-8",
+            ));
+            None
+        }
+    }
+}
+
+fn resolve_launch_config(
+    cli: Cli,
+    loaded: &LoadedConfig,
+    environment: EnvironmentOverrides,
+    current_directory: PathBuf,
+) -> Result<LaunchConfig, String> {
+    let config = &loaded.config;
+    let selected_profile = cli.profile.clone().or_else(|| environment.profile.clone());
+    let mut settings = config.defaults.clone();
+    if let Some(name) = selected_profile.as_ref() {
+        let profile = config
+            .profiles
+            .get(name)
+            .ok_or_else(|| format!("Unknown fgdb profile '{name}'"))?;
+        settings.overlay(profile);
+    }
+    settings.overlay(&environment.layer);
+    sanitize_config_layer(&mut settings);
+
+    let working_directory = cli
+        .working_directory
+        .clone()
+        .or_else(|| settings.working_directory.clone())
+        .unwrap_or(current_directory);
+    let initial_session = resolve_initial_session(&cli, &settings, &working_directory)?;
+    let safe_mode = cli.safe_mode || settings.safe_mode.unwrap_or(false);
+    let gdb_startup_arguments = if safe_mode {
+        Vec::new()
+    } else {
+        settings
+            .gdb_startup_arguments
+            .as_deref()
+            .map_or_else(|| Ok(Vec::new()), shell_words::split)
+            .map_err(|error| format!("Invalid GDB startup arguments: {error}"))?
+    };
+
+    let gdb_executable = settings
+        .gdb_executable
+        .unwrap_or_else(|| String::from("gdb"));
+    let source_paths = settings.source_paths.unwrap_or_default();
+    let configuration_report = Arc::new(ConfigurationReport {
+        active_path: loaded.path.clone(),
+        loaded_paths: loaded.loaded_paths.clone(),
+        created: loaded.created,
+        selected_profile: selected_profile.clone(),
+        issues: loaded.issues.clone(),
+        effective: effective_configuration(
+            selected_profile.as_deref(),
+            &gdb_executable,
+            &gdb_startup_arguments,
+            settings.gef_context_visible.unwrap_or(false),
+            &source_paths,
+            &working_directory,
+            safe_mode,
+            initial_session.as_ref(),
+        ),
+    });
+
+    Ok(LaunchConfig {
+        gdb_executable,
+        gdb_startup_arguments,
+        gef_context_visible: settings.gef_context_visible.unwrap_or(false),
+        source_paths,
+        working_directory,
+        safe_mode,
+        initial_session,
+        configuration_report,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn effective_configuration(
+    selected_profile: Option<&str>,
+    gdb_executable: &str,
+    gdb_startup_arguments: &[String],
+    gef_context_visible: bool,
+    source_paths: &[PathBuf],
+    working_directory: &Path,
+    safe_mode: bool,
+    initial_session: Option<&DebugSession>,
+) -> Vec<EffectiveConfigurationEntry> {
+    let mut entries = vec![
+        EffectiveConfigurationEntry::new("profile", selected_profile.unwrap_or("none")),
+        EffectiveConfigurationEntry::new("gdb", gdb_executable),
+        EffectiveConfigurationEntry::new(
+            "gdb_args",
+            if gdb_startup_arguments.is_empty() {
+                String::from("none")
+            } else {
+                shell_words::join(gdb_startup_arguments)
+            },
+        ),
+        EffectiveConfigurationEntry::new(
+            "gef_context",
+            if gef_context_visible { "show" } else { "hide" },
+        ),
+        EffectiveConfigurationEntry::new(
+            "source_path",
+            if source_paths.is_empty() {
+                String::from("none")
+            } else {
+                source_paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(":")
+            },
+        ),
+        EffectiveConfigurationEntry::new(
+            "working_directory",
+            working_directory.display().to_string(),
+        ),
+        EffectiveConfigurationEntry::new("safe_mode", safe_mode.to_string()),
+        EffectiveConfigurationEntry::new(
+            "session",
+            initial_session.map_or("none", DebugSession::kind_label),
+        ),
+    ];
+    match initial_session {
+        Some(DebugSession::Launch {
+            executable,
+            arguments,
+            ..
+        }) => {
+            entries.push(EffectiveConfigurationEntry::new(
+                "executable",
+                executable.display().to_string(),
+            ));
+            entries.push(EffectiveConfigurationEntry::new(
+                "arguments",
+                if arguments.is_empty() {
+                    String::from("none")
+                } else {
+                    shell_words::join(arguments)
+                },
+            ));
+        }
+        Some(DebugSession::Attach { pid, executable }) => {
+            entries.push(EffectiveConfigurationEntry::new("attach", pid.to_string()));
+            if let Some(executable) = executable {
+                entries.push(EffectiveConfigurationEntry::new(
+                    "executable",
+                    executable.display().to_string(),
+                ));
+            }
+        }
+        Some(DebugSession::CoreDump {
+            executable,
+            core_dump,
+        }) => {
+            entries.push(EffectiveConfigurationEntry::new(
+                "executable",
+                executable.display().to_string(),
+            ));
+            entries.push(EffectiveConfigurationEntry::new(
+                "core",
+                core_dump.display().to_string(),
+            ));
+        }
+        Some(DebugSession::Remote {
+            endpoint,
+            executable,
+            ..
+        }) => {
+            entries.push(EffectiveConfigurationEntry::new("remote", endpoint));
+            if let Some(executable) = executable {
+                entries.push(EffectiveConfigurationEntry::new(
+                    "executable",
+                    executable.display().to_string(),
+                ));
+            }
+        }
+        None => {}
+    }
+    entries
+}
+
+fn resolve_initial_session(
+    cli: &Cli,
+    settings: &ConfigLayer,
+    working_directory: &Path,
+) -> Result<Option<DebugSession>, String> {
+    let explicit_modes = usize::from(cli.attach.is_some())
+        + usize::from(cli.core.is_some())
+        + usize::from(cli.remote.is_some());
+    if explicit_modes > 1 {
+        return Err(String::from(
+            "--attach, --core, and --remote cannot be used together",
+        ));
+    }
+    if cli.target.is_some() && (explicit_modes > 0 || cli.executable.is_some()) {
+        return Err(String::from(
+            "A positional executable cannot be combined with --attach, --core, --remote, or --executable",
+        ));
+    }
+    if let Some(executable) = cli.target.as_ref() {
+        return Ok(Some(DebugSession::Launch {
+            executable: PathBuf::from(executable),
+            arguments: cli.target_arguments.clone(),
+            environment: Vec::new(),
+            working_directory: working_directory.to_path_buf(),
+        }));
+    }
+
+    let configured_modes = usize::from(settings.attach.is_some())
+        + usize::from(settings.core_dump.is_some())
+        + usize::from(settings.remote.is_some());
+    if explicit_modes == 0 && configured_modes > 1 {
+        return Err(String::from(
+            "The selected configuration combines attach, core, and remote session types",
+        ));
+    }
+
+    let executable = cli
+        .executable
+        .clone()
+        .or_else(|| settings.executable.clone());
+    if let Some(pid) = cli
+        .attach
+        .or_else(|| (explicit_modes == 0).then_some(settings.attach).flatten())
+    {
+        if pid == 0 {
+            return Err(String::from("--attach PID must be greater than zero"));
+        }
+        return Ok(Some(DebugSession::Attach { pid, executable }));
+    }
+    if let Some(core_dump) = cli.core.clone().or_else(|| {
+        (explicit_modes == 0)
+            .then(|| settings.core_dump.clone())
+            .flatten()
+    }) {
+        let executable = executable.ok_or_else(|| {
+            String::from("--core CORE requires --executable EXE or a profile executable")
+        })?;
+        return Ok(Some(DebugSession::CoreDump {
+            executable,
+            core_dump,
+        }));
+    }
+    if let Some(endpoint) = cli.remote.clone().or_else(|| {
+        (explicit_modes == 0)
+            .then(|| settings.remote.clone())
+            .flatten()
+    }) {
+        if endpoint.trim().is_empty() {
+            return Err(String::from("--remote HOST:PORT cannot be empty"));
+        }
+        return Ok(Some(DebugSession::Remote {
+            endpoint,
+            executable,
+            extended: false,
+            remote_executable: None,
+        }));
+    }
+    if let Some(executable) = executable {
+        let arguments = settings
+            .arguments
+            .as_deref()
+            .map_or_else(|| Ok(Vec::new()), shell_words::split)
+            .map_err(|error| format!("Invalid target arguments: {error}"))?;
+        return Ok(Some(DebugSession::Launch {
+            executable,
+            arguments,
+            environment: Vec::new(),
+            working_directory: working_directory.to_path_buf(),
+        }));
+    }
+    Ok(None)
+}
+
+fn validate_check_config_arguments(cli: &Cli) -> Result<(), String> {
+    if cli.attach.is_some()
+        || cli.core.is_some()
+        || cli.remote.is_some()
+        || cli.executable.is_some()
+        || cli.working_directory.is_some()
+        || cli.safe_mode
+        || cli.target.is_some()
+        || !cli.target_arguments.is_empty()
+    {
+        return Err(String::from(
+            "--check-config can only be combined with --profile",
+        ));
+    }
+    Ok(())
+}
+
+fn config_check_report(loaded: &LoadedConfig, selected_profile: Option<&str>) -> String {
+    let status = if loaded.issues.is_empty() {
+        if loaded.created {
+            "Created and validated"
+        } else {
+            "Validated"
+        }
+    } else {
+        "Configuration has errors"
+    };
+    let profile = selected_profile.map_or_else(
+        || {
+            if loaded.config.profiles.is_empty() {
+                String::from("none")
+            } else {
+                loaded
+                    .config
+                    .profiles
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        },
+        |name| name.to_owned(),
+    );
+    let loaded_files = if loaded.loaded_paths.is_empty() {
+        String::from("none")
+    } else {
+        loaded
+            .loaded_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut report = format!(
+        "{status}\nActive file: {}\nLoaded files: {loaded_files}\nProfiles: {profile}\n",
+        loaded.path.display()
+    );
+    if !loaded.issues.is_empty() {
+        report.push_str("Issues:\n");
+        for issue in &loaded.issues {
+            report.push_str(&format!("  {}: {}\n", issue.location(), issue.message()));
+        }
+    }
+    report
 }
 
 fn unquote_config_value(value: &str) -> &str {
@@ -280,7 +1333,7 @@ fn unquote_config_value(value: &str) -> &str {
     }
 }
 
-fn parse_gef_context(value: &str) -> Option<bool> {
+fn parse_boolean(value: &str) -> Option<bool> {
     match value
         .trim()
         .trim_matches(['\'', '"'])
@@ -295,18 +1348,43 @@ fn parse_gef_context(value: &str) -> Option<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DebugSession, LaunchConfig};
-    use std::path::PathBuf;
+    use super::{
+        Cli, ConfigLayer, DebugSession, EnvironmentOverrides, FileConfig, LaunchConfig,
+        fallback_loaded_config, loaded_config_from_contents, parse_user_config,
+        resolve_launch_config, validate_file_config,
+    };
+    use clap::Parser;
+    use std::{path::PathBuf, sync::Arc};
+
+    fn resolve(arguments: &[&str], contents: &str) -> LaunchConfig {
+        let cli = Cli::try_parse_from(arguments).unwrap();
+        let loaded =
+            loaded_config_from_contents(PathBuf::from("/tmp/config.conf"), contents, false);
+        resolve_launch_config(
+            cli,
+            &loaded,
+            EnvironmentOverrides::default(),
+            PathBuf::from("/current"),
+        )
+        .unwrap()
+    }
 
     #[test]
-    fn assembles_special_gef_startup_before_target() {
+    fn assembles_special_gef_startup_before_launch_target() {
         let configuration = LaunchConfig {
             gdb_executable: String::from("/usr/bin/gdb"),
             gdb_startup_arguments: vec![String::from("-ex"), String::from("init-gef-special")],
             gef_context_visible: false,
             source_paths: Vec::new(),
-            target_arguments: vec![String::from("/tmp/debug target"), String::from("arg")],
             working_directory: PathBuf::from("/tmp"),
+            safe_mode: false,
+            initial_session: Some(DebugSession::Launch {
+                executable: PathBuf::from("/tmp/debug target"),
+                arguments: vec![String::from("arg")],
+                environment: Vec::new(),
+                working_directory: PathBuf::from("/tmp"),
+            }),
+            configuration_report: Arc::new(super::ConfigurationReport::default()),
         };
 
         assert_eq!(
@@ -324,24 +1402,107 @@ mod tests {
     }
 
     #[test]
-    fn derives_an_editable_launch_session_from_process_arguments() {
-        let configuration = LaunchConfig {
-            gdb_executable: String::from("gdb"),
-            gdb_startup_arguments: Vec::new(),
-            gef_context_visible: false,
-            source_paths: Vec::new(),
-            target_arguments: vec![
-                String::from("/tmp/debug target"),
-                String::from("first argument"),
+    fn parses_a_positional_launch_and_preserves_trailing_options() {
+        let configuration = resolve(
+            &[
+                "fgdb",
+                "--working-directory",
+                "/work",
+                "/tmp/program",
+                "--flag",
+                "two words",
             ],
-            working_directory: PathBuf::from("/tmp/project"),
-        };
-
+            "gdb=gdb\n",
+        );
         assert_eq!(
             configuration.initial_session(),
             Some(DebugSession::Launch {
-                executable: PathBuf::from("/tmp/debug target"),
-                arguments: vec![String::from("first argument")],
+                executable: PathBuf::from("/tmp/program"),
+                arguments: vec![String::from("--flag"), String::from("two words")],
+                environment: Vec::new(),
+                working_directory: PathBuf::from("/work"),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_attach_core_and_remote_sessions() {
+        assert_eq!(
+            resolve(&["fgdb", "--attach", "42"], "gdb=gdb\n").initial_session(),
+            Some(DebugSession::Attach {
+                pid: 42,
+                executable: None,
+            })
+        );
+        assert_eq!(
+            resolve(
+                &["fgdb", "--core", "/tmp/core", "--executable", "/tmp/app",],
+                "gdb=gdb\n",
+            )
+            .initial_session(),
+            Some(DebugSession::CoreDump {
+                executable: PathBuf::from("/tmp/app"),
+                core_dump: PathBuf::from("/tmp/core"),
+            })
+        );
+        assert_eq!(
+            resolve(
+                &[
+                    "fgdb",
+                    "--remote",
+                    "localhost:1234",
+                    "--executable",
+                    "/tmp/app",
+                ],
+                "gdb=gdb\n",
+            )
+            .initial_session(),
+            Some(DebugSession::Remote {
+                endpoint: String::from("localhost:1234"),
+                executable: Some(PathBuf::from("/tmp/app")),
+                extended: false,
+                remote_executable: None,
+            })
+        );
+    }
+
+    #[test]
+    fn safe_mode_skips_configured_startup_arguments() {
+        let configuration = resolve(
+            &["fgdb", "--safe-mode", "/tmp/program"],
+            "gdb=/usr/bin/gdb\ngdb_args=-ex init-gef-special\n",
+        );
+        assert_eq!(
+            configuration.gdb_arguments(),
+            ["/usr/bin/gdb", "--quiet", "--nx", "--args", "/tmp/program"]
+        );
+    }
+
+    #[test]
+    fn safe_mode_can_recover_from_malformed_startup_arguments() {
+        let configuration = resolve(
+            &["fgdb", "--safe-mode"],
+            "gdb=/usr/bin/gdb\ngdb_args='unterminated\n",
+        );
+        assert_eq!(
+            configuration.gdb_arguments(),
+            ["/usr/bin/gdb", "--quiet", "--nx"]
+        );
+    }
+
+    #[test]
+    fn named_profiles_supply_sessions_and_can_be_overridden() {
+        let contents = "gdb=/usr/bin/gdb\n[profile local]\nexecutable=/tmp/app\narguments=--count 4\nworking_directory=/tmp/project\n";
+        let configuration = resolve(&["fgdb", "--profile", "local"], contents);
+        assert_eq!(
+            configuration.working_directory,
+            PathBuf::from("/tmp/project")
+        );
+        assert_eq!(
+            configuration.initial_session(),
+            Some(DebugSession::Launch {
+                executable: PathBuf::from("/tmp/app"),
+                arguments: vec![String::from("--count"), String::from("4")],
                 environment: Vec::new(),
                 working_directory: PathBuf::from("/tmp/project"),
             })
@@ -349,35 +1510,140 @@ mod tests {
     }
 
     #[test]
-    fn gef_context_defaults_can_be_explicitly_made_visible() {
-        for value in ["show", "ON", " true ", "yes", "1"] {
-            assert_eq!(super::parse_gef_context(value), Some(true), "{value}");
-        }
-        for value in ["hide", "off", "false", "no", "0"] {
-            assert_eq!(super::parse_gef_context(value), Some(false), "{value}");
-        }
-        assert_eq!(super::parse_gef_context("unexpected"), None);
+    fn an_explicit_session_replaces_the_profile_session_type() {
+        let contents = "gdb=gdb\n[profile attached]\nattach=42\nexecutable=/tmp/app\n";
+        let configuration = resolve(
+            &[
+                "fgdb",
+                "--profile",
+                "attached",
+                "--remote",
+                "localhost:1234",
+            ],
+            contents,
+        );
+        assert_eq!(
+            configuration.initial_session(),
+            Some(DebugSession::Remote {
+                endpoint: String::from("localhost:1234"),
+                executable: Some(PathBuf::from("/tmp/app")),
+                extended: false,
+                remote_executable: None,
+            })
+        );
     }
 
     #[test]
-    fn reads_gef_context_from_the_user_config_format() {
+    fn config_validation_rejects_unknown_duplicate_and_conflicting_settings() {
+        assert!(parse_user_config("unknown=value\n").is_err());
+        assert!(parse_user_config("gdb=gdb\ngdb_executable=/usr/bin/gdb\n").is_err());
+        let config =
+            parse_user_config("gdb=gdb\n[profile broken]\nattach=12\nremote=localhost:1234\n")
+                .unwrap();
+        assert!(validate_file_config(&config).is_err());
+    }
+
+    #[test]
+    fn reports_every_parse_problem_with_its_file_and_line() {
+        let loaded = loaded_config_from_contents(
+            PathBuf::from("/tmp/fgdb.conf"),
+            "gdb=/usr/bin/gdb\nunknown=value\nsafe_mode=perhaps\nattach=0\n",
+            false,
+        );
+        assert_eq!(loaded.issues.len(), 3);
+        assert_eq!(loaded.issues[0].location(), "/tmp/fgdb.conf:2");
+        assert_eq!(loaded.issues[1].location(), "/tmp/fgdb.conf:3");
+        assert_eq!(loaded.issues[2].location(), "/tmp/fgdb.conf:4");
+        assert!(loaded.issues[0].message().contains("Unknown setting"));
         assert_eq!(
-            super::parse_user_config(
+            loaded.config.defaults.gdb_executable.as_deref(),
+            Some("/usr/bin/gdb")
+        );
+        assert_eq!(loaded.config.defaults.safe_mode, None);
+        assert_eq!(loaded.config.defaults.attach, None);
+    }
+
+    #[test]
+    fn file_failures_fall_back_to_defaults_and_remain_visible() {
+        let loaded = fallback_loaded_config(
+            PathBuf::from("/protected/fgdb/config.conf"),
+            String::from("Could not read the configuration: Permission denied"),
+        );
+        assert!(loaded.loaded_paths.is_empty());
+        assert_eq!(loaded.issues.len(), 1);
+        assert_eq!(loaded.issues[0].location(), "/protected/fgdb/config.conf");
+        assert!(loaded.issues[0].message().contains("Permission denied"));
+        assert_eq!(
+            loaded.config.defaults.gdb_executable.as_deref(),
+            Some("gdb")
+        );
+    }
+
+    #[test]
+    fn invalid_file_values_are_excluded_from_the_effective_configuration() {
+        let cli = Cli::try_parse_from(["fgdb"]).unwrap();
+        let loaded = loaded_config_from_contents(
+            PathBuf::from("/tmp/fgdb.conf"),
+            "gdb=/usr/bin/gdb\ngdb_args='unterminated\nattach=41\nremote=localhost:1234\n",
+            false,
+        );
+        let configuration = resolve_launch_config(
+            cli,
+            &loaded,
+            EnvironmentOverrides::default(),
+            PathBuf::from("/current"),
+        )
+        .unwrap();
+        assert!(configuration.gdb_startup_arguments.is_empty());
+        assert_eq!(configuration.initial_session(), None);
+        assert_eq!(configuration.configuration_report().issues().len(), 2);
+        assert_eq!(
+            configuration
+                .configuration_report()
+                .effective()
+                .iter()
+                .find(|entry| entry.name() == "gdb")
+                .map(super::EffectiveConfigurationEntry::value),
+            Some("/usr/bin/gdb")
+        );
+    }
+
+    #[test]
+    fn reads_existing_global_configuration_aliases() {
+        assert_eq!(
+            parse_user_config(
                 "# fgdb\ngdb=/usr/bin/gdb\ngdb_args=-ex init-gef-special\ngef_context=show\nsource_path='/src/one:/src/two'\n"
-            ),
-            super::FileConfig {
-                gdb_executable: Some(String::from("/usr/bin/gdb")),
-                gdb_startup_arguments: Some(String::from("-ex init-gef-special")),
-                gef_context_visible: Some(true),
-                source_path: Some(String::from("/src/one:/src/two")),
+            )
+            .unwrap(),
+            FileConfig {
+                defaults: ConfigLayer {
+                    gdb_executable: Some(String::from("/usr/bin/gdb")),
+                    gdb_startup_arguments: Some(String::from("-ex init-gef-special")),
+                    gef_context_visible: Some(true),
+                    source_paths: Some(vec![PathBuf::from("/src/one"), PathBuf::from("/src/two")]),
+                    ..ConfigLayer::default()
+                },
+                ..FileConfig::default()
             }
         );
-        assert_eq!(
-            super::parse_user_config("gef.context='hide'\nunknown=value\n"),
-            super::FileConfig {
-                gef_context_visible: Some(false),
-                ..super::FileConfig::default()
-            }
-        );
+    }
+
+    #[test]
+    fn help_and_version_are_terminal_actions() {
+        for argument in ["--help", "--version"] {
+            let error = Cli::try_parse_from(["fgdb", argument]).unwrap_err();
+            assert!(matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ));
+        }
+    }
+
+    #[test]
+    fn unknown_frontend_options_fail_but_inferior_options_are_preserved() {
+        assert!(Cli::try_parse_from(["fgdb", "--unknown"]).is_err());
+        let cli = Cli::try_parse_from(["fgdb", "/tmp/app", "--unknown"]).unwrap();
+        assert_eq!(cli.target.as_deref(), Some("/tmp/app"));
+        assert_eq!(cli.target_arguments, ["--unknown"]);
     }
 }

@@ -71,22 +71,22 @@ pub(super) fn request_heap_inspection(
     client: Rc<MiClient>,
     request: HeapInspectionRequest,
 ) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+    if !current_ui.stopped_inspection_available() {
+        return;
+    }
     let target_expression = match request.action {
         HeapInspectionAction::Chunk => match validated_heap_expression(&request.expression) {
             Ok(expression) => Some(expression.to_owned()),
             Err(error) => {
-                let Some(current_ui) = ui.upgrade() else {
-                    return;
-                };
                 let generation = current_ui.current_stop_refresh_generation();
                 current_ui.show_heap_inspection_error(generation, "heap chunk", &error);
                 return;
             }
         },
         _ => None,
-    };
-    let Some(current_ui) = ui.upgrade() else {
-        return;
     };
     if request.action == HeapInspectionAction::Backend {
         let allocator = current_ui.allocator_identity();

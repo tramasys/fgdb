@@ -159,16 +159,55 @@ impl TargetArchitecture {
         Self::infer_from_register_names_with_bits(names, None)
     }
 
-    pub fn infer_from_register_names_with_bits<T: AsRef<str>>(
-        names: &[T],
-        pointer_bits: Option<u32>,
-    ) -> Self {
-        let has = |name: &str| names.iter().any(|candidate| candidate.as_ref() == name);
-        if has("rip") || has("rax") {
+    pub fn infer_from_register_names_with_bits<I, T>(names: I, pointer_bits: Option<u32>) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<str>,
+    {
+        let mut rip_or_rax = false;
+        let mut eip_or_eax = false;
+        let mut s390 = false;
+        let mut powerpc = false;
+        let mut x30 = false;
+        let mut sp_or_pc = false;
+        let mut cpsr = false;
+        let mut orig_a0_or_badv = false;
+        let mut r31 = false;
+        let mut x31 = false;
+        let mut a7 = false;
+        let mut zero = false;
+        let mut ra = false;
+        let mut tp = false;
+        let mut badvaddr = false;
+        let mut hi = false;
+        let mut lo = false;
+        for name in names {
+            match name.as_ref() {
+                "rip" | "rax" => rip_or_rax = true,
+                "eip" | "eax" => eip_or_eax = true,
+                "pswa" | "pswm" => s390 = true,
+                "xer" | "ctr" => powerpc = true,
+                "x30" => x30 = true,
+                "sp" | "pc" => sp_or_pc = true,
+                "cpsr" => cpsr = true,
+                "orig_a0" | "badv" => orig_a0_or_badv = true,
+                "r31" => r31 = true,
+                "x31" => x31 = true,
+                "a7" => a7 = true,
+                "zero" => zero = true,
+                "ra" => ra = true,
+                "tp" => tp = true,
+                "badvaddr" => badvaddr = true,
+                "hi" => hi = true,
+                "lo" => lo = true,
+                _ => {}
+            }
+        }
+        if rip_or_rax {
             Self::X86_64
-        } else if has("eip") || has("eax") {
+        } else if eip_or_eax {
             Self::X86
-        } else if has("pswa") || has("pswm") {
+        } else if s390 {
             if pointer_bits == Some(64) {
                 Self::S390x
             } else if pointer_bits == Some(32) {
@@ -176,7 +215,7 @@ impl TargetArchitecture {
             } else {
                 Self::Unknown
             }
-        } else if has("xer") || has("ctr") {
+        } else if powerpc {
             if pointer_bits == Some(64) {
                 Self::PowerPc64
             } else if pointer_bits == Some(32) {
@@ -184,19 +223,19 @@ impl TargetArchitecture {
             } else {
                 Self::Unknown
             }
-        } else if has("x30") && (has("sp") || has("pc")) {
+        } else if x30 && sp_or_pc {
             Self::AArch64
-        } else if has("cpsr") {
+        } else if cpsr {
             Self::Arm
-        } else if (has("orig_a0") || has("badv")) && has("r31") {
+        } else if orig_a0_or_badv && r31 {
             Self::LoongArch64
-        } else if has("x31") || (has("a7") && has("zero") && has("ra") && has("tp")) {
+        } else if x31 || (a7 && zero && ra && tp) {
             match pointer_bits {
                 Some(32) => Self::RiscV32,
                 Some(64) => Self::RiscV64,
                 _ => Self::Unknown,
             }
-        } else if has("badvaddr") && has("hi") && has("lo") {
+        } else if badvaddr && hi && lo {
             match pointer_bits {
                 Some(64) => Self::Mips64,
                 Some(32) => Self::Mips32,
@@ -1225,7 +1264,7 @@ mod tests {
     fn recognizes_loongarch_without_treating_zero_as_a_pointer() {
         assert_eq!(
             TargetArchitecture::infer_from_register_names_with_bits(
-                &["r0", "r31", "orig_a0", "badv"],
+                ["r0", "r31", "orig_a0", "badv"],
                 Some(64),
             ),
             TargetArchitecture::LoongArch64
@@ -1241,7 +1280,7 @@ mod tests {
         assert_eq!(TargetArchitecture::S390x.scalar_register_bits("a0", 64), 32);
         assert_eq!(
             TargetArchitecture::infer_from_register_names_with_bits(
-                &["x0", "x30", "sp", "pc", "pstate"],
+                ["x0", "x30", "sp", "pc", "pstate"],
                 Some(32),
             ),
             TargetArchitecture::AArch64

@@ -201,7 +201,7 @@ fn request_register_values(
         let current = ui.target_architecture();
         let detected = if current == TargetArchitecture::Unknown {
             TargetArchitecture::infer_from_register_names_with_bits(
-                &names,
+                names.iter(),
                 Some(ui.target_pointer_bits()),
             )
         } else {
@@ -554,12 +554,10 @@ fn request_next_variable_update(client: &MiClient, state: Rc<RefCell<VariableRef
                     discard_variable_refresh(client, &state_for_response);
                     return;
                 }
-                let updates = if record.is_done() {
-                    crate::debugger::variable_updates(&record)
-                } else {
-                    Vec::new()
-                };
-                let update = updates.into_iter().find(|update| update.varobj == varobj);
+                let update = record
+                    .is_done()
+                    .then(|| crate::debugger::variable_update_named(&record, &varobj))
+                    .flatten();
                 {
                     let mut state = state_for_response.borrow_mut();
                     let invalid = !record.is_done()
@@ -1204,12 +1202,11 @@ fn continue_stack_refresh(
         .upgrade()
         .map_or(TargetArchitecture::Unknown, |ui| ui.target_architecture());
     let architecture = if architecture == TargetArchitecture::Unknown {
-        let names = registers
-            .iter()
-            .map(|register| register.name.as_str())
-            .collect::<Vec<_>>();
         let bits = ui.upgrade().map(|ui| ui.target_pointer_bits());
-        TargetArchitecture::infer_from_register_names_with_bits(&names, bits)
+        TargetArchitecture::infer_from_register_names_with_bits(
+            registers.iter().map(|register| register.name.as_str()),
+            bits,
+        )
     } else {
         architecture
     };
@@ -1341,12 +1338,11 @@ pub(super) fn request_stack_memory(
         .upgrade()
         .map_or(TargetArchitecture::Unknown, |ui| ui.target_architecture());
     let architecture = if architecture == TargetArchitecture::Unknown {
-        let names = registers
-            .iter()
-            .map(|register| register.name.as_str())
-            .collect::<Vec<_>>();
         let bits = ui.upgrade().map(|ui| ui.target_pointer_bits());
-        TargetArchitecture::infer_from_register_names_with_bits(&names, bits)
+        TargetArchitecture::infer_from_register_names_with_bits(
+            registers.iter().map(|register| register.name.as_str()),
+            bits,
+        )
     } else {
         architecture
     };

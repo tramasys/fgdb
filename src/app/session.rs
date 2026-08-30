@@ -54,6 +54,49 @@ impl SessionController {
         self.run_sequence(commands, SequenceCompletion::Configure(session));
     }
 
+    pub fn configure_initial(self: &Rc<Self>, session: DebugSession) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        if self.busy.replace(true) {
+            return;
+        }
+        self.configured_environment.borrow_mut().clear();
+        ui.set_session_pending(true);
+        ui.set_status(
+            "Configuring startup session",
+            &format!("Preparing {} target…", session.kind_label().to_lowercase()),
+            None,
+        );
+        self.run_sequence(
+            session_commands(&session, &HashSet::new()),
+            SequenceCompletion::Configure(session),
+        );
+    }
+
+    pub fn restore(self: &Rc<Self>, session: DebugSession) {
+        let Some(ui) = self.ui.upgrade() else {
+            return;
+        };
+        if self.busy.replace(true) {
+            return;
+        }
+        self.configured_environment.borrow_mut().clear();
+        ui.set_session_pending(true);
+        ui.set_status(
+            "Restoring session",
+            &format!(
+                "Reconnecting the {} target…",
+                session.kind_label().to_lowercase()
+            ),
+            None,
+        );
+        self.run_sequence(
+            session_commands(&session, &HashSet::new()),
+            SequenceCompletion::Configure(session),
+        );
+    }
+
     pub fn action(self: &Rc<Self>, action: SessionAction) {
         let Some(ui) = self.ui.upgrade() else {
             return;
@@ -270,6 +313,23 @@ fn cleanup_commands(session: Option<&DebugSession>, inferior_started: bool) -> V
     }
 }
 
+pub(super) fn shutdown_cleanup_command(
+    session: Option<&DebugSession>,
+    inferior_started: bool,
+) -> Option<String> {
+    match session {
+        Some(DebugSession::Launch { .. }) if inferior_started => console_command("kill").into(),
+        Some(DebugSession::Attach { .. }) if inferior_started => {
+            String::from("-target-detach").into()
+        }
+        Some(DebugSession::Remote { .. }) => String::from("-target-disconnect").into(),
+        Some(DebugSession::Launch { .. })
+        | Some(DebugSession::Attach { .. })
+        | Some(DebugSession::CoreDump { .. })
+        | None => None,
+    }
+}
+
 fn session_commands(session: &DebugSession, old_environment: &HashSet<String>) -> Vec<String> {
     let mut commands = Vec::new();
     for name in old_environment {
@@ -357,7 +417,7 @@ fn console_command(command: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_commands, session_commands};
+    use super::{cleanup_commands, session_commands, shutdown_cleanup_command};
     use crate::config::DebugSession;
     use std::{collections::HashSet, path::PathBuf};
 
@@ -449,6 +509,39 @@ mod tests {
         assert_eq!(
             cleanup_commands(Some(&remote), true),
             ["-target-disconnect"]
+        );
+    }
+
+    #[test]
+    fn shutdown_kills_launches_but_detaches_external_targets() {
+        let launch = DebugSession::Launch {
+            executable: PathBuf::from("/tmp/app"),
+            arguments: Vec::new(),
+            environment: Vec::new(),
+            working_directory: PathBuf::from("/tmp"),
+        };
+        assert_eq!(
+            shutdown_cleanup_command(Some(&launch), true).as_deref(),
+            Some("-interpreter-exec console \"kill\"")
+        );
+        let attach = DebugSession::Attach {
+            pid: 42,
+            executable: None,
+        };
+        assert_eq!(
+            shutdown_cleanup_command(Some(&attach), true).as_deref(),
+            Some("-target-detach")
+        );
+        assert!(shutdown_cleanup_command(Some(&attach), false).is_none());
+        let remote = DebugSession::Remote {
+            endpoint: String::from("localhost:1234"),
+            executable: None,
+            extended: false,
+            remote_executable: None,
+        };
+        assert_eq!(
+            shutdown_cleanup_command(Some(&remote), false).as_deref(),
+            Some("-target-disconnect")
         );
     }
 }

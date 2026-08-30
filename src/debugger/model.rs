@@ -332,6 +332,7 @@ pub fn variable_object(record: &MiRecord, display_name: &str) -> Option<Variable
     })
 }
 
+#[cfg(test)]
 pub fn variable_updates(record: &MiRecord) -> Vec<VariableUpdate> {
     record
         .field("changelist")
@@ -339,24 +340,35 @@ pub fn variable_updates(record: &MiRecord) -> Vec<VariableUpdate> {
         .into_iter()
         .flatten()
         .filter_map(tuple_from_item)
-        .filter_map(|tuple| {
-            let in_scope = match constant(tuple, "in_scope") {
-                Some("true") => Some(true),
-                Some("false" | "invalid") => Some(false),
-                _ => None,
-            };
-            Some(VariableUpdate {
-                varobj: constant(tuple, "name")?.to_owned(),
-                value: owned_constant(tuple, "value"),
-                in_scope,
-                type_changed: constant(tuple, "type_changed") == Some("true"),
-                new_type: owned_constant(tuple, "new_type"),
-                new_num_children: constant(tuple, "new_num_children")
-                    .and_then(|value| value.parse().ok()),
-                has_more: constant(tuple, "has_more").map(|value| value == "1"),
-            })
-        })
+        .filter_map(variable_update)
         .collect()
+}
+
+pub fn variable_update_named(record: &MiRecord, varobj: &str) -> Option<VariableUpdate> {
+    record
+        .field("changelist")
+        .and_then(MiValue::as_list)?
+        .iter()
+        .filter_map(tuple_from_item)
+        .find(|tuple| constant(tuple, "name") == Some(varobj))
+        .and_then(variable_update)
+}
+
+fn variable_update(tuple: &[MiResult]) -> Option<VariableUpdate> {
+    let in_scope = match constant(tuple, "in_scope") {
+        Some("true") => Some(true),
+        Some("false" | "invalid") => Some(false),
+        _ => None,
+    };
+    Some(VariableUpdate {
+        varobj: constant(tuple, "name")?.to_owned(),
+        value: owned_constant(tuple, "value"),
+        in_scope,
+        type_changed: constant(tuple, "type_changed") == Some("true"),
+        new_type: owned_constant(tuple, "new_type"),
+        new_num_children: constant(tuple, "new_num_children").and_then(|value| value.parse().ok()),
+        has_more: constant(tuple, "has_more").map(|value| value == "1"),
+    })
 }
 
 pub fn variable_children(record: &MiRecord) -> Vec<Variable> {
@@ -1219,6 +1231,11 @@ mod tests {
         assert_eq!(updates[1].in_scope, Some(false));
         assert!(updates[1].type_changed);
         assert_eq!(updates[1].new_type.as_deref(), Some("long"));
+        let selected = super::variable_update_named(&record, "var2").unwrap();
+        assert_eq!(selected.varobj, "var2");
+        assert_eq!(selected.in_scope, Some(false));
+        assert!(selected.type_changed);
+        assert!(super::variable_update_named(&record, "missing").is_none());
     }
 
     #[test]

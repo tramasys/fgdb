@@ -17,11 +17,12 @@ pub(super) fn build_topbar(
     let title_separator = gtk::Label::new(Some("·"));
     title_separator.add_css_class("muted");
     title_group.append(&title_separator);
-    let target_label = gtk::Label::new(Some(config.target_name()));
+    let target_name = config.target_name();
+    let target_label = gtk::Label::new(Some(&target_name));
     target_label.add_css_class("target-label");
     target_label.set_ellipsize(pango::EllipsizeMode::Middle);
     target_label.set_max_width_chars(32);
-    target_label.set_tooltip_text(Some(config.target_name()));
+    target_label.set_tooltip_text(Some(&target_name));
     title_group.append(&target_label);
     topbar.set_title_widget(Some(&title_group));
 
@@ -55,10 +56,37 @@ pub(super) fn build_topbar(
     let kill_session_button = session_menu_action("Kill inferior", "terminate");
     kill_session_button.add_css_class("danger-action");
     let detach_session_button = session_menu_action("Detach safely", "keep running");
+    let resynchronize_button = session_menu_action("Refresh debugger state", "Ctrl+Shift+R");
+    resynchronize_button.add_css_class("session-utility-action");
+    resynchronize_button.set_tooltip_text(Some(
+        "Re-read state after terminal commands or external debugger changes",
+    ));
+    let configuration_detail = config.configuration_report().menu_detail();
+    let configuration_button = session_menu_action("Configuration", &configuration_detail);
+    configuration_button.add_css_class("session-utility-action");
+    configuration_button.set_tooltip_text(Some(
+        "Show loaded files, configuration issues, and effective settings",
+    ));
+    if !config.configuration_report().issues().is_empty() {
+        configuration_button.add_css_class("configuration-warning");
+    }
+    let restart_gdb_button = session_menu_action("Restart GDB", "recover backend");
+    restart_gdb_button.add_css_class("session-primary-action");
+    restart_gdb_button.set_visible(false);
+    let gdb_capabilities_label = gtk::Label::new(Some("GDB capabilities pending"));
+    gdb_capabilities_label.add_css_class("session-target");
+    gdb_capabilities_label.add_css_class("session-capabilities");
+    gdb_capabilities_label.set_halign(gtk::Align::Start);
+    gdb_capabilities_label.set_ellipsize(pango::EllipsizeMode::End);
     session_menu.append(&new_session_button);
     session_menu.append(&restart_session_button);
     session_menu.append(&kill_session_button);
     session_menu.append(&detach_session_button);
+    session_menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    session_menu.append(&resynchronize_button);
+    session_menu.append(&configuration_button);
+    session_menu.append(&restart_gdb_button);
+    session_menu.append(&gdb_capabilities_label);
     session_popover.set_child(Some(&session_menu));
     let session_button = header_popup_button("Session", &session_popover);
     session_button.add_css_class("toolbar-action");
@@ -229,6 +257,10 @@ pub(super) fn build_topbar(
         restart_session_button,
         kill_session_button,
         detach_session_button,
+        restart_gdb_button,
+        resynchronize_button,
+        configuration_button,
+        gdb_capabilities_label,
         target_label,
         open_source_button: open_source,
         load_symbols_button: load_symbols,
@@ -721,7 +753,7 @@ pub(super) fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSi
     sidebar.set_size_request(190, -1);
 
     let session_rows = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    session_rows.append(&sidebar_row("Target", config.target_name()));
+    session_rows.append(&sidebar_row("Target", &config.target_name()));
     session_rows.append(&sidebar_row("Debugger", &config.gdb_executable));
     session_rows.append(&sidebar_row("Interface", "GDB/MI 2"));
     session_rows.append(&sidebar_row("Theme", theme.name));
