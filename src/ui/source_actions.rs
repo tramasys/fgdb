@@ -22,16 +22,23 @@ impl Ui {
     }
 
     pub fn show_source_locations(&self, symbol: &str, locations: &[SourceLocation]) {
-        let mut candidates = locations
+        let candidate = locations
             .iter()
             .filter_map(|location| {
                 let path = self.resolve_source_path(location.source_path())?;
                 let score = source_location_score(symbol, location);
                 Some((score, path, location))
             })
-            .collect::<Vec<_>>();
-        candidates.sort_by_key(|candidate| Reverse(candidate.0));
-        let Some((_, path, location)) = candidates.first() else {
+            // Preserve the stable-sort behavior for equal scores by retaining
+            // the first candidate rather than Iterator::max_by_key's last one.
+            .reduce(|best, candidate| {
+                if best.0 >= candidate.0 {
+                    best
+                } else {
+                    candidate
+                }
+            });
+        let Some((_, path, location)) = candidate else {
             self.set_status(
                 "Source unavailable",
                 &format!(
@@ -53,7 +60,7 @@ impl Ui {
             enabled_handler: &self.breakpoint_enabled_handler,
             symbol_handler: &self.source_symbol_handler,
         };
-        let Some(document) = open_source_document(path, context) else {
+        let Some(document) = open_source_document(&path, context) else {
             self.set_status(
                 "Source unavailable",
                 &format!("Could not read {}", path.display()),
@@ -169,17 +176,9 @@ impl Ui {
             );
             return;
         };
-        let source_name = frame
-            .file
-            .as_deref()
-            .unwrap_or(path.as_os_str().to_str().unwrap_or("source"));
-        document.tab_label.set_text(&format!(
-            "{source_name}:{line} · {}",
-            compact_function_name(&frame.function)
-        ));
         document.tab.add_css_class("executing-source-tab");
         document.tab_label.set_tooltip_text(Some(&format!(
-            "{}\n{}",
+            "{}\n{} at line {line}",
             path.to_string_lossy(),
             frame.function
         )));
@@ -217,6 +216,23 @@ impl Ui {
         self.clear_execution_mark();
     }
 
+    pub fn suspend_execution_location(&self) {
+        self.selected_frame_level.set(u32::MAX);
+        self.current_source_is_rust.set(false);
+        update_selected_frame_buttons(&self.frame_buttons.borrow(), u32::MAX);
+        self.execution_source_line.set(None);
+        let path = self.execution_source_path.borrow();
+        for document in self
+            .source_documents
+            .borrow()
+            .iter()
+            .filter(|document| path.as_ref().is_some_and(|path| document.path == *path))
+        {
+            remove_marks(&document.buffer, EXECUTION_CATEGORY);
+            document.breakpoint_renderer.queue_draw();
+        }
+    }
+
     fn clear_execution_mark(&self) {
         let path = self.execution_source_path.borrow_mut().take();
         self.execution_source_line.set(None);
@@ -229,9 +245,6 @@ impl Ui {
             remove_marks(&document.buffer, EXECUTION_CATEGORY);
             document.breakpoint_renderer.queue_draw();
             document.tab.remove_css_class("executing-source-tab");
-            document
-                .tab_label
-                .set_text(&source_tab_title(&document.path));
             document
                 .tab_label
                 .set_tooltip_text(Some(&document.path.to_string_lossy()));
@@ -255,7 +268,7 @@ impl Ui {
         self.show_stack(&[]);
         self.previous_registers.borrow_mut().clear();
         self.disassembly_source_cache.borrow_mut().clear();
-        self.show_instructions(&[], "", "", None, false);
+        self.show_instructions(Vec::new(), "", "", None, false);
         self.show_signal(None, None);
         self.memory_region_store.remove_all();
         self.memory_regions.borrow_mut().clear();

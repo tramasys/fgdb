@@ -1,9 +1,11 @@
 use std::{
+    borrow::Cow,
     cell::{Cell, RefCell},
     cmp::Reverse,
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
+    time::Duration,
 };
 
 use gtk::{gio, glib, pango, prelude::*};
@@ -828,7 +830,7 @@ struct KernelOverviewRow {
     value: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct KernelTlsRuntime {
     thread: Option<String>,
     architecture: TargetArchitecture,
@@ -1109,6 +1111,8 @@ pub struct Ui {
     gef_tool_groups: Vec<GefCapabilityGroup>,
     pub status_label: gtk::Label,
     pub status_detail: gtk::Label,
+    status_visual_generation: Rc<Cell<u64>>,
+    pause_visual_generation: Rc<Cell<u64>>,
     inspector_notebook: gtk::Notebook,
     source_notebook: gtk::Notebook,
     source_documents: Rc<RefCell<Vec<SourceDocument>>>,

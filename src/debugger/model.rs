@@ -436,15 +436,10 @@ pub fn compact_register_numbers(names: &[String], architecture: TargetArchitectu
             .take(MAX_REGISTER_VALUES)
             .collect();
     }
-    let preferred = names
+    let has_preferred = names
         .iter()
-        .enumerate()
-        .filter(|(_, name)| {
-            architecture.is_core_register(name) || architecture.is_thread_pointer(name)
-        })
-        .map(|(number, _)| number)
-        .collect::<Vec<_>>();
-    if !preferred.is_empty() {
+        .any(|name| architecture.is_core_register(name) || architecture.is_thread_pointer(name));
+    if has_preferred {
         // Always keep a complete first-stop snapshot. On x86, request only
         // the widest advertised SIMD alias (ZMM, YMM, or XMM), rather than
         // transferring overlapping views of the same register file.
@@ -463,8 +458,9 @@ pub fn compact_register_numbers(names: &[String], architecture: TargetArchitectu
         return names
             .iter()
             .enumerate()
-            .filter(|(number, name)| {
-                preferred.binary_search(number).is_ok()
+            .filter(|(_, name)| {
+                architecture.is_core_register(name)
+                    || architecture.is_thread_pointer(name)
                     || x86_vector_prefix.is_some_and(|prefix| vector_register(name, prefix))
                     || (matches!(
                         architecture,
@@ -550,12 +546,21 @@ pub fn memory_block(record: &MiRecord) -> Option<MemoryBlock> {
     let bytes = pairs
         .iter()
         .map(|pair| {
-            std::str::from_utf8(pair)
-                .ok()
-                .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+            let high = hex_nibble(pair[0])?;
+            let low = hex_nibble(pair[1])?;
+            Some((high << 4) | low)
         })
         .collect::<Option<Vec<_>>>()?;
     Some(MemoryBlock { begin, bytes })
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn parse_hex(value: &str) -> Option<u64> {
@@ -1038,6 +1043,23 @@ mod tests {
         .unwrap();
         assert_eq!(memory.begin, 0x1000);
         assert_eq!(memory.bytes, [1, 2, 0xfe, 0xff]);
+        let uppercase = memory_block(
+            &parse_record(
+                r#"9^done,memory=[{begin="0x2000",offset="0x0",end="0x2002",contents="A0fF"}]"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(uppercase.bytes, [0xa0, 0xff]);
+        assert!(
+            memory_block(
+                &parse_record(
+                    r#"10^done,memory=[{begin="0x2000",offset="0x0",end="0x2001",contents="g0"}]"#,
+                )
+                .unwrap()
+            )
+            .is_none()
+        );
     }
 
     #[test]

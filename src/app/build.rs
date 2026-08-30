@@ -186,7 +186,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                         return;
                     }
                     if let Some(memory) = crate::debugger::memory_block(&record) {
-                        ui.show_memory_watch(id, Ok(&memory));
+                        ui.show_memory_watch(id, Ok(memory));
                     } else {
                         ui.show_memory_watch(
                             id,

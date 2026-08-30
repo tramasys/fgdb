@@ -349,11 +349,13 @@ impl<'a> MemoryReader<'a> {
     }
 
     fn mapping(&self, address: u64) -> Option<&ProcessMapping> {
-        self.mappings.iter().find(|mapping| {
-            mapping.permissions.starts_with('r')
-                && address >= mapping.start
-                && address < mapping.end
-        })
+        let index = self
+            .mappings
+            .partition_point(|mapping| mapping.start <= address)
+            .checked_sub(1)?;
+        self.mappings
+            .get(index)
+            .filter(|mapping| mapping.permissions.starts_with('r') && address < mapping.end)
     }
 
     fn readable(&self, address: u64, length: usize) -> bool {

@@ -53,11 +53,13 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ui.start_thread_refresh();
             ui.invalidate_kernel_refresh();
             ui.invalidate_misc_refresh();
-            ui.clear_execution_location();
-            ui.set_status(
+            // Keep the last source tab identity stable while a short execution
+            // command is in flight. The stale line marker is removed, while a
+            // subsequent stop atomically moves the active-source decoration.
+            ui.suspend_execution_location();
+            ui.set_execution_status(
                 "Running",
                 "The inferior is running. Pause it to inspect state.",
-                Some("status-running"),
             );
         }
         MiEvent::Stopped {

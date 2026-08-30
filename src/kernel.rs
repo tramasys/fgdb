@@ -394,7 +394,7 @@ struct KernelMetrics {
 
 pub(crate) fn verified_proc_root(pid: u32, debugger_pid: u32) -> Result<PathBuf, String> {
     let root = PathBuf::from(format!("/proc/{pid}"));
-    let status = process::read_key_values(&root.join("status"))
+    let status = crate::bounded::read_string(&root.join("status"), 1024 * 1024)
         .map_err(|error| format!("Cannot inspect /proc/{pid}/status: {error}"))?;
     verify_tracer(pid, debugger_pid, &status)?;
     Ok(root)
@@ -419,14 +419,11 @@ pub(crate) fn read_local_target_abi(
     crate::debugger::TargetArchitecture::from_elf_ident(&bytes)
 }
 
-fn verify_tracer(
-    pid: u32,
-    debugger_pid: u32,
-    status: &HashMap<String, String>,
-) -> Result<(), String> {
+fn verify_tracer(pid: u32, debugger_pid: u32, status: &str) -> Result<(), String> {
     let tracer = status
-        .get("TracerPid")
-        .and_then(|value| value.parse::<u32>().ok())
+        .lines()
+        .find_map(|line| line.strip_prefix("TracerPid:"))
+        .and_then(|value| value.trim().parse::<u32>().ok())
         .ok_or_else(|| format!("/proc/{pid}/status did not expose TracerPid"))?;
     if tracer != debugger_pid {
         return Err(format!(
@@ -1254,10 +1251,10 @@ mod tests {
 
     #[test]
     fn rejects_procfs_data_not_traced_by_this_debugger() {
-        let status = HashMap::from([(String::from("TracerPid"), String::from("42"))]);
-        assert!(verify_tracer(7, 42, &status).is_ok());
+        let status = "Name:\tdemo\nTracerPid:\t42\nThreads:\t1\n";
+        assert!(verify_tracer(7, 42, status).is_ok());
         assert!(
-            verify_tracer(7, 41, &status)
+            verify_tracer(7, 41, status)
                 .unwrap_err()
                 .contains("found 42")
         );

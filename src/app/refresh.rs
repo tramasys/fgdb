@@ -242,12 +242,15 @@ fn request_register_values(
                 return;
             }
             let registers = crate::debugger::registers(&record, &names);
-            if let Some(ui) = ui_for_response.upgrade() {
+            let registers_for_enrichment = ui_for_response.upgrade().and_then(|ui| {
                 ui.show_registers_for_refresh(generation, &registers);
-            }
-            stack_inputs_for_response.borrow_mut().registers = Some(registers.clone());
+                ui.register_details_visible().then(|| registers.clone())
+            });
+            stack_inputs_for_response.borrow_mut().registers = Some(registers);
             start_stack_refresh_if_ready(&stack_inputs_for_response, client);
-            enrich_registers(ui_for_response, client, generation, registers);
+            if let Some(registers) = registers_for_enrichment {
+                enrich_registers(ui_for_response, client, generation, registers);
+            }
         })
         .is_err()
     {
@@ -1110,6 +1113,21 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
     if !stop_refresh_is_current(&ui, generation) {
         return;
     }
+    let cached = ui
+        .upgrade()
+        .map(|ui| (ui.inferior_pid(), ui.debugger_pid()));
+    if let Some((Some(pid), debugger_pid)) = cached {
+        continue_stack_refresh(
+            ui,
+            client,
+            generation,
+            registers,
+            frames,
+            Some(pid),
+            debugger_pid,
+        );
+        return;
+    }
     let ui_for_request = ui.clone();
     if client
         .request("-list-thread-groups", move |client, record| {
@@ -1118,68 +1136,7 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
             }
             let pid = crate::debugger::inferior_pid(&record);
             let debugger_pid = ui.upgrade().and_then(|ui| ui.debugger_pid());
-            if let Some((architecture, endian, pointer_bits)) =
-                pid.zip(debugger_pid).and_then(|(pid, debugger_pid)| {
-                    crate::kernel::read_local_target_abi(pid, debugger_pid)
-                })
-                && let Some(current_ui) = ui.upgrade()
-            {
-                // An ELF class and byte order remain useful even when this
-                // fgdb build does not recognize e_machine. Do not let that
-                // future/unknown machine erase a more specific GDB result.
-                if architecture != TargetArchitecture::Unknown {
-                    current_ui.set_target_architecture(architecture);
-                }
-                current_ui.set_target_endian(Some(endian));
-                current_ui.set_target_pointer_bits(pointer_bits);
-                // Register names can be ambiguous (notably numbered RISC,
-                // MIPS, PowerPC and s390 registers). Rebind rows once the
-                // executable resolves the architecture so grouping, widths
-                // and semantic colors are correct on the first stop. Use the
-                // current generation's cached rows rather than the captured
-                // raw response: pointer-chain enrichment may already have
-                // completed while the PID/ABI request was in flight.
-                if let Some(current_registers) = current_ui.registers_for_details(generation) {
-                    current_ui.show_registers_for_refresh(generation, &current_registers);
-                    // If the initial enrichment was deferred because target
-                    // byte order or architecture was not known yet, ABI
-                    // discovery is the event that makes it runnable. An
-                    // already active/completed attempt is rejected by the
-                    // per-generation claim.
-                    enrich_registers(ui.clone(), client, generation, current_registers);
-                }
-            }
-            let mut regions = pid
-                .zip(debugger_pid)
-                .map(|(pid, debugger_pid)| read_memory_regions(pid, debugger_pid))
-                .unwrap_or_default();
-            let architecture = ui
-                .upgrade()
-                .map_or(TargetArchitecture::Unknown, |ui| ui.target_architecture());
-            let architecture = if architecture == TargetArchitecture::Unknown {
-                let names = registers
-                    .iter()
-                    .map(|register| register.name.as_str())
-                    .collect::<Vec<_>>();
-                let bits = ui.upgrade().map(|ui| ui.target_pointer_bits());
-                TargetArchitecture::infer_from_register_names_with_bits(&names, bits)
-            } else {
-                architecture
-            };
-            annotate_memory_regions(&mut regions, &registers, architecture);
-            if let Some(current_ui) = ui.upgrade() {
-                current_ui.set_inferior_pid(pid);
-                if pid.is_some() {
-                    current_ui.set_inferior_started(true);
-                }
-                current_ui.show_call_abi_for_refresh(generation, &frames);
-                current_ui.show_memory_regions_for_refresh(generation, &regions);
-                current_ui.refresh_memory_watches();
-                current_ui.refresh_kernel_after_stop();
-                current_ui.refresh_misc_after_stop();
-            }
-            request_tls_runtime(&ui, client, generation, &registers, &regions, architecture);
-            request_stack_memory(ui, client, generation, registers, frames, regions);
+            continue_stack_refresh(ui, client, generation, registers, frames, pid, debugger_pid);
         })
         .is_err()
         && let Some(ui) = ui_for_request.upgrade()
@@ -1190,6 +1147,86 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
         ui.refresh_kernel_after_stop();
         ui.refresh_misc_after_stop();
     }
+}
+
+fn continue_stack_refresh(
+    ui: Weak<Ui>,
+    client: &MiClient,
+    generation: u64,
+    registers: Vec<Register>,
+    frames: Vec<StackFrame>,
+    pid: Option<u32>,
+    debugger_pid: Option<u32>,
+) {
+    if !stop_refresh_is_current(&ui, generation) {
+        return;
+    }
+    if let Some((architecture, endian, pointer_bits)) = pid
+        .zip(debugger_pid)
+        .and_then(|(pid, debugger_pid)| crate::kernel::read_local_target_abi(pid, debugger_pid))
+        && let Some(current_ui) = ui.upgrade()
+    {
+        let previous = (
+            current_ui.target_architecture(),
+            current_ui.target_endian(),
+            current_ui.target_pointer_bits(),
+        );
+        // An ELF class and byte order remain useful even when this fgdb build
+        // does not recognize e_machine. Do not let a future machine erase a
+        // more specific GDB result.
+        if architecture != TargetArchitecture::Unknown {
+            current_ui.set_target_architecture(architecture);
+        }
+        current_ui.set_target_endian(Some(endian));
+        current_ui.set_target_pointer_bits(pointer_bits);
+        let current = (
+            current_ui.target_architecture(),
+            current_ui.target_endian(),
+            current_ui.target_pointer_bits(),
+        );
+        // Rebind only when ELF discovery actually refined the target. The
+        // former unconditional pass rebuilt every register row on each stop.
+        if previous != current
+            && let Some(current_registers) = current_ui.registers_for_details(generation)
+        {
+            current_ui.show_registers_for_refresh(generation, &current_registers);
+            // ABI discovery may make pointer enrichment runnable after the
+            // initial register response. The generation claim prevents a
+            // duplicate active or completed attempt.
+            enrich_registers(ui.clone(), client, generation, current_registers);
+        }
+    }
+    let mut regions = pid
+        .zip(debugger_pid)
+        .map(|(pid, debugger_pid)| read_memory_regions(pid, debugger_pid))
+        .unwrap_or_default();
+    let architecture = ui
+        .upgrade()
+        .map_or(TargetArchitecture::Unknown, |ui| ui.target_architecture());
+    let architecture = if architecture == TargetArchitecture::Unknown {
+        let names = registers
+            .iter()
+            .map(|register| register.name.as_str())
+            .collect::<Vec<_>>();
+        let bits = ui.upgrade().map(|ui| ui.target_pointer_bits());
+        TargetArchitecture::infer_from_register_names_with_bits(&names, bits)
+    } else {
+        architecture
+    };
+    annotate_memory_regions(&mut regions, &registers, architecture);
+    if let Some(current_ui) = ui.upgrade() {
+        current_ui.set_inferior_pid(pid);
+        if pid.is_some() {
+            current_ui.set_inferior_started(true);
+        }
+        current_ui.show_call_abi_for_refresh(generation, &frames);
+        current_ui.show_memory_regions_for_refresh(generation, &regions);
+        current_ui.refresh_memory_watches();
+        current_ui.refresh_kernel_after_stop();
+        current_ui.refresh_misc_after_stop();
+    }
+    request_tls_runtime(&ui, client, generation, &registers, &regions, architecture);
+    request_stack_memory(ui, client, generation, registers, frames, regions);
 }
 
 fn request_tls_runtime(

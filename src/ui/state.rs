@@ -50,6 +50,7 @@ impl Ui {
             theme,
             &source_notebook,
             &terminal,
+            &topbar.gef_tools_button,
             &inspector_bindings,
         );
         root.append(&workspace.root);
@@ -99,6 +100,8 @@ impl Ui {
             gef_tool_groups: topbar.gef_tool_groups,
             status_label: topbar.status_label,
             status_detail: workspace.status_detail,
+            status_visual_generation: Rc::new(Cell::new(0)),
+            pause_visual_generation: Rc::new(Cell::new(0)),
             inspector_notebook: workspace.inspector_notebook,
             source_notebook,
             source_documents,
@@ -665,7 +668,32 @@ impl Ui {
     }
 
     pub fn set_status(&self, text: &str, detail: &str, class: Option<&str>) {
+        self.status_visual_generation
+            .set(self.status_visual_generation.get().wrapping_add(1));
         set_status_widgets(&self.status_label, &self.status_detail, text, detail, class);
+    }
+
+    pub fn set_execution_status(&self, text: &str, detail: &str) {
+        const VISUAL_DELAY: Duration = Duration::from_millis(150);
+
+        let generation = self.status_visual_generation.get().wrapping_add(1);
+        self.status_visual_generation.set(generation);
+        let current_generation = Rc::clone(&self.status_visual_generation);
+        let status = self.status_label.clone();
+        let detail_label = self.status_detail.clone();
+        let text = text.to_owned();
+        let detail = detail.to_owned();
+        gtk::glib::timeout_add_local_once(VISUAL_DELAY, move || {
+            if current_generation.get() == generation {
+                set_status_widgets(
+                    &status,
+                    &detail_label,
+                    &text,
+                    &detail,
+                    Some("status-running"),
+                );
+            }
+        });
     }
 
     pub fn set_controls_ready(&self, ready: bool) {
@@ -896,13 +924,18 @@ impl Ui {
         };
         drop(breakpoints);
         drop(session);
-        if self.applied_control_state.borrow().as_ref() == Some(&state) {
+        let previous_state = *self.applied_control_state.borrow();
+        if previous_state.as_ref() == Some(&state) {
             return;
         }
         self.applied_control_state.replace(Some(state));
 
         set_header_execution_sensitive(&self.run_button, state.run, state.busy);
-        set_header_execution_sensitive(&self.pause_button, state.pause, state.busy);
+        self.update_pause_control(
+            state.pause,
+            state.busy,
+            previous_state.is_some_and(|previous| previous.pause),
+        );
         for button in [
             &self.next_button,
             &self.step_button,
@@ -986,6 +1019,45 @@ impl Ui {
             state.delete_watchpoints,
             state.busy,
         );
+    }
+
+    fn update_pause_control(&self, sensitive: bool, busy: bool, was_sensitive: bool) {
+        const VISUAL_DELAY: Duration = Duration::from_millis(150);
+        const PENDING_CLASS: &str = "pause-availability-pending";
+
+        set_header_execution_sensitive(&self.pause_button, sensitive, busy);
+        if sensitive {
+            if was_sensitive {
+                return;
+            }
+            let generation = self.pause_visual_generation.get().wrapping_add(1);
+            self.pause_visual_generation.set(generation);
+            self.pause_button.add_css_class(PENDING_CLASS);
+            let current_generation = Rc::clone(&self.pause_visual_generation);
+            let button = self.pause_button.downgrade();
+            let ready = Rc::clone(&self.debugger_ready);
+            let started = Rc::clone(&self.inferior_started);
+            let running = Rc::clone(&self.inferior_running);
+            let command_pending = Rc::clone(&self.command_pending);
+            let session_pending = Rc::clone(&self.session_pending);
+            let until_active = Rc::clone(&self.native_until_active);
+            gtk::glib::timeout_add_local_once(VISUAL_DELAY, move || {
+                let still_available = ready.get()
+                    && started.get()
+                    && !session_pending.get()
+                    && (until_active.get() || (running.get() && !command_pending.get()));
+                if current_generation.get() == generation
+                    && still_available
+                    && let Some(button) = button.upgrade()
+                {
+                    button.remove_css_class(PENDING_CLASS);
+                }
+            });
+        } else if !busy {
+            self.pause_visual_generation
+                .set(self.pause_visual_generation.get().wrapping_add(1));
+            self.pause_button.remove_css_class(PENDING_CLASS);
+        }
     }
 
     pub(crate) fn set_until_action_handler(&self, handler: impl Fn(UntilAction) + 'static) {

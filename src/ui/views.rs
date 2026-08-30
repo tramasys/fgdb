@@ -546,10 +546,10 @@ pub(super) fn build_instruction_view() -> (
             &selection,
             |row| {
                 let marker = if row.current { "›" } else { " " };
-                format!(
+                Cow::Owned(format!(
                     "{marker} {}",
                     full_address(&row.instruction.address, row.pointer_bits)
-                )
+                ))
             },
         ),
         instruction_column(
@@ -558,7 +558,7 @@ pub(super) fn build_instruction_view() -> (
             false,
             "instruction-mnemonic",
             &selection,
-            |row| split_instruction(&row.instruction.text).0.to_owned(),
+            |row| Cow::Borrowed(split_instruction(&row.instruction.text).0),
         ),
         instruction_column(
             "OPERANDS",
@@ -566,7 +566,7 @@ pub(super) fn build_instruction_view() -> (
             true,
             "instruction-operands",
             &selection,
-            |row| split_instruction(&row.instruction.text).1.to_owned(),
+            |row| Cow::Borrowed(split_instruction(&row.instruction.text).1),
         ),
         instruction_column(
             "BYTES",
@@ -577,8 +577,8 @@ pub(super) fn build_instruction_view() -> (
             |row| {
                 row.instruction
                     .opcodes
-                    .clone()
-                    .unwrap_or_else(|| String::from("unavailable"))
+                    .as_deref()
+                    .map_or(Cow::Borrowed("unavailable"), Cow::Borrowed)
             },
         ),
         instruction_column(
@@ -587,7 +587,7 @@ pub(super) fn build_instruction_view() -> (
             false,
             "instruction-symbol",
             &selection,
-            |row| instruction_symbol(&row.instruction),
+            |row| Cow::Owned(instruction_symbol(&row.instruction)),
         ),
     ] {
         view.append_column(&column);
@@ -600,16 +600,16 @@ pub(super) fn build_instruction_view() -> (
         &selection,
         |row| {
             let Some(source) = row.instruction.source.as_ref() else {
-                return String::new();
+                return Cow::Borrowed("");
             };
             let file = Path::new(source.source_path())
                 .file_name()
                 .unwrap_or_default()
                 .to_string_lossy();
-            row.source_text.as_ref().map_or_else(
+            Cow::Owned(row.source_text.as_ref().map_or_else(
                 || format!("{file}:{}", source.line),
                 |text| format!("{file}:{}  {}", source.line, text.trim()),
-            )
+            ))
         },
     );
     source_column.set_visible(false);
@@ -1016,7 +1016,7 @@ pub(super) fn instruction_column(
     expand: bool,
     class: &'static str,
     selection: &gtk::SingleSelection,
-    text: fn(&InstructionRowData) -> String,
+    text: for<'a> fn(&'a InstructionRowData) -> Cow<'a, str>,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
     let selection = selection.clone();
@@ -1083,13 +1083,20 @@ pub(super) fn build_editor_panel(notebook: &gtk::Notebook) -> gtk::Box {
     panel
 }
 
-pub(super) fn build_terminal_panel(terminal: &vte4::Terminal) -> gtk::Box {
+pub(super) fn build_terminal_panel(
+    terminal: &vte4::Terminal,
+    gef_tools_button: &gtk::ToggleButton,
+) -> gtk::Box {
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
     panel.add_css_class("panel");
 
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     header.add_css_class("panel-header");
-    header.append(&section_title("TERMINAL"));
+    header.add_css_class("terminal-header");
+    let title = section_title("TERMINAL");
+    title.set_hexpand(true);
+    header.append(&title);
+    header.append(gef_tools_button);
     panel.append(&header);
 
     let scrolled = gtk::ScrolledWindow::builder()

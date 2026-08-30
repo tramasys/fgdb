@@ -1874,12 +1874,12 @@ impl MiscView {
         self.call_abi_register_empty.set_visible(true);
     }
 
-    fn show_core(&self, snapshot: CoreDumpSnapshot) {
+    fn show_core(&self, mut snapshot: CoreDumpSnapshot) {
         let auxv_count = snapshot.auxv.len();
         self.auxv_summary.set_text(&format!(
             "{auxv_count} auxiliary-vector entries recovered from NT_AUXV"
         ));
-        replace_boxed_store_if_changed(&self.auxv_store, snapshot.auxv.clone());
+        replace_boxed_store_if_changed(&self.auxv_store, std::mem::take(&mut snapshot.auxv));
         self.auxv_empty.set_visible(auxv_count == 0);
         let signal = snapshot.signal.map_or_else(
             || String::from("signal unavailable"),

@@ -115,6 +115,7 @@ type ResponseHandler = Box<dyn FnOnce(&MiClient, MiRecord)>;
 type EventHandler = Box<dyn Fn(&MiClient, MiEvent)>;
 
 const MAX_MI_RECORD_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RETAINED_MI_INPUT_BYTES: usize = 256 * 1024;
 const MAX_MI_NESTING: usize = 64;
 const MAX_MI_ITEMS: usize = 100_000;
 const MAX_MI_COMMAND_BYTES: usize = 1024 * 1024;
@@ -654,17 +655,17 @@ impl MiClient {
         if bytes.is_empty() {
             return;
         }
-        let complete = {
+        let complete_end = {
             let mut incoming = self.incoming.borrow_mut();
             incoming.extend_from_slice(bytes);
-            let complete = take_complete_input(&mut incoming);
-            if complete.is_none() && incoming.len() > MAX_MI_RECORD_BYTES {
+            let complete_end = complete_input_end(&incoming);
+            if complete_end.is_none() && incoming.len() > MAX_MI_RECORD_BYTES {
                 incoming.clear();
                 self.discarding_oversized_line.set(true);
             }
-            complete
+            complete_end
         };
-        let Some(complete) = complete else {
+        let Some(complete_end) = complete_end else {
             if self.discarding_oversized_line.get() {
                 (self.event_handler)(
                     self,
@@ -676,19 +677,31 @@ impl MiClient {
             }
             return;
         };
-        for line in complete.split(|byte| *byte == b'\n') {
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            if line.is_empty() {
-                continue;
+        {
+            let incoming = self.incoming.borrow();
+            for line in incoming[..complete_end].split(|byte| *byte == b'\n') {
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                if line.is_empty() {
+                    continue;
+                }
+                if line.len() > MAX_MI_RECORD_BYTES {
+                    (self.event_handler)(
+                        self,
+                        MiEvent::Error(String::from("Oversized GDB/MI record discarded")),
+                    );
+                    continue;
+                }
+                self.process_line(&String::from_utf8_lossy(line));
             }
-            if line.len() > MAX_MI_RECORD_BYTES {
-                (self.event_handler)(
-                    self,
-                    MiEvent::Error(String::from("Oversized GDB/MI record discarded")),
-                );
-                continue;
-            }
-            self.process_line(&String::from_utf8_lossy(line));
+        }
+        let mut incoming = self.incoming.borrow_mut();
+        let remaining = incoming.len().saturating_sub(complete_end);
+        incoming.copy_within(complete_end.., 0);
+        incoming.truncate(remaining);
+        if incoming.capacity() > MAX_RETAINED_MI_INPUT_BYTES
+            && incoming.len() < MAX_RETAINED_MI_INPUT_BYTES
+        {
+            incoming.shrink_to(MAX_RETAINED_MI_INPUT_BYTES);
         }
     }
 
@@ -746,7 +759,8 @@ impl MiClient {
     }
 
     fn process_line(&self, line: &str) {
-        if line.trim() == "(gdb)" {
+        let line = line.trim();
+        if line == "(gdb)" {
             if !self.ready.replace(true) {
                 // Publish Ready only after both initialization commands have
                 // entered the FIFO. Requests issued by the Ready handler are
@@ -759,7 +773,7 @@ impl MiClient {
             return;
         }
 
-        if let Ok(output) = parse_stream_output(line.trim()) {
+        if let Ok(output) = parse_stream_output(line) {
             if let Ok(response) = parse_record(output.trim())
                 && response.kind == '^'
                 && let Some(request) = self.scoped_request.borrow_mut().as_mut()
@@ -769,7 +783,7 @@ impl MiClient {
             return;
         }
 
-        let Ok(record) = parse_record(line.trim()) else {
+        let Ok(record) = parse_record(line) else {
             return;
         };
 
@@ -919,10 +933,11 @@ fn validate_mi_command(command: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn take_complete_input(incoming: &mut Vec<u8>) -> Option<Vec<u8>> {
-    let end = incoming.iter().rposition(|byte| *byte == b'\n')? + 1;
-    let remainder = incoming.split_off(end);
-    Some(std::mem::replace(incoming, remainder))
+fn complete_input_end(incoming: &[u8]) -> Option<usize> {
+    incoming
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map(|end| end + 1)
 }
 
 impl Drop for MiClient {
@@ -1237,9 +1252,9 @@ pub fn quote(argument: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MiListItem, MiValue, OutgoingQueue, SESSION_INITIALIZATION_COMMANDS, drain_outgoing,
-        parse_record, parse_stream_output, quote, result_field, scoped_mi_command,
-        take_complete_input, validate_mi_command,
+        MiListItem, MiValue, OutgoingQueue, SESSION_INITIALIZATION_COMMANDS, complete_input_end,
+        drain_outgoing, parse_record, parse_stream_output, quote, result_field, scoped_mi_command,
+        validate_mi_command,
     };
 
     struct BackpressuredWriter;
@@ -1315,20 +1330,14 @@ mod tests {
     }
 
     #[test]
-    fn extracts_complete_mi_lines_without_discarding_a_partial_record() {
-        let mut incoming = b"1^done\r\n*stopped,reason=\"breakpoint-hit\"\n3^do".to_vec();
+    fn locates_complete_mi_lines_without_claiming_a_partial_record() {
+        let incoming = b"1^done\r\n*stopped,reason=\"breakpoint-hit\"\n3^do";
         assert_eq!(
-            take_complete_input(&mut incoming),
-            Some(b"1^done\r\n*stopped,reason=\"breakpoint-hit\"\n".to_vec())
+            complete_input_end(incoming),
+            Some(b"1^done\r\n*stopped,reason=\"breakpoint-hit\"\n".len())
         );
-        assert_eq!(incoming, b"3^do");
-
-        incoming.extend_from_slice(b"ne\n");
-        assert_eq!(
-            take_complete_input(&mut incoming),
-            Some(b"3^done\n".to_vec())
-        );
-        assert!(incoming.is_empty());
+        assert_eq!(complete_input_end(b"3^do"), None);
+        assert_eq!(complete_input_end(b"3^done\n"), Some(7));
     }
 
     #[test]

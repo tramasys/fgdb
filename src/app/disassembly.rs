@@ -420,7 +420,7 @@ impl DisassemblyController {
             (state.pc.clone(), state.architecture.clone())
         };
         self.commit_location(&focus, history, &instructions);
-        ui.show_instructions(&instructions, &pc, &focus, architecture.as_deref(), mixed);
+        ui.show_instructions(instructions, &pc, &focus, architecture.as_deref(), mixed);
         if let Some(request) = ui.take_call_abi_target_request() {
             self.resolve_call_abi_target(request);
         }

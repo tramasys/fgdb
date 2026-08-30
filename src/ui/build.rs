@@ -84,7 +84,6 @@ pub(super) fn build_topbar(
     terminal_toggle.set_tooltip_text(Some("Show or hide the interactive GDB terminal · Ctrl+`"));
     leading.append(&terminal_toggle);
     let gef_tools = build_gef_tools_menu(terminal, &terminal_toggle);
-    leading.append(&gef_tools.button);
     topbar.pack_start(&leading);
 
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -450,7 +449,7 @@ pub(super) fn build_gef_tools_menu(
 
     popover.set_child(Some(&menu));
     let button = header_popup_button("GEF tools", &popover);
-    button.add_css_class("debug-control");
+    button.add_css_class("inline-action");
     button.set_tooltip_text(Some(
         "Run investigations supported by the active GEF installation",
     ));
@@ -562,6 +561,7 @@ pub(super) fn build_workspace(
     theme: &Theme,
     source_notebook: &gtk::Notebook,
     terminal: &vte4::Terminal,
+    gef_tools_button: &gtk::ToggleButton,
     inspector_bindings: &InspectorBindings<'_>,
 ) -> Workspace {
     let workspace = gtk::Paned::new(gtk::Orientation::Horizontal);
@@ -590,7 +590,7 @@ pub(super) fn build_workspace(
     main_and_terminal.set_shrink_start_child(false);
     main_and_terminal.set_resize_start_child(true);
     main_and_terminal.set_start_child(Some(&navigation_and_editor));
-    let terminal_panel = build_terminal_panel(terminal);
+    let terminal_panel = build_terminal_panel(terminal, gef_tools_button);
     main_and_terminal.set_end_child(Some(&terminal_panel));
     workspace.set_start_child(Some(&main_and_terminal));
     let layout_panes = vec![

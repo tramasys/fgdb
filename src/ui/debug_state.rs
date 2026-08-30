@@ -16,10 +16,20 @@ impl Ui {
                     .all(|(previous, current)| previous.level == current.level)
         };
         if can_update_in_place {
-            for ((level, button), frame) in self.frame_buttons.borrow().iter().zip(frames) {
+            let latest = self.latest_frames.borrow();
+            for (((level, button), previous), frame) in self
+                .frame_buttons
+                .borrow()
+                .iter()
+                .zip(latest.iter())
+                .zip(frames)
+            {
                 debug_assert_eq!(*level, frame.level);
-                update_frame_button(button, frame);
+                if previous != frame {
+                    update_frame_button(button, frame);
+                }
             }
+            drop(latest);
             self.latest_frames.replace(frames.to_vec());
             update_selected_frame_buttons(
                 &self.frame_buttons.borrow(),
@@ -358,12 +368,11 @@ impl Ui {
             .and_then(std::ffi::OsStr::to_str)
             .map(str::to_owned);
         let stop_reason = self.thread_stop_reason.borrow().clone();
-        let render_state = ThreadRenderState {
-            threads: threads.to_vec(),
-            stop_reason: stop_reason.clone(),
-            executable_name: executable_name.clone(),
-        };
-        if self.latest_threads.borrow().as_ref() == Some(&render_state) {
+        if self.latest_threads.borrow().as_ref().is_some_and(|state| {
+            state.threads == threads
+                && state.stop_reason == stop_reason
+                && state.executable_name == executable_name
+        }) {
             return;
         }
         self.kernel_view
@@ -382,16 +391,40 @@ impl Ui {
                         .all(|(previous, current)| previous.id == current.id)
             });
         if can_update_in_place {
-            for ((_, button), thread) in self.thread_buttons.borrow().iter().zip(threads) {
+            let latest = self.latest_threads.borrow();
+            let previous = latest
+                .as_ref()
+                .expect("in-place thread update requires prior state");
+            for (((_, button), old_thread), thread) in self
+                .thread_buttons
+                .borrow()
+                .iter()
+                .zip(previous.threads.iter())
+                .zip(threads)
+            {
                 let reason = thread
                     .current
                     .then(|| stop_reason.as_deref().unwrap_or("STOPPED"));
-                update_thread_button(button, thread, reason);
+                let old_reason = old_thread
+                    .current
+                    .then(|| previous.stop_reason.as_deref().unwrap_or("STOPPED"));
+                if old_thread != thread || old_reason != reason {
+                    update_thread_button(button, thread, reason);
+                }
             }
-            self.latest_threads.replace(Some(render_state));
+            drop(latest);
+            self.latest_threads.replace(Some(ThreadRenderState {
+                threads: threads.to_vec(),
+                stop_reason,
+                executable_name,
+            }));
             return;
         }
-        self.latest_threads.replace(Some(render_state));
+        self.latest_threads.replace(Some(ThreadRenderState {
+            threads: threads.to_vec(),
+            stop_reason: stop_reason.clone(),
+            executable_name,
+        }));
         clear_box(&self.threads_list);
         self.thread_buttons.borrow_mut().clear();
         if threads.is_empty() {
@@ -505,7 +538,7 @@ impl Ui {
 
     pub fn show_instructions(
         &self,
-        instructions: &[Instruction],
+        instructions: Vec<Instruction>,
         pc: &str,
         focus: &str,
         architecture: Option<&str>,
@@ -573,6 +606,7 @@ impl Ui {
             .position(|instruction| addresses_equal(&instruction.address, focus))
             .or(current)
             .unwrap_or(0);
+        let selected_address = instructions[selected].address.clone();
         self.current_instruction
             .replace(current.and_then(|position| instructions.get(position).cloned()));
         if let Some(position) = current {
@@ -590,12 +624,12 @@ impl Ui {
             self.refresh_call_abi_transfer();
         }
         let rows = instructions
-            .iter()
+            .into_iter()
             .map(|instruction| InstructionRowData {
-                instruction: instruction.clone(),
                 current: addresses_equal(&instruction.address, pc),
                 pointer_bits: self.target_pointer_bits(),
-                source_text: self.disassembly_source_text(instruction),
+                source_text: self.disassembly_source_text(&instruction),
+                instruction,
             })
             .collect::<Vec<_>>();
         let rows_changed = replace_boxed_store_if_changed(&self.instructions_store, rows);
@@ -607,17 +641,26 @@ impl Ui {
             self.instructions_view
                 .scroll_to(selected, None, gtk::ListScrollFlags::FOCUS, None);
         }
-        if let (Some(first), Some(last)) = (instructions.first(), instructions.last()) {
-            let function = if first.function == "??" {
+        if let (Some(first), Some(last)) = (
+            self.instructions_store
+                .item(0)
+                .and_downcast::<glib::BoxedAnyObject>(),
+            self.instructions_store
+                .item(self.instructions_store.n_items().saturating_sub(1))
+                .and_downcast::<glib::BoxedAnyObject>(),
+        ) {
+            let first = first.borrow::<InstructionRowData>();
+            let last = last.borrow::<InstructionRowData>();
+            let function = if first.instruction.function == "??" {
                 "unknown function"
             } else {
-                first.function.as_str()
+                first.instruction.function.as_str()
             };
             let range = format!(
                 "{function} · {}–{} · {} instructions",
-                full_address(&first.address, self.target_pointer_bits()),
-                full_address(&last.address, self.target_pointer_bits()),
-                instructions.len()
+                full_address(&first.instruction.address, self.target_pointer_bits()),
+                full_address(&last.instruction.address, self.target_pointer_bits()),
+                self.instructions_store.n_items()
             );
             self.disassembly_controls.range.set_text(&range);
             self.disassembly_controls
@@ -625,7 +668,7 @@ impl Ui {
                 .set_tooltip_text(Some(&range));
             self.disassembly_controls
                 .location
-                .set_text(&instructions[selected as usize].address);
+                .set_text(&selected_address);
         }
         self.disassembly_controls
             .previous_function
@@ -986,18 +1029,24 @@ impl Ui {
         }
     }
 
-    pub fn show_registers(&self, registers: &[Register]) {
+    pub fn show_registers(&self, registers: &[Register]) -> bool {
         self.latest_registers_generation.set(None);
-        for group in &self.register_groups {
-            group.panel.set_visible(false);
-            if registers.is_empty() {
-                group.store.remove_all();
-            }
-        }
         if registers.is_empty() {
-            self.registers_empty.set_visible(true);
+            for group in &self.register_groups {
+                if group.store.n_items() != 0 {
+                    group.store.remove_all();
+                }
+                if group.panel.is_visible() {
+                    group.panel.set_visible(false);
+                }
+            }
+            if !self.registers_empty.is_visible() {
+                self.registers_empty.set_visible(true);
+            }
         } else {
-            self.registers_empty.set_visible(false);
+            if self.registers_empty.is_visible() {
+                self.registers_empty.set_visible(false);
+            }
             let architecture = self.target_architecture();
             let endian = self.target_endian();
             let pointer_bits = self.target_pointer_bits();
@@ -1039,6 +1088,7 @@ impl Ui {
             self.latest_registers.replace(registers.to_vec());
         }
         self.update_instruction_insight();
+        values_changed
     }
 
     pub fn start_stop_refresh(&self) -> u64 {
@@ -1081,9 +1131,12 @@ impl Ui {
 
     pub fn show_registers_for_refresh(&self, generation: u64, registers: &[Register]) {
         if self.is_stop_refresh_current(generation) {
-            self.show_registers(registers);
+            let first_for_generation = self.latest_registers_generation.get() != Some(generation);
+            let values_changed = self.show_registers(registers);
             self.latest_registers_generation.set(Some(generation));
-            self.refresh_call_abi_transfer();
+            if first_for_generation || values_changed {
+                self.refresh_call_abi_transfer();
+            }
         }
     }
 
@@ -1351,17 +1404,32 @@ impl Ui {
     }
 
     pub fn refresh_memory_watches(&self) {
-        let watches = self.memory_watches.borrow().clone();
-        if watches.is_empty() {
-            return;
-        }
-        update_memory_container_state(&self.memory_watch_container, true);
-        for watch in &watches {
-            request_memory_watch(watch, &self.memory_watch_handler);
+        let requests = {
+            let watches = self.memory_watches.borrow();
+            if watches.is_empty() {
+                return;
+            }
+            update_memory_container_state(&self.memory_watch_container, true);
+            watches
+                .iter()
+                .map(|watch| {
+                    set_memory_watch_reading(watch);
+                    (
+                        watch.id,
+                        memory_watch_request_expression(watch),
+                        watch.byte_count,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        if let Some(handler) = self.memory_watch_handler.borrow().as_ref() {
+            for (id, expression, byte_count) in requests {
+                handler(id, expression, byte_count);
+            }
         }
     }
 
-    pub fn show_memory_watch(&self, id: u64, result: Result<&MemoryBlock, &str>) {
+    pub fn show_memory_watch(&self, id: u64, result: Result<MemoryBlock, &str>) {
         let watch = self
             .memory_watches
             .borrow()

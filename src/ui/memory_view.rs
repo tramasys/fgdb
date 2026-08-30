@@ -373,8 +373,7 @@ pub(super) fn request_memory_watch(
     watch: &MemoryWatchView,
     handler: &Rc<RefCell<Option<MemoryWatchHandler>>>,
 ) {
-    watch.status.remove_css_class("memory-watch-error");
-    watch.status.set_text("reading…");
+    set_memory_watch_reading(watch);
     if let Some(handler) = handler.borrow().as_ref() {
         handler(
             watch.id,
@@ -382,6 +381,11 @@ pub(super) fn request_memory_watch(
             watch.byte_count,
         );
     }
+}
+
+pub(super) fn set_memory_watch_reading(watch: &MemoryWatchView) {
+    watch.status.remove_css_class("memory-watch-error");
+    watch.status.set_text("reading…");
 }
 
 pub(super) fn memory_watch_request_expression(watch: &MemoryWatchView) -> String {
@@ -408,7 +412,7 @@ fn update_memory_watch_offset(watch: &MemoryWatchView) {
 
 pub(super) fn show_memory_watch_data(
     watch: &MemoryWatchView,
-    memory: &MemoryBlock,
+    memory: MemoryBlock,
     regions: &[MemoryRegion],
     pointer_bits: u32,
     endian: TargetEndian,
@@ -429,11 +433,12 @@ pub(super) fn show_memory_watch_data(
         watch.selection.set_selected(gtk::INVALID_LIST_POSITION);
         watch.follow_button.set_sensitive(false);
     }
+    let byte_count = memory.bytes.len();
     watch.previous_begin.set(Some(memory.begin));
-    watch.previous_bytes.replace(memory.bytes.clone());
+    watch.previous_bytes.replace(memory.bytes);
 
     let width = usize::try_from(pointer_bits / 4).unwrap_or(16).clamp(8, 16);
-    let end = memory.begin.saturating_add(memory.bytes.len() as u64);
+    let end = memory.begin.saturating_add(byte_count as u64);
     let region = regions
         .iter()
         .find(|region| region.contains(memory.begin))
@@ -452,7 +457,7 @@ pub(super) fn show_memory_watch_data(
         "[0x{:0width$x}, 0x{:0width$x}) · {} · {}{change_text}",
         memory.begin,
         end,
-        format_memory_size(memory.bytes.len() as u64),
+        format_memory_size(byte_count as u64),
         watch.format.label(),
     );
     watch.range.set_text(&range);

@@ -1161,20 +1161,17 @@ fn interpret_auxv(kind: u64, value: u64, abi: Abi, maps: &[ProcessMapping]) -> S
         8 | 29 | 30 => format!("bit mask 0x{value:x}"),
         16 | 26 => format_hwcap(abi.architecture, kind == 26, value),
         23 => if value == 0 { "disabled" } else { "enabled" }.to_owned(),
-        3 | 7 | 9 | 15 | 24 | 25 | 31 | 32 | 33 => maps
-            .iter()
-            .find(|mapping| value >= mapping.start && value < mapping.end)
-            .map_or_else(
-                || format!("{}-bit pointer", abi.pointer_bits),
-                |mapping| {
-                    let path = if mapping.path.is_empty() {
-                        "anonymous"
-                    } else {
-                        &mapping.path
-                    };
-                    format!("{} + 0x{:x}", path, value.saturating_sub(mapping.start))
-                },
-            ),
+        3 | 7 | 9 | 15 | 24 | 25 | 31 | 32 | 33 => mapping_containing(maps, value).map_or_else(
+            || format!("{}-bit pointer", abi.pointer_bits),
+            |mapping| {
+                let path = if mapping.path.is_empty() {
+                    "anonymous"
+                } else {
+                    &mapping.path
+                };
+                format!("{} + 0x{:x}", path, value.saturating_sub(mapping.start))
+            },
+        ),
         _ => String::new(),
     }
 }
@@ -1861,8 +1858,10 @@ fn direct_binding_mapping<'a>(
 }
 
 fn mapping_containing(maps: &[ProcessMapping], address: u64) -> Option<&ProcessMapping> {
-    maps.iter()
-        .find(|mapping| mapping.start <= address && address < mapping.end)
+    let index = maps
+        .partition_point(|mapping| mapping.start <= address)
+        .checked_sub(1)?;
+    maps.get(index).filter(|mapping| address < mapping.end)
 }
 
 fn mappings_have_same_owner(left: Option<&ProcessMapping>, right: Option<&ProcessMapping>) -> bool {

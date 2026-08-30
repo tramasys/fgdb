@@ -2763,13 +2763,15 @@ impl KernelView {
     }
 
     pub(super) fn set_tls_thread(&self, threads: &[ThreadInfo], executable_name: Option<&str>) {
-        self.tls_runtime.borrow_mut().thread =
-            threads.iter().find(|thread| thread.current).map(|thread| {
-                let reported_name = thread.name.as_deref().unwrap_or("unnamed");
-                let name =
-                    tls_thread_display_name(reported_name, executable_name, thread.id == "1");
-                format!("GDB #{} · {} · {name}", thread.id, thread.target_id)
-            });
+        let thread = threads.iter().find(|thread| thread.current).map(|thread| {
+            let reported_name = thread.name.as_deref().unwrap_or("unnamed");
+            let name = tls_thread_display_name(reported_name, executable_name, thread.id == "1");
+            format!("GDB #{} · {} · {name}", thread.id, thread.target_id)
+        });
+        if self.tls_runtime.borrow().thread == thread {
+            return;
+        }
+        self.tls_runtime.borrow_mut().thread = thread;
         self.rebuild_tls_runtime();
     }
 
@@ -2782,9 +2784,22 @@ impl KernelView {
         bytes: &[u8],
         error: Option<&str>,
     ) {
-        let thread = self.tls_runtime.borrow().thread.clone();
         let (architecture, endian, pointer_bits) = target;
-        self.tls_runtime.replace(KernelTlsRuntime {
+        let current = self.tls_runtime.borrow();
+        if current.architecture == architecture
+            && current.endian == endian
+            && current.pointer_bits == pointer_bits
+            && current.register.as_deref() == register
+            && current.base == base
+            && current.mapping.as_deref() == mapping
+            && current.bytes == bytes
+            && current.error.as_deref() == error
+        {
+            return;
+        }
+        let thread = current.thread.clone();
+        drop(current);
+        let runtime = KernelTlsRuntime {
             thread,
             architecture,
             endian,
@@ -2794,7 +2809,8 @@ impl KernelView {
             mapping: mapping.map(str::to_owned),
             bytes: bytes.to_vec(),
             error: error.map(str::to_owned),
-        });
+        };
+        self.tls_runtime.replace(runtime);
         self.rebuild_tls_runtime();
     }
 

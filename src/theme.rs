@@ -207,6 +207,8 @@ headerbar.topbar button.window-control.close:active {{
     border-bottom: 1px solid @app_border;
 }}
 
+.panel-header.terminal-header {{ padding-right: 0; }}
+
 .subpanel-header {{
     min-height: 23px;
     padding: 0 3px;
@@ -1177,6 +1179,15 @@ button:checked {{
 }}
 
 button:disabled {{
+    color: alpha(@app_muted, 0.45);
+    background: transparent;
+}}
+
+button.pause-availability-pending,
+button.pause-availability-pending:hover,
+button.pause-availability-pending:focus,
+button.pause-availability-pending:focus-visible,
+button.pause-availability-pending:active {{
     color: alpha(@app_muted, 0.45);
     background: transparent;
 }}

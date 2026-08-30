@@ -195,7 +195,7 @@ pub(crate) fn issue_execution_command(ui: &Ui, client: &MiClient, command: &str,
     match client.send(command) {
         Ok(_) => {
             ui.set_command_pending(true);
-            ui.set_status("Executing", detail, Some("status-running"));
+            ui.set_execution_status("Executing", detail);
         }
         Err(error) => ui.set_status("Command failed", &error.to_string(), Some("status-error")),
     }

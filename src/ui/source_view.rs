@@ -80,22 +80,79 @@ pub(super) fn replace_boxed_store_if_changed<T: PartialEq + 'static>(
     values: impl IntoIterator<Item = T>,
 ) -> bool {
     let values = values.into_iter().collect::<Vec<_>>();
-    let unchanged = usize::try_from(store.n_items()).ok() == Some(values.len())
-        && values.iter().enumerate().all(|(index, value)| {
-            store
-                .item(u32::try_from(index).unwrap_or(u32::MAX))
-                .and_downcast::<glib::BoxedAnyObject>()
-                .is_some_and(|item| *item.borrow::<T>() == *value)
-        });
-    if unchanged {
-        return false;
+    let old_len = usize::try_from(store.n_items()).unwrap_or(usize::MAX);
+    if old_len == values.len() {
+        let mut changed = false;
+        let mut run_start = None;
+        let mut replacements = Vec::new();
+        for (index, value) in values.into_iter().enumerate() {
+            if boxed_store_item_equals(store, index, &value) {
+                if let Some(start) = run_start.take() {
+                    store.splice(
+                        u32::try_from(start).unwrap_or(u32::MAX),
+                        u32::try_from(replacements.len()).unwrap_or(u32::MAX),
+                        &replacements,
+                    );
+                    replacements.clear();
+                }
+            } else {
+                changed = true;
+                run_start.get_or_insert(index);
+                replacements.push(glib::BoxedAnyObject::new(value));
+            }
+        }
+        if let Some(start) = run_start {
+            store.splice(
+                u32::try_from(start).unwrap_or(u32::MAX),
+                u32::try_from(replacements.len()).unwrap_or(u32::MAX),
+                &replacements,
+            );
+        }
+        return changed;
     }
-    let values = values
+
+    let common_len = old_len.min(values.len());
+    let prefix = values
+        .iter()
+        .take(common_len)
+        .enumerate()
+        .take_while(|(index, value)| boxed_store_item_equals(store, *index, *value))
+        .count();
+    let suffix = values
+        .iter()
+        .enumerate()
+        .rev()
+        .take(common_len.saturating_sub(prefix))
+        .take_while(|(index, value)| {
+            let old_index = old_len - (values.len() - *index);
+            boxed_store_item_equals(store, old_index, *value)
+        })
+        .count();
+    let new_middle_len = values.len().saturating_sub(prefix + suffix);
+    let old_middle_len = old_len.saturating_sub(prefix + suffix);
+    let replacements = values
         .into_iter()
+        .skip(prefix)
+        .take(new_middle_len)
         .map(glib::BoxedAnyObject::new)
         .collect::<Vec<_>>();
-    store.splice(0, store.n_items(), &values);
+    store.splice(
+        u32::try_from(prefix).unwrap_or(u32::MAX),
+        u32::try_from(old_middle_len).unwrap_or(u32::MAX),
+        &replacements,
+    );
     true
+}
+
+fn boxed_store_item_equals<T: PartialEq + 'static>(
+    store: &gio::ListStore,
+    index: usize,
+    value: &T,
+) -> bool {
+    store
+        .item(u32::try_from(index).unwrap_or(u32::MAX))
+        .and_downcast::<glib::BoxedAnyObject>()
+        .is_some_and(|item| *item.borrow::<T>() == *value)
 }
 
 pub(super) fn update_selected_frame_buttons(buttons: &[(u32, gtk::Button)], selected: u32) {
@@ -601,41 +658,58 @@ pub(super) fn source_symbol_span_at_offset(
     line: &str,
     offset: usize,
 ) -> Option<(String, usize, usize)> {
-    let characters = line.chars().collect::<Vec<_>>();
-    let offset = offset.min(characters.len());
+    let character_count = line.chars().count();
+    let offset = offset.min(character_count);
+    let byte_offset = line
+        .char_indices()
+        .nth(offset)
+        .map_or(line.len(), |(index, _)| index);
     let is_symbol_character =
         |character: char| character.is_alphanumeric() || matches!(character, '_' | ':' | '$' | '~');
-    if offset < characters.len() && !is_symbol_character(characters[offset]) {
+    if byte_offset < line.len()
+        && !line[byte_offset..]
+            .chars()
+            .next()
+            .is_some_and(is_symbol_character)
+    {
         return None;
     }
-    let mut left = offset;
-    while left > 0 && is_symbol_character(characters[left - 1]) {
-        left -= 1;
+    let mut left_byte = byte_offset;
+    for (index, character) in line[..byte_offset].char_indices().rev() {
+        if !is_symbol_character(character) {
+            break;
+        }
+        left_byte = index;
     }
-    let mut right = offset;
-    while right < characters.len() && is_symbol_character(characters[right]) {
-        right += 1;
+    let mut right_byte = byte_offset;
+    for (index, character) in line[byte_offset..].char_indices() {
+        if !is_symbol_character(character) {
+            break;
+        }
+        right_byte = byte_offset + index + character.len_utf8();
     }
-    let syntax_right = right;
-    while left < right && characters[left] == ':' {
-        left += 1;
+    let syntax_right_byte = right_byte;
+    while left_byte < right_byte && line.as_bytes()[left_byte] == b':' {
+        left_byte += 1;
     }
-    while right > left && characters[right - 1] == ':' {
-        right -= 1;
+    while right_byte > left_byte && line.as_bytes()[right_byte - 1] == b':' {
+        right_byte -= 1;
     }
-    let symbol = characters[left..right].iter().collect::<String>();
+    let symbol = &line[left_byte..right_byte];
     if !symbol
         .chars()
         .next()
         .is_some_and(|character| character.is_alphabetic() || matches!(character, '_' | '~'))
-        || !is_callable_source_symbol(&symbol, &characters, syntax_right)
+        || !is_callable_source_symbol(symbol, line, syntax_right_byte)
     {
         return None;
     }
-    Some((symbol, left, right))
+    let left = line[..left_byte].chars().count();
+    let right = left + symbol.chars().count();
+    Some((symbol.to_owned(), left, right))
 }
 
-pub(super) fn is_callable_source_symbol(symbol: &str, line: &[char], mut cursor: usize) -> bool {
+pub(super) fn is_callable_source_symbol(symbol: &str, line: &str, cursor: usize) -> bool {
     const NON_CALL_KEYWORDS: &[&str] = &[
         "if", "for", "while", "switch", "catch", "match", "loop", "sizeof", "alignof", "_Alignof",
         "typeof", "decltype", "typeid", "return",
@@ -644,39 +718,34 @@ pub(super) fn is_callable_source_symbol(symbol: &str, line: &[char], mut cursor:
     if NON_CALL_KEYWORDS.contains(&name) {
         return false;
     }
-    while line
-        .get(cursor)
-        .is_some_and(|character| character.is_whitespace())
-    {
-        cursor += 1;
-    }
-    if line.get(cursor) == Some(&'<') {
+    let mut characters = line[cursor..].chars().peekable();
+    while characters
+        .next_if(|character| character.is_whitespace())
+        .is_some()
+    {}
+    if characters.next_if_eq(&'<').is_some() {
         let mut depth = 0_u32;
-        while let Some(character) = line.get(cursor) {
+        for character in characters.by_ref() {
             match character {
-                '<' => depth += 1,
+                '<' => depth = depth.saturating_add(1),
                 '>' => {
-                    depth = depth.saturating_sub(1);
                     if depth == 0 {
-                        cursor += 1;
                         break;
                     }
+                    depth -= 1;
                 }
                 _ => {}
             }
-            cursor += 1;
         }
         if depth != 0 {
             return false;
         }
-        while line
-            .get(cursor)
-            .is_some_and(|character| character.is_whitespace())
-        {
-            cursor += 1;
-        }
+        while characters
+            .next_if(|character| character.is_whitespace())
+            .is_some()
+        {}
     }
-    line.get(cursor) == Some(&'(')
+    characters.next() == Some('(')
 }
 
 pub(super) fn update_source_link_highlight(
@@ -688,8 +757,8 @@ pub(super) fn update_source_link_highlight(
     y: f64,
     active: bool,
 ) {
-    clear_source_link_highlight(view, buffer, tag, highlighted_range);
     if !active {
+        clear_source_link_highlight(view, buffer, tag, highlighted_range);
         return;
     }
     let (x, y) = view.window_to_buffer_coords(
@@ -698,22 +767,32 @@ pub(super) fn update_source_link_highlight(
         y.round() as i32,
     );
     let Some(iter) = view.iter_at_location(x, y) else {
+        clear_source_link_highlight(view, buffer, tag, highlighted_range);
         return;
     };
     let Some((_, start, end)) = source_symbol_span_at_iter(buffer, &iter) else {
+        clear_source_link_highlight(view, buffer, tag, highlighted_range);
         return;
     };
     let Some(line_start) = buffer.iter_at_line(iter.line()) else {
+        clear_source_link_highlight(view, buffer, tag, highlighted_range);
         return;
     };
     let Ok(start) = i32::try_from(start) else {
+        clear_source_link_highlight(view, buffer, tag, highlighted_range);
         return;
     };
     let Ok(end) = i32::try_from(end) else {
+        clear_source_link_highlight(view, buffer, tag, highlighted_range);
         return;
     };
     let start = line_start.offset() + start;
     let end = line_start.offset() + end;
+    if highlighted_range.borrow().as_ref() == Some(&(start, end)) {
+        view.set_cursor_from_name(Some("pointer"));
+        return;
+    }
+    clear_source_link_highlight(view, buffer, tag, highlighted_range);
     let start_iter = buffer.iter_at_offset(start);
     let end_iter = buffer.iter_at_offset(end);
     buffer.apply_tag(tag, &start_iter, &end_iter);
@@ -845,4 +924,40 @@ pub(super) fn source_tab_title(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("source")
         .to_owned()
+}
+
+#[cfg(test)]
+mod model_update_tests {
+    use super::*;
+
+    fn values(store: &gio::ListStore) -> Vec<u32> {
+        (0..store.n_items())
+            .map(|index| {
+                *store
+                    .item(index)
+                    .and_downcast::<glib::BoxedAnyObject>()
+                    .unwrap()
+                    .borrow::<u32>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn changed_store_updates_preserve_equal_objects() {
+        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        assert!(replace_boxed_store_if_changed(&store, [1_u32, 2, 3]));
+        let first = store.item(0).unwrap();
+        let last = store.item(2).unwrap();
+
+        assert!(replace_boxed_store_if_changed(&store, [1_u32, 20, 3]));
+        assert_eq!(values(&store), [1, 20, 3]);
+        assert_eq!(store.item(0).as_ref(), Some(&first));
+        assert_eq!(store.item(2).as_ref(), Some(&last));
+        assert!(!replace_boxed_store_if_changed(&store, [1_u32, 20, 3]));
+
+        assert!(replace_boxed_store_if_changed(&store, [1_u32, 3]));
+        assert_eq!(values(&store), [1, 3]);
+        assert_eq!(store.item(0).as_ref(), Some(&first));
+        assert_eq!(store.item(1).as_ref(), Some(&last));
+    }
 }

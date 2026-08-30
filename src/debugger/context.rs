@@ -86,6 +86,21 @@ pub(crate) fn build_stack_entries(
     if !matches!(word_size, 4 | 8) {
         return Vec::new();
     }
+    // Register and frame addresses are invariant across the stack window.
+    // Decode them once instead of reparsing the same hexadecimal strings for
+    // every stack word.
+    let register_addresses = registers
+        .iter()
+        .filter(|register| is_pointer_register(&register.name, architecture))
+        .filter_map(|register| {
+            pointer_address(&register.value).map(|address| (address, register.name.as_str()))
+        })
+        .collect::<Vec<_>>();
+    let return_addresses = frames
+        .iter()
+        .filter(|frame| frame.level > 0)
+        .filter_map(|frame| pointer_address(&frame.address).map(|address| (address, frame.level)))
+        .collect::<Vec<_>>();
     memory
         .bytes
         .chunks_exact(word_size)
@@ -101,17 +116,15 @@ pub(crate) fn build_stack_entries(
                 }
             };
             let address = memory.begin.saturating_add((index * word_size) as u64);
-            let address_registers = matching_registers(registers, address, architecture);
+            let address_registers = matching_registers(&register_addresses, address);
             let value_registers = if value == 0 {
                 Vec::new()
             } else {
-                matching_registers(registers, value, architecture)
+                matching_registers(&register_addresses, value)
             };
-            let return_frame = frames
+            let return_frame = return_addresses
                 .iter()
-                .filter(|frame| frame.level > 0)
-                .find(|frame| pointer_address(&frame.address) == Some(value))
-                .map(|frame| frame.level);
+                .find_map(|(address, level)| (*address == value).then_some(*level));
             let region = region_for_address(regions, value);
             let memory_kind =
                 if region.is_none() && looks_like_string_word(value, endian, word_size) {
@@ -151,18 +164,11 @@ pub(crate) fn looks_like_string_word(value: u64, endian: TargetEndian, word_size
         >= 4
 }
 
-fn matching_registers(
-    registers: &[Register],
-    address: u64,
-    architecture: TargetArchitecture,
-) -> Vec<String> {
+fn matching_registers(registers: &[(u64, &str)], address: u64) -> Vec<String> {
     registers
         .iter()
-        .filter(|register| {
-            is_pointer_register(&register.name, architecture)
-                && pointer_address(&register.value) == Some(address)
-        })
-        .map(|register| register.name.clone())
+        .filter(|(register_address, _)| *register_address == address)
+        .map(|(_, name)| (*name).to_owned())
         .collect()
 }
 

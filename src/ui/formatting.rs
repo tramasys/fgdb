@@ -1,4 +1,5 @@
 use super::*;
+use std::fmt::Write as _;
 
 pub(super) fn populate_register_group<'a>(
     group: &RegisterGroupView,
@@ -21,12 +22,18 @@ pub(super) fn populate_register_group<'a>(
         })
         .collect::<Vec<_>>();
     let count = rows.len() as i32;
+    let previous_count = group.store.n_items();
     replace_boxed_store_if_changed(&group.store, rows);
-    group.panel.set_visible(count != 0);
+    let visible = count != 0;
+    if group.panel.is_visible() != visible {
+        group.panel.set_visible(visible);
+    }
     if count == 0 {
         return;
     }
-    group.view.set_size_request(-1, 24 + count * 26);
+    if previous_count != count as u32 {
+        group.view.set_size_request(-1, 24 + count * 26);
+    }
 }
 
 pub(super) fn register_in_group(
@@ -134,25 +141,26 @@ pub(super) fn register_text(
     } else {
         register.pointer_chain.as_slice()
     };
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            if index == 0 {
-                format_register_value_for_target(
-                    &register.name,
-                    value,
-                    false,
-                    architecture,
-                    endian,
-                    pointer_bits,
-                )
-            } else {
-                format_target_pointer_word(value, endian, pointer_bits)
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("  →  ")
+    let mut text = String::new();
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            text.push_str("  →  ");
+        }
+        let value = if index == 0 {
+            format_register_value_for_target(
+                &register.name,
+                value,
+                false,
+                architecture,
+                endian,
+                pointer_bits,
+            )
+        } else {
+            format_target_pointer_word(value, endian, pointer_bits)
+        };
+        text.push_str(&value);
+    }
+    text
 }
 
 pub(super) fn register_primary_value(
@@ -169,13 +177,14 @@ pub(super) fn register_details(
     endian: Option<TargetEndian>,
     pointer_bits: u32,
 ) -> String {
-    register
-        .pointer_chain
-        .iter()
-        .skip(1)
-        .map(|value| format_target_pointer_word(value, endian, pointer_bits))
-        .collect::<Vec<_>>()
-        .join("  →  ")
+    let mut details = String::new();
+    for value in register.pointer_chain.iter().skip(1) {
+        if !details.is_empty() {
+            details.push_str("  →  ");
+        }
+        details.push_str(&format_target_pointer_word(value, endian, pointer_bits));
+    }
+    details
 }
 
 fn format_target_pointer_word(
@@ -617,14 +626,7 @@ pub(super) fn build_disclosure_with_content(
 pub(super) fn stack_references(entry: &StackEntry) -> String {
     let mut references = Vec::new();
     if !entry.value_registers.is_empty() {
-        references.push(
-            entry
-                .value_registers
-                .iter()
-                .map(|name| format!("${name}"))
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
+        references.push(format_register_names(&entry.value_registers));
     }
     if let Some(frame) = entry.return_frame {
         references.push(format!("retaddr[{frame}]"));
@@ -637,23 +639,13 @@ pub(super) fn stack_word_role(entry: &StackEntry) -> String {
     if !entry.address_registers.is_empty() {
         roles.push(format!(
             "addressed by {}",
-            entry
-                .address_registers
-                .iter()
-                .map(|name| format!("${name}"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            format_register_names(&entry.address_registers)
         ));
     }
     if !entry.value_registers.is_empty() {
         roles.push(format!(
             "value held by {}",
-            entry
-                .value_registers
-                .iter()
-                .map(|name| format!("${name}"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            format_register_names(&entry.value_registers)
         ));
     }
     if let Some(frame) = entry.return_frame {
@@ -676,12 +668,7 @@ pub(super) const fn memory_kind_label(kind: MemoryKind) -> &'static str {
 }
 
 pub(super) fn stack_tooltip(entry: &StackEntry) -> String {
-    let anchors = entry
-        .address_registers
-        .iter()
-        .map(|name| format!("${name}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let anchors = format_register_names(&entry.address_registers);
     let references = stack_references(entry);
     let region = entry.region.as_deref().unwrap_or("unmapped");
     let width = usize::try_from(entry.pointer_bits / 4)
@@ -710,26 +697,38 @@ pub(super) fn stack_entry_text(entry: &StackEntry) -> String {
     } else {
         entry.pointer_chain.as_slice()
     };
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let architecture = if entry.pointer_bits == 32 {
-                TargetArchitecture::X86
-            } else {
-                TargetArchitecture::X86_64
-            };
-            format_register_value_for_target(
-                "sp",
-                value,
-                index > 0,
-                architecture,
-                Some(entry.endian),
-                entry.pointer_bits,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("  →  ")
+    let architecture = if entry.pointer_bits == 32 {
+        TargetArchitecture::X86
+    } else {
+        TargetArchitecture::X86_64
+    };
+    let mut text = String::new();
+    for (index, value) in values.iter().enumerate() {
+        if index > 0 {
+            text.push_str("  →  ");
+        }
+        text.push_str(&format_register_value_for_target(
+            "sp",
+            value,
+            index > 0,
+            architecture,
+            Some(entry.endian),
+            entry.pointer_bits,
+        ));
+    }
+    text
+}
+
+fn format_register_names(names: &[String]) -> String {
+    let mut formatted = String::new();
+    for name in names {
+        if !formatted.is_empty() {
+            formatted.push_str(", ");
+        }
+        formatted.push('$');
+        formatted.push_str(name);
+    }
+    formatted
 }
 
 pub(super) fn memory_kind_css(kind: MemoryKind) -> &'static str {
@@ -827,22 +826,27 @@ pub(super) fn thread_detail_widget(thread: &ThreadInfo, stop_reason: Option<&str
 }
 
 pub(super) fn thread_metadata(thread: &ThreadInfo, stop_reason: Option<&str>) -> String {
-    let mut metadata = Vec::new();
-    if let Some(frame) = thread.frame.as_ref()
-        && let Some(symbol) = thread
-            .pc_symbol
-            .clone()
-            .or_else(|| (frame.function != "??").then(|| format!("<{}>", frame.function)))
-    {
-        metadata.push(compact_function_name(&symbol));
+    let mut metadata = String::new();
+    if let Some(frame) = thread.frame.as_ref() {
+        if let Some(symbol) = thread.pc_symbol.as_deref() {
+            metadata.push_str(&compact_function_name(symbol));
+        } else if frame.function != "??" {
+            metadata.push_str(&compact_function_name(&format!("<{}>", frame.function)));
+        }
     }
     if let Some(core) = thread.core.as_deref() {
-        metadata.push(format!("core:{core}"));
+        if !metadata.is_empty() {
+            metadata.push_str(", ");
+        }
+        let _ = write!(metadata, "core:{core}");
     }
     if let Some(reason) = stop_reason {
-        metadata.push(format!("reason: {reason}"));
+        if !metadata.is_empty() {
+            metadata.push_str(", ");
+        }
+        let _ = write!(metadata, "reason: {reason}");
     }
-    metadata.join(", ")
+    metadata
 }
 
 pub(super) fn full_address(address: &str, pointer_bits: u32) -> String {
