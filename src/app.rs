@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
     fmt::Write as _,
     path::PathBuf,
@@ -23,7 +23,8 @@ use crate::{
     ui::{
         BreakpointEditRequest, BreakpointSpec, CallAbiTargetRequest, DisassemblyRequest,
         DisassemblySyntax, EventCatchpoint, GefContextControl, HeapInspectionAction,
-        HeapInspectionRequest, SessionAction, Ui, UntilAction, WatchpointAccess,
+        HeapInspectionRequest, SessionAction, SourceDiscoveryRequest, Ui, UntilAction,
+        WatchpointAccess,
     },
 };
 

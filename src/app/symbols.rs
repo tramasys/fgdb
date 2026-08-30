@@ -1,5 +1,100 @@
 use super::*;
 
+struct SourceSymbolSearch {
+    ui: Weak<Ui>,
+    query: String,
+    generation: u64,
+    pending: Cell<u8>,
+    locations: RefCell<Vec<crate::debugger::SourceLocation>>,
+}
+
+pub(super) fn request_source_discovery(
+    ui: Weak<Ui>,
+    client: Rc<MiClient>,
+    request: SourceDiscoveryRequest,
+) {
+    match request {
+        SourceDiscoveryRequest::LoadedFiles(generation) => {
+            let ui_for_response = ui.clone();
+            if client
+                .request("-file-list-exec-source-files", move |_, record| {
+                    if let Some(ui) = ui_for_response.upgrade() {
+                        let files = if record.is_done() {
+                            crate::debugger::source_files(&record)
+                        } else {
+                            Vec::new()
+                        };
+                        ui.show_loaded_source_files(generation, files);
+                    }
+                })
+                .is_err()
+                && let Some(ui) = ui.upgrade()
+            {
+                ui.show_loaded_source_files(generation, Vec::new());
+            }
+        }
+        SourceDiscoveryRequest::Symbols { query, generation } => {
+            request_source_symbol_results(ui, &client, query, generation);
+        }
+    }
+}
+
+fn request_source_symbol_results(ui: Weak<Ui>, client: &MiClient, query: String, generation: u64) {
+    let pattern = source_symbol_pattern(&query);
+    let search = Rc::new(SourceSymbolSearch {
+        ui,
+        query,
+        generation,
+        pending: Cell::new(2),
+        locations: RefCell::new(Vec::new()),
+    });
+    for command in [
+        format!(
+            "-symbol-info-functions --name {} --max-results 256",
+            crate::debugger::quote(&pattern)
+        ),
+        format!(
+            "-symbol-info-variables --name {} --max-results 256",
+            crate::debugger::quote(&pattern)
+        ),
+    ] {
+        let search_for_response = Rc::clone(&search);
+        if client
+            .request(&command, move |_, record| {
+                if record.is_done() {
+                    search_for_response
+                        .locations
+                        .borrow_mut()
+                        .extend(crate::debugger::source_locations(&record));
+                }
+                finish_source_symbol_request(&search_for_response);
+            })
+            .is_err()
+        {
+            finish_source_symbol_request(&search);
+        }
+    }
+}
+
+fn finish_source_symbol_request(search: &SourceSymbolSearch) {
+    let remaining = search.pending.get().saturating_sub(1);
+    search.pending.set(remaining);
+    if remaining != 0 {
+        return;
+    }
+    let mut locations = search.locations.borrow().clone();
+    locations.sort_unstable_by(|left, right| {
+        left.function
+            .cmp(&right.function)
+            .then_with(|| left.source_path().cmp(right.source_path()))
+            .then_with(|| left.line.cmp(&right.line))
+    });
+    locations.dedup();
+    if let Some(ui) = search.ui.upgrade() {
+        ui.show_source_symbol_results(search.generation, &search.query, locations);
+    }
+}
+
 pub(super) fn request_source_symbol(
     ui: Weak<Ui>,
     client: Rc<MiClient>,

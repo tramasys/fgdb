@@ -14,6 +14,8 @@ impl Ui {
     }
 
     pub fn set_current_session(&self, session: DebugSession) {
+        self.close_source_palette();
+        let mut tree_roots = self.source_tree_base_roots.clone();
         if let Some(directory) = session.working_directory()
             && directory.is_dir()
         {
@@ -23,6 +25,16 @@ impl Ui {
             }
             roots.insert(0, directory.to_path_buf());
             self.resolved_source_paths.borrow_mut().clear();
+            if let Some(index) = tree_roots.iter().position(|root| root == directory) {
+                tree_roots.remove(index);
+            }
+            tree_roots.insert(0, directory.to_path_buf());
+        }
+        if *self.source_tree_roots.borrow() != tree_roots {
+            self.source_tree_roots.replace(tree_roots);
+            self.source_tree_cache.borrow_mut().take();
+            self.source_tree_indexing.set(false);
+            self.source_tree_generation.fetch_add(1, Ordering::Relaxed);
         }
         self.current_session.replace(Some(session));
         self.update_session_display();

@@ -1082,11 +1082,132 @@ pub(super) fn instruction_column(
     column
 }
 
-pub(super) fn build_editor_panel(notebook: &gtk::Notebook) -> gtk::Box {
+pub(super) fn build_editor_panel(notebook: &gtk::Notebook) -> SourceEditorPanel {
     let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
     panel.add_css_class("panel");
+    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+    toolbar.add_css_class("source-navigation-toolbar");
+    let back = gtk::Button::with_label("‹");
+    back.set_tooltip_text(Some("Back in source navigation history · Alt+Left"));
+    back.set_sensitive(false);
+    let forward = gtk::Button::with_label("›");
+    forward.set_tooltip_text(Some("Forward in source navigation history · Alt+Right"));
+    forward.set_sensitive(false);
+    let quick_open = gtk::Button::with_label("Quick open");
+    quick_open.set_tooltip_text(Some("Find a loaded or project source file · Ctrl+P"));
+    for button in [&back, &forward, &quick_open] {
+        button.add_css_class("source-navigation-action");
+        toolbar.append(button);
+    }
+
+    let popover = gtk::Popover::new();
+    popover.set_autohide(true);
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    menu.add_css_class("source-navigation-menu");
+    let find = source_navigation_menu_action("Find in file", "Ctrl+F");
+    let go_to_line = source_navigation_menu_action("Go to line", "Ctrl+G");
+    let symbols = source_navigation_menu_action("Functions and symbols", "Ctrl+Shift+O");
+    let loaded_search = source_navigation_menu_action("Search loaded source files", "");
+    let tree_search = source_navigation_menu_action("Search source tree", "Ctrl+Shift+F");
+    let reopen_closed = source_navigation_menu_action("Reopen closed tab", "Ctrl+Shift+T");
+    reopen_closed.set_sensitive(false);
+    for button in [
+        &find,
+        &go_to_line,
+        &symbols,
+        &loaded_search,
+        &tree_search,
+        &reopen_closed,
+    ] {
+        let popover = popover.clone();
+        button.connect_clicked(move |_| popover.popdown());
+        menu.append(button);
+    }
+    popover.set_child(Some(&menu));
+    let source_menu = gtk::MenuButton::new();
+    source_menu.set_child(Some(&gtk::Label::new(Some("Source"))));
+    source_menu.set_popover(Some(&popover));
+    source_menu.add_css_class("source-navigation-menu-button");
+    toolbar.append(&source_menu);
+    panel.append(&toolbar);
+
+    let find_bar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    find_bar.add_css_class("source-find-bar");
+    find_bar.set_visible(false);
+    let find_entry = source_search_entry("Find in current source file");
+    find_entry.set_hexpand(true);
+    let find_count = gtk::Label::new(None);
+    find_count.add_css_class("source-find-count");
+    let find_previous = gtk::Button::with_label("Prev");
+    let find_next = gtk::Button::with_label("Next");
+    let find_case = gtk::ToggleButton::with_label("Aa");
+    find_case.set_tooltip_text(Some("Match case"));
+    let find_close = gtk::Button::with_label("Close");
+    for button in [&find_previous, &find_next, &find_close] {
+        button.add_css_class("inline-action");
+    }
+    find_case.add_css_class("inline-action");
+    find_bar.append(&find_entry);
+    find_bar.append(&find_count);
+    find_bar.append(&find_previous);
+    find_bar.append(&find_next);
+    find_bar.append(&find_case);
+    find_bar.append(&find_close);
+    panel.append(&find_bar);
     panel.append(notebook);
-    panel
+    SourceEditorPanel {
+        root: panel,
+        navigation: SourceNavigationControls {
+            back,
+            forward,
+            quick_open,
+            find,
+            go_to_line,
+            symbols,
+            loaded_search,
+            tree_search,
+            reopen_closed,
+            find_bar,
+            find_entry,
+            find_count,
+            find_previous,
+            find_next,
+            find_case,
+            find_close,
+        },
+    }
+}
+
+fn source_navigation_menu_action(label: &str, shortcut: &str) -> gtk::Button {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let label = gtk::Label::new(Some(label));
+    label.set_halign(gtk::Align::Start);
+    label.set_hexpand(true);
+    let shortcut = gtk::Label::new(Some(shortcut));
+    shortcut.add_css_class("muted");
+    shortcut.set_halign(gtk::Align::End);
+    row.append(&label);
+    row.append(&shortcut);
+    let button = gtk::Button::builder().child(&row).hexpand(true).build();
+    button.add_css_class("source-navigation-menu-action");
+    button
+}
+
+pub(super) fn source_search_entry(placeholder: &str) -> gtk::Entry {
+    let entry = gtk::Entry::builder()
+        .placeholder_text(placeholder)
+        .primary_icon_name("system-search-symbolic")
+        .build();
+    entry.add_css_class("source-search-entry");
+    entry.connect_changed(|entry| {
+        entry.set_secondary_icon_name((!entry.text().is_empty()).then_some("edit-clear-symbolic"));
+    });
+    entry.connect_icon_release(|entry, position| {
+        if position == gtk::EntryIconPosition::Secondary {
+            entry.set_text("");
+        }
+    });
+    entry
 }
 
 pub(super) fn build_terminal_panel(

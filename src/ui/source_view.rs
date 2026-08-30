@@ -205,9 +205,36 @@ fn close_source_pages(
     documents: &Rc<RefCell<Vec<SourceDocument>>>,
     pages: &[gtk::ScrolledWindow],
     style_scheme: Option<&sourceview5::StyleScheme>,
+    closed_tabs: &Rc<RefCell<Vec<ClosedSourceTab>>>,
+    reopen_closed: &gtk::Button,
 ) {
     if pages.is_empty() {
         return;
+    }
+    let closed = documents
+        .borrow()
+        .iter()
+        .filter(|document| pages.contains(&document.page))
+        .map(|document| ClosedSourceTab {
+            path: document.path.clone(),
+            line: u32::try_from(
+                document
+                    .buffer
+                    .iter_at_offset(document.buffer.cursor_position())
+                    .line()
+                    .saturating_add(1),
+            )
+            .unwrap_or(1),
+        })
+        .collect::<Vec<_>>();
+    if !closed.is_empty() {
+        let mut history = closed_tabs.borrow_mut();
+        history.extend(closed);
+        if history.len() > 32 {
+            let remove = history.len() - 32;
+            history.drain(..remove);
+        }
+        reopen_closed.set_sensitive(true);
     }
     for page in pages {
         if let Some(page_number) = notebook.page_num(page) {
@@ -243,6 +270,8 @@ fn connect_source_tab_context_menu(
     notebook: &gtk::Notebook,
     documents: &Rc<RefCell<Vec<SourceDocument>>>,
     style_scheme: Option<&sourceview5::StyleScheme>,
+    closed_tabs: &Rc<RefCell<Vec<ClosedSourceTab>>>,
+    reopen_closed: &gtk::Button,
 ) {
     let popover = gtk::Popover::new();
     popover.add_css_class("source-tab-menu");
@@ -283,13 +312,22 @@ fn connect_source_tab_context_menu(
         let documents = Rc::clone(documents);
         let page = document.page.clone();
         let style_scheme = style_scheme.cloned();
+        let closed_tabs = Rc::clone(closed_tabs);
+        let reopen_closed = reopen_closed.clone();
         let popover = popover.downgrade();
         button.connect_clicked(move |_| {
             let pages = source_pages_for_close(&notebook, &documents, &page, scope);
             if let Some(popover) = popover.upgrade() {
                 popover.popdown();
             }
-            close_source_pages(&notebook, &documents, &pages, style_scheme.as_ref());
+            close_source_pages(
+                &notebook,
+                &documents,
+                &pages,
+                style_scheme.as_ref(),
+                &closed_tabs,
+                &reopen_closed,
+            );
         });
     }
 
@@ -448,17 +486,23 @@ pub(super) fn open_source_document(
         context.notebook,
         context.documents,
         context.style_scheme,
+        context.closed_tabs,
+        context.reopen_closed,
     );
     let notebook_for_close = context.notebook.clone();
     let documents_for_close = Rc::clone(context.documents);
     let page_for_close = document.page.clone();
     let style_scheme_for_close = context.style_scheme.cloned();
+    let closed_tabs_for_close = Rc::clone(context.closed_tabs);
+    let reopen_closed_for_close = context.reopen_closed.clone();
     close.connect_clicked(move |_| {
         close_source_pages(
             &notebook_for_close,
             &documents_for_close,
             std::slice::from_ref(&page_for_close),
             style_scheme_for_close.as_ref(),
+            &closed_tabs_for_close,
+            &reopen_closed_for_close,
         );
     });
 

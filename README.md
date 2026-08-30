@@ -56,3 +56,9 @@ Profiles also accept `attach=PID`. A profile can override `gdb`, `gdb_args`, `so
 Safe mode passes `--nx` to GDB and ignores configured GDB startup arguments for that invocation.
 
 The Session menu includes Configuration diagnostics with the loaded file list, file and line specific errors, and the effective merged settings. Invalid file entries are ignored safely while valid settings remain active. Use Open active config to edit the selected file with the desktop editor.
+
+## Source navigation
+
+The source pane provides quick open across GDB sources and the configured source tree, current-file find, line navigation, function and symbol lookup, loaded-source and source-tree content search, closed-tab recovery, and its own back and forward history.
+
+Common shortcuts are `Ctrl+P` for quick open, `Ctrl+F` for current-file find, `Ctrl+G` for line navigation, `Ctrl+Shift+O` for symbols, `Ctrl+Shift+F` for source-tree search, `Ctrl+Shift+T` to reopen a closed tab, and `Alt+Left` or `Alt+Right` for source history.

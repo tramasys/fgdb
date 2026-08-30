@@ -740,6 +740,26 @@ pub fn source_locations(record: &MiRecord) -> Vec<SourceLocation> {
         .collect()
 }
 
+pub fn source_files(record: &MiRecord) -> Vec<SourceFile> {
+    let mut files = record
+        .field("files")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .filter_map(|file| {
+            Some(SourceFile {
+                file: constant(file, "file")?.to_owned(),
+                fullname: owned_constant(file, "fullname"),
+                line: 1,
+            })
+        })
+        .collect::<Vec<_>>();
+    files.sort_unstable_by(|left, right| left.source_path().cmp(right.source_path()));
+    files.dedup_by(|left, right| left.source_path() == right.source_path());
+    files
+}
+
 pub fn current_source(record: &MiRecord) -> Option<SourceFile> {
     Some(SourceFile {
         file: record.field("file")?.as_const()?.to_owned(),
@@ -883,7 +903,7 @@ mod tests {
     use super::{
         breakpoints, compact_register_numbers, current_source, has_exact_command_completion,
         inferior_pid, inserted_breakpoints, instructions, memory_block, register_names, registers,
-        shared_libraries, source_locations, stack_frames, threads, variable_children,
+        shared_libraries, source_files, source_locations, stack_frames, threads, variable_children,
         variable_children_have_more, variable_object, variable_path_expression, variable_updates,
         variables,
     };
@@ -1246,6 +1266,19 @@ mod tests {
         assert_eq!(locations[0].function, "demo::run");
         assert_eq!(locations[0].source_path(), "/tmp/src/main.rs");
         assert_eq!(locations[0].line, 14);
+    }
+
+    #[test]
+    fn converts_and_deduplicates_loaded_source_files() {
+        let record = parse_record(
+            r#"9^done,files=[{file="src/main.c",fullname="/tmp/project/src/main.c"},{file="src/lib.c",fullname="/tmp/project/src/lib.c"},{file="src/main.c",fullname="/tmp/project/src/main.c"}]"#,
+        )
+        .unwrap();
+        let files = source_files(&record);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].source_path(), "/tmp/project/src/lib.c");
+        assert_eq!(files[1].source_path(), "/tmp/project/src/main.c");
+        assert_eq!(files[1].line, 1);
     }
 
     #[test]

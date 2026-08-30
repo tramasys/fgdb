@@ -428,6 +428,14 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+    ui.set_source_discovery_handler(move |request| {
+        let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
+            return;
+        };
+        request_source_discovery(weak_ui, client, request);
+    });
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
     ui.set_variable_editor_handler(move |variable| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;

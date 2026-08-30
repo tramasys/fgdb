@@ -1680,6 +1680,109 @@ button.terminal-pane-toggle:checked {{
 .status-running {{ color: @app_accent_hover; }}
 .status-error {{ color: @app_danger; }}
 
+.source-navigation-toolbar {{
+    min-height: 25px;
+    padding: 0;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}}
+
+button.source-navigation-action,
+menubutton.source-navigation-menu-button > button {{
+    min-height: 24px;
+    padding: 0 8px;
+    color: @app_muted;
+    background: transparent;
+    border: 0;
+    border-right: 1px solid alpha(@app_border, 0.75);
+}}
+
+button.source-navigation-action:hover,
+button.source-navigation-action:focus-visible,
+menubutton.source-navigation-menu-button > button:hover,
+menubutton.source-navigation-menu-button > button:focus-visible {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.11);
+}}
+
+button.source-navigation-action:disabled {{
+    color: alpha(@app_muted, 0.40);
+    background: transparent;
+}}
+
+popover > contents .source-navigation-menu {{
+    min-width: 310px;
+    padding: 4px;
+    background: @app_surface;
+}}
+
+button.source-navigation-menu-action {{
+    min-height: 27px;
+    padding: 1px 7px;
+    color: @app_fg;
+    background: transparent;
+    border: 0;
+}}
+
+button.source-navigation-menu-action:hover,
+button.source-navigation-menu-action:focus-visible {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.12);
+}}
+
+.source-find-bar {{
+    min-height: 29px;
+    padding: 3px 5px;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}}
+
+.source-find-bar entry.source-search-entry {{ min-height: 21px; }}
+.source-find-count {{
+    min-width: 82px;
+    color: @app_muted;
+}}
+
+window.source-palette,
+window.source-palette > box {{
+    color: @app_fg;
+    background: @app_bg;
+}}
+
+window.source-palette entry.source-search-entry {{
+    min-height: 29px;
+    color: @app_fg;
+    background: @app_surface;
+    border: 1px solid @app_border;
+}}
+
+window.source-palette entry.source-search-entry:focus-within {{ border-color: @app_accent; }}
+
+.source-search-entry image.left {{ margin-right: 6px; }}
+
+.source-palette-results {{
+    padding: 1px;
+    background: @app_surface;
+}}
+
+button.source-palette-result {{
+    min-height: 43px;
+    padding: 4px 7px;
+    color: @app_fg;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid alpha(@app_border, 0.65);
+}}
+
+button.source-palette-result:hover,
+button.source-palette-result:focus-visible {{
+    background: alpha(@app_accent, 0.13);
+}}
+
+.source-palette-primary {{ color: @app_accent_hover; }}
+.source-palette-kind {{ color: @app_muted; font-size: 10px; }}
+.source-palette-secondary {{ color: @app_muted; font-size: 11px; }}
+
 .source-tab {{
     padding: 0 2px;
     color: @app_fg;

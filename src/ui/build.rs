@@ -613,8 +613,9 @@ pub(super) fn build_workspace(
     navigation_and_editor.set_shrink_start_child(false);
     navigation_and_editor.set_resize_start_child(false);
     let left_sidebar = build_left_sidebar(config, theme);
+    let source_editor = build_editor_panel(source_notebook);
     navigation_and_editor.set_start_child(Some(&left_sidebar.root));
-    navigation_and_editor.set_end_child(Some(&build_editor_panel(source_notebook)));
+    navigation_and_editor.set_end_child(Some(&source_editor.root));
 
     let main_and_terminal = gtk::Paned::new(gtk::Orientation::Vertical);
     main_and_terminal.set_position(515);
@@ -652,6 +653,7 @@ pub(super) fn build_workspace(
         layout_panes,
         terminal_panel,
         status_detail: inspector.status_detail,
+        source_navigation: source_editor.navigation,
         inspector_notebook: inspector.notebook.clone(),
         call_stack_list: left_sidebar.call_stack_list,
         threads_list: left_sidebar.threads_list,

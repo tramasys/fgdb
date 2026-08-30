@@ -5,6 +5,10 @@ use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -14,6 +18,7 @@ use vte4::prelude::*;
 
 mod configuration;
 mod layout;
+mod source_navigation;
 mod value;
 
 #[cfg(test)]
@@ -179,6 +184,7 @@ type BreakpointEnabledHandler = Rc<dyn Fn(String, bool)>;
 type BreakpointBulkDeleteHandler = Rc<dyn Fn(Vec<String>)>;
 type BreakpointInsertHandler = Rc<dyn Fn(PathBuf, u32)>;
 type SourceJumpHandler = Rc<dyn Fn(PathBuf, u32)>;
+type SourceDiscoveryHandler = Rc<dyn Fn(SourceDiscoveryRequest)>;
 type SignalCatchpointHandler = Rc<dyn Fn(String, Option<String>)>;
 type EventCatchpointHandler = Rc<dyn Fn(EventCatchpoint, Option<String>)>;
 type WatchpointInsertHandler = Rc<dyn Fn(String, WatchpointAccess)>;
@@ -644,6 +650,73 @@ struct SourceDocument {
     breakpoint_renderer: BreakpointGutterRenderer,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceNavigationLocation {
+    path: PathBuf,
+    line: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ClosedSourceTab {
+    path: PathBuf,
+    line: u32,
+}
+
+#[derive(Clone)]
+struct SourceNavigationControls {
+    back: gtk::Button,
+    forward: gtk::Button,
+    quick_open: gtk::Button,
+    find: gtk::Button,
+    go_to_line: gtk::Button,
+    symbols: gtk::Button,
+    loaded_search: gtk::Button,
+    tree_search: gtk::Button,
+    reopen_closed: gtk::Button,
+    find_bar: gtk::Box,
+    find_entry: gtk::Entry,
+    find_count: gtk::Label,
+    find_previous: gtk::Button,
+    find_next: gtk::Button,
+    find_case: gtk::ToggleButton,
+    find_close: gtk::Button,
+}
+
+struct SourceEditorPanel {
+    root: gtk::Box,
+    navigation: SourceNavigationControls,
+}
+
+struct SourceFindState {
+    path: PathBuf,
+    context: sourceview5::SearchContext,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SourceSearchMode {
+    Files,
+    Symbols,
+    LoadedText,
+    Tree,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum SourceDiscoveryRequest {
+    LoadedFiles(u64),
+    Symbols { query: String, generation: u64 },
+}
+
+struct SourcePalette {
+    window: gtk::Window,
+    mode: SourceSearchMode,
+    entry: gtk::Entry,
+    results: gtk::Box,
+    status: gtk::Label,
+    loaded_files: Arc<Vec<PathBuf>>,
+    loaded_files_ready: bool,
+    tree_files: Arc<Vec<PathBuf>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MemoryWatchFormat {
     Bytes,
@@ -920,6 +993,8 @@ struct SourceOpenContext<'a> {
     delete_handler: &'a Rc<RefCell<Option<StringSelectionHandler>>>,
     enabled_handler: &'a Rc<RefCell<Option<BreakpointEnabledHandler>>>,
     symbol_handler: &'a Rc<RefCell<Option<StringSelectionHandler>>>,
+    closed_tabs: &'a Rc<RefCell<Vec<ClosedSourceTab>>>,
+    reopen_closed: &'a gtk::Button,
 }
 
 #[derive(Clone, Copy)]
@@ -1083,6 +1158,11 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 // Ctrl+F10  next instruction     Ctrl+F11  step instruction
 // Shift+F11 finish function
 //
+// Ctrl+P    quick open source    Ctrl+F     find in source
+// Ctrl+G    go to source line    Ctrl+Shift+O search symbols
+// Ctrl+Shift+F search source tree
+// Alt+Left / Alt+Right navigate source history
+//
 // Ctrl+hover underlines navigable symbols. Ctrl+click opens definitions.
 // Double-click an instruction to toggle an address breakpoint.
 "#;
@@ -1127,6 +1207,19 @@ pub struct Ui {
     inspector_notebook: gtk::Notebook,
     source_notebook: gtk::Notebook,
     source_documents: Rc<RefCell<Vec<SourceDocument>>>,
+    source_navigation: SourceNavigationControls,
+    source_back_history: Rc<RefCell<Vec<SourceNavigationLocation>>>,
+    source_forward_history: Rc<RefCell<Vec<SourceNavigationLocation>>>,
+    closed_source_tabs: Rc<RefCell<Vec<ClosedSourceTab>>>,
+    source_find_state: Rc<RefCell<Option<SourceFindState>>>,
+    source_palette: Rc<RefCell<Option<SourcePalette>>>,
+    source_palette_generation: Arc<AtomicU64>,
+    source_loaded_generation: Arc<AtomicU64>,
+    source_tree_base_roots: Vec<PathBuf>,
+    source_tree_roots: Rc<RefCell<Vec<PathBuf>>>,
+    source_tree_cache: Rc<RefCell<Option<Arc<Vec<PathBuf>>>>>,
+    source_tree_indexing: Rc<Cell<bool>>,
+    source_tree_generation: Arc<AtomicU64>,
     execution_source_path: Rc<RefCell<Option<PathBuf>>>,
     execution_source_line: Rc<Cell<Option<u32>>>,
     source_theme: Theme,
@@ -1277,6 +1370,7 @@ pub struct Ui {
     event_catchpoint_handler: Rc<RefCell<Option<EventCatchpointHandler>>>,
     watchpoint_insert_handler: Rc<RefCell<Option<WatchpointInsertHandler>>>,
     source_symbol_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
+    source_discovery_handler: Rc<RefCell<Option<SourceDiscoveryHandler>>>,
     thread_stop_reason: Rc<RefCell<Option<String>>>,
     debugger_ready: Rc<Cell<bool>>,
     inferior_running: Rc<Cell<bool>>,
@@ -1325,6 +1419,7 @@ struct Workspace {
     layout_panes: Vec<layout::Pane>,
     terminal_panel: gtk::Box,
     status_detail: gtk::Label,
+    source_navigation: SourceNavigationControls,
     inspector_notebook: gtk::Notebook,
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,

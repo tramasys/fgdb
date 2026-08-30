@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashSet, VecDeque},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -7,6 +7,17 @@ use std::{
 };
 
 use crate::config::LaunchConfig;
+
+const MAX_SOURCE_TREE_DIRECTORIES: usize = 25_000;
+const MAX_SEARCHABLE_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceTreeMatch {
+    pub path: PathBuf,
+    pub line: u32,
+    pub column: u32,
+    pub preview: String,
+}
 
 pub fn paths_match(open_path: &Path, reported_path: &str) -> bool {
     let reported_path = Path::new(reported_path);
@@ -29,6 +40,181 @@ pub fn roots(config: &LaunchConfig) -> Vec<PathBuf> {
     let mut seen = HashSet::new();
     roots.retain(|root| root.is_dir() && seen.insert(root.clone()));
     roots
+}
+
+pub fn search_roots(config: &LaunchConfig) -> Vec<PathBuf> {
+    let mut roots = vec![config.working_directory.clone()];
+    roots.extend(config.source_paths.iter().cloned());
+    let mut seen = HashSet::new();
+    roots.retain(|root| root.is_dir() && seen.insert(root.clone()));
+    roots
+}
+
+pub fn discover_source_files(roots: &[PathBuf], limit: usize) -> Vec<PathBuf> {
+    let mut pending = roots.iter().cloned().collect::<VecDeque<_>>();
+    let mut files = Vec::new();
+    let mut directories = 0_usize;
+    while let Some(directory) = pending.pop_front() {
+        if files.len() >= limit || directories >= MAX_SOURCE_TREE_DIRECTORIES {
+            break;
+        }
+        directories += 1;
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if files.len() >= limit {
+                break;
+            }
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                if !is_ignored_source_directory(&entry.file_name()) {
+                    pending.push_back(path);
+                }
+            } else if file_type.is_file() && is_source_path(&path) {
+                files.push(path);
+            }
+        }
+    }
+    files.sort_unstable();
+    files.dedup();
+    files
+}
+
+pub fn search_source_files(
+    files: &[PathBuf],
+    query: &str,
+    match_limit: usize,
+    mut should_continue: impl FnMut() -> bool,
+) -> Vec<SourceTreeMatch> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let query_lower = query.to_lowercase();
+    let mut matches = Vec::new();
+    for path in files {
+        if !should_continue() {
+            break;
+        }
+        let Ok(metadata) = std::fs::metadata(path) else {
+            continue;
+        };
+        if metadata.len() > MAX_SEARCHABLE_SOURCE_BYTES {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            continue;
+        };
+        let contents = String::from_utf8_lossy(&bytes);
+        for (line_index, line) in contents.lines().enumerate() {
+            let line_lower = line.to_lowercase();
+            let Some(column) = line_lower.find(&query_lower) else {
+                continue;
+            };
+            matches.push(SourceTreeMatch {
+                path: path.clone(),
+                line: u32::try_from(line_index + 1).unwrap_or(u32::MAX),
+                column: u32::try_from(column + 1).unwrap_or(u32::MAX),
+                preview: line.trim().chars().take(240).collect(),
+            });
+            if matches.len() >= match_limit {
+                return matches;
+            }
+        }
+    }
+    matches
+}
+
+fn is_ignored_source_directory(name: &std::ffi::OsStr) -> bool {
+    matches!(
+        name.to_str(),
+        Some(
+            ".git"
+                | ".hg"
+                | ".svn"
+                | ".cache"
+                | ".venv"
+                | "venv"
+                | "__pycache__"
+                | "node_modules"
+                | "target"
+                | "CMakeFiles"
+                | "build"
+                | "dist"
+                | "out"
+        )
+    )
+}
+
+fn is_source_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "c" | "h"
+                    | "cc"
+                    | "cpp"
+                    | "cxx"
+                    | "hpp"
+                    | "hh"
+                    | "hxx"
+                    | "tcc"
+                    | "ipp"
+                    | "ixx"
+                    | "cppm"
+                    | "rs"
+                    | "s"
+                    | "asm"
+                    | "inc"
+                    | "inl"
+                    | "m"
+                    | "mm"
+                    | "go"
+                    | "zig"
+                    | "swift"
+                    | "f"
+                    | "for"
+                    | "f90"
+                    | "f95"
+                    | "f03"
+                    | "f08"
+                    | "adb"
+                    | "ads"
+                    | "d"
+                    | "di"
+                    | "cu"
+                    | "cuh"
+                    | "cl"
+                    | "pas"
+                    | "pp"
+                    | "java"
+                    | "kt"
+                    | "kts"
+                    | "scala"
+                    | "cs"
+                    | "vala"
+                    | "vapi"
+                    | "py"
+                    | "pyx"
+                    | "pxd"
+                    | "js"
+                    | "jsx"
+                    | "ts"
+                    | "tsx"
+                    | "sh"
+                    | "bash"
+                    | "zsh"
+                    | "fish"
+                    | "lua"
+                    | "rb"
+                    | "php"
+            )
+        })
 }
 
 fn rust_sysroot(timeout: Duration) -> Option<PathBuf> {
@@ -122,8 +308,8 @@ pub fn resolve(reported: &str, roots: &[PathBuf]) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::paths_match;
-    use std::path::Path;
+    use super::{paths_match, search_source_files};
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn matches_absolute_and_debugger_relative_source_paths() {
@@ -131,5 +317,21 @@ mod tests {
         assert!(paths_match(open, "/home/user/project/src/main.rs"));
         assert!(paths_match(open, "src/main.rs"));
         assert!(!paths_match(open, "other/main.rs"));
+    }
+
+    #[test]
+    fn searches_source_text_and_honors_cancellation() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/source.rs");
+        let matches = search_source_files(
+            std::slice::from_ref(&path),
+            "MAX_SEARCHABLE_SOURCE_BYTES",
+            10,
+            || true,
+        );
+        assert!(!matches.is_empty());
+        assert_eq!(matches[0].path, path);
+
+        let cancelled = search_source_files(&[path], "SourceTreeMatch", 10, || false);
+        assert!(cancelled.is_empty());
     }
 }

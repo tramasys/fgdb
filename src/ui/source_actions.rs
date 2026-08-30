@@ -48,27 +48,9 @@ impl Ui {
             );
             return;
         };
-        let context = SourceOpenContext {
-            notebook: &self.source_notebook,
-            documents: &self.source_documents,
-            theme: &self.source_theme,
-            style_scheme: self.source_style_scheme.as_ref(),
-            breakpoints: &self.breakpoints,
-            insert_handler: &self.breakpoint_insert_handler,
-            jump_handler: &self.source_jump_handler,
-            delete_handler: &self.breakpoint_delete_handler,
-            enabled_handler: &self.breakpoint_enabled_handler,
-            symbol_handler: &self.source_symbol_handler,
-        };
-        let Some(document) = open_source_document(&path, context) else {
-            self.set_status(
-                "Source unavailable",
-                &format!("Could not read {}", path.display()),
-                Some("status-error"),
-            );
+        if !self.navigate_to_source(&path, location.line, true) {
             return;
-        };
-        scroll_source_document(&document, location.line);
+        }
         self.set_status(
             "Source",
             &format!(
@@ -99,6 +81,8 @@ impl Ui {
             delete_handler: &self.breakpoint_delete_handler,
             enabled_handler: &self.breakpoint_enabled_handler,
             symbol_handler: &self.source_symbol_handler,
+            closed_tabs: &self.closed_source_tabs,
+            reopen_closed: &self.source_navigation.reopen_closed,
         };
         let Some(document) = open_source_document(&path, context) else {
             return;
@@ -166,6 +150,8 @@ impl Ui {
             delete_handler: &self.breakpoint_delete_handler,
             enabled_handler: &self.breakpoint_enabled_handler,
             symbol_handler: &self.source_symbol_handler,
+            closed_tabs: &self.closed_source_tabs,
+            reopen_closed: &self.source_navigation.reopen_closed,
         };
         let Some(document) = open_source_document(&path, context) else {
             self.clear_execution_mark();
@@ -306,22 +292,8 @@ impl Ui {
             .collect()
     }
 
-    pub(super) fn connect_open_source(&self) {
-        let window = self.window.clone();
-        let notebook = self.source_notebook.clone();
-        let documents = Rc::clone(&self.source_documents);
-        let theme = self.source_theme.clone();
-        let style_scheme = self.source_style_scheme.clone();
-        let breakpoints = Rc::clone(&self.breakpoints);
-        let insert_handler = Rc::clone(&self.breakpoint_insert_handler);
-        let jump_handler = Rc::clone(&self.source_jump_handler);
-        let delete_handler = Rc::clone(&self.breakpoint_delete_handler);
-        let enabled_handler = Rc::clone(&self.breakpoint_enabled_handler);
-        let symbol_handler = Rc::clone(&self.source_symbol_handler);
-        let source_roots = Rc::clone(&self.source_roots);
-        let status_label = self.status_label.clone();
-        let status_detail = self.status_detail.clone();
-
+    pub(super) fn connect_open_source(self: &Rc<Self>) {
+        let weak_ui = Rc::downgrade(self);
         self.open_source_button.connect_clicked(move |_| {
             let dialog = gtk::FileDialog::builder()
                 .title("Open source files")
@@ -343,22 +315,15 @@ impl Ui {
             filters.append(&all_filter);
             dialog.set_filters(Some(&filters));
             dialog.set_default_filter(Some(&source_filter));
-            if let Some(root) = source_roots.borrow().first() {
+            let Some(ui) = weak_ui.upgrade() else {
+                return;
+            };
+            if let Some(root) = ui.source_roots.borrow().first() {
                 dialog.set_initial_folder(Some(&gio::File::for_path(root)));
             }
-            let window = window.clone();
-            let notebook = notebook.clone();
-            let documents = Rc::clone(&documents);
-            let theme = theme.clone();
-            let style_scheme = style_scheme.clone();
-            let breakpoints = Rc::clone(&breakpoints);
-            let insert_handler = Rc::clone(&insert_handler);
-            let jump_handler = Rc::clone(&jump_handler);
-            let delete_handler = Rc::clone(&delete_handler);
-            let enabled_handler = Rc::clone(&enabled_handler);
-            let symbol_handler = Rc::clone(&symbol_handler);
-            let status_label = status_label.clone();
-            let status_detail = status_detail.clone();
+            let window = ui.window.clone();
+            let weak_ui = Rc::downgrade(&ui);
+            drop(ui);
 
             gtk::glib::spawn_future_local(async move {
                 let Ok(files) = dialog.open_multiple_future(Some(&window)).await else {
@@ -374,32 +339,20 @@ impl Ui {
                         failed.push(String::from("non-local source"));
                         continue;
                     };
-                    if open_source_document(
-                        &path,
-                        SourceOpenContext {
-                            notebook: &notebook,
-                            documents: &documents,
-                            theme: &theme,
-                            style_scheme: style_scheme.as_ref(),
-                            breakpoints: &breakpoints,
-                            insert_handler: &insert_handler,
-                            jump_handler: &jump_handler,
-                            delete_handler: &delete_handler,
-                            enabled_handler: &enabled_handler,
-                            symbol_handler: &symbol_handler,
-                        },
-                    )
-                    .is_some()
-                    {
+                    let Some(ui) = weak_ui.upgrade() else {
+                        return;
+                    };
+                    if ui.navigate_to_source(&path, 1, true) {
                         opened += 1;
                     } else {
                         failed.push(path.display().to_string());
                     }
                 }
+                let Some(ui) = weak_ui.upgrade() else {
+                    return;
+                };
                 if failed.is_empty() {
-                    set_status_widgets(
-                        &status_label,
-                        &status_detail,
+                    ui.set_status(
                         "Source",
                         &format!(
                             "Opened {opened} source file{}",
@@ -408,9 +361,7 @@ impl Ui {
                         Some("status-ready"),
                     );
                 } else {
-                    set_status_widgets(
-                        &status_label,
-                        &status_detail,
+                    ui.set_status(
                         "Source open failed",
                         &format!("Could not read {}", failed.join(", ")),
                         Some("status-error"),

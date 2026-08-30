@@ -82,6 +82,7 @@ impl Ui {
         window.set_child(Some(&root));
         kernel_section_handler.replace(Some(layout.disclosure_handler()));
         let initial_session = config.initial_session();
+        let source_tree_base_roots = source::search_roots(config);
 
         let ui = Self {
             window,
@@ -122,6 +123,19 @@ impl Ui {
             inspector_notebook: workspace.inspector_notebook,
             source_notebook,
             source_documents,
+            source_navigation: workspace.source_navigation,
+            source_back_history: Rc::new(RefCell::new(Vec::new())),
+            source_forward_history: Rc::new(RefCell::new(Vec::new())),
+            closed_source_tabs: Rc::new(RefCell::new(Vec::new())),
+            source_find_state: Rc::new(RefCell::new(None)),
+            source_palette: Rc::new(RefCell::new(None)),
+            source_palette_generation: Arc::new(AtomicU64::new(0)),
+            source_loaded_generation: Arc::new(AtomicU64::new(0)),
+            source_tree_roots: Rc::new(RefCell::new(source_tree_base_roots.clone())),
+            source_tree_base_roots,
+            source_tree_cache: Rc::new(RefCell::new(None)),
+            source_tree_indexing: Rc::new(Cell::new(false)),
+            source_tree_generation: Arc::new(AtomicU64::new(0)),
             execution_source_path: Rc::new(RefCell::new(None)),
             execution_source_line: Rc::new(Cell::new(None)),
             source_theme: theme.clone(),
@@ -272,6 +286,7 @@ impl Ui {
             event_catchpoint_handler: Rc::new(RefCell::new(None)),
             watchpoint_insert_handler: Rc::new(RefCell::new(None)),
             source_symbol_handler: Rc::new(RefCell::new(None)),
+            source_discovery_handler: Rc::new(RefCell::new(None)),
             thread_stop_reason: Rc::new(RefCell::new(None)),
             debugger_ready: Rc::new(Cell::new(false)),
             inferior_running: Rc::new(Cell::new(false)),
@@ -671,8 +686,9 @@ impl Ui {
         });
     }
 
-    pub fn connect_source_actions(&self) {
+    pub fn connect_source_actions(self: &Rc<Self>) {
         self.connect_open_source();
+        self.connect_source_navigation();
     }
 
     fn connect_keyboard_shortcuts(&self) {
@@ -687,6 +703,17 @@ impl Ui {
         let finish = self.finish_button.clone();
         let terminal_toggle = self.terminal_toggle_button.clone();
         let resynchronize = self.resynchronize_button.clone();
+        let source_back = self.source_navigation.back.clone();
+        let source_forward = self.source_navigation.forward.clone();
+        let source_quick_open = self.source_navigation.quick_open.clone();
+        let source_find = self.source_navigation.find.clone();
+        let source_go_to_line = self.source_navigation.go_to_line.clone();
+        let source_symbols = self.source_navigation.symbols.clone();
+        let source_tree_search = self.source_navigation.tree_search.clone();
+        let source_reopen_closed = self.source_navigation.reopen_closed.clone();
+        let source_find_close = self.source_navigation.find_close.clone();
+        let source_find_bar = self.source_navigation.find_bar.clone();
+        let terminal = self.terminal.clone();
         let debugger_ready = Rc::clone(&self.debugger_ready);
         let inferior_started = Rc::clone(&self.inferior_started);
         let inferior_running = Rc::clone(&self.inferior_running);
@@ -697,9 +724,48 @@ impl Ui {
         keys.connect_key_pressed(move |_, key, _, state| {
             let control = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
-            let blocked = state
-                .intersects(gtk::gdk::ModifierType::ALT_MASK | gtk::gdk::ModifierType::SUPER_MASK);
+            let alt = state.contains(gtk::gdk::ModifierType::ALT_MASK);
+            let blocked = state.contains(gtk::gdk::ModifierType::SUPER_MASK);
             if blocked {
+                return gtk::glib::Propagation::Proceed;
+            }
+            let source_action = match (key, control, shift, alt) {
+                (gtk::gdk::Key::Left, false, false, true) => Some(&source_back),
+                (gtk::gdk::Key::Right, false, false, true) => Some(&source_forward),
+                (gtk::gdk::Key::p | gtk::gdk::Key::P, true, false, false) => {
+                    Some(&source_quick_open)
+                }
+                (gtk::gdk::Key::f | gtk::gdk::Key::F, true, false, false) => Some(&source_find),
+                (gtk::gdk::Key::g | gtk::gdk::Key::G, true, false, false) => {
+                    Some(&source_go_to_line)
+                }
+                (gtk::gdk::Key::o | gtk::gdk::Key::O, true, true, false) => Some(&source_symbols),
+                (gtk::gdk::Key::f | gtk::gdk::Key::F, true, true, false) => {
+                    Some(&source_tree_search)
+                }
+                (gtk::gdk::Key::t | gtk::gdk::Key::T, true, true, false) => {
+                    Some(&source_reopen_closed)
+                }
+                _ => None,
+            };
+            if terminal.has_focus() && source_action.is_some() {
+                return gtk::glib::Propagation::Proceed;
+            }
+            if let Some(button) = source_action.filter(|button| button.is_sensitive()) {
+                button.emit_clicked();
+                return gtk::glib::Propagation::Stop;
+            }
+            if key == gtk::gdk::Key::Escape
+                && !control
+                && !shift
+                && !alt
+                && source_find_bar.is_visible()
+                && !terminal.has_focus()
+            {
+                source_find_close.emit_clicked();
+                return gtk::glib::Propagation::Stop;
+            }
+            if alt {
                 return gtk::glib::Propagation::Proceed;
             }
             if key == gtk::gdk::Key::grave && control && !shift {
@@ -1384,6 +1450,11 @@ impl Ui {
 
     pub fn set_source_symbol_handler(&self, handler: impl Fn(String) + 'static) {
         self.source_symbol_handler.replace(Some(Rc::new(handler)));
+    }
+
+    pub fn set_source_discovery_handler(&self, handler: impl Fn(SourceDiscoveryRequest) + 'static) {
+        self.source_discovery_handler
+            .replace(Some(Rc::new(handler)));
     }
 
     pub fn set_thread_stop_reason(&self, reason: Option<&str>) {

@@ -11,7 +11,7 @@ pub use model::{
     ValueTypeMetadata, Variable, breakpoints, compact_register_numbers, current_frame,
     current_source, evaluated_value, executable_source_lines, has_exact_command_completion,
     inferior_pid, inserted_breakpoints, instructions, memory_block, register_names, registers,
-    shared_libraries, source_locations, stack_frames, threads, variable_children,
+    shared_libraries, source_files, source_locations, stack_frames, threads, variable_children,
     variable_children_have_more, variable_object, variable_path_expression, variable_update_named,
     variables,
 };
