@@ -110,6 +110,69 @@ impl Ui {
                 ui.close_source_find();
             }
         });
+
+        let weak_ui = Rc::downgrade(self);
+        self.source_tree
+            .open_handler
+            .replace(Some(Rc::new(move |path| {
+                if let Some(ui) = weak_ui.upgrade() {
+                    ui.navigate_to_source(&path, 1, true);
+                }
+            })));
+        let weak_ui = Rc::downgrade(self);
+        self.source_tree
+            .search_handler
+            .replace(Some(Rc::new(move |directory| {
+                if let Some(ui) = weak_ui.upgrade() {
+                    ui.present_source_palette_scoped(SourceSearchMode::Tree, Some(directory));
+                }
+            })));
+        let weak_ui = Rc::downgrade(self);
+        self.source_tree
+            .refresh_handler
+            .replace(Some(Rc::new(move || {
+                if let Some(ui) = weak_ui.upgrade() {
+                    ui.refresh_source_tree();
+                }
+            })));
+        let weak_ui = Rc::downgrade(self);
+        self.source_tree.root.connect_map(move |_| {
+            let Some(ui) = weak_ui.upgrade() else {
+                return;
+            };
+            if !ui.source_tree_initialized.replace(true) {
+                ui.source_tree.status.set_text("Indexing source files");
+                ui.request_loaded_source_files();
+            }
+            ui.start_source_tree_index();
+        });
+        let weak_ui = Rc::downgrade(self);
+        self.source_tree.search.connect_changed(move |_| {
+            let Some(ui) = weak_ui.upgrade() else {
+                return;
+            };
+            let generation = ui
+                .source_tree_render_generation
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
+            let weak_ui = Rc::downgrade(&ui);
+            gtk::glib::timeout_add_local_once(Duration::from_millis(140), move || {
+                if let Some(ui) = weak_ui.upgrade()
+                    && ui.source_tree_render_generation.load(Ordering::Relaxed) == generation
+                {
+                    ui.render_source_tree();
+                }
+            });
+        });
+        let weak_ui = Rc::downgrade(self);
+        self.source_notebook.connect_switch_page(move |_, _, _| {
+            let weak_ui = weak_ui.clone();
+            gtk::glib::idle_add_local_once(move || {
+                if let Some(ui) = weak_ui.upgrade() {
+                    ui.sync_source_tree_selection();
+                }
+            });
+        });
     }
 
     pub(super) fn present_source_find(&self) {
@@ -388,6 +451,7 @@ impl Ui {
         }
         scroll_source_document(&document, destination.line);
         self.update_source_history_buttons();
+        self.sync_source_tree_selection();
         true
     }
 
@@ -419,13 +483,25 @@ impl Ui {
     }
 
     fn present_source_palette(self: &Rc<Self>, mode: SourceSearchMode) {
-        let existing = self
-            .source_palette
-            .borrow()
-            .as_ref()
-            .map(|palette| (palette.mode, palette.window.clone(), palette.entry.clone()));
-        if let Some((existing_mode, window, entry)) = existing {
-            if existing_mode == mode {
+        self.present_source_palette_scoped(mode, None);
+    }
+
+    fn present_source_palette_scoped(
+        self: &Rc<Self>,
+        mode: SourceSearchMode,
+        scope: Option<PathBuf>,
+    ) {
+        let scope = (mode == SourceSearchMode::Tree).then_some(scope).flatten();
+        let existing = self.source_palette.borrow().as_ref().map(|palette| {
+            (
+                palette.mode,
+                palette.scope.clone(),
+                palette.window.clone(),
+                palette.entry.clone(),
+            )
+        });
+        if let Some((existing_mode, existing_scope, window, entry)) = existing {
+            if existing_mode == mode && existing_scope == scope {
                 window.present();
                 entry.grab_focus();
                 return;
@@ -436,22 +512,27 @@ impl Ui {
             SourceSearchMode::Files => (
                 "Quick open source file",
                 "File name or path, optionally followed by :line",
-                "Loaded debugger sources and files from the configured source tree",
+                String::from("Loaded debugger sources and files from the configured source tree"),
             ),
             SourceSearchMode::Symbols => (
                 "Search functions and symbols",
                 "Function, method, or variable name",
-                "Searches debug symbols currently known to GDB",
+                String::from("Searches debug symbols currently known to GDB"),
             ),
             SourceSearchMode::LoadedText => (
                 "Search loaded source files",
                 "Text to find across source files known to GDB",
-                "Searches readable source files reported by the current debugger session",
+                String::from(
+                    "Searches readable source files reported by the current debugger session",
+                ),
             ),
             SourceSearchMode::Tree => (
                 "Search source tree",
                 "Text to find across project source files",
-                "Searches configured source roots in the background",
+                scope.as_ref().map_or_else(
+                    || String::from("Searches configured source roots in the background"),
+                    |scope| format!("Searches within {}", scope.display()),
+                ),
             ),
         };
         let window = gtk::Window::builder()
@@ -473,7 +554,7 @@ impl Ui {
         root.append(&heading);
         let entry = source_search_entry(placeholder);
         root.append(&entry);
-        let hint = gtk::Label::new(Some(hint));
+        let hint = gtk::Label::new(Some(&hint));
         hint.add_css_class("muted");
         hint.set_halign(gtk::Align::Start);
         root.append(&hint);
@@ -491,27 +572,33 @@ impl Ui {
         status.set_halign(gtk::Align::Start);
         root.append(&status);
         window.set_child(Some(&root));
+        let loaded_files = self
+            .source_loaded_cache
+            .borrow()
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+        let loaded_files_ready = self.source_loaded_cache.borrow().is_some();
         self.source_palette.replace(Some(SourcePalette {
             window: window.clone(),
             mode,
             entry: entry.clone(),
             results,
             status,
-            loaded_files: Arc::new(Vec::new()),
-            loaded_files_ready: false,
+            loaded_files,
+            loaded_files_ready,
             tree_files: self
                 .source_tree_cache
                 .borrow()
                 .as_ref()
                 .cloned()
                 .unwrap_or_default(),
+            scope,
         }));
         let weak_palette = Rc::downgrade(&self.source_palette);
         let generation = Arc::clone(&self.source_palette_generation);
-        let loaded_generation = Arc::clone(&self.source_loaded_generation);
         window.connect_close_request(move |_| {
             generation.fetch_add(1, Ordering::Relaxed);
-            loaded_generation.fetch_add(1, Ordering::Relaxed);
             if let Some(palette) = weak_palette.upgrade() {
                 palette.borrow_mut().take();
             }
@@ -556,12 +643,13 @@ impl Ui {
     }
 
     fn source_palette_query_changed(self: &Rc<Self>) {
-        let Some((mode, query)) = self
-            .source_palette
-            .borrow()
-            .as_ref()
-            .map(|palette| (palette.mode, palette.entry.text().to_string()))
-        else {
+        let Some((mode, query, scope)) = self.source_palette.borrow().as_ref().map(|palette| {
+            (
+                palette.mode,
+                palette.entry.text().to_string(),
+                palette.scope.clone(),
+            )
+        }) else {
             return;
         };
         let generation = self
@@ -611,7 +699,7 @@ impl Ui {
                     return;
                 }
                 self.set_source_palette_status("Searching loaded source files");
-                self.start_source_content_search(query, generation, files);
+                self.start_source_content_search(query, generation, files, None);
             }
             SourceSearchMode::Tree => {
                 clear_source_palette_results(self);
@@ -636,7 +724,7 @@ impl Ui {
                             .as_ref()
                             .cloned()
                             .unwrap_or_default();
-                        ui.start_source_content_search(query, generation, files);
+                        ui.start_source_content_search(query, generation, files, scope);
                     }
                 });
             }
@@ -679,6 +767,9 @@ impl Ui {
                     if ui.source_tree_generation.load(Ordering::Relaxed) == generation {
                         ui.source_tree_indexing.set(false);
                         ui.set_source_palette_status("Source indexing failed");
+                        if ui.source_tree_initialized.get() {
+                            ui.source_tree.status.set_text("Source indexing failed");
+                        }
                     }
                     glib::ControlFlow::Break
                 }
@@ -687,6 +778,9 @@ impl Ui {
     }
 
     fn apply_source_tree_index(self: &Rc<Self>, files: Arc<Vec<PathBuf>>) {
+        if self.source_tree_initialized.get() {
+            self.render_source_tree();
+        }
         let mode = {
             let mut palette = self.source_palette.borrow_mut();
             let Some(palette) = palette.as_mut() else {
@@ -707,15 +801,19 @@ impl Ui {
         query: String,
         generation: u64,
         files: Arc<Vec<PathBuf>>,
+        scope: Option<PathBuf>,
     ) {
         let (sender, receiver) = mpsc::channel();
         let query_for_worker = query.clone();
         let current_generation = Arc::clone(&self.source_palette_generation);
         std::thread::spawn(move || {
-            let matches =
-                source::search_source_files(&files, &query_for_worker, MAX_SOURCE_RESULTS, || {
-                    current_generation.load(Ordering::Relaxed) == generation
-                });
+            let matches = source::search_source_files(
+                &files,
+                &query_for_worker,
+                MAX_SOURCE_RESULTS,
+                scope.as_deref(),
+                || current_generation.load(Ordering::Relaxed) == generation,
+            );
             let _ = sender.send(matches);
         });
         let weak_ui = Rc::downgrade(self);
@@ -789,12 +887,18 @@ impl Ui {
     }
 
     fn apply_loaded_source_files(self: &Rc<Self>, resolved: Vec<PathBuf>) {
+        let resolved = Arc::new(resolved);
+        self.source_loaded_cache
+            .replace(Some(Arc::clone(&resolved)));
+        if self.source_tree_initialized.get() {
+            self.render_source_tree();
+        }
         let mode = {
             let mut palette = self.source_palette.borrow_mut();
             let Some(palette) = palette.as_mut() else {
                 return;
             };
-            palette.loaded_files = Arc::new(resolved);
+            palette.loaded_files = resolved;
             palette.loaded_files_ready = true;
             palette.mode
         };
@@ -802,6 +906,165 @@ impl Ui {
             SourceSearchMode::Files => self.render_source_file_results(),
             SourceSearchMode::LoadedText => self.source_palette_query_changed(),
             SourceSearchMode::Symbols | SourceSearchMode::Tree => {}
+        }
+    }
+
+    fn refresh_source_tree(self: &Rc<Self>) {
+        self.source_tree_generation.fetch_add(1, Ordering::Relaxed);
+        self.source_tree_render_generation
+            .fetch_add(1, Ordering::Relaxed);
+        self.source_tree_cache.borrow_mut().take();
+        self.source_loaded_cache.borrow_mut().take();
+        self.source_tree_indexing.set(false);
+        self.source_tree.roots.remove_all();
+        self.source_tree.status.set_text("Indexing source files");
+        self.request_loaded_source_files();
+        self.start_source_tree_index();
+    }
+
+    fn render_source_tree(self: &Rc<Self>) {
+        if !self.source_tree_initialized.get() {
+            return;
+        }
+        let Some(files) = self.source_tree_cache.borrow().as_ref().cloned() else {
+            self.source_tree.status.set_text("Indexing source files");
+            self.start_source_tree_index();
+            return;
+        };
+        let roots = self.source_tree_roots.borrow().clone();
+        let loaded = self
+            .source_loaded_cache
+            .borrow()
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+        let query = self.source_tree.search.text().trim().to_owned();
+        let generation = self
+            .source_tree_render_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        self.source_tree.status.set_text(if query.is_empty() {
+            "Building source tree"
+        } else {
+            "Filtering source files"
+        });
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let build = source::build_source_tree(&files, &roots, &loaded, &query);
+            let _ = sender.send(build);
+        });
+        let weak_ui = Rc::downgrade(self);
+        gtk::glib::timeout_add_local(Duration::from_millis(25), move || {
+            let Some(ui) = weak_ui.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            match receiver.try_recv() {
+                Ok(build) => {
+                    if ui.source_tree_render_generation.load(Ordering::Relaxed) == generation {
+                        ui.apply_source_tree_build(build);
+                    }
+                    glib::ControlFlow::Break
+                }
+                Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
+                Err(TryRecvError::Disconnected) => {
+                    if ui.source_tree_render_generation.load(Ordering::Relaxed) == generation {
+                        ui.source_tree
+                            .status
+                            .set_text("Source tree rendering failed");
+                    }
+                    glib::ControlFlow::Break
+                }
+            }
+        });
+    }
+
+    fn apply_source_tree_build(&self, build: source::SourceTreeBuild) {
+        let root_count = build.roots.len();
+        self.source_tree.roots.remove_all();
+        for root in build.roots {
+            self.source_tree
+                .roots
+                .append(&glib::BoxedAnyObject::new(SourceTreeNode {
+                    data: Arc::new(root),
+                }));
+        }
+        let query_active = !self.source_tree.search.text().trim().is_empty();
+        let expand_filtered = query_active && build.file_count <= MAX_SOURCE_RESULTS;
+        let mut position = 0;
+        let mut expanded_roots = 0;
+        while position < self.source_tree.model.n_items() {
+            let Some(row) = self
+                .source_tree
+                .model
+                .item(position)
+                .and_downcast::<gtk::TreeListRow>()
+            else {
+                position += 1;
+                continue;
+            };
+            if row.depth() == 0 {
+                expanded_roots += 1;
+            }
+            if row.depth() == 0 || expand_filtered {
+                row.set_expanded(true);
+            }
+            position += 1;
+            if !expand_filtered && expanded_roots >= root_count {
+                break;
+            }
+        }
+        self.source_tree.status.set_text(&match build.file_count {
+            0 if query_active => String::from("No matching source files"),
+            0 => String::from("No source files found"),
+            1 => String::from("1 source file"),
+            count => format!("{count} source files"),
+        });
+        self.sync_source_tree_selection();
+    }
+
+    fn sync_source_tree_selection(&self) {
+        if !self.source_tree_initialized.get() {
+            return;
+        }
+        let Some(target) = self.current_source_document().map(|document| document.path) else {
+            self.source_tree.selection.unselect_all();
+            return;
+        };
+        self.source_tree.selection.unselect_all();
+        for _ in 0..128 {
+            let mut path_expanded = false;
+            for position in 0..self.source_tree.model.n_items() {
+                let Some(row) = self
+                    .source_tree
+                    .model
+                    .item(position)
+                    .and_downcast::<gtk::TreeListRow>()
+                else {
+                    continue;
+                };
+                let Some(item) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+                    continue;
+                };
+                let node = item.borrow::<SourceTreeNode>();
+                if node.data.path == target {
+                    drop(node);
+                    self.source_tree.selection.set_selected(position);
+                    self.source_tree
+                        .view
+                        .scroll_to(position, gtk::ListScrollFlags::FOCUS, None);
+                    return;
+                }
+                if node.data.directory && target.starts_with(&node.data.path) && !row.is_expanded()
+                {
+                    drop(node);
+                    row.set_expanded(true);
+                    path_expanded = true;
+                    break;
+                }
+            }
+            if !path_expanded {
+                break;
+            }
         }
     }
 

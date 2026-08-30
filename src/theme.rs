@@ -1783,6 +1783,95 @@ button.source-palette-result:focus-visible {{
 .source-palette-kind {{ color: @app_muted; font-size: 10px; }}
 .source-palette-secondary {{ color: @app_muted; font-size: 11px; }}
 
+.source-tree-panel {{ background: @app_surface; }}
+
+.source-tree-toolbar {{
+    min-height: 27px;
+    padding: 3px;
+    background: @app_surface;
+    border-bottom: 1px solid alpha(@app_border, 0.75);
+}}
+
+.source-tree-toolbar entry.source-search-entry {{
+    min-height: 22px;
+    padding-top: 0;
+    padding-bottom: 0;
+    color: @app_fg;
+    background: @app_bg;
+    border: 1px solid @app_border;
+}}
+
+.source-tree-toolbar entry.source-search-entry:focus-within {{ border-color: @app_accent; }}
+
+button.source-tree-refresh {{
+    min-width: 25px;
+    min-height: 24px;
+    padding: 0;
+    color: @app_muted;
+    background: transparent;
+    border: 0;
+}}
+
+button.source-tree-refresh:hover,
+button.source-tree-refresh:focus-visible {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.11);
+}}
+
+.source-tree-status {{
+    min-height: 20px;
+    padding: 0 5px;
+    color: @app_muted;
+    font-size: 10px;
+    background: @app_bg;
+    border-bottom: 1px solid alpha(@app_border, 0.55);
+}}
+
+listview.source-tree-view {{
+    color: @app_fg;
+    background: @app_surface;
+}}
+
+listview.source-tree-view row {{
+    min-height: 23px;
+    padding: 0 3px;
+    background: transparent;
+}}
+
+listview.source-tree-view row:hover {{ background: alpha(@app_accent, 0.08); }}
+listview.source-tree-view row:selected {{ background: alpha(@app_accent, 0.19); }}
+
+.source-tree-row {{ min-height: 22px; }}
+.source-tree-disclosure {{
+    min-width: 8px;
+    color: @app_muted;
+    font-size: 11px;
+}}
+.source-tree-icon {{ color: @app_muted; -gtk-icon-size: 13px; }}
+.source-tree-name {{ color: @app_fg; }}
+.source-tree-loaded {{ color: @app_success; font-size: 8px; }}
+
+popover.source-tree-menu > contents {{
+    min-width: 190px;
+    padding: 4px;
+    background: @app_surface;
+    border: 1px solid @app_border;
+}}
+
+button.source-tree-menu-action {{
+    min-height: 25px;
+    padding: 1px 7px;
+    color: @app_fg;
+    background: transparent;
+    border: 0;
+}}
+
+button.source-tree-menu-action:hover,
+button.source-tree-menu-action:focus-visible {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.12);
+}}
+
 .source-tab {{
     padding: 0 2px;
     color: @app_fg;

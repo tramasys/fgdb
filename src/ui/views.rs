@@ -1210,6 +1210,282 @@ pub(super) fn source_search_entry(placeholder: &str) -> gtk::Entry {
     entry
 }
 
+pub(super) fn build_source_tree_view() -> SourceTreeControls {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.add_css_class("source-tree-panel");
+    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    toolbar.add_css_class("source-tree-toolbar");
+    let search = source_search_entry("Filter source files");
+    search.set_hexpand(true);
+    let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+    refresh.add_css_class("source-tree-refresh");
+    refresh.set_tooltip_text(Some("Refresh source tree"));
+    toolbar.append(&search);
+    toolbar.append(&refresh);
+    root.append(&toolbar);
+
+    let status = gtk::Label::new(Some("Open Sources to index the source tree"));
+    status.add_css_class("source-tree-status");
+    status.set_halign(gtk::Align::Start);
+    status.set_ellipsize(pango::EllipsizeMode::End);
+    root.append(&status);
+
+    let roots = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let model = gtk::TreeListModel::new(roots.clone(), false, false, |item| {
+        let item = item.downcast_ref::<glib::BoxedAnyObject>()?;
+        let node = item.borrow::<SourceTreeNode>();
+        if node.data.children.is_empty() {
+            return None;
+        }
+        let children = gio::ListStore::new::<glib::BoxedAnyObject>();
+        for child in &node.data.children {
+            children.append(&glib::BoxedAnyObject::new(SourceTreeNode {
+                data: Arc::new(child.clone()),
+            }));
+        }
+        Some(children.upcast())
+    });
+    let selection = gtk::SingleSelection::new(Some(model.clone()));
+    selection.set_autoselect(false);
+    selection.set_can_unselect(true);
+    let open_handler = Rc::new(RefCell::new(None::<SourceTreePathHandler>));
+    let search_handler = Rc::new(RefCell::new(None::<SourceTreePathHandler>));
+    let refresh_handler = Rc::new(RefCell::new(None::<SourceTreeRefreshHandler>));
+    let factory = gtk::SignalListItemFactory::new();
+    let open_for_bind = Rc::clone(&open_handler);
+    let search_for_bind = Rc::clone(&search_handler);
+    let refresh_for_bind = Rc::clone(&refresh_handler);
+    factory.connect_bind(move |_, object| {
+        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let Some(tree_row) = item.item().and_downcast::<gtk::TreeListRow>() else {
+            return;
+        };
+        let Some(data) = tree_row.item().and_downcast::<glib::BoxedAnyObject>() else {
+            return;
+        };
+        let node = data.borrow::<SourceTreeNode>().clone();
+        let row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+        row.add_css_class("source-tree-row");
+        row.set_tooltip_text(Some(&node.data.path.display().to_string()));
+        let disclosure = gtk::Label::new(Some(if node.data.directory {
+            if tree_row.is_expanded() {
+                DISCLOSURE_EXPANDED_ICON
+            } else {
+                DISCLOSURE_COLLAPSED_ICON
+            }
+        } else {
+            ""
+        }));
+        disclosure.add_css_class("source-tree-disclosure");
+        disclosure.set_width_chars(1);
+        if node.data.directory {
+            tree_row
+                .bind_property("expanded", &disclosure, "label")
+                .transform_to(|_, expanded: bool| {
+                    Some(if expanded {
+                        DISCLOSURE_EXPANDED_ICON
+                    } else {
+                        DISCLOSURE_COLLAPSED_ICON
+                    })
+                })
+                .sync_create()
+                .build();
+        }
+        row.append(&disclosure);
+        let icon = gtk::Image::from_icon_name(if node.data.directory {
+            "folder-symbolic"
+        } else {
+            "text-x-generic-symbolic"
+        });
+        icon.add_css_class("source-tree-icon");
+        row.append(&icon);
+        let name = gtk::Label::new(Some(&node.data.name));
+        name.add_css_class("source-tree-name");
+        name.set_halign(gtk::Align::Start);
+        name.set_xalign(0.0);
+        name.set_hexpand(true);
+        name.set_ellipsize(pango::EllipsizeMode::End);
+        row.append(&name);
+        let loaded = gtk::Label::new(Some("●"));
+        loaded.add_css_class("source-tree-loaded");
+        loaded.set_tooltip_text(Some(if node.data.directory {
+            "Contains source files known to GDB"
+        } else {
+            "Source file known to GDB"
+        }));
+        loaded.set_visible(node.data.loaded);
+        row.append(&loaded);
+        connect_source_tree_context_menu(
+            &row,
+            &node,
+            &open_for_bind,
+            &search_for_bind,
+            &refresh_for_bind,
+        );
+        let expander = gtk::TreeExpander::new();
+        expander.set_list_row(Some(&tree_row));
+        expander.set_hide_expander(true);
+        expander.set_indent_for_icon(false);
+        expander.set_child(Some(&row));
+        item.set_child(Some(&expander));
+    });
+    factory.connect_unbind(|_, object| {
+        if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
+            item.set_child(None::<&gtk::Widget>);
+        }
+    });
+    let view = gtk::ListView::new(Some(selection.clone()), Some(factory));
+    view.add_css_class("source-tree-view");
+    view.set_single_click_activate(true);
+    let model_for_activate = model.clone();
+    let open_for_activate = Rc::clone(&open_handler);
+    view.connect_activate(move |_, position| {
+        let Some(row) = model_for_activate
+            .item(position)
+            .and_downcast::<gtk::TreeListRow>()
+        else {
+            return;
+        };
+        let Some(item) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+            return;
+        };
+        let node = item.borrow::<SourceTreeNode>();
+        if node.data.directory {
+            row.set_expanded(!row.is_expanded());
+        } else if let Some(handler) = open_for_activate.borrow().clone() {
+            handler(node.data.path.clone());
+        }
+    });
+    let refresh_for_click = Rc::clone(&refresh_handler);
+    refresh.connect_clicked(move |_| {
+        if let Some(handler) = refresh_for_click.borrow().clone() {
+            handler();
+        }
+    });
+    let scrolled = gtk::ScrolledWindow::builder()
+        .child(&view)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .build();
+    root.append(&scrolled);
+    SourceTreeControls {
+        root,
+        search,
+        status,
+        roots,
+        model,
+        selection,
+        view,
+        open_handler,
+        search_handler,
+        refresh_handler,
+    }
+}
+
+fn connect_source_tree_context_menu(
+    row: &gtk::Box,
+    node: &SourceTreeNode,
+    open_handler: &Rc<RefCell<Option<SourceTreePathHandler>>>,
+    search_handler: &Rc<RefCell<Option<SourceTreePathHandler>>>,
+    refresh_handler: &Rc<RefCell<Option<SourceTreeRefreshHandler>>>,
+) {
+    let popover = gtk::Popover::new();
+    popover.add_css_class("source-tree-menu");
+    popover.set_autohide(true);
+    popover.set_has_arrow(false);
+    popover.set_parent(row);
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    let open = source_tree_menu_button("Open");
+    open.set_sensitive(!node.data.directory);
+    let search = source_tree_menu_button("Search within folder");
+    let copy_name = source_tree_menu_button("Copy name");
+    let copy_path = source_tree_menu_button("Copy full path");
+    let refresh = source_tree_menu_button("Refresh source tree");
+    for button in [&open, &search, &copy_name, &copy_path, &refresh] {
+        menu.append(button);
+    }
+    popover.set_child(Some(&menu));
+    let path = node.data.path.clone();
+    let open_handler = Rc::clone(open_handler);
+    let popover_for_open = popover.clone();
+    open.connect_clicked(move |_| {
+        if let Some(handler) = open_handler.borrow().clone() {
+            handler(path.clone());
+        }
+        popover_for_open.popdown();
+    });
+    let directory = if node.data.directory {
+        Some(node.data.path.clone())
+    } else {
+        node.data.path.parent().map(Path::to_path_buf)
+    };
+    search.set_sensitive(directory.is_some());
+    let search_handler = Rc::clone(search_handler);
+    let popover_for_search = popover.clone();
+    search.connect_clicked(move |_| {
+        if let (Some(directory), Some(handler)) =
+            (directory.as_ref(), search_handler.borrow().clone())
+        {
+            handler(directory.clone());
+        }
+        popover_for_search.popdown();
+    });
+    let name = node.data.name.clone();
+    let popover_for_name = popover.clone();
+    copy_name.connect_clicked(move |_| {
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.clipboard().set_text(&name);
+        }
+        popover_for_name.popdown();
+    });
+    let path = node.data.path.display().to_string();
+    let popover_for_path = popover.clone();
+    copy_path.connect_clicked(move |_| {
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.clipboard().set_text(&path);
+        }
+        popover_for_path.popdown();
+    });
+    let refresh_handler = Rc::clone(refresh_handler);
+    let popover_for_refresh = popover.clone();
+    refresh.connect_clicked(move |_| {
+        if let Some(handler) = refresh_handler.borrow().clone() {
+            handler();
+        }
+        popover_for_refresh.popdown();
+    });
+    let gesture = gtk::GestureClick::new();
+    gesture.set_button(gtk::gdk::BUTTON_SECONDARY);
+    let popover_for_click = popover.downgrade();
+    gesture.connect_pressed(move |gesture, _, x, y| {
+        let Some(popover) = popover_for_click.upgrade() else {
+            return;
+        };
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+            x.round() as i32,
+            y.round() as i32,
+            1,
+            1,
+        )));
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        popover.popup();
+    });
+    row.add_controller(gesture);
+}
+
+fn source_tree_menu_button(text: &str) -> gtk::Button {
+    let label = gtk::Label::new(Some(text));
+    label.set_halign(gtk::Align::Start);
+    label.set_xalign(0.0);
+    gtk::Button::builder()
+        .child(&label)
+        .hexpand(true)
+        .css_classes(["source-tree-menu-action"])
+        .build()
+}
+
 pub(super) fn build_terminal_panel(
     terminal: &vte4::Terminal,
     gef_tools_button: &gtk::ToggleButton,

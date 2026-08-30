@@ -654,6 +654,7 @@ pub(super) fn build_workspace(
         terminal_panel,
         status_detail: inspector.status_detail,
         source_navigation: source_editor.navigation,
+        source_tree: left_sidebar.source_tree,
         inspector_notebook: inspector.notebook.clone(),
         call_stack_list: left_sidebar.call_stack_list,
         threads_list: left_sidebar.threads_list,
@@ -779,12 +780,15 @@ pub(super) fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSi
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
+    let source_tree = build_source_tree_view();
     let navigation = gtk::Notebook::new();
     navigation.add_css_class("sidebar-tabs");
     navigation.set_vexpand(true);
+    navigation.set_scrollable(true);
     navigation.append_page(&stack_scrolled, Some(&gtk::Label::new(Some("Call Stack"))));
     navigation.append_page(&threads_scrolled, Some(&gtk::Label::new(Some("Threads"))));
     navigation.append_page(&modules_scrolled, Some(&gtk::Label::new(Some("Modules"))));
+    navigation.append_page(&source_tree.root, Some(&gtk::Label::new(Some("Sources"))));
     let navigation_for_selection = navigation.clone();
     navigation.connect_switch_page(move |_, _, _| {
         let navigation = navigation_for_selection.clone();
@@ -796,6 +800,7 @@ pub(super) fn build_left_sidebar(config: &LaunchConfig, theme: &Theme) -> LeftSi
         call_stack_list,
         threads_list,
         modules_list,
+        source_tree,
     }
 }
 

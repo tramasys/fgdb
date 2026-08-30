@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeMap, HashSet, VecDeque},
+    ffi::OsString,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
@@ -17,6 +18,28 @@ pub struct SourceTreeMatch {
     pub line: u32,
     pub column: u32,
     pub preview: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceTreeNodeData {
+    pub name: String,
+    pub path: PathBuf,
+    pub directory: bool,
+    pub loaded: bool,
+    pub children: Vec<SourceTreeNodeData>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SourceTreeBuild {
+    pub roots: Vec<SourceTreeNodeData>,
+    pub file_count: usize,
+}
+
+#[derive(Default)]
+struct SourceTreeDirectory {
+    path: PathBuf,
+    directories: BTreeMap<OsString, SourceTreeDirectory>,
+    files: BTreeMap<OsString, PathBuf>,
 }
 
 pub fn paths_match(open_path: &Path, reported_path: &str) -> bool {
@@ -84,10 +107,131 @@ pub fn discover_source_files(roots: &[PathBuf], limit: usize) -> Vec<PathBuf> {
     files
 }
 
+pub fn build_source_tree(
+    files: &[PathBuf],
+    roots: &[PathBuf],
+    loaded_files: &[PathBuf],
+    query: &str,
+) -> SourceTreeBuild {
+    let terms = query
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>();
+    let loaded = loaded_files.iter().cloned().collect::<HashSet<_>>();
+    let mut directories = roots
+        .iter()
+        .cloned()
+        .map(|path| SourceTreeDirectory {
+            path,
+            ..SourceTreeDirectory::default()
+        })
+        .collect::<Vec<_>>();
+    let mut file_count = 0;
+    for file in files {
+        let path_text = file.to_string_lossy().to_lowercase();
+        if !terms.iter().all(|term| path_text.contains(term)) {
+            continue;
+        }
+        let Some((root_index, root)) = roots
+            .iter()
+            .enumerate()
+            .filter(|(_, root)| file.starts_with(root))
+            .max_by_key(|(_, root)| root.components().count())
+        else {
+            continue;
+        };
+        let Ok(relative) = file.strip_prefix(root) else {
+            continue;
+        };
+        let components = relative
+            .components()
+            .filter_map(|component| match component {
+                std::path::Component::Normal(component) => Some(component.to_os_string()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let Some((file_name, parents)) = components.split_last() else {
+            continue;
+        };
+        let mut directory = &mut directories[root_index];
+        for parent in parents {
+            let path = directory.path.join(parent);
+            directory = directory
+                .directories
+                .entry(parent.clone())
+                .or_insert_with(|| SourceTreeDirectory {
+                    path,
+                    ..SourceTreeDirectory::default()
+                });
+        }
+        if directory
+            .files
+            .insert(file_name.clone(), file.clone())
+            .is_none()
+        {
+            file_count += 1;
+        }
+    }
+    let roots = directories
+        .into_iter()
+        .filter(|directory| !directory.directories.is_empty() || !directory.files.is_empty())
+        .map(|directory| source_tree_directory_node(directory, &loaded, true))
+        .collect();
+    SourceTreeBuild { roots, file_count }
+}
+
+fn source_tree_directory_node(
+    directory: SourceTreeDirectory,
+    loaded_files: &HashSet<PathBuf>,
+    root: bool,
+) -> SourceTreeNodeData {
+    let mut children = directory
+        .directories
+        .into_values()
+        .map(|directory| source_tree_directory_node(directory, loaded_files, false))
+        .collect::<Vec<_>>();
+    children.extend(
+        directory
+            .files
+            .into_iter()
+            .map(|(name, path)| SourceTreeNodeData {
+                name: name.to_string_lossy().into_owned(),
+                loaded: loaded_files.contains(&path),
+                path,
+                directory: false,
+                children: Vec::new(),
+            }),
+    );
+    let loaded = children.iter().any(|child| child.loaded);
+    let name = if root {
+        directory
+            .path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .map_or_else(
+                || directory.path.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+    } else {
+        directory.path.file_name().map_or_else(
+            || String::from("source"),
+            |name| name.to_string_lossy().into_owned(),
+        )
+    };
+    SourceTreeNodeData {
+        name,
+        path: directory.path,
+        directory: true,
+        loaded,
+        children,
+    }
+}
+
 pub fn search_source_files(
     files: &[PathBuf],
     query: &str,
     match_limit: usize,
+    scope: Option<&Path>,
     mut should_continue: impl FnMut() -> bool,
 ) -> Vec<SourceTreeMatch> {
     let query = query.trim();
@@ -99,6 +243,9 @@ pub fn search_source_files(
     for path in files {
         if !should_continue() {
             break;
+        }
+        if scope.is_some_and(|scope| !path.starts_with(scope)) {
+            continue;
         }
         let Ok(metadata) = std::fs::metadata(path) else {
             continue;
@@ -308,7 +455,7 @@ pub fn resolve(reported: &str, roots: &[PathBuf]) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{paths_match, search_source_files};
+    use super::{build_source_tree, paths_match, search_source_files};
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -326,12 +473,45 @@ mod tests {
             std::slice::from_ref(&path),
             "MAX_SEARCHABLE_SOURCE_BYTES",
             10,
+            None,
             || true,
         );
         assert!(!matches.is_empty());
         assert_eq!(matches[0].path, path);
 
-        let cancelled = search_source_files(&[path], "SourceTreeMatch", 10, || false);
+        let outside_scope = search_source_files(
+            std::slice::from_ref(&path),
+            "MAX_SEARCHABLE_SOURCE_BYTES",
+            10,
+            Some(Path::new("/outside/source/root")),
+            || true,
+        );
+        assert!(outside_scope.is_empty());
+
+        let cancelled = search_source_files(&[path], "SourceTreeMatch", 10, None, || false);
         assert!(cancelled.is_empty());
+    }
+
+    #[test]
+    fn builds_filtered_hierarchies_and_marks_loaded_sources() {
+        let root = PathBuf::from("/project");
+        let main = root.join("src/main.rs");
+        let parser = root.join("src/parser/mod.rs");
+        let build = build_source_tree(
+            &[main.clone(), parser.clone(), root.join("tests/parser.rs")],
+            std::slice::from_ref(&root),
+            std::slice::from_ref(&parser),
+            "src parser",
+        );
+        assert_eq!(build.file_count, 1);
+        assert_eq!(build.roots.len(), 1);
+        let src = &build.roots[0].children[0];
+        assert_eq!(src.name, "src");
+        assert!(src.loaded);
+        let parser_directory = &src.children[0];
+        assert_eq!(parser_directory.name, "parser");
+        assert!(parser_directory.loaded);
+        assert_eq!(parser_directory.children[0].path, parser);
+        assert!(!build.roots[0].children.iter().any(|node| node.path == main));
     }
 }

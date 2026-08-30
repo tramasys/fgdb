@@ -15,6 +15,11 @@ impl Ui {
 
     pub fn set_current_session(&self, session: DebugSession) {
         self.close_source_palette();
+        self.source_loaded_cache.borrow_mut().take();
+        self.source_loaded_generation
+            .fetch_add(1, Ordering::Relaxed);
+        self.source_tree_render_generation
+            .fetch_add(1, Ordering::Relaxed);
         let mut tree_roots = self.source_tree_base_roots.clone();
         if let Some(directory) = session.working_directory()
             && directory.is_dir()
@@ -39,6 +44,11 @@ impl Ui {
         self.current_session.replace(Some(session));
         self.update_session_display();
         self.update_control_sensitivity();
+        if self.source_tree_initialized.get()
+            && let Some(refresh) = self.source_tree.refresh_handler.borrow().clone()
+        {
+            refresh();
+        }
     }
 
     pub fn connect_session_actions(self: &Rc<Self>) {

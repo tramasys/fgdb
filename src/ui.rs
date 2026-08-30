@@ -185,6 +185,8 @@ type BreakpointBulkDeleteHandler = Rc<dyn Fn(Vec<String>)>;
 type BreakpointInsertHandler = Rc<dyn Fn(PathBuf, u32)>;
 type SourceJumpHandler = Rc<dyn Fn(PathBuf, u32)>;
 type SourceDiscoveryHandler = Rc<dyn Fn(SourceDiscoveryRequest)>;
+type SourceTreePathHandler = Rc<dyn Fn(PathBuf)>;
+type SourceTreeRefreshHandler = Rc<dyn Fn()>;
 type SignalCatchpointHandler = Rc<dyn Fn(String, Option<String>)>;
 type EventCatchpointHandler = Rc<dyn Fn(EventCatchpoint, Option<String>)>;
 type WatchpointInsertHandler = Rc<dyn Fn(String, WatchpointAccess)>;
@@ -715,6 +717,26 @@ struct SourcePalette {
     loaded_files: Arc<Vec<PathBuf>>,
     loaded_files_ready: bool,
     tree_files: Arc<Vec<PathBuf>>,
+    scope: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+struct SourceTreeNode {
+    data: Arc<source::SourceTreeNodeData>,
+}
+
+#[derive(Clone)]
+struct SourceTreeControls {
+    root: gtk::Box,
+    search: gtk::Entry,
+    status: gtk::Label,
+    roots: gio::ListStore,
+    model: gtk::TreeListModel,
+    selection: gtk::SingleSelection,
+    view: gtk::ListView,
+    open_handler: Rc<RefCell<Option<SourceTreePathHandler>>>,
+    search_handler: Rc<RefCell<Option<SourceTreePathHandler>>>,
+    refresh_handler: Rc<RefCell<Option<SourceTreeRefreshHandler>>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1208,6 +1230,7 @@ pub struct Ui {
     source_notebook: gtk::Notebook,
     source_documents: Rc<RefCell<Vec<SourceDocument>>>,
     source_navigation: SourceNavigationControls,
+    source_tree: SourceTreeControls,
     source_back_history: Rc<RefCell<Vec<SourceNavigationLocation>>>,
     source_forward_history: Rc<RefCell<Vec<SourceNavigationLocation>>>,
     closed_source_tabs: Rc<RefCell<Vec<ClosedSourceTab>>>,
@@ -1215,11 +1238,14 @@ pub struct Ui {
     source_palette: Rc<RefCell<Option<SourcePalette>>>,
     source_palette_generation: Arc<AtomicU64>,
     source_loaded_generation: Arc<AtomicU64>,
+    source_loaded_cache: Rc<RefCell<Option<Arc<Vec<PathBuf>>>>>,
     source_tree_base_roots: Vec<PathBuf>,
     source_tree_roots: Rc<RefCell<Vec<PathBuf>>>,
     source_tree_cache: Rc<RefCell<Option<Arc<Vec<PathBuf>>>>>,
     source_tree_indexing: Rc<Cell<bool>>,
     source_tree_generation: Arc<AtomicU64>,
+    source_tree_render_generation: Arc<AtomicU64>,
+    source_tree_initialized: Rc<Cell<bool>>,
     execution_source_path: Rc<RefCell<Option<PathBuf>>>,
     execution_source_line: Rc<Cell<Option<u32>>>,
     source_theme: Theme,
@@ -1420,6 +1446,7 @@ struct Workspace {
     terminal_panel: gtk::Box,
     status_detail: gtk::Label,
     source_navigation: SourceNavigationControls,
+    source_tree: SourceTreeControls,
     inspector_notebook: gtk::Notebook,
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
@@ -1538,6 +1565,7 @@ struct LeftSidebar {
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
     modules_list: gtk::Box,
+    source_tree: SourceTreeControls,
 }
 
 mod build;
