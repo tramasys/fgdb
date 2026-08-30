@@ -1015,6 +1015,9 @@ enum MemoryColumn {
 }
 
 pub(crate) const GEF_COMMAND_CAPABILITIES: &[&str] = &[
+    "context off",
+    "context on",
+    "gef config context.enable",
     "xinfo",
     "ii",
     "registers",
@@ -1042,9 +1045,6 @@ pub(crate) const GEF_COMMAND_CAPABILITIES: &[&str] = &[
     "dynamic",
     "link-map",
     "dt",
-    "context off",
-    "context on",
-    "gef config context.enable",
 ];
 
 #[derive(Clone)]
@@ -1227,6 +1227,8 @@ pub struct Ui {
     gef_available: Rc<Cell<bool>>,
     gef_capabilities: Rc<RefCell<HashSet<&'static str>>>,
     gef_context_control: Rc<Cell<GefContextControl>>,
+    gef_context_visible: bool,
+    gef_context_hidden_by_fgdb: Rc<Cell<bool>>,
     heap_inspection_handler: Rc<RefCell<Option<HeapInspectionHandler>>>,
     source_roots: Rc<RefCell<Vec<PathBuf>>>,
     current_session: Rc<RefCell<Option<DebugSession>>>,

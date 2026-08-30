@@ -496,7 +496,7 @@ impl Ui {
             heading.append(&symbol_state);
 
             let range = match (&module.from, &module.to) {
-                (Some(from), Some(to)) => format!("{from}–{to}"),
+                (Some(from), Some(to)) => format!("{from}-{to}"),
                 _ => String::from("address range unavailable"),
             };
             let range = gtk::Label::new(Some(&range));
@@ -657,7 +657,7 @@ impl Ui {
                 first.instruction.function.as_str()
             };
             let range = format!(
-                "{function} · {}–{} · {} instructions",
+                "{function} · {}-{} · {} instructions",
                 full_address(&first.instruction.address, self.target_pointer_bits()),
                 full_address(&last.instruction.address, self.target_pointer_bits()),
                 self.instructions_store.n_items()

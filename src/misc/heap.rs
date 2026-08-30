@@ -1527,7 +1527,7 @@ impl Inspector<'_> {
                 .unwrap_or(u64::MAX)
         };
         let max = 0x800_u64.checked_shl(shift).unwrap_or(u64::MAX);
-        format!("size 0x{min:x}–0x{max:x}")
+        format!("size 0x{min:x}-0x{max:x}")
     }
 
     fn push_row(&mut self, kind: &str, location: &str, metric: &str, state: &str, details: &str) {

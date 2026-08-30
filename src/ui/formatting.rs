@@ -871,7 +871,9 @@ pub(super) fn is_call_instruction(
     architecture: TargetArchitecture,
 ) -> bool {
     match architecture {
-        TargetArchitecture::X86 | TargetArchitecture::X86_64 => mnemonic.starts_with("call"),
+        TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
+            mnemonic.starts_with("call") || mnemonic.starts_with("lcall")
+        }
         TargetArchitecture::Arm => matches!(mnemonic, "bl" | "blx"),
         TargetArchitecture::AArch64 => matches!(mnemonic, "bl" | "blr"),
         TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64 => {
@@ -916,6 +918,9 @@ pub(super) fn is_return_instruction(
         return true;
     }
     match architecture {
+        TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
+            mnemonic.starts_with("lret") || mnemonic.starts_with("iret")
+        }
         TargetArchitecture::Arm => {
             mnemonic == "bx" && operands.trim().trim_start_matches(['$', '%']) == "lr"
         }
@@ -1045,7 +1050,9 @@ fn syscall_architecture(
 
 fn is_unconditional_branch(mnemonic: &str, architecture: TargetArchitecture) -> bool {
     match architecture {
-        TargetArchitecture::X86 | TargetArchitecture::X86_64 => mnemonic.starts_with("jmp"),
+        TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
+            mnemonic.starts_with("jmp") || mnemonic.starts_with("ljmp")
+        }
         TargetArchitecture::Arm => matches!(mnemonic, "b" | "bx"),
         TargetArchitecture::AArch64 => matches!(mnemonic, "b" | "br"),
         TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64 => matches!(mnemonic, "j" | "jr"),
@@ -1124,22 +1131,22 @@ pub(crate) fn instruction_matches_until(
     instruction: &Instruction,
     architecture: TargetArchitecture,
 ) -> bool {
-    let (mnemonic, operands) = split_instruction(&instruction.text);
-    let mnemonic = mnemonic.to_ascii_lowercase();
+    let (mnemonic, operands) = normalized_instruction_parts(&instruction.text, architecture);
+    let mnemonic = mnemonic.as_ref();
     match action {
-        UntilAction::NextCall => is_call_instruction(&mnemonic, operands, architecture),
-        UntilAction::NextReturn => is_return_instruction(&mnemonic, operands, architecture),
+        UntilAction::NextCall => is_call_instruction(mnemonic, operands, architecture),
+        UntilAction::NextReturn => is_return_instruction(mnemonic, operands, architecture),
         UntilAction::NextSyscall => {
-            syscall_architecture(&mnemonic, operands, architecture).is_some()
+            syscall_architecture(mnemonic, operands, architecture).is_some()
         }
-        UntilAction::NextIndirectBranch => is_indirect_branch(&mnemonic, operands, architecture),
+        UntilAction::NextIndirectBranch => is_indirect_branch(mnemonic, operands, architecture),
         UntilAction::NextControlFlow => {
-            is_call_instruction(&mnemonic, operands, architecture)
-                || is_return_instruction(&mnemonic, operands, architecture)
-                || is_unconditional_branch(&mnemonic, architecture)
-                || is_conditional_branch(&mnemonic, architecture)
+            is_call_instruction(mnemonic, operands, architecture)
+                || is_return_instruction(mnemonic, operands, architecture)
+                || is_unconditional_branch(mnemonic, architecture)
+                || is_conditional_branch(mnemonic, architecture)
         }
-        UntilAction::MemoryAccess => instruction_accesses_memory(&mnemonic, operands, architecture),
+        UntilAction::MemoryAccess => instruction_accesses_memory(mnemonic, operands, architecture),
         UntilAction::CurrentLine
         | UntilAction::FunctionReturns
         | UntilAction::UserCode
@@ -1147,6 +1154,78 @@ pub(crate) fn instruction_matches_until(
         | UntilAction::RegionChange
         | UntilAction::Expression(_) => false,
     }
+}
+
+pub(crate) fn instruction_ends_linear_flow(
+    instruction: &Instruction,
+    architecture: TargetArchitecture,
+) -> bool {
+    let (mnemonic, operands) = normalized_instruction_parts(&instruction.text, architecture);
+    let mnemonic = mnemonic.as_ref();
+    if is_call_instruction(mnemonic, operands, architecture)
+        || is_return_instruction(mnemonic, operands, architecture)
+        || is_unconditional_branch(mnemonic, architecture)
+        || is_conditional_branch(mnemonic, architecture)
+        || syscall_architecture(mnemonic, operands, architecture).is_some()
+    {
+        return true;
+    }
+    matches!(
+        architecture,
+        TargetArchitecture::X86 | TargetArchitecture::X86_64
+    ) && (matches!(
+        mnemonic,
+        "int"
+            | "int1"
+            | "int3"
+            | "into"
+            | "sysret"
+            | "sysexit"
+            | "rsm"
+            | "vmrun"
+            | "vmlaunch"
+            | "xabort"
+            | "xbegin"
+    ) || mnemonic.starts_with("sysret")
+        || mnemonic.starts_with("sysexit"))
+}
+
+fn normalized_instruction_parts<'a>(
+    instruction: &'a str,
+    architecture: TargetArchitecture,
+) -> (Cow<'a, str>, &'a str) {
+    let (mut mnemonic, mut operands) = split_instruction(instruction);
+    if matches!(
+        architecture,
+        TargetArchitecture::X86 | TargetArchitecture::X86_64
+    ) {
+        while is_x86_instruction_prefix(mnemonic) {
+            let next = split_instruction(operands);
+            if next.0.is_empty() {
+                break;
+            }
+            (mnemonic, operands) = next;
+        }
+    }
+    let mnemonic = if mnemonic.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        Cow::Owned(mnemonic.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(mnemonic)
+    };
+    (mnemonic, operands)
+}
+
+fn is_x86_instruction_prefix(mnemonic: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "lock", "rep", "repe", "repz", "repne", "repnz", "bnd", "notrack", "data16", "addr16",
+        "addr32", "rex", "rex.w", "rex2", "xacquire", "xrelease", "cs", "ds", "es", "fs", "gs",
+        "ss",
+    ];
+    PREFIXES.contains(&mnemonic)
+        || (mnemonic.bytes().any(|byte| byte.is_ascii_uppercase())
+            && PREFIXES
+                .iter()
+                .any(|prefix| mnemonic.eq_ignore_ascii_case(prefix)))
 }
 
 fn is_indirect_branch(mnemonic: &str, operands: &str, architecture: TargetArchitecture) -> bool {

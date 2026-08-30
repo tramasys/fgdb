@@ -410,7 +410,7 @@ fn build_allocator_page() -> AllocatorWidgets {
         "ADDRESS RANGE",
         330,
         false,
-        |row| format!("0x{:016x}–0x{:016x}", row.start, row.end),
+        |row| format!("0x{:016x}-0x{:016x}", row.start, row.end),
     ));
     view.append_column(&misc_column::<AllocatorRegion>("SIZE", 120, false, |row| {
         crate::kernel::format_bytes(row.size())
@@ -1079,7 +1079,7 @@ fn build_core_page() -> CoreWidgets {
         "ADDRESS RANGE",
         330,
         false,
-        |row| format!("0x{:016x}–0x{:016x}", row.start, row.end),
+        |row| format!("0x{:016x}-0x{:016x}", row.start, row.end),
     ));
     file_view.append_column(&misc_column::<CoreMappedFile>(
         "FILE OFFSET",
@@ -1539,7 +1539,7 @@ fn format_address(address: Option<u64>) -> String {
 fn format_range(range: Option<(u64, u64)>) -> String {
     range.map_or_else(
         || String::from("range unavailable"),
-        |(start, end)| format!("0x{start:016x}–0x{end:016x}"),
+        |(start, end)| format!("0x{start:016x}-0x{end:016x}"),
     )
 }
 

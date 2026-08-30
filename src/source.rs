@@ -15,9 +15,7 @@ pub fn paths_match(open_path: &Path, reported_path: &str) -> bool {
 
 pub fn roots(config: &LaunchConfig) -> Vec<PathBuf> {
     let mut roots = vec![config.working_directory.clone()];
-    if let Some(paths) = std::env::var_os("FGDB_SOURCE_PATH") {
-        roots.extend(std::env::split_paths(&paths));
-    }
+    roots.extend(config.source_paths.iter().cloned());
     if let Some(paths) = std::env::var_os("RUST_SRC_PATH") {
         roots.extend(std::env::split_paths(&paths));
     }

@@ -206,7 +206,7 @@ pub(super) fn memory_region_column(
         };
         label.set_text(&text);
         label.set_tooltip_text(Some(&format!(
-            "0x{:0address_width$x}–0x{:0address_width$x} · {}",
+            "0x{:0address_width$x}-0x{:0address_width$x} · {}",
             region.start,
             region.end,
             region.description()

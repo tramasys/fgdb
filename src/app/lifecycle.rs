@@ -309,6 +309,7 @@ fn probe_next_gef_capability(client: &MiClient, discovery: Rc<RefCell<GefCapabil
                     return;
                 };
                 ui.show_gef_capabilities(&discovery.available);
+                configure_gef_context(&discovery.ui, client);
                 return;
             };
             discovery.next += 1;
@@ -335,6 +336,47 @@ fn probe_next_gef_capability(client: &MiClient, discovery: Rc<RefCell<GefCapabil
     }
 }
 
+fn configure_gef_context(ui: &Weak<Ui>, client: &MiClient) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+    let visible = current_ui.gef_context_visible();
+    let control = current_ui.detected_gef_context_control();
+    current_ui.set_gef_context_hidden_by_fgdb(false);
+    let Some(command) = gef_context_configuration_command(control, visible) else {
+        return;
+    };
+    let command = format!(
+        "-interpreter-exec console {}",
+        crate::debugger::quote(command)
+    );
+    let weak_ui = ui.clone();
+    if client
+        .request(&command, move |_, record| {
+            if let Some(ui) = weak_ui.upgrade() {
+                ui.set_gef_context_hidden_by_fgdb(!visible && record.is_success());
+            }
+        })
+        .is_err()
+        && let Some(ui) = ui.upgrade()
+    {
+        ui.set_gef_context_hidden_by_fgdb(false);
+    }
+}
+
+fn gef_context_configuration_command(
+    control: GefContextControl,
+    visible: bool,
+) -> Option<&'static str> {
+    match (control, visible) {
+        (GefContextControl::ContextCommand, false) => Some("context off"),
+        (GefContextControl::ContextCommand, true) => Some("context on"),
+        (GefContextControl::OriginalGef, false) => Some("gef config context.enable false"),
+        (GefContextControl::OriginalGef, true) => Some("gef config context.enable true"),
+        (GefContextControl::None, _) => None,
+    }
+}
+
 pub(super) fn request_initial_source(ui: &Weak<Ui>, client: &MiClient) {
     let weak_ui = ui.clone();
     let _ = client.request("-file-list-exec-source-file", move |_, record| {
@@ -349,7 +391,7 @@ pub(super) fn request_initial_source(ui: &Weak<Ui>, client: &MiClient) {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_pointer_size;
+    use super::{GefContextControl, gef_context_configuration_command, parse_pointer_size};
 
     #[test]
     fn accepts_decimal_and_gdb_hex_pointer_sizes() {
@@ -357,5 +399,29 @@ mod tests {
         assert_eq!(parse_pointer_size("0x8"), Some(8));
         assert_eq!(parse_pointer_size("16"), None);
         assert_eq!(parse_pointer_size("not-a-size"), None);
+    }
+
+    #[test]
+    fn configures_context_for_both_supported_gef_families() {
+        assert_eq!(
+            gef_context_configuration_command(GefContextControl::ContextCommand, false),
+            Some("context off")
+        );
+        assert_eq!(
+            gef_context_configuration_command(GefContextControl::ContextCommand, true),
+            Some("context on")
+        );
+        assert_eq!(
+            gef_context_configuration_command(GefContextControl::OriginalGef, false),
+            Some("gef config context.enable false")
+        );
+        assert_eq!(
+            gef_context_configuration_command(GefContextControl::OriginalGef, true),
+            Some("gef config context.enable true")
+        );
+        assert_eq!(
+            gef_context_configuration_command(GefContextControl::None, false),
+            None
+        );
     }
 }

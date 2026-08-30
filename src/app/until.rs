@@ -3,16 +3,45 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::*;
+use crate::debugger::Instruction;
 use crate::ui::controls::issue_execution_command;
 
 const MAX_UNTIL_EXPRESSION_BYTES: usize = 4096;
-const DISASSEMBLY_LOOKAHEAD_BYTES: u64 = 32;
+const DISASSEMBLY_LOOKAHEAD_BYTES: u64 = 128;
+const MAX_UNTIL_LOOKAHEAD_INSTRUCTIONS: usize = 256;
 const MAX_TRACKED_UNTIL_PCS: usize = 8192;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MappingIdentity {
     start: u64,
     end: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StopDecision {
+    EvaluateCondition,
+    Complete,
+    Step,
+    InspectInstruction,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ObservedInstruction {
+    checked: bool,
+    safe_steps: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LookaheadInstruction {
+    address: u64,
+    matched: bool,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct InstructionWindow {
+    current_matched: bool,
+    safe_steps: u16,
+    lookahead: Vec<LookaheadInstruction>,
 }
 
 #[derive(Clone, Debug)]
@@ -22,14 +51,20 @@ struct UntilRun {
     current_address: Option<u64>,
     /// Addresses observed on the live execution path. The value records whether
     /// the instruction was already disassembled and found not to match.
-    observed_addresses: HashMap<u64, bool>,
+    observed_addresses: HashMap<u64, ObservedInstruction>,
+    /// Already classified instructions returned alongside the current PC by
+    /// GDB's bounded disassembly response. The bounded window is replaced on
+    /// the next cache miss.
+    instruction_lookahead: Vec<LookaheadInstruction>,
     observed_addresses_capped: bool,
     repeated_steps: u64,
     address_space: Option<crate::misc::ProcessAddressSpace>,
     initial_mapping: Option<MappingIdentity>,
     context_control: GefContextControl,
     cancel_requested: bool,
-    step_in_flight: bool,
+    pending_steps: u64,
+    counted_steps_supported: bool,
+    condition_command: Option<Rc<str>>,
 }
 
 pub(super) struct NativeUntilController {
@@ -90,18 +125,33 @@ impl NativeUntilController {
             UntilAction::UserCode | UntilAction::LibcCode | UntilAction::RegionChange
         );
         let can_use_address_space = requires_address_space || searches_instructions(&action);
+        let description = action_description(&action);
+        let condition_command = if let UntilAction::Expression(expression) = &action {
+            Some(
+                format!(
+                    "-data-evaluate-expression {}",
+                    crate::debugger::quote(expression)
+                )
+                .into(),
+            )
+        } else {
+            None
+        };
         self.state.replace(Some(UntilRun {
-            action: action.clone(),
+            action,
             steps: 0,
             current_address: None,
             observed_addresses: HashMap::new(),
+            instruction_lookahead: Vec::new(),
             observed_addresses_capped: false,
             repeated_steps: 0,
             address_space: None,
             initial_mapping: None,
             context_control: GefContextControl::None,
             cancel_requested: false,
-            step_in_flight: false,
+            pending_steps: 0,
+            counted_steps_supported: true,
+            condition_command,
         }));
         ui.set_native_until_active(true);
         ui.set_debug_state_stale(true);
@@ -111,10 +161,7 @@ impl NativeUntilController {
         ui.invalidate_misc_refresh();
         ui.set_status(
             "Running until",
-            &format!(
-                "Following live execution for {}…",
-                action_description(&action)
-            ),
+            &format!("Following live execution for {}…", description),
             Some("status-running"),
         );
         drop(ui);
@@ -138,7 +185,7 @@ impl NativeUntilController {
             .state
             .borrow()
             .as_ref()
-            .is_some_and(|run| run.step_in_flight);
+            .is_some_and(|run| run.pending_steps > 0);
         if ui.inferior_is_running() || execution_pending {
             if self
                 .state
@@ -180,9 +227,11 @@ impl NativeUntilController {
         if self.state.borrow().is_none() {
             return false;
         }
-        if let Some(run) = self.state.borrow_mut().as_mut() {
-            run.step_in_flight = false;
-        }
+        let completed_steps = self
+            .state
+            .borrow_mut()
+            .as_mut()
+            .map_or(0, |run| std::mem::take(&mut run.pending_steps));
         if self
             .state
             .borrow()
@@ -218,13 +267,13 @@ impl NativeUntilController {
             let Some(state) = state.as_mut() else {
                 return false;
             };
-            state.steps = state.steps.saturating_add(1);
+            state.steps = state.steps.saturating_add(completed_steps.max(1));
             if state.steps.is_multiple_of(64)
                 && let Some(ui) = self.ui.upgrade()
             {
                 ui.set_status(
                     "Running until",
-                    &progress_detail(state, false),
+                    &progress_detail(state, 0),
                     Some("status-running"),
                 );
             }
@@ -239,6 +288,14 @@ impl NativeUntilController {
     }
 
     fn prepare_address_space(self: &Rc<Self>, generation: u64, required: bool) {
+        let cached_process = self
+            .ui
+            .upgrade()
+            .and_then(|ui| ui.inferior_pid().zip(ui.debugger_pid()));
+        if let Some((pid, debugger_pid)) = cached_process {
+            self.finish_address_space_preparation(generation, required, pid, debugger_pid);
+            return;
+        }
         let controller = Rc::clone(self);
         if let Err(error) = self
             .client
@@ -265,65 +322,80 @@ impl NativeUntilController {
                     );
                     return;
                 };
-                let address_space = match crate::misc::read_process_address_space(pid, debugger_pid)
-                {
-                    Ok(address_space) => address_space,
-                    Err(error) => {
-                        controller.address_space_unavailable(generation, required, &error);
-                        return;
-                    }
-                };
-                let action = controller
-                    .state
-                    .borrow()
-                    .as_ref()
-                    .map(|state| state.action.clone());
-                let Some(action) = action else {
-                    return;
-                };
-                if address_space.capped {
-                    controller.address_space_unavailable(
-                        generation,
-                        required,
-                        "The process has more mappings than fgdb can safely scan",
-                    );
-                    return;
+                if let Some(ui) = controller.ui.upgrade() {
+                    ui.set_inferior_pid(Some(pid));
                 }
-                let target_available = match action {
-                    UntilAction::UserCode => address_space
-                        .mappings
-                        .iter()
-                        .any(|mapping| is_user_code_mapping(mapping, &address_space)),
-                    UntilAction::LibcCode => {
-                        address_space.mappings.iter().any(is_libc_code_mapping)
-                    }
-                    UntilAction::RegionChange => true,
-                    _ => true,
-                };
-                if !target_available {
-                    controller.fail(
-                        generation,
-                        match action {
-                            UntilAction::UserCode => {
-                                "No executable mapping for the main program is available"
-                            }
-                            UntilAction::LibcCode => "No executable libc mapping is loaded",
-                            _ => "The requested mapping class is unavailable",
-                        },
-                    );
-                    return;
-                }
-                if let Some(state) = controller.state.borrow_mut().as_mut() {
-                    state.address_space = Some(address_space);
-                }
-                if action == UntilAction::RegionChange {
-                    controller.request_pc(generation, true);
-                } else {
-                    controller.begin_stepping(generation);
-                }
+                controller.finish_address_space_preparation(
+                    generation,
+                    required,
+                    pid,
+                    debugger_pid,
+                );
             })
         {
             self.address_space_unavailable(generation, required, &error.to_string());
+        }
+    }
+
+    fn finish_address_space_preparation(
+        self: &Rc<Self>,
+        generation: u64,
+        required: bool,
+        pid: u32,
+        debugger_pid: u32,
+    ) {
+        if !self.is_current(generation) {
+            return;
+        }
+        let address_space = match crate::misc::read_process_address_space(pid, debugger_pid) {
+            Ok(address_space) => address_space,
+            Err(error) => {
+                self.address_space_unavailable(generation, required, &error);
+                return;
+            }
+        };
+        if address_space.capped {
+            self.address_space_unavailable(
+                generation,
+                required,
+                "The process has more mappings than fgdb can safely scan",
+            );
+            return;
+        }
+        let (unavailable, region_change) = {
+            let state = self.state.borrow();
+            let Some(state) = state.as_ref() else {
+                return;
+            };
+            let unavailable = match &state.action {
+                UntilAction::UserCode
+                    if !address_space
+                        .mappings
+                        .iter()
+                        .any(|mapping| is_user_code_mapping(mapping, &address_space)) =>
+                {
+                    Some("No executable mapping for the main program is available")
+                }
+                UntilAction::LibcCode
+                    if !address_space.mappings.iter().any(is_libc_code_mapping) =>
+                {
+                    Some("No executable libc mapping is loaded")
+                }
+                _ => None,
+            };
+            (unavailable, state.action == UntilAction::RegionChange)
+        };
+        if let Some(message) = unavailable {
+            self.fail(generation, message);
+            return;
+        }
+        if let Some(state) = self.state.borrow_mut().as_mut() {
+            state.address_space = Some(address_space);
+        }
+        if region_change {
+            self.request_pc(generation, true);
+        } else {
+            self.begin_stepping(generation);
         }
     }
 
@@ -353,7 +425,7 @@ impl NativeUntilController {
                     return gtk::glib::ControlFlow::Break;
                 };
                 (
-                    progress_detail(state, state.step_in_flight),
+                    progress_detail(state, state.pending_steps),
                     state.cancel_requested,
                 )
             };
@@ -427,57 +499,87 @@ impl NativeUntilController {
     }
 
     fn inspect_stop(self: &Rc<Self>, address: u64, generation: u64) {
-        let action = self
-            .state
-            .borrow()
-            .as_ref()
-            .map(|state| state.action.clone());
-        let Some(action) = action else {
-            return;
-        };
-        match action {
-            UntilAction::Expression(expression) => {
-                self.evaluate_condition(expression, generation);
-            }
-            UntilAction::UserCode | UntilAction::LibcCode | UntilAction::RegionChange => {
-                let matched = {
-                    let state = self.state.borrow();
-                    let Some(state) = state.as_ref() else {
-                        return;
-                    };
-                    match action {
-                        UntilAction::UserCode => {
-                            state.address_space.as_ref().is_some_and(|space| {
-                                mapping_at(&space.mappings, address)
-                                    .is_some_and(|mapping| is_user_code_mapping(mapping, space))
-                            })
-                        }
-                        UntilAction::LibcCode => {
-                            state.address_space.as_ref().is_some_and(|space| {
-                                mapping_at(&space.mappings, address)
-                                    .is_some_and(is_libc_code_mapping)
-                            })
-                        }
-                        UntilAction::RegionChange => state
-                            .initial_mapping
-                            .as_ref()
-                            .is_some_and(|mapping| !mapping_contains(mapping, address)),
-                        _ => false,
+        let decision = {
+            let state = self.state.borrow();
+            let Some(state) = state.as_ref() else {
+                return;
+            };
+            match &state.action {
+                UntilAction::Expression(_) => StopDecision::EvaluateCondition,
+                UntilAction::UserCode => {
+                    state
+                        .address_space
+                        .as_ref()
+                        .map_or(StopDecision::Step, |space| {
+                            if mapping_at(&space.mappings, address)
+                                .is_some_and(|mapping| is_user_code_mapping(mapping, space))
+                            {
+                                StopDecision::Complete
+                            } else {
+                                StopDecision::Step
+                            }
+                        })
+                }
+                UntilAction::LibcCode => {
+                    state
+                        .address_space
+                        .as_ref()
+                        .map_or(StopDecision::Step, |space| {
+                            if mapping_at(&space.mappings, address)
+                                .is_some_and(is_libc_code_mapping)
+                            {
+                                StopDecision::Complete
+                            } else {
+                                StopDecision::Step
+                            }
+                        })
+                }
+                UntilAction::RegionChange => {
+                    if state
+                        .initial_mapping
+                        .as_ref()
+                        .is_some_and(|mapping| !mapping_contains(mapping, address))
+                    {
+                        StopDecision::Complete
+                    } else {
+                        StopDecision::Step
                     }
-                };
-                if matched {
-                    self.complete(generation);
+                }
+                _ => StopDecision::InspectInstruction,
+            }
+        };
+        match decision {
+            StopDecision::EvaluateCondition => self.evaluate_condition(generation),
+            StopDecision::Complete => self.complete(generation),
+            StopDecision::Step => self.issue_step(generation),
+            StopDecision::InspectInstruction
+                if let Some(safe_steps) = self.cached_instruction_steps(address) =>
+            {
+                self.issue_steps(generation, safe_steps);
+            }
+            StopDecision::InspectInstruction => {
+                if let Some(matched) = self.take_instruction_lookahead(address) {
+                    if matched {
+                        self.complete(generation);
+                    } else {
+                        self.mark_instruction_checked(address, 1);
+                        self.issue_step(generation);
+                    }
                 } else {
-                    self.issue_step(generation);
+                    self.request_instruction(address, generation, DISASSEMBLY_LOOKAHEAD_BYTES);
                 }
             }
-            _ if self.instruction_was_checked(address) => self.issue_step(generation),
-            _ => self.request_instruction(address, generation, DISASSEMBLY_LOOKAHEAD_BYTES),
         }
     }
 
     fn request_instruction(self: &Rc<Self>, address: u64, generation: u64, bytes: u64) {
-        let end = address.saturating_add(bytes.max(1));
+        if let Some(state) = self.state.borrow_mut().as_mut() {
+            state.instruction_lookahead.clear();
+        }
+        let end = self.state.borrow().as_ref().map_or_else(
+            || address.saturating_add(bytes.max(1)),
+            |state| disassembly_end(address, bytes, state.address_space.as_ref()),
+        );
         let command = format!("-data-disassemble -s 0x{address:x} -e 0x{end:x} -- 0");
         let controller = Rc::clone(self);
         if let Err(error) = self.client.request(&command, move |_, record| {
@@ -489,11 +591,11 @@ impl NativeUntilController {
             } else {
                 Vec::new()
             };
-            let instruction = instructions
+            let instruction_index = instructions
                 .iter()
-                .find(|instruction| parse_address(&instruction.address) == Some(address))
-                .or_else(|| instructions.first());
-            let Some(instruction) = instruction else {
+                .position(|instruction| parse_address(&instruction.address) == Some(address))
+                .unwrap_or(0);
+            if instructions.get(instruction_index).is_none() {
                 if bytes > 1 {
                     controller.request_instruction(address, generation, bytes.div_ceil(2));
                 } else {
@@ -505,36 +607,54 @@ impl NativeUntilController {
                     );
                 }
                 return;
+            }
+            let architecture = controller
+                .ui
+                .upgrade()
+                .map_or(TargetArchitecture::Unknown, |ui| ui.target_architecture());
+            let InstructionWindow {
+                current_matched,
+                safe_steps,
+                lookahead,
+            } = {
+                let state = controller.state.borrow();
+                let Some(state) = state.as_ref() else {
+                    return;
+                };
+                classify_instruction_window(
+                    &state.action,
+                    &instructions,
+                    instruction_index,
+                    architecture,
+                    state.address_space.as_ref(),
+                )
             };
-            let (action, architecture) = match controller.state.borrow().as_ref() {
-                Some(state) => (
-                    state.action.clone(),
-                    controller
-                        .ui
-                        .upgrade()
-                        .map_or(TargetArchitecture::Unknown, |ui| ui.target_architecture()),
-                ),
-                None => return,
-            };
-            if crate::ui::formatting::instruction_matches_until(&action, instruction, architecture)
-            {
+            if let Some(state) = controller.state.borrow_mut().as_mut() {
+                state.instruction_lookahead = lookahead;
+            }
+            if current_matched {
                 controller.complete(generation);
             } else {
-                controller.mark_instruction_checked(address);
-                controller.issue_step(generation);
+                controller.mark_instruction_checked(address, safe_steps);
+                controller.issue_steps(generation, u64::from(safe_steps));
             }
         }) {
             self.fail(generation, &error.to_string());
         }
     }
 
-    fn evaluate_condition(self: &Rc<Self>, expression: String, generation: u64) {
-        let command = format!(
-            "-data-evaluate-expression {}",
-            crate::debugger::quote(&expression)
-        );
+    fn evaluate_condition(self: &Rc<Self>, generation: u64) {
+        let command = self
+            .state
+            .borrow()
+            .as_ref()
+            .and_then(|state| state.condition_command.clone());
+        let Some(command) = command else {
+            self.fail(generation, "The Until expression is unavailable");
+            return;
+        };
         let controller = Rc::clone(self);
-        if let Err(error) = self.client.request(&command, move |_, record| {
+        let request = self.client.request(&command, move |_, record| {
             if !controller.is_current(generation) {
                 return;
             }
@@ -558,32 +678,64 @@ impl NativeUntilController {
                     "The Until expression must produce a scalar integer or boolean value",
                 ),
             }
-        }) {
+        });
+        if let Err(error) = request {
             self.fail(generation, &error.to_string());
         }
     }
 
     fn issue_step(self: &Rc<Self>, generation: u64) {
+        self.issue_steps(generation, 1);
+    }
+
+    fn issue_steps(self: &Rc<Self>, generation: u64, requested_steps: u64) {
         if !self.is_current(generation) {
             return;
         }
-        if let Some(run) = self.state.borrow_mut().as_mut() {
-            run.step_in_flight = true;
-        }
+        let steps = {
+            let mut state = self.state.borrow_mut();
+            let Some(run) = state.as_mut() else {
+                return;
+            };
+            let steps = if run.counted_steps_supported {
+                requested_steps.max(1)
+            } else {
+                1
+            };
+            run.pending_steps = steps;
+            steps
+        };
+        let command = if steps == 1 {
+            String::from("-exec-step-instruction")
+        } else {
+            format!(
+                "-interpreter-exec console {}",
+                crate::debugger::quote(&format!("stepi {steps}"))
+            )
+        };
         let controller = Rc::clone(self);
-        if let Err(error) = self
-            .client
-            .request("-exec-step-instruction", move |_, record| {
-                if controller.is_current(generation) && !record.is_success() {
-                    controller.fail(
-                        generation,
-                        record
-                            .error_message()
-                            .unwrap_or("GDB rejected instruction stepping"),
-                    );
+        if let Err(error) = self.client.request(&command, move |_, record| {
+            if !controller.is_current(generation) || record.is_success() {
+                return;
+            }
+            if steps > 1 {
+                if let Some(run) = controller.state.borrow_mut().as_mut() {
+                    run.pending_steps = 0;
+                    run.counted_steps_supported = false;
                 }
-            })
-        {
+                controller.issue_step(generation);
+            } else {
+                controller.fail(
+                    generation,
+                    record
+                        .error_message()
+                        .unwrap_or("GDB rejected instruction stepping"),
+                );
+            }
+        }) {
+            if let Some(run) = self.state.borrow_mut().as_mut() {
+                run.pending_steps = 0;
+            }
             self.fail(generation, &error.to_string());
         }
     }
@@ -633,29 +785,46 @@ impl NativeUntilController {
         if state.observed_addresses.contains_key(&address) {
             state.repeated_steps = state.repeated_steps.saturating_add(1);
         } else if state.observed_addresses.len() < MAX_TRACKED_UNTIL_PCS {
-            state.observed_addresses.insert(address, false);
+            state
+                .observed_addresses
+                .insert(address, ObservedInstruction::default());
         } else {
             state.observed_addresses_capped = true;
         }
     }
 
-    fn instruction_was_checked(&self, address: u64) -> bool {
-        self.state.borrow().as_ref().is_some_and(|state| {
-            instruction_is_cacheable(state, address)
-                && state.observed_addresses.get(&address) == Some(&true)
-        })
+    fn cached_instruction_steps(&self, address: u64) -> Option<u64> {
+        let state = self.state.borrow();
+        let state = state.as_ref()?;
+        if !instruction_is_cacheable(state, address) {
+            return None;
+        }
+        let instruction = state.observed_addresses.get(&address)?;
+        instruction
+            .checked
+            .then_some(u64::from(instruction.safe_steps.max(1)))
     }
 
-    fn mark_instruction_checked(&self, address: u64) {
+    fn mark_instruction_checked(&self, address: u64, safe_steps: u16) {
         let mut state = self.state.borrow_mut();
         let Some(state) = state.as_mut() else {
             return;
         };
         if instruction_is_cacheable(state, address)
-            && let Some(checked) = state.observed_addresses.get_mut(&address)
+            && let Some(instruction) = state.observed_addresses.get_mut(&address)
         {
-            *checked = true;
+            instruction.checked = true;
+            instruction.safe_steps = safe_steps.max(1);
         }
+    }
+
+    fn take_instruction_lookahead(&self, address: u64) -> Option<bool> {
+        let state = self.state.borrow();
+        let lookahead = &state.as_ref()?.instruction_lookahead;
+        lookahead
+            .binary_search_by_key(&address, |instruction| instruction.address)
+            .ok()
+            .map(|index| lookahead[index].matched)
     }
 
     fn restore_context(&self, control: GefContextControl, render_current_stop: bool) {
@@ -782,17 +951,107 @@ fn searches_instructions(action: &UntilAction) -> bool {
     )
 }
 
+fn classify_instruction_window(
+    action: &UntilAction,
+    instructions: &[Instruction],
+    current_index: usize,
+    architecture: TargetArchitecture,
+    address_space: Option<&crate::misc::ProcessAddressSpace>,
+) -> InstructionWindow {
+    let Some(current) = instructions.get(current_index) else {
+        return InstructionWindow::default();
+    };
+    let current_matched =
+        crate::ui::formatting::instruction_matches_until(action, current, architecture);
+    let current_address = parse_address(&current.address);
+    let can_batch = matches!(
+        architecture,
+        TargetArchitecture::X86 | TargetArchitecture::X86_64
+    ) && current_address
+        .is_some_and(|address| address_is_cacheable(address_space, address));
+    let mut safe_steps = 1_u16;
+    let mut previous_address = current_address;
+    let mut linear_path =
+        can_batch && !crate::ui::formatting::instruction_ends_linear_flow(current, architecture);
+    let mut lookahead = Vec::with_capacity(
+        instructions
+            .len()
+            .saturating_sub(current_index + 1)
+            .min(MAX_UNTIL_LOOKAHEAD_INSTRUCTIONS),
+    );
+    for (offset, instruction) in instructions
+        .iter()
+        .skip(current_index + 1)
+        .take(MAX_UNTIL_LOOKAHEAD_INSTRUCTIONS)
+        .enumerate()
+    {
+        let Some(address) = parse_address(&instruction.address) else {
+            linear_path = false;
+            continue;
+        };
+        let matched =
+            crate::ui::formatting::instruction_matches_until(action, instruction, architecture);
+        let cacheable = address_is_cacheable(address_space, address);
+        if cacheable {
+            lookahead.push(LookaheadInstruction { address, matched });
+        }
+        if linear_path {
+            let monotonic = previous_address.is_some_and(|previous| address > previous);
+            if !cacheable || !monotonic {
+                linear_path = false;
+                continue;
+            }
+            safe_steps = u16::try_from(offset + 1).unwrap_or(u16::MAX).max(1);
+            if matched
+                || crate::ui::formatting::instruction_ends_linear_flow(instruction, architecture)
+            {
+                linear_path = false;
+            }
+            previous_address = Some(address);
+        }
+    }
+    lookahead.sort_unstable_by_key(|instruction| instruction.address);
+    lookahead.dedup_by_key(|instruction| instruction.address);
+    InstructionWindow {
+        current_matched,
+        safe_steps,
+        lookahead,
+    }
+}
+
+fn disassembly_end(
+    address: u64,
+    bytes: u64,
+    address_space: Option<&crate::misc::ProcessAddressSpace>,
+) -> u64 {
+    let requested_end = address.saturating_add(bytes.max(1));
+    address_space
+        .and_then(|space| mapping_at(&space.mappings, address))
+        .map_or(requested_end, |mapping| requested_end.min(mapping.end))
+}
+
 fn instruction_is_cacheable(run: &UntilRun, address: u64) -> bool {
-    run.address_space
-        .as_ref()
+    address_is_cacheable(run.address_space.as_ref(), address)
+}
+
+fn address_is_cacheable(
+    address_space: Option<&crate::misc::ProcessAddressSpace>,
+    address: u64,
+) -> bool {
+    address_space
         .and_then(|space| mapping_at(&space.mappings, address))
         .is_some_and(|mapping| {
             mapping.permissions.contains('x') && !mapping.permissions.contains('w')
         })
 }
 
-fn progress_detail(run: &UntilRun, instruction_in_flight: bool) -> String {
-    let verb = if instruction_in_flight {
+fn progress_detail(run: &UntilRun, pending_steps: u64) -> String {
+    let verb = if pending_steps > 1 {
+        format!(
+            "Executing up to {pending_steps} instructions from instruction {}",
+            run.steps.saturating_add(1)
+        )
+    } else if pending_steps == 1 {
         format!("Executing instruction {}", run.steps.saturating_add(1))
     } else {
         format!("Executed {} instructions", run.steps)
@@ -803,7 +1062,7 @@ fn progress_detail(run: &UntilRun, instruction_in_flight: bool) -> String {
         ""
     };
     let mut detail = format!(
-        "{verb} · {}{unique_suffix} unique PCs",
+        "{verb} · {}{unique_suffix} observed PCs",
         run.observed_addresses.len()
     );
     if let Some(address) = run.current_address {
@@ -885,9 +1144,10 @@ fn mapping_at(
     mappings: &[crate::misc::ProcessMapping],
     address: u64,
 ) -> Option<&crate::misc::ProcessMapping> {
-    mappings
-        .iter()
-        .find(|mapping| mapping.start <= address && address < mapping.end)
+    let index = mappings
+        .partition_point(|mapping| mapping.start <= address)
+        .checked_sub(1)?;
+    mappings.get(index).filter(|mapping| address < mapping.end)
 }
 
 fn mapping_identity(mapping: &crate::misc::ProcessMapping) -> MappingIdentity {
@@ -956,6 +1216,17 @@ fn action_description(action: &UntilAction) -> &'static str {
 mod tests {
     use super::*;
 
+    fn instruction(address: &str, text: &str) -> Instruction {
+        Instruction {
+            address: address.to_owned(),
+            function: String::from("test"),
+            offset: String::from("0"),
+            opcodes: None,
+            text: text.to_owned(),
+            source: None,
+        }
+    }
+
     #[test]
     fn distinguishes_internal_steps_from_real_debugger_stops() {
         assert!(is_internal_step_stop(Some("end-stepping-range")));
@@ -1021,5 +1292,145 @@ mod tests {
             };
             assert!(is_libc_code_mapping(&mapping), "{path}");
         }
+    }
+
+    #[test]
+    fn reuses_bounded_disassembly_lookahead_for_read_only_code() {
+        let address_space = crate::misc::ProcessAddressSpace {
+            executable: Some(String::from("/tmp/target")),
+            mappings: vec![crate::misc::ProcessMapping {
+                start: 0x1000,
+                end: 0x2000,
+                permissions: String::from("r-xp"),
+                path: String::from("/tmp/target"),
+            }],
+            capped: false,
+        };
+        let instructions = [
+            instruction("0x1000", "mov eax, ebx"),
+            instruction("0x1002", "nop"),
+            instruction("0x1003", "call 0x1800"),
+        ];
+        let window = classify_instruction_window(
+            &UntilAction::NextCall,
+            &instructions,
+            0,
+            TargetArchitecture::X86_64,
+            Some(&address_space),
+        );
+        assert!(!window.current_matched);
+        assert_eq!(window.safe_steps, 2);
+        assert_eq!(
+            window.lookahead,
+            vec![
+                LookaheadInstruction {
+                    address: 0x1002,
+                    matched: false,
+                },
+                LookaheadInstruction {
+                    address: 0x1003,
+                    matched: true,
+                },
+            ]
+        );
+
+        let mut writable = address_space;
+        writable.mappings[0].permissions = String::from("rwxp");
+        let window = classify_instruction_window(
+            &UntilAction::NextCall,
+            &instructions,
+            0,
+            TargetArchitecture::X86_64,
+            Some(&writable),
+        );
+        assert_eq!(window.safe_steps, 1);
+        assert!(window.lookahead.is_empty());
+    }
+
+    #[test]
+    fn counted_steps_stop_before_nonmatching_control_flow() {
+        let address_space = crate::misc::ProcessAddressSpace {
+            executable: Some(String::from("/tmp/target")),
+            mappings: vec![crate::misc::ProcessMapping {
+                start: 0x1000,
+                end: 0x2000,
+                permissions: String::from("r-xp"),
+                path: String::from("/tmp/target"),
+            }],
+            capped: false,
+        };
+        let instructions = [
+            instruction("0x1000", "mov eax, ebx"),
+            instruction("0x1002", "nop"),
+            instruction("0x1003", "jne 0x1100"),
+            instruction("0x1005", "nop"),
+            instruction("0x1006", "call 0x1800"),
+        ];
+        let window = classify_instruction_window(
+            &UntilAction::NextCall,
+            &instructions,
+            0,
+            TargetArchitecture::X86_64,
+            Some(&address_space),
+        );
+        assert_eq!(window.safe_steps, 2);
+        assert_eq!(
+            window
+                .lookahead
+                .binary_search_by_key(&0x1006, |instruction| instruction.address)
+                .ok()
+                .map(|index| window.lookahead[index].matched),
+            Some(true)
+        );
+
+        let prefixed_return = instruction("0x1100", "repz retq");
+        assert!(crate::ui::formatting::instruction_matches_until(
+            &UntilAction::NextReturn,
+            &prefixed_return,
+            TargetArchitecture::X86_64,
+        ));
+        assert!(crate::ui::formatting::instruction_ends_linear_flow(
+            &instruction("0x1101", "ds ljmp $0x8,$0x1200"),
+            TargetArchitecture::X86_64,
+        ));
+    }
+
+    #[test]
+    fn finds_mapping_boundaries_with_sorted_lookup() {
+        let mappings = [
+            crate::misc::ProcessMapping {
+                start: 0x1000,
+                end: 0x1800,
+                permissions: String::from("r-xp"),
+                path: String::new(),
+            },
+            crate::misc::ProcessMapping {
+                start: 0x2000,
+                end: 0x2800,
+                permissions: String::from("rw-p"),
+                path: String::new(),
+            },
+        ];
+        assert_eq!(
+            mapping_at(&mappings, 0x1000).map(|map| map.start),
+            Some(0x1000)
+        );
+        assert_eq!(
+            mapping_at(&mappings, 0x17ff).map(|map| map.start),
+            Some(0x1000)
+        );
+        assert!(mapping_at(&mappings, 0x1800).is_none());
+        assert!(mapping_at(&mappings, 0x1fff).is_none());
+        assert_eq!(
+            mapping_at(&mappings, 0x2000).map(|map| map.start),
+            Some(0x2000)
+        );
+        assert!(mapping_at(&mappings, 0x2800).is_none());
+        let address_space = crate::misc::ProcessAddressSpace {
+            executable: None,
+            mappings: mappings.to_vec(),
+            capped: false,
+        };
+        assert_eq!(disassembly_end(0x17f0, 128, Some(&address_space)), 0x1800);
     }
 }

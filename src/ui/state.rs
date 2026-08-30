@@ -216,6 +216,8 @@ impl Ui {
             gef_available: Rc::new(Cell::new(false)),
             gef_capabilities: Rc::new(RefCell::new(HashSet::new())),
             gef_context_control: Rc::new(Cell::new(GefContextControl::None)),
+            gef_context_visible: config.gef_context_visible,
+            gef_context_hidden_by_fgdb: Rc::new(Cell::new(false)),
             heap_inspection_handler: Rc::new(RefCell::new(None)),
             source_roots: Rc::new(RefCell::new(source::roots(config))),
             current_session: Rc::new(RefCell::new(initial_session)),
@@ -765,6 +767,7 @@ impl Ui {
     }
 
     pub fn clear_gef_capabilities(&self) {
+        self.gef_context_hidden_by_fgdb.set(false);
         self.set_gef_capabilities(false, &HashSet::new());
     }
 
@@ -1103,7 +1106,23 @@ impl Ui {
     }
 
     pub(crate) fn gef_context_control(&self) -> GefContextControl {
+        if self.gef_context_hidden_by_fgdb.get() {
+            GefContextControl::None
+        } else {
+            self.gef_context_control.get()
+        }
+    }
+
+    pub(crate) fn detected_gef_context_control(&self) -> GefContextControl {
         self.gef_context_control.get()
+    }
+
+    pub(crate) const fn gef_context_visible(&self) -> bool {
+        self.gef_context_visible
+    }
+
+    pub(crate) fn set_gef_context_hidden_by_fgdb(&self, hidden: bool) {
+        self.gef_context_hidden_by_fgdb.set(hidden);
     }
 
     pub(crate) fn set_native_until_active(&self, active: bool) {

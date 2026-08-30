@@ -217,9 +217,11 @@ impl Ui {
     }
 
     pub fn suspend_execution_location(&self) {
-        self.selected_frame_level.set(u32::MAX);
+        // Keep the selected frame row stable across a short execution command.
+        // The stopped-state refresh updates it when GDB reports the next frame.
+        // Removing and immediately restoring this class made the blue row flash
+        // on every step even though the sidebar contents stayed visible.
         self.current_source_is_rust.set(false);
-        update_selected_frame_buttons(&self.frame_buttons.borrow(), u32::MAX);
         self.execution_source_line.set(None);
         let path = self.execution_source_path.borrow();
         for document in self

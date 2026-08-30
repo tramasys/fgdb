@@ -893,7 +893,7 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
             snapshot.diagnostics.push(fact(
                 "Largest private mapping",
                 format!(
-                    "0x{:016x}–0x{:016x} · USS {} · RSS {} · {}",
+                    "0x{:016x}-0x{:016x} · USS {} · RSS {} · {}",
                     mapping.start,
                     mapping.end,
                     format_bytes(mapping.private_bytes()),

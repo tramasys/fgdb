@@ -1823,7 +1823,7 @@ fn private_mapping_column(
         label.add_css_class(mapping_css(mapping));
         let text = match column {
             PrivateMappingColumn::Address => {
-                format!("0x{:016x}–0x{:016x}", mapping.start, mapping.end)
+                format!("0x{:016x}-0x{:016x}", mapping.start, mapping.end)
             }
             PrivateMappingColumn::Permissions => mapping.permissions.clone(),
             PrivateMappingColumn::Unique => {
@@ -1870,7 +1870,7 @@ fn private_mapping_column(
         );
         label.set_text(&text);
         label.set_tooltip_text(Some(&format!(
-            "0x{:016x}–0x{:016x} · {} · device {} · inode {} · private RSS (USS) {} · clean {} · dirty {} · RSS {} · VSS {} · PSS {} · anonymous {} · referenced {} · lazy-free {} · huge/PMD {} · {}",
+            "0x{:016x}-0x{:016x} · {} · device {} · inode {} · private RSS (USS) {} · clean {} · dirty {} · RSS {} · VSS {} · PSS {} · anonymous {} · referenced {} · lazy-free {} · huge/PMD {} · {}",
             mapping.start,
             mapping.end,
             mapping.permissions,
@@ -1958,7 +1958,7 @@ fn mapping_column(
         label.add_css_class(mapping_css(&mapping));
         let text = match column {
             MappingColumn::Address => format!(
-                "0x{:016x}–0x{:016x}  +0x{:x}",
+                "0x{:016x}-0x{:016x}  +0x{:x}",
                 mapping.start, mapping.end, mapping.offset
             ),
             MappingColumn::Permissions => mapping.permissions.clone(),
@@ -2019,7 +2019,7 @@ fn mapping_column(
         );
         label.set_text(&text);
         label.set_tooltip_text(Some(&format!(
-            "0x{:016x}–0x{:016x} · {} · device {} · inode {} · VSS {} · RSS {} · private RSS (USS) {} · shared RSS {} · PSS {} · anonymous {} · referenced {} · lazy-free {} · locked {} · huge/PMD {} · {}",
+            "0x{:016x}-0x{:016x} · {} · device {} · inode {} · VSS {} · RSS {} · private RSS (USS) {} · shared RSS {} · PSS {} · anonymous {} · referenced {} · lazy-free {} · locked {} · huge/PMD {} · {}",
             mapping.start,
             mapping.end,
             mapping.permissions,
@@ -2052,7 +2052,7 @@ fn mapping_change_column(
         let text = match column {
             MappingChangeColumn::Status => change.status.clone(),
             MappingChangeColumn::Address => {
-                format!("0x{:016x}–0x{:016x}", change.start, change.end)
+                format!("0x{:016x}-0x{:016x}", change.start, change.end)
             }
             MappingChangeColumn::Permissions => change.permissions.clone(),
             MappingChangeColumn::Size => format_signed_bytes(change.size_delta),
@@ -2115,7 +2115,7 @@ fn mapping_change_column(
         );
         label.set_text(&text);
         label.set_tooltip_text(Some(&format!(
-            "{} · 0x{:016x}–0x{:016x} · {} · device {} · inode {} · ΔVSS {} · ΔRSS {} · ΔPSS {} · ΔUSS {} · {}",
+            "{} · 0x{:016x}-0x{:016x} · {} · device {} · inode {} · ΔVSS {} · ΔRSS {} · ΔPSS {} · ΔUSS {} · {}",
             change.status,
             change.start,
             change.end,

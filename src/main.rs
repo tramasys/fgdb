@@ -18,7 +18,7 @@ fn main() -> gtk::glib::ExitCode {
     let launch_config = match config::LaunchConfig::from_process() {
         Ok(configuration) => configuration,
         Err(error) => {
-            eprintln!("invalid FGDB_GDB_ARGS: {error}");
+            eprintln!("invalid GDB startup arguments: {error}");
             return gtk::glib::ExitCode::FAILURE;
         }
     };
