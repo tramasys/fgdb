@@ -155,7 +155,7 @@ impl SessionController {
             SequenceCompletion::Restart => {
                 ui.set_status(
                     "Restarting",
-                    "GDB accepted the restart; waiting for target state…",
+                    "GDB accepted the restart. Waiting for target state…",
                     Some("status-running"),
                 );
             }
@@ -177,7 +177,7 @@ impl SessionController {
                 ui.clear_debugger_state();
                 ui.set_status(
                     "Detached",
-                    "GDB released the process; it normally continues running outside fgdb.",
+                    "GDB released the process. It normally continues running outside fgdb.",
                     Some("status-ready"),
                 );
             }

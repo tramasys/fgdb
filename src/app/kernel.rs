@@ -20,9 +20,20 @@ impl Drop for KernelWorkerGuard {
 }
 
 pub(super) fn request_kernel_refresh(ui: Weak<Ui>, client: Rc<MiClient>) {
-    let Some(generation) = ui.upgrade().and_then(|ui| ui.begin_kernel_refresh()) else {
+    let Some(current_ui) = ui.upgrade() else {
         return;
     };
+    let Some(generation) = current_ui.begin_kernel_refresh() else {
+        return;
+    };
+    let cached_pid = current_ui.inferior_pid();
+    let debugger_pid = current_ui.debugger_pid();
+    let include_tls_metadata = current_ui.kernel_tls_requested();
+    drop(current_ui);
+    if let (Some(pid), Some(debugger_pid)) = (cached_pid, debugger_pid) {
+        read_kernel_snapshot(ui, generation, pid, debugger_pid, include_tls_metadata);
+        return;
+    }
     let ui_for_response = ui.clone();
     if let Err(error) = client.request("-list-thread-groups", move |_, record| {
         let Some(current_ui) = ui_for_response.upgrade() else {
@@ -45,6 +56,9 @@ pub(super) fn request_kernel_refresh(ui: Weak<Ui>, client: Rc<MiClient>) {
             );
             return;
         };
+        if let Some(current_ui) = ui_for_response.upgrade() {
+            current_ui.set_inferior_pid(Some(pid));
+        }
         let Some(debugger_pid) = debugger_pid else {
             show_kernel_error(
                 &ui_for_response,
@@ -79,7 +93,7 @@ fn read_kernel_snapshot(
         show_kernel_error(
             &ui,
             generation,
-            "Previous procfs readers are still finishing; try the refresh again shortly",
+            "Previous procfs readers are still finishing. Try the refresh again shortly",
         );
         return;
     }

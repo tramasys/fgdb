@@ -2,6 +2,32 @@ use super::*;
 
 impl Ui {
     pub fn show_frames(&self, frames: &[StackFrame]) {
+        if self.latest_frames.borrow().as_slice() == frames {
+            return;
+        }
+        let can_update_in_place = {
+            let latest = self.latest_frames.borrow();
+            let buttons = self.frame_buttons.borrow();
+            latest.len() == frames.len()
+                && buttons.len() == frames.len()
+                && latest
+                    .iter()
+                    .zip(frames)
+                    .all(|(previous, current)| previous.level == current.level)
+        };
+        if can_update_in_place {
+            for ((level, button), frame) in self.frame_buttons.borrow().iter().zip(frames) {
+                debug_assert_eq!(*level, frame.level);
+                update_frame_button(button, frame);
+            }
+            self.latest_frames.replace(frames.to_vec());
+            update_selected_frame_buttons(
+                &self.frame_buttons.borrow(),
+                self.selected_frame_level.get(),
+            );
+            return;
+        }
+        self.latest_frames.replace(frames.to_vec());
         clear_box(&self.call_stack_list);
         self.frame_buttons.borrow_mut().clear();
         if frames.is_empty() {
@@ -11,15 +37,6 @@ impl Ui {
         }
 
         for frame in frames {
-            let location_text = frame.line.map_or_else(
-                || frame.address.clone(),
-                |line| {
-                    format!(
-                        "{}:{line}",
-                        frame.source_path().unwrap_or(frame.address.as_str())
-                    )
-                },
-            );
             let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let displayed_function = compact_function_name(&frame.function);
             let function =
@@ -27,6 +44,7 @@ impl Ui {
             function.set_halign(gtk::Align::Start);
             function.set_ellipsize(pango::EllipsizeMode::End);
             function.set_tooltip_text(Some(&frame.function));
+            let location_text = frame_location_text(frame);
             let location = gtk::Label::new(Some(&location_text));
             location.add_css_class("muted");
             location.set_halign(gtk::Align::Start);
@@ -60,10 +78,12 @@ impl Ui {
     pub fn show_locals(&self, variables: &[Variable]) {
         let selected_name = variable_at(&self.locals_selection, self.locals_selection.selected())
             .map(|variable| variable.name);
-        replace_boxed_store(
-            &self.locals_store,
-            variables.iter().cloned().map(VariableNode::new),
-        );
+        let changed = replace_variable_roots_if_changed(&self.locals_store, variables);
+        if !changed {
+            self.locals_empty.set_visible(variables.is_empty());
+            self.locals_edit_button.set_sensitive(!variables.is_empty());
+            return;
+        }
         self.locals_selection
             .set_selected(gtk::INVALID_LIST_POSITION);
         if variables.is_empty() {
@@ -153,10 +173,8 @@ impl Ui {
         node.children_loaded.set(true);
     }
 
-    pub fn local_variable_object_names(&self) -> Vec<String> {
-        let mut names = Vec::new();
-        collect_variable_object_roots(&self.locals_store, None, &mut names);
-        names
+    pub fn local_variable_objects(&self) -> Vec<Variable> {
+        root_variables(&self.locals_store)
     }
 
     fn find_variable_node(&self, varobj: &str) -> Option<VariableNode> {
@@ -175,7 +193,20 @@ impl Ui {
         let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
         let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
+        let debugger_ready = Rc::clone(&self.debugger_ready);
+        let inferior_started = Rc::clone(&self.inferior_started);
+        let inferior_running = Rc::clone(&self.inferior_running);
+        let command_pending = Rc::clone(&self.command_pending);
+        let session_pending = Rc::clone(&self.session_pending);
         self.locals_view.connect_activate(move |_, position| {
+            if !debugger_ready.get()
+                || !inferior_started.get()
+                || inferior_running.get()
+                || command_pending.get()
+                || session_pending.get()
+            {
+                return;
+            }
             let Some((row, node)) = variable_node_at(&selection, position) else {
                 return;
             };
@@ -266,7 +297,20 @@ impl Ui {
             let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
             let target_architecture = Rc::clone(&self.target_architecture);
             let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
+            let debugger_ready = Rc::clone(&self.debugger_ready);
+            let inferior_started = Rc::clone(&self.inferior_started);
+            let inferior_running = Rc::clone(&self.inferior_running);
+            let command_pending = Rc::clone(&self.command_pending);
+            let session_pending = Rc::clone(&self.session_pending);
             group.view.connect_activate(move |_, position| {
+                if !debugger_ready.get()
+                    || !inferior_started.get()
+                    || inferior_running.get()
+                    || command_pending.get()
+                    || session_pending.get()
+                {
+                    return;
+                }
                 let Some(item) = store
                     .item(position)
                     .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
@@ -313,47 +357,53 @@ impl Ui {
             .and_then(std::path::Path::file_name)
             .and_then(std::ffi::OsStr::to_str)
             .map(str::to_owned);
+        let stop_reason = self.thread_stop_reason.borrow().clone();
+        let render_state = ThreadRenderState {
+            threads: threads.to_vec(),
+            stop_reason: stop_reason.clone(),
+            executable_name: executable_name.clone(),
+        };
+        if self.latest_threads.borrow().as_ref() == Some(&render_state) {
+            return;
+        }
         self.kernel_view
             .set_tls_thread(threads, executable_name.as_deref());
+        let can_update_in_place = self
+            .latest_threads
+            .borrow()
+            .as_ref()
+            .is_some_and(|previous| {
+                previous.threads.len() == threads.len()
+                    && self.thread_buttons.borrow().len() == threads.len()
+                    && previous
+                        .threads
+                        .iter()
+                        .zip(threads)
+                        .all(|(previous, current)| previous.id == current.id)
+            });
+        if can_update_in_place {
+            for ((_, button), thread) in self.thread_buttons.borrow().iter().zip(threads) {
+                let reason = thread
+                    .current
+                    .then(|| stop_reason.as_deref().unwrap_or("STOPPED"));
+                update_thread_button(button, thread, reason);
+            }
+            self.latest_threads.replace(Some(render_state));
+            return;
+        }
+        self.latest_threads.replace(Some(render_state));
         clear_box(&self.threads_list);
+        self.thread_buttons.borrow_mut().clear();
         if threads.is_empty() {
             self.threads_list
                 .append(&empty_label("No threads available"));
             return;
         }
-        let stop_reason = self.thread_stop_reason.borrow().clone();
         for thread in threads {
-            let marker = if thread.current { "*" } else { " " };
-            let tid = thread_os_id(&thread.target_id).unwrap_or_else(|| String::from("?"));
-            let name = thread.name.as_deref().unwrap_or("<unnamed>");
             let reason = thread
                 .current
                 .then(|| stop_reason.as_deref().unwrap_or("STOPPED"));
-            let detail = thread_detail(thread, reason);
-            let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            let heading = gtk::Label::new(Some(&format!(
-                "[{marker}Thread Id:{}, tid:{tid}]",
-                thread.id
-            )));
-            heading.add_css_class("thread-heading");
-            heading.set_halign(gtk::Align::Start);
-            heading.set_ellipsize(pango::EllipsizeMode::End);
-            let name = gtk::Label::new(Some(&format!("Name: \"{name}\"")));
-            name.add_css_class("thread-name");
-            name.set_halign(gtk::Align::Start);
-            name.set_ellipsize(pango::EllipsizeMode::End);
-            let detail_widget = thread_detail_widget(thread, reason);
-            let full_symbol = thread.frame.as_ref().map(|frame| frame.function.as_str());
-            detail_widget.set_tooltip_text(Some(&match full_symbol {
-                Some(symbol) => format!(
-                    "{detail}\nFull symbol: {symbol}\nGDB target: {}",
-                    thread.target_id
-                ),
-                None => format!("{detail}\nGDB target: {}", thread.target_id),
-            }));
-            row.append(&heading);
-            row.append(&name);
-            row.append(&detail_widget);
+            let row = thread_button_content(thread, reason);
             let button = gtk::Button::builder().child(&row).build();
             button.add_css_class("stack-frame");
             if thread.current {
@@ -366,6 +416,9 @@ impl Ui {
                     handler(id.clone());
                 }
             });
+            self.thread_buttons
+                .borrow_mut()
+                .push((thread.id.clone(), button.clone()));
             self.threads_list.append(&button);
         }
     }
@@ -472,8 +525,6 @@ impl Ui {
                 self.set_target_endian(Some(endian));
             }
         }
-        self.instructions_selection
-            .set_selected(gtk::INVALID_LIST_POSITION);
         self.disassembly_controls.source_column.set_visible(mixed);
         let syntax_applicable = matches!(
             self.target_architecture(),
@@ -494,6 +545,8 @@ impl Ui {
         if instructions.is_empty() {
             self.instructions_empty.set_visible(true);
             self.instructions_store.remove_all();
+            self.instructions_selection
+                .set_selected(gtk::INVALID_LIST_POSITION);
             self.disassembly_controls.range.set_text("");
             self.disassembly_controls
                 .previous_function
@@ -545,11 +598,15 @@ impl Ui {
                 source_text: self.disassembly_source_text(instruction),
             })
             .collect::<Vec<_>>();
-        replace_boxed_store(&self.instructions_store, rows);
+        let rows_changed = replace_boxed_store_if_changed(&self.instructions_store, rows);
         let selected = u32::try_from(selected).unwrap_or(0);
-        self.instructions_selection.set_selected(selected);
-        self.instructions_view
-            .scroll_to(selected, None, gtk::ListScrollFlags::FOCUS, None);
+        if self.instructions_selection.selected() != selected {
+            self.instructions_selection.set_selected(selected);
+        }
+        if rows_changed {
+            self.instructions_view
+                .scroll_to(selected, None, gtk::ListScrollFlags::FOCUS, None);
+        }
         if let (Some(first), Some(last)) = (instructions.first(), instructions.last()) {
             let function = if first.function == "??" {
                 "unknown function"
@@ -795,7 +852,11 @@ impl Ui {
         let ui = self.clone();
         self.disassembly_controls
             .open_memory
-            .connect_clicked(move |_| ui.open_selected_instruction_memory());
+            .connect_clicked(move |_| {
+                if ui.disassembly_commands_available() {
+                    ui.open_selected_instruction_memory();
+                }
+            });
         self.disassembly_controls.back.set_sensitive(false);
         self.disassembly_controls.forward.set_sensitive(false);
         self.disassembly_controls
@@ -881,10 +942,6 @@ impl Ui {
 
     pub(crate) fn set_disassembly_loading(&self, loading: bool) {
         self.disassembly_controls.loading.set(loading);
-        if loading {
-            self.disassembly_controls.range.set_text("Loading…");
-        }
-        self.update_control_sensitivity();
     }
 
     pub(crate) fn set_disassembly_history(&self, can_back: bool, can_forward: bool) {
@@ -1043,8 +1100,10 @@ impl Ui {
 
     pub fn show_stack(&self, entries: &[StackEntry]) {
         self.latest_stack_generation.set(None);
-        self.latest_stack.replace(entries.to_vec());
-        replace_boxed_store(&self.stack_store, entries.iter().cloned());
+        if self.latest_stack.borrow().as_slice() != entries {
+            self.latest_stack.replace(entries.to_vec());
+            replace_boxed_store(&self.stack_store, entries.iter().cloned());
+        }
         if entries.is_empty() {
             self.stack_empty
                 .set_text("Stack values appear when the target is paused");
@@ -1087,8 +1146,10 @@ impl Ui {
         if !self.is_stop_refresh_current(generation) {
             return;
         }
-        replace_boxed_store(&self.memory_region_store, regions.iter().cloned());
-        self.memory_regions.replace(regions.to_vec());
+        if self.memory_regions.borrow().as_slice() != regions {
+            replace_boxed_store(&self.memory_region_store, regions.iter().cloned());
+            self.memory_regions.replace(regions.to_vec());
+        }
         self.memory_regions_empty.set_visible(regions.is_empty());
     }
 
@@ -1318,7 +1379,7 @@ impl Ui {
                 let Some(endian) = endian else {
                     show_memory_watch_error(
                         &watch,
-                        "Target byte order is unavailable; use Hex bytes display",
+                        "Target byte order is unavailable. Use Hex bytes display",
                     );
                     update_memory_container_state(&self.memory_watch_container, false);
                     return;
@@ -1672,7 +1733,7 @@ impl Ui {
             if let Some(number) = signal_catchpoint_command_number(&breakpoints, signal) {
                 button.add_css_class("signal-caught");
                 button.set_tooltip_text(Some(&format!(
-                    "{description}\nCatchpoint #{number} is active; click to remove it"
+                    "{description}\nCatchpoint #{number} is active. Click to remove it"
                 )));
             } else {
                 button.remove_css_class("signal-caught");
@@ -1685,7 +1746,7 @@ impl Ui {
             if let Some(number) = event_catchpoint_command_number(&breakpoints, *event) {
                 button.add_css_class("signal-caught");
                 button.set_tooltip_text(Some(&format!(
-                    "{} catchpoint #{number} is active; click to remove it",
+                    "{} catchpoint #{number} is active. Click to remove it",
                     event.label()
                 )));
             } else {
@@ -1756,5 +1817,79 @@ impl Ui {
 
     pub fn breakpoint_number_at_address(&self, address: &str) -> Option<String> {
         breakpoint_command_number_at_address(&self.breakpoints.borrow(), address)
+    }
+}
+
+fn frame_location_text(frame: &StackFrame) -> String {
+    frame.line.map_or_else(
+        || frame.address.clone(),
+        |line| {
+            format!(
+                "{}:{line}",
+                frame.source_path().unwrap_or(frame.address.as_str())
+            )
+        },
+    )
+}
+
+fn update_frame_button(button: &gtk::Button, frame: &StackFrame) {
+    let Some(row) = button.child().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    let Some(function) = row.first_child().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    let Some(location) = row.last_child().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    function.set_text(&format!(
+        "#{}  {}",
+        frame.level,
+        compact_function_name(&frame.function)
+    ));
+    function.set_tooltip_text(Some(&frame.function));
+    let location_text = frame_location_text(frame);
+    location.set_text(&location_text);
+    location.set_tooltip_text(Some(&location_text));
+}
+
+fn thread_button_content(thread: &ThreadInfo, stop_reason: Option<&str>) -> gtk::Box {
+    let marker = if thread.current { "*" } else { " " };
+    let tid = thread_os_id(&thread.target_id).unwrap_or_else(|| String::from("?"));
+    let name = thread.name.as_deref().unwrap_or("<unnamed>");
+    let detail = thread_detail(thread, stop_reason);
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let heading = gtk::Label::new(Some(&format!(
+        "[{marker}Thread Id:{}, tid:{tid}]",
+        thread.id
+    )));
+    heading.add_css_class("thread-heading");
+    heading.set_halign(gtk::Align::Start);
+    heading.set_ellipsize(pango::EllipsizeMode::End);
+    let name = gtk::Label::new(Some(&format!("Name: \"{name}\"")));
+    name.add_css_class("thread-name");
+    name.set_halign(gtk::Align::Start);
+    name.set_ellipsize(pango::EllipsizeMode::End);
+    let detail_widget = thread_detail_widget(thread, stop_reason);
+    let full_symbol = thread.frame.as_ref().map(|frame| frame.function.as_str());
+    detail_widget.set_tooltip_text(Some(&match full_symbol {
+        Some(symbol) => format!(
+            "{detail}\nFull symbol: {symbol}\nGDB target: {}",
+            thread.target_id
+        ),
+        None => format!("{detail}\nGDB target: {}", thread.target_id),
+    }));
+    row.append(&heading);
+    row.append(&name);
+    row.append(&detail_widget);
+    row
+}
+
+fn update_thread_button(button: &gtk::Button, thread: &ThreadInfo, stop_reason: Option<&str>) {
+    button.set_child(Some(&thread_button_content(thread, stop_reason)));
+    if thread.current {
+        button.add_css_class("current-debug-item");
+    } else {
+        button.remove_css_class("current-debug-item");
     }
 }

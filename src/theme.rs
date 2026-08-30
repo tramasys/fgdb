@@ -200,8 +200,6 @@ headerbar.topbar button.window-control.close:active {{
     border: 0;
 }}
 
-.debug-state-stale {{ opacity: 0.56; }}
-
 .panel-header {{
     min-height: 25px;
     padding: 0 6px;
@@ -1183,6 +1181,62 @@ button:disabled {{
     background: transparent;
 }}
 
+/* Stop-only controls remain visually stable while execution interlocks them.
+   They are still insensitive; this only avoids repainting the entire debugger
+   chrome for every single step. */
+.execution-interlocked:disabled {{
+    opacity: 1;
+}}
+
+.execution-interlocked:disabled * {{
+    opacity: 1;
+}}
+
+button.execution-interlocked:disabled,
+.execution-interlocked:disabled button:disabled {{
+    color: @app_fg;
+}}
+
+button.execution-interlocked:disabled:checked,
+.execution-interlocked:disabled button:disabled:checked {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.17);
+}}
+
+button.primary-control.execution-interlocked:disabled,
+button.inline-action.execution-interlocked:disabled,
+.execution-interlocked:disabled button.primary-control:disabled,
+.execution-interlocked:disabled button.inline-action:disabled {{
+    color: @app_accent_hover;
+    background: @app_raised;
+}}
+
+button.heap-inspector-action.execution-interlocked:disabled,
+.execution-interlocked:disabled button.heap-inspector-action:disabled {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.07);
+    border-left-color: alpha(@app_accent, 0.52);
+}}
+
+button.inline-action.danger-action.execution-interlocked:disabled {{
+    color: @app_danger;
+}}
+
+.session-menu > button.session-action.execution-interlocked:disabled {{
+    color: @app_fg;
+    background: alpha(@app_fg, 0.025);
+}}
+
+button.signal-action.execution-interlocked:disabled {{
+    color: @app_muted;
+    background: @app_raised;
+}}
+
+button.signal-action.signal-caught.execution-interlocked:disabled {{
+    color: @app_success;
+    background: alpha(@app_success, 0.13);
+}}
+
 button.primary-control {{
     color: @app_accent_hover;
     background: @app_raised;
@@ -1474,10 +1528,15 @@ window.value-editor dropdown.value-editor-select popover listview > row:selected
 
 .status-readout {{
     min-height: 23px;
-    padding: 0 7px;
+    margin: 0 6px 0 0;
+    padding: 0 10px;
     color: @app_muted;
-    background: @app_bg;
-    border-left: 1px solid @app_border;
+    background: alpha(@app_fg, 0.025);
+    border-right: 1px solid @app_border;
+}}
+
+headerbar.topbar .execution-controls {{
+    border-spacing: 1px;
 }}
 
 .status-detail {{
@@ -1759,6 +1818,282 @@ paned.misc-startup-split > separator:hover {{
 
 .misc-data-note {{
     padding: 3px 7px;
+}}
+
+stackswitcher.allocator-view-tabs {{
+    min-height: 25px;
+    padding: 1px 3px;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}}
+
+stackswitcher.allocator-view-tabs button {{
+    min-height: 22px;
+    margin: 0;
+    padding: 1px 8px;
+    color: @app_muted;
+    background: transparent;
+}}
+
+stackswitcher.allocator-view-tabs button:hover {{
+    color: @app_fg;
+    background: alpha(@app_fg, 0.06);
+}}
+
+stackswitcher.allocator-view-tabs button:checked {{
+    color: @app_accent_hover;
+    font-weight: 700;
+    background: alpha(@app_accent, 0.10);
+}}
+
+.allocator-detection-card {{
+    padding: 7px 8px 6px;
+    background: @app_raised;
+    border-bottom: 1px solid @app_border;
+}}
+
+.allocator-detection-caption,
+.allocator-detail-key,
+.allocator-metric-key {{
+    color: @app_muted;
+    font-size: 10px;
+    font-weight: 700;
+}}
+
+.allocator-detection-identity {{
+    color: @app_accent;
+    font-size: 15px;
+    font-weight: 800;
+}}
+
+.allocator-detection-basis {{
+    margin-top: 1px;
+    padding: 2px 5px;
+    color: @app_accent;
+    background: alpha(@app_accent, 0.10);
+    border-left: 2px solid @app_accent;
+    font-size: 10px;
+    font-weight: 700;
+}}
+
+.allocator-detection-basis.allocator-detection-warning {{
+    color: @app_warning;
+    background: alpha(@app_warning, 0.10);
+    border-left-color: @app_warning;
+}}
+
+.allocator-detection-basis.allocator-detection-error {{
+    color: @app_danger;
+    background: alpha(@app_danger, 0.10);
+    border-left-color: @app_danger;
+}}
+
+.allocator-detail {{
+    margin-top: 3px;
+    padding-top: 3px;
+    border-top: 1px solid alpha(@app_border, 0.72);
+}}
+
+.allocator-detail-value {{
+    color: @app_fg;
+}}
+
+.allocator-evidence-value {{
+    color: @app_muted;
+}}
+
+.allocator-frontend-value {{
+    color: @app_accent_hover;
+}}
+
+.allocator-detection-safety {{
+    margin-top: 4px;
+    padding: 3px 5px;
+    color: @app_success;
+    background: alpha(@app_success, 0.07);
+    border-left: 2px solid alpha(@app_success, 0.72);
+    font-size: 10px;
+    font-weight: 700;
+}}
+
+.allocator-detection-safety.allocator-safety-warning {{
+    color: @app_warning;
+    background: alpha(@app_warning, 0.08);
+    border-left-color: alpha(@app_warning, 0.72);
+}}
+
+flowbox.allocator-metrics {{
+    background: @app_border;
+}}
+
+flowbox.allocator-metrics > flowboxchild {{
+    min-width: 0;
+    padding: 0;
+    background: transparent;
+}}
+
+.allocator-metric-cell {{
+    min-height: 35px;
+    padding: 3px 7px;
+    background: @app_surface;
+}}
+
+.allocator-metric-value {{
+    color: @app_fg;
+    font-weight: 700;
+}}
+
+.heap-inspector-controls {{
+    padding: 6px 7px 7px;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}}
+
+.heap-inspector-note {{
+    padding-bottom: 2px;
+    color: @app_muted;
+}}
+
+.heap-inspector-group-title {{
+    color: @app_muted;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+}}
+
+flowbox.heap-inspector-actions {{
+    background: transparent;
+}}
+
+flowbox.heap-inspector-actions > flowboxchild {{
+    min-width: 0;
+    padding: 0;
+    background: transparent;
+}}
+
+button.heap-inspector-action {{
+    min-height: 24px;
+    padding: 1px 8px;
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.07);
+    border-left: 2px solid alpha(@app_accent, 0.52);
+}}
+
+button.heap-inspector-action:hover,
+button.heap-inspector-action:focus-visible {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.15);
+    border-left-color: @app_accent;
+}}
+
+button.heap-inspector-action:disabled {{
+    color: alpha(@app_muted, 0.45);
+    background: alpha(@app_fg, 0.025);
+    border-left-color: alpha(@app_muted, 0.24);
+}}
+
+entry.heap-inspector-expression {{
+    margin: 1px 0 2px;
+}}
+
+.heap-inspector-result-header {{
+    min-height: 38px;
+    padding: 4px 7px;
+    background: @app_raised;
+    border-bottom: 1px solid @app_border;
+}}
+
+.heap-table-controls {{
+    min-height: 28px;
+    padding: 3px 5px;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}}
+
+.heap-table-controls button.inline-action {{
+    min-height: 22px;
+    padding-left: 8px;
+    padding-right: 8px;
+}}
+
+.heap-inspector-command {{
+    color: @app_accent;
+    font-weight: 700;
+}}
+
+.heap-inspector-status {{
+    color: @app_muted;
+}}
+
+.heap-inspector-status.heap-inspector-error {{
+    color: @app_danger;
+}}
+
+.heap-inspector-status.heap-inspector-warning {{
+    color: @app_warning;
+}}
+
+.heap-inspector-table label.debug-table-cell {{
+    min-height: 23px;
+}}
+
+.heap-inspector-cell {{
+    color: @app_fg;
+}}
+
+.heap-inspector-structure-cell {{
+    font-weight: 700;
+}}
+
+.heap-inspector-location-cell {{
+    color: @app_accent_hover;
+}}
+
+.heap-inspector-metric-cell,
+.heap-inspector-details-cell {{
+    color: @app_muted;
+}}
+
+.heap-inspector-state-cell {{
+    margin: 3px 4px;
+    min-height: 18px;
+    padding: 0 5px;
+    color: @app_muted;
+    background: alpha(@app_fg, 0.045);
+}}
+
+.heap-inspector-state-cell.heap-state-active {{
+    color: @app_success;
+    background: alpha(@app_success, 0.10);
+}}
+
+.heap-inspector-state-cell.heap-state-idle {{
+    color: @app_muted;
+    background: alpha(@app_fg, 0.035);
+}}
+
+.heap-inspector-state-cell.heap-state-free {{
+    color: @app_warning;
+    background: alpha(@app_warning, 0.09);
+}}
+
+.heap-inspector-state-cell.heap-state-special {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.10);
+}}
+
+.heap-inspector-cell.heap-inspector-section-cell {{
+    color: @app_accent;
+    font-weight: 700;
+}}
+
+.heap-inspector-cell.heap-inspector-error-cell {{
+    color: @app_danger;
+    font-weight: 700;
+}}
+
+.heap-inspector-cell.heap-inspector-warning-cell {{
+    color: @app_warning;
 }}
 
 .call-abi-context {{

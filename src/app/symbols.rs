@@ -67,7 +67,7 @@ pub(super) fn load_library_symbols_for_source(ui: Weak<Ui>, client: Rc<MiClient>
     if let Some(ui) = ui.upgrade() {
         ui.set_status(
             "Loading library symbols",
-            &format!("No definition for {symbol} was loaded; asking GDB to load shared libraries…"),
+            &format!("No definition for {symbol} was loaded. Asking GDB to load shared libraries…"),
             None,
         );
     }
@@ -90,7 +90,7 @@ pub(super) fn load_library_symbols_for_source(ui: Weak<Ui>, client: Rc<MiClient>
             ui.set_status(
                 "Library symbols unavailable",
                 record.error_message().unwrap_or(
-                    "GDB could not load shared-library symbols; pause the target and try again",
+                    "GDB could not load shared-library symbols. Pause the target and try again",
                 ),
                 Some("status-error"),
             );
@@ -180,7 +180,7 @@ pub(super) fn handle_session_event(ui: &Weak<Ui>, event: SessionEvent) {
             ui.set_debugger_pid(Some(pid));
             ui.set_status(
                 "Connecting",
-                "GDB started; waiting for its secondary MI interface.",
+                "GDB started. Waiting for its secondary MI interface.",
                 None,
             );
         }

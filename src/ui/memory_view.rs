@@ -9,7 +9,7 @@ enum MemoryRowColumn {
     Interpretation,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct MemoryRowData {
     address: u64,
     offset: usize,
@@ -425,9 +425,10 @@ pub(super) fn show_memory_watch_data(
     let rows = format_memory_rows(memory.begin, &memory.bytes, watch.format, &context);
     let changed = rows.iter().filter(|row| row.changed).count();
     drop(previous);
-    replace_boxed_store(&watch.store, rows);
-    watch.selection.set_selected(gtk::INVALID_LIST_POSITION);
-    watch.follow_button.set_sensitive(false);
+    if replace_boxed_store_if_changed(&watch.store, rows) {
+        watch.selection.set_selected(gtk::INVALID_LIST_POSITION);
+        watch.follow_button.set_sensitive(false);
+    }
     watch.previous_begin.set(Some(memory.begin));
     watch.previous_bytes.replace(memory.bytes.clone());
 

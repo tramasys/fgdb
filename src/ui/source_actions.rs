@@ -108,7 +108,6 @@ impl Ui {
     }
 
     pub fn show_execution_location(&self, frame: &StackFrame) {
-        self.clear_execution_location();
         self.selected_frame_level.set(frame.level);
         self.current_source_is_rust.set(
             frame
@@ -132,16 +131,23 @@ impl Ui {
         }
         update_selected_frame_buttons(&self.frame_buttons.borrow(), frame.level);
         let (Some(reported_path), Some(line)) = (frame.source_path(), frame.line) else {
+            self.clear_execution_mark();
             return;
         };
         let path = self.resolve_source_path(reported_path);
         let Some(path) = path else {
+            self.clear_execution_mark();
             self.status_detail.set_text(&format!(
                 "Paused in {} · source unavailable: {reported_path}",
                 frame.function
             ));
             return;
         };
+        let same_location = self.execution_source_line.get() == Some(line)
+            && self.execution_source_path.borrow().as_ref() == Some(&path);
+        if !same_location {
+            self.clear_execution_mark();
+        }
         let context = SourceOpenContext {
             notebook: &self.source_notebook,
             documents: &self.source_documents,
@@ -155,6 +161,7 @@ impl Ui {
             symbol_handler: &self.source_symbol_handler,
         };
         let Some(document) = open_source_document(&path, context) else {
+            self.clear_execution_mark();
             self.set_status(
                 "Source unavailable",
                 &format!("Could not read {}", path.display()),
@@ -176,6 +183,9 @@ impl Ui {
             path.to_string_lossy(),
             frame.function
         )));
+        if same_location {
+            return;
+        }
         let Ok(line) = i32::try_from(line.saturating_sub(1)) else {
             return;
         };
@@ -185,6 +195,8 @@ impl Ui {
         let mark = document
             .buffer
             .create_source_mark(None, EXECUTION_CATEGORY, &iter);
+        self.execution_source_path.replace(Some(path));
+        self.execution_source_line.set(frame.line);
         document.breakpoint_renderer.queue_draw();
         document.buffer.place_cursor(&iter);
         let source_view = document.view;
@@ -202,7 +214,18 @@ impl Ui {
         self.selected_frame_level.set(u32::MAX);
         self.current_source_is_rust.set(false);
         update_selected_frame_buttons(&self.frame_buttons.borrow(), u32::MAX);
-        for document in self.source_documents.borrow().iter() {
+        self.clear_execution_mark();
+    }
+
+    fn clear_execution_mark(&self) {
+        let path = self.execution_source_path.borrow_mut().take();
+        self.execution_source_line.set(None);
+        for document in self
+            .source_documents
+            .borrow()
+            .iter()
+            .filter(|document| path.as_ref().is_some_and(|path| document.path == *path))
+        {
             remove_marks(&document.buffer, EXECUTION_CATEGORY);
             document.breakpoint_renderer.queue_draw();
             document.tab.remove_css_class("executing-source-tab");
@@ -216,6 +239,7 @@ impl Ui {
     }
 
     pub fn clear_debugger_state(&self) {
+        self.defer_displayed_variable_object_deletions();
         if let Some(handler) = self.disassembly_handler.borrow().as_ref() {
             handler(DisassemblyRequest::Clear);
         }
@@ -248,6 +272,23 @@ impl Ui {
             watch.previous_begin.set(None);
             watch.previous_bytes.borrow_mut().clear();
         }
+    }
+
+    fn defer_displayed_variable_object_deletions(&self) {
+        let mut deferred = self.deferred_variable_object_deletions.borrow_mut();
+        deferred.extend(
+            self.local_variable_objects()
+                .into_iter()
+                .chain(self.expression_watch_variable_objects())
+                .filter_map(|variable| variable.varobj),
+        );
+    }
+
+    pub(crate) fn take_deferred_variable_object_deletions(&self) -> Vec<String> {
+        self.deferred_variable_object_deletions
+            .borrow_mut()
+            .drain()
+            .collect()
     }
 
     pub(super) fn connect_open_source(&self) {

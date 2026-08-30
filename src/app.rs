@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::Write as _,
     path::PathBuf,
     rc::{Rc, Weak},
@@ -22,8 +22,8 @@ use crate::{
     theme::Theme,
     ui::{
         BreakpointEditRequest, BreakpointSpec, CallAbiTargetRequest, DisassemblyRequest,
-        DisassemblySyntax, EventCatchpoint, GefContextControl, SessionAction, Ui, UntilAction,
-        WatchpointAccess,
+        DisassemblySyntax, EventCatchpoint, GefContextControl, HeapInspectionAction,
+        HeapInspectionRequest, SessionAction, Ui, UntilAction, WatchpointAccess,
     },
 };
 
@@ -67,9 +67,20 @@ struct StackInputs {
 struct VariableRefresh {
     ui: Weak<Ui>,
     generation: u64,
+    target: VariableRefreshTarget,
     variables: Vec<Variable>,
+    fallbacks: Vec<Variable>,
     next_index: usize,
     created: usize,
+    created_varobjs: HashSet<String>,
+    updates_requested: bool,
+    update_index: usize,
+    recreate_after_updates: bool,
+}
+
+enum VariableRefreshTarget {
+    Locals,
+    ExpressionWatches(Vec<String>),
 }
 
 mod assignments;

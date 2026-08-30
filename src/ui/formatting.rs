@@ -21,7 +21,7 @@ pub(super) fn populate_register_group<'a>(
         })
         .collect::<Vec<_>>();
     let count = rows.len() as i32;
-    replace_boxed_store(&group.store, rows);
+    replace_boxed_store_if_changed(&group.store, rows);
     group.panel.set_visible(count != 0);
     if count == 0 {
         return;

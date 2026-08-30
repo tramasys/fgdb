@@ -41,8 +41,8 @@ use crate::{
     },
     misc::{
         AllocatorRegion, AllocatorSnapshot, AuxvEntry, CallAbiFact, CallAbiPhase, CallAbiRegister,
-        CallAbiSnapshot, CoreDumpSnapshot, CoreMappedFile, CoreNote, LiveMiscSnapshot,
-        LockSnapshot, LockWait,
+        CallAbiSnapshot, CoreDumpSnapshot, CoreMappedFile, CoreNote, HeapInspectionRow,
+        HeapInspectionSnapshot, LiveMiscSnapshot, LockSnapshot, LockWait,
     },
     source,
     theme::Theme,
@@ -53,6 +53,67 @@ const MAX_EXPRESSION_WATCHES: usize = 256;
 const MAX_MEMORY_WATCHES: usize = 256;
 const DISCLOSURE_EXPANDED_ICON: &str = "▾";
 const DISCLOSURE_COLLAPSED_ICON: &str = "›";
+
+fn set_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive: bool, busy: bool) {
+    let widget = widget.upcast_ref::<gtk::Widget>();
+    if !busy || sensitive {
+        widget.remove_css_class("execution-interlocked");
+    } else if widget.is_sensitive() {
+        // Preserve the appearance only when this execution transition is what
+        // made an otherwise available control insensitive.
+        widget.add_css_class("execution-interlocked");
+    }
+    widget.set_sensitive(sensitive);
+}
+
+/// Keep a previously available titlebar action visually stable while a short
+/// execution command is in flight. The corresponding signal handlers still
+/// validate debugger state before issuing a command, so this is only a
+/// presentation distinction: durable unavailable states remain insensitive.
+fn set_header_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive: bool, busy: bool) {
+    let widget = widget.upcast_ref::<gtk::Widget>();
+    widget.remove_css_class("execution-interlocked");
+    if !busy || sensitive || !widget.is_sensitive() {
+        widget.set_sensitive(sensitive);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ControlState {
+    busy: bool,
+    run: bool,
+    pause: bool,
+    move_target: bool,
+    inspect: bool,
+    syntax: bool,
+    gef_tools: bool,
+    heap_inspector_in_flight: bool,
+    heap_action_visibility: u64,
+    edit_local: bool,
+    manage_watches: bool,
+    add_watch: bool,
+    remove_watch: bool,
+    add_memory: bool,
+    session: bool,
+    new_session: bool,
+    restart_session: bool,
+    kill_session: bool,
+    detach_session: bool,
+    edit_stop_points: bool,
+    add_signal: bool,
+    delete_signal_catchpoints: bool,
+    delete_event_catchpoints: bool,
+    delete_breakpoints: bool,
+    delete_watchpoints: bool,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct ThreadRenderState {
+    threads: Vec<ThreadInfo>,
+    stop_reason: Option<String>,
+    executable_name: Option<String>,
+}
+
 const FLAGS: &[(u8, &str)] = &[
     (21, "ident"),
     (18, "align"),
@@ -121,6 +182,7 @@ type DisassemblyHandler = Rc<dyn Fn(DisassemblyRequest)>;
 type DisassemblySourceCache = Rc<RefCell<HashMap<PathBuf, Rc<Vec<Rc<str>>>>>>;
 type KernelRefreshHandler = Rc<dyn Fn()>;
 type MiscRefreshHandler = Rc<dyn Fn()>;
+type HeapInspectionHandler = Rc<dyn Fn(HeapInspectionRequest)>;
 type KernelSectionHandler = Rc<dyn Fn(&str, bool)>;
 type DebugSessionHandler = Rc<dyn Fn(DebugSession)>;
 type SessionActionHandler = Rc<dyn Fn(SessionAction)>;
@@ -149,6 +211,30 @@ pub(crate) enum UntilAction {
     LibcCode,
     RegionChange,
     Expression(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HeapInspectionAction {
+    Arenas,
+    Arena,
+    Top,
+    Chunks,
+    Parsed,
+    CompactBins,
+    AllBins,
+    TcacheBins,
+    FastBins,
+    UnsortedBin,
+    SmallBins,
+    LargeBins,
+    Chunk,
+    Backend,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct HeapInspectionRequest {
+    pub action: HeapInspectionAction,
+    pub expression: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -343,7 +429,7 @@ impl EventCatchpoint {
         (
             Self::Syscall,
             "syscall",
-            "Stop at every system call; this can trigger very frequently",
+            "Stop at every system call. This can trigger very frequently",
         ),
     ];
 
@@ -388,7 +474,7 @@ impl EventCatchpoint {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct InstructionRowData {
     instruction: Instruction,
     current: bool,
@@ -419,7 +505,6 @@ pub(crate) struct CallAbiTargetRequest {
 
 #[derive(Clone)]
 struct DisassemblyControls {
-    root: gtk::Box,
     back: gtk::Button,
     forward: gtk::Button,
     previous_function: gtk::Button,
@@ -438,7 +523,7 @@ struct DisassemblyControls {
     setting_syntax: Rc<Cell<bool>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 struct RegisterRowData {
     register: Register,
     changed: bool,
@@ -620,7 +705,6 @@ struct KernelView {
     wide_subtabs: gtk::Box,
     compact_subtabs: gtk::Box,
     active: Rc<Cell<bool>>,
-    tracking_enabled: Rc<Cell<bool>>,
     in_flight: Rc<Cell<bool>>,
     needs_refresh: Rc<Cell<bool>>,
     tls_requested: Rc<Cell<bool>>,
@@ -682,10 +766,12 @@ struct MiscView {
     wide_subtabs: gtk::Box,
     compact_subtabs: gtk::Box,
     active: Rc<Cell<bool>>,
-    tracking_enabled: Rc<Cell<bool>>,
     in_flight: Rc<Cell<bool>>,
     needs_refresh: Rc<Cell<bool>>,
     pages: gtk::Stack,
+    allocator_requested: Rc<Cell<bool>>,
+    allocator_probe_fresh: Rc<Cell<bool>>,
+    allocator_probe_cache: Rc<RefCell<Option<crate::misc::AllocatorProbe>>>,
     locks_requested: Rc<Cell<bool>>,
     summary: MiscStartupSummary,
     warning: gtk::Label,
@@ -703,9 +789,25 @@ struct MiscView {
     call_abi_register_empty: gtk::Label,
     call_abi_contract_store: gio::ListStore,
     call_abi_split: gtk::Paned,
-    allocator_summary: gtk::Label,
+    allocator_implementation: gtk::Label,
+    allocator_basis: gtk::Label,
+    allocator_bindings: gtk::Label,
+    allocator_runtimes: gtk::Label,
+    allocator_frontends: gtk::Label,
+    allocator_evidence: gtk::Label,
+    allocator_safety: gtk::Label,
+    allocator_heap_bytes: gtk::Label,
+    allocator_anonymous_bytes: gtk::Label,
+    allocator_mapping_count: gtk::Label,
     allocator_store: gio::ListStore,
     allocator_empty: gtk::Label,
+    heap_inspector_actions: Vec<(gtk::Button, HeapInspectionAction)>,
+    heap_inspector_expression: gtk::Entry,
+    heap_inspector_status: gtk::Label,
+    heap_inspector_command: gtk::Label,
+    heap_inspector_store: gio::ListStore,
+    heap_inspector_empty: gtk::Label,
+    heap_inspector_in_flight: Rc<Cell<bool>>,
     lock_summary: gtk::Label,
     lock_note: gtk::Label,
     lock_store: gio::ListStore,
@@ -937,11 +1039,6 @@ pub(crate) const GEF_COMMAND_CAPABILITIES: &[&str] = &[
     "dwarf-exception-handler",
     "dynamic",
     "link-map",
-    "heap bins-simple",
-    "heap arenas",
-    "heap chunks",
-    "heap top",
-    "heap parse",
     "dt",
     "context off",
     "context on",
@@ -962,6 +1059,7 @@ struct GefCapabilityGroup {
 
 struct GefToolsMenu {
     button: gtk::ToggleButton,
+    content: gtk::Box,
     controls: Vec<GefCapabilityControl>,
     groups: Vec<GefCapabilityGroup>,
 }
@@ -976,7 +1074,7 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 // Ctrl+F10  next instruction     Ctrl+F11  step instruction
 // Shift+F11 finish function
 //
-// Ctrl+hover underlines navigable symbols; Ctrl+click opens definitions.
+// Ctrl+hover underlines navigable symbols. Ctrl+click opens definitions.
 // Double-click an instruction to toggle an address breakpoint.
 "#;
 
@@ -1006,21 +1104,26 @@ pub struct Ui {
     pub until_button: gtk::ToggleButton,
     until_popover: gtk::Popover,
     pub gef_tools_button: gtk::ToggleButton,
+    gef_tools_content: gtk::Box,
     gef_tool_controls: Vec<GefCapabilityControl>,
     gef_tool_groups: Vec<GefCapabilityGroup>,
     pub status_label: gtk::Label,
     pub status_detail: gtk::Label,
-    debug_state_panels: Vec<gtk::Widget>,
     inspector_notebook: gtk::Notebook,
     source_notebook: gtk::Notebook,
     source_documents: Rc<RefCell<Vec<SourceDocument>>>,
+    execution_source_path: Rc<RefCell<Option<PathBuf>>>,
+    execution_source_line: Rc<Cell<Option<u32>>>,
     source_theme: Theme,
     source_style_scheme: Option<sourceview5::StyleScheme>,
     resolved_source_paths: Rc<RefCell<HashMap<String, Option<PathBuf>>>>,
     call_stack_list: gtk::Box,
     frame_buttons: Rc<RefCell<Vec<(u32, gtk::Button)>>>,
+    latest_frames: Rc<RefCell<Vec<StackFrame>>>,
     selected_frame_level: Rc<Cell<u32>>,
     threads_list: gtk::Box,
+    thread_buttons: Rc<RefCell<Vec<(String, gtk::Button)>>>,
+    latest_threads: Rc<RefCell<Option<ThreadRenderState>>>,
     modules_list: gtk::Box,
     latest_modules: Rc<RefCell<Vec<SharedLibrary>>>,
     locals_store: gio::ListStore,
@@ -1033,6 +1136,7 @@ pub struct Ui {
     expression_watches_view: gtk::ColumnView,
     expression_watches_empty: gtk::Label,
     expression_watches: Rc<RefCell<Vec<String>>>,
+    deferred_variable_object_deletions: Rc<RefCell<HashSet<String>>>,
     expression_watch_entry: gtk::Entry,
     expression_watch_add_button: gtk::Button,
     expression_watch_remove_button: gtk::Button,
@@ -1102,6 +1206,7 @@ pub struct Ui {
     misc_refresh_handler: Rc<RefCell<Option<MiscRefreshHandler>>>,
     misc_refresh_generation: Rc<Cell<u64>>,
     debugger_pid: Rc<Cell<Option<u32>>>,
+    inferior_pid: Rc<Cell<Option<u32>>>,
     layout: layout::Persistence,
     breakpoints: Rc<RefCell<Vec<Breakpoint>>>,
     previous_registers: Rc<RefCell<HashMap<String, String>>>,
@@ -1114,8 +1219,11 @@ pub struct Ui {
     modules_dirty: Rc<Cell<bool>>,
     command_pending: Rc<Cell<bool>>,
     session_pending: Rc<Cell<bool>>,
+    applied_control_state: Rc<RefCell<Option<ControlState>>>,
     gef_available: Rc<Cell<bool>>,
+    gef_capabilities: Rc<RefCell<HashSet<&'static str>>>,
     gef_context_control: Rc<Cell<GefContextControl>>,
+    heap_inspection_handler: Rc<RefCell<Option<HeapInspectionHandler>>>,
     source_roots: Rc<RefCell<Vec<PathBuf>>>,
     current_session: Rc<RefCell<Option<DebugSession>>>,
     session_handler: Rc<RefCell<Option<DebugSessionHandler>>>,
@@ -1175,6 +1283,7 @@ struct Topbar {
     until_button: gtk::ToggleButton,
     until_popover: gtk::Popover,
     gef_tools_button: gtk::ToggleButton,
+    gef_tools_content: gtk::Box,
     gef_tool_controls: Vec<GefCapabilityControl>,
     gef_tool_groups: Vec<GefCapabilityGroup>,
     until_actions: Vec<(gtk::Button, UntilAction)>,
@@ -1188,7 +1297,6 @@ struct Workspace {
     layout_panes: Vec<layout::Pane>,
     terminal_panel: gtk::Box,
     status_detail: gtk::Label,
-    debug_state_panels: Vec<gtk::Widget>,
     inspector_notebook: gtk::Notebook,
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
@@ -1250,7 +1358,6 @@ struct Inspector {
     compact_tabs: gtk::Box,
     context_split: gtk::Paned,
     status_detail: gtk::Label,
-    stale_panels: Vec<gtk::Widget>,
     locals_store: gio::ListStore,
     locals_selection: gtk::SingleSelection,
     locals_view: gtk::ColumnView,

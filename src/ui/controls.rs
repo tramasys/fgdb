@@ -183,7 +183,9 @@ pub(super) fn connect_execution_button(
     let weak_ui = Rc::downgrade(ui);
     let client = Rc::clone(client);
     button.connect_clicked(move |_| {
-        if let Some(ui) = weak_ui.upgrade() {
+        if let Some(ui) = weak_ui.upgrade()
+            && ui.movement_commands_available()
+        {
             issue_execution_command(&ui, &client, command, detail);
         }
     });
@@ -234,14 +236,24 @@ pub(super) fn set_status_widgets(
     class: Option<&str>,
 ) {
     for status_class in ["status-ready", "status-running", "status-error"] {
-        status.remove_css_class(status_class);
+        if Some(status_class) != class && status.has_css_class(status_class) {
+            status.remove_css_class(status_class);
+        }
     }
-    if let Some(class) = class {
+    if let Some(class) = class
+        && !status.has_css_class(class)
+    {
         status.add_css_class(class);
     }
-    status.set_text(text);
-    detail_label.set_text(detail);
-    detail_label.set_tooltip_text(Some(detail));
+    if status.text().as_str() != text {
+        status.set_text(text);
+    }
+    if detail_label.text().as_str() != detail {
+        detail_label.set_text(detail);
+    }
+    if detail_label.tooltip_text().as_deref() != Some(detail) {
+        detail_label.set_tooltip_text(Some(detail));
+    }
 }
 
 #[cfg(test)]

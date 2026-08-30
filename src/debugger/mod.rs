@@ -12,7 +12,8 @@ pub use model::{
     current_source, evaluated_value, executable_source_lines, has_exact_command_completion,
     inferior_pid, inserted_breakpoints, instructions, memory_block, register_names, registers,
     shared_libraries, source_locations, stack_frames, threads, variable_children,
-    variable_children_have_more, variable_object, variable_path_expression, variables,
+    variable_children_have_more, variable_object, variable_path_expression, variable_updates,
+    variables,
 };
 pub use session::{SessionEvent, launch_gdb};
 pub use target::{TargetArchitecture, TargetEndian};

@@ -70,6 +70,22 @@ impl DisassemblyController {
                     ui.set_disassembly_history(false, false);
                 }
             }
+            DisassemblyRequest::Mixed(mixed) => {
+                self.state.borrow_mut().mixed = mixed;
+                if self
+                    .ui
+                    .upgrade()
+                    .is_some_and(|ui| ui.disassembly_commands_available())
+                    && let Some(current) = self.state.borrow().current.clone()
+                {
+                    self.resolve_and_show(current, HistoryUpdate::Keep);
+                }
+            }
+            _request
+                if !self
+                    .ui
+                    .upgrade()
+                    .is_some_and(|ui| ui.disassembly_commands_available()) => {}
             DisassemblyRequest::Navigate(expression) => {
                 self.resolve_and_show(expression, HistoryUpdate::Push);
             }
@@ -77,12 +93,6 @@ impl DisassemblyController {
             DisassemblyRequest::Forward => self.move_history(1),
             DisassemblyRequest::PreviousFunction => self.adjacent_function(false),
             DisassemblyRequest::NextFunction => self.adjacent_function(true),
-            DisassemblyRequest::Mixed(mixed) => {
-                self.state.borrow_mut().mixed = mixed;
-                if let Some(current) = self.state.borrow().current.clone() {
-                    self.resolve_and_show(current, HistoryUpdate::Keep);
-                }
-            }
             DisassemblyRequest::Syntax(syntax) => self.set_syntax(syntax),
         }
     }
@@ -189,7 +199,7 @@ impl DisassemblyController {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
-        if ui.inferior_is_running() {
+        if !ui.stopped_inspection_available() {
             return;
         }
         ui.set_disassembly_loading(true);
@@ -247,7 +257,7 @@ impl DisassemblyController {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
-        if ui.inferior_is_running() {
+        if !ui.stopped_inspection_available() {
             return;
         }
         ui.clear_disassembly_error();
@@ -256,6 +266,10 @@ impl DisassemblyController {
 
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
+        if let Some(address) = parse_address(expression) {
+            self.request_function(address, generation, history);
+            return;
+        }
         let command = format!(
             "-data-evaluate-expression {}",
             crate::debugger::quote(&format!("(void*)({expression})"))
@@ -308,7 +322,7 @@ impl DisassemblyController {
                 let Some(ui) = controller.ui.upgrade() else {
                     return;
                 };
-                if ui.inferior_is_running() {
+                if !ui.stopped_inspection_available() {
                     return;
                 }
                 if !record.is_done() {
@@ -397,7 +411,7 @@ impl DisassemblyController {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
-        if ui.inferior_is_running() {
+        if !ui.stopped_inspection_available() {
             return;
         }
         let focus = format!("0x{address:x}");

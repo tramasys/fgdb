@@ -829,7 +829,7 @@ fn validate_until_expression(expression: &str) -> Result<(), &'static str> {
     }
     if contains_assignment(expression) {
         return Err(
-            "Assignments are not allowed in an Until expression; use == to compare values.",
+            "Assignments are not allowed in an Until expression. Use == to compare values.",
         );
     }
     Ok(())

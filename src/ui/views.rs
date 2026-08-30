@@ -499,7 +499,7 @@ pub(super) fn variable_details(
 
 pub(super) fn variable_tooltip(variable: &Variable) -> String {
     let interaction = if variable.can_expand() {
-        "Click the name or press Enter to expand; use Edit to change the value"
+        "Click the name or press Enter to expand. Use Edit to change the value"
     } else {
         "Double-click or press Enter to edit"
     };
@@ -1063,7 +1063,7 @@ pub(super) fn instruction_column(
         }
         label.set_text(&text(&data));
         label.set_tooltip_text(Some(&format!(
-            "{} · {}\n{}\nSelect text to copy; press Enter or double-click outside a text selection to toggle an instruction breakpoint",
+            "{} · {}\n{}\nSelect text to copy. Press Enter or double-click outside a text selection to toggle an instruction breakpoint",
             data.instruction.address,
             data.instruction.text,
             instruction_symbol_full(&data.instruction),

@@ -10,6 +10,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ui.set_command_pending(false);
             ui.set_debug_state_stale(false);
             ui.clear_gef_capabilities();
+            ui.invalidate_allocator_probe_cache();
             ui.reset_target_abi();
             ui.set_status(
                 "Ready",
@@ -23,7 +24,6 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             refresh_breakpoints(weak_ui, client);
             ui.take_modules_dirty();
             refresh_modules(weak_ui, client);
-            infer_initial_stop_reason(weak_ui, client);
         }
         MiEvent::InferiorStarted => {
             // A terminal user can load and run a different executable in the
@@ -31,11 +31,15 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             // must not leak across that boundary; the stopped-state refresh
             // will establish the new ABI from GDB and the traced ELF.
             ui.reset_target_abi();
+            ui.invalidate_allocator_probe_cache();
             ui.set_inferior_started(true);
         }
         MiEvent::Running => {
-            ui.set_command_pending(false);
+            // Preserve the disabled state across the pending -> running
+            // transition. Clearing `pending` first briefly made every stop-only
+            // control sensitive before `running` disabled it again.
             ui.set_controls_running(true);
+            ui.set_command_pending(false);
             if ui.native_until_active() {
                 return;
             }
@@ -81,6 +85,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             }
         }
         MiEvent::LibrariesChanged => {
+            ui.invalidate_allocator_probe_cache();
             ui.mark_modules_dirty();
             if !ui.inferior_is_running() && !ui.native_until_active() && ui.take_modules_dirty() {
                 refresh_modules(weak_ui, client);
@@ -146,8 +151,6 @@ pub(super) fn finish_stopped_state(
     let detail =
         status_detail.unwrap_or_else(|| format!("GDB reported: {}", reason.replace('-', " ")));
     ui.set_status("Paused", &detail, Some("status-ready"));
-    ui.refresh_kernel_after_stop();
-    ui.refresh_misc_after_stop();
 }
 
 pub(super) fn detect_target_abi(ui: &Weak<Ui>, client: &MiClient) {
@@ -236,11 +239,19 @@ fn detect_target_endian(ui: &Weak<Ui>, client: &MiClient) {
             {
                 ui.set_target_endian(endian);
             }
-            refresh_stopped_state(&weak_ui, client);
+            refresh_after_target_abi_detection(&weak_ui, client);
         })
         .is_err()
     {
+        refresh_after_target_abi_detection(ui, client);
+    }
+}
+
+fn refresh_after_target_abi_detection(ui: &Weak<Ui>, client: &MiClient) {
+    if ui.upgrade().is_some_and(|ui| ui.inferior_has_started()) {
         refresh_stopped_state(ui, client);
+    } else {
+        infer_initial_stop_reason(ui, client);
     }
 }
 

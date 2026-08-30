@@ -7,11 +7,7 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     if current_ui.inferior_is_running() {
         return;
     }
-    current_ui.clear_execution_location();
     let generation = current_ui.start_stop_refresh();
-    for varobj in current_ui.local_variable_object_names() {
-        delete_variable_object(client, &varobj);
-    }
     drop(current_ui);
 
     let stack_inputs = Rc::new(RefCell::new(StackInputs {
@@ -55,14 +51,19 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
         if !stop_refresh_is_current(&weak_ui, generation) {
             return;
         }
-        if record.is_done()
-            && let (Some(ui), Some(frame)) =
-                (weak_ui.upgrade(), crate::debugger::current_frame(&record))
-        {
+        if let (Some(ui), Some(frame)) = (
+            weak_ui.upgrade(),
+            record
+                .is_done()
+                .then(|| crate::debugger::current_frame(&record))
+                .flatten(),
+        ) {
             ui.show_execution_location(&frame);
             let pc = frame.address.clone();
             let architecture = frame.architecture.clone();
             ui.request_disassembly_for_stop(pc, architecture);
+        } else if let Some(ui) = weak_ui.upgrade() {
+            ui.clear_execution_location();
         }
     });
 
@@ -258,33 +259,161 @@ pub(super) fn refresh_variable_objects(
     ui: Weak<Ui>,
     client: &MiClient,
     generation: u64,
-    variables: Vec<Variable>,
+    fallbacks: Vec<Variable>,
+) {
+    let existing = ui
+        .upgrade()
+        .map(|ui| ui.local_variable_objects())
+        .unwrap_or_default();
+    refresh_persistent_variable_objects(
+        ui,
+        client,
+        generation,
+        fallbacks,
+        existing,
+        VariableRefreshTarget::Locals,
+    );
+}
+
+pub(super) fn refresh_expression_variable_objects(
+    ui: Weak<Ui>,
+    client: &MiClient,
+    generation: u64,
+    expressions: Vec<String>,
+) {
+    let existing = ui
+        .upgrade()
+        .map(|ui| ui.expression_watch_variable_objects())
+        .unwrap_or_default();
+    let fallbacks = expressions
+        .iter()
+        .map(|expression| Variable {
+            name: expression.clone(),
+            value: String::from("<not available>"),
+            type_name: None,
+            varobj: None,
+            num_children: 0,
+            has_more: false,
+        })
+        .collect();
+    refresh_persistent_variable_objects(
+        ui,
+        client,
+        generation,
+        fallbacks,
+        existing,
+        VariableRefreshTarget::ExpressionWatches(expressions),
+    );
+}
+
+fn refresh_persistent_variable_objects(
+    ui: Weak<Ui>,
+    client: &MiClient,
+    generation: u64,
+    fallbacks: Vec<Variable>,
+    existing: Vec<Variable>,
+    target: VariableRefreshTarget,
 ) {
     if let Some(ui) = ui.upgrade() {
-        ui.show_locals_for_refresh(generation, &variables);
+        for varobj in ui.take_deferred_variable_object_deletions() {
+            delete_variable_object(client, &varobj);
+        }
     }
-    if variables.is_empty() {
+    let (variables, stale) = reuse_variable_objects(&fallbacks, existing);
+    for varobj in stale {
+        delete_variable_object(client, &varobj);
+    }
+    if let Some(ui) = ui.upgrade() {
+        show_variable_refresh(&ui, generation, &target, &variables);
+    }
+    if fallbacks.is_empty() {
         return;
     }
-    if !variables.iter().any(Variable::needs_variable_object) {
+    if !fallbacks.iter().any(Variable::needs_variable_object) {
         return;
     }
     let state = Rc::new(RefCell::new(VariableRefresh {
         ui,
         generation,
+        target,
         variables,
+        fallbacks,
         next_index: 0,
         created: 0,
+        created_varobjs: HashSet::new(),
+        updates_requested: false,
+        update_index: 0,
+        recreate_after_updates: false,
     }));
     request_next_variable_object(client, state);
 }
 
+fn variable_refresh_is_current(state: &VariableRefresh) -> bool {
+    state.ui.upgrade().is_some_and(|ui| {
+        ui.is_stop_refresh_current(state.generation)
+            && match &state.target {
+                VariableRefreshTarget::Locals => true,
+                VariableRefreshTarget::ExpressionWatches(expressions) => {
+                    ui.expression_watches_match(expressions)
+                }
+            }
+    })
+}
+
+fn show_variable_refresh(
+    ui: &Ui,
+    generation: u64,
+    target: &VariableRefreshTarget,
+    variables: &[Variable],
+) {
+    match target {
+        VariableRefreshTarget::Locals => ui.show_locals_for_refresh(generation, variables),
+        VariableRefreshTarget::ExpressionWatches(_) => {
+            ui.show_expression_watches_for_refresh(generation, variables);
+        }
+    }
+}
+
+fn reuse_variable_objects(
+    fallbacks: &[Variable],
+    existing: Vec<Variable>,
+) -> (Vec<Variable>, Vec<String>) {
+    let mut existing = existing.into_iter().fold(
+        HashMap::<String, Vec<Variable>>::new(),
+        |mut by_name, variable| {
+            by_name
+                .entry(variable.name.clone())
+                .or_default()
+                .push(variable);
+            by_name
+        },
+    );
+    let variables = fallbacks
+        .iter()
+        .map(|fallback| {
+            if !fallback.needs_variable_object() {
+                return fallback.clone();
+            }
+            let Some(mut variable) = existing.get_mut(&fallback.name).and_then(Vec::pop) else {
+                return fallback.clone();
+            };
+            variable.name.clone_from(&fallback.name);
+            if fallback.type_name.is_some() {
+                variable.type_name.clone_from(&fallback.type_name);
+            }
+            variable
+        })
+        .collect();
+    let stale = existing
+        .into_values()
+        .flatten()
+        .filter_map(|variable| variable.varobj)
+        .collect();
+    (variables, stale)
+}
+
 pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<VariableRefresh>>) {
-    let (ui, generation) = {
-        let state = state.borrow();
-        (state.ui.clone(), state.generation)
-    };
-    if !stop_refresh_is_current(&ui, generation) {
+    if !variable_refresh_is_current(&state.borrow()) {
         discard_variable_refresh(client, &state);
         return;
     }
@@ -294,7 +423,8 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
             state.next_index = state.variables.len();
         }
         while state.next_index < state.variables.len()
-            && !state.variables[state.next_index].needs_variable_object()
+            && (!state.fallbacks[state.next_index].needs_variable_object()
+                || state.variables[state.next_index].varobj.is_some())
         {
             state.next_index += 1;
         }
@@ -306,16 +436,11 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
         })
     };
     let Some((index, display_name)) = next else {
-        let (ui, generation, variables) = {
-            let mut state = state.borrow_mut();
-            (
-                state.ui.clone(),
-                state.generation,
-                std::mem::take(&mut state.variables),
-            )
-        };
-        if let Some(ui) = ui.upgrade() {
-            ui.show_locals_for_refresh(generation, &variables);
+        if state.borrow().updates_requested {
+            finish_variable_refresh(state);
+        } else {
+            state.borrow_mut().updates_requested = true;
+            request_next_variable_update(client, state);
         }
         return;
     };
@@ -328,18 +453,14 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
             AUTOMATIC_PRINT_ELEMENTS,
             move || {
                 let state = state_for_guard.borrow();
-                stop_refresh_is_current(&state.ui, state.generation)
+                variable_refresh_is_current(&state)
             },
             move |client, record| {
                 let variable = record
                     .is_done()
                     .then(|| crate::debugger::variable_object(&record, &display_name))
                     .flatten();
-                let (ui, generation) = {
-                    let state = state_for_response.borrow();
-                    (state.ui.clone(), state.generation)
-                };
-                if !stop_refresh_is_current(&ui, generation) {
+                if !variable_refresh_is_current(&state_for_response.borrow()) {
                     if let Some(varobj) = variable
                         .as_ref()
                         .and_then(|variable| variable.varobj.as_deref())
@@ -350,14 +471,145 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
                     return;
                 }
                 if let Some(variable) = variable {
-                    state_for_response.borrow_mut().variables[index] = variable;
+                    let mut state = state_for_response.borrow_mut();
+                    if let Some(varobj) = variable.varobj.as_ref() {
+                        state.created_varobjs.insert(varobj.clone());
+                    }
+                    state.variables[index] = variable;
+                } else if !record.is_done() {
+                    state_for_response.borrow_mut().variables[index].value = format!(
+                        "<error: {}>",
+                        record
+                            .error_message()
+                            .unwrap_or("expression is unavailable")
+                    );
                 }
                 request_next_variable_object(client, state_for_response);
             },
         )
         .is_err()
     {
+        state.borrow_mut().variables[index].value =
+            String::from("<error: MI channel is unavailable>");
         request_next_variable_object(client, state);
+    }
+}
+
+fn request_next_variable_update(client: &MiClient, state: Rc<RefCell<VariableRefresh>>) {
+    if !variable_refresh_is_current(&state.borrow()) {
+        discard_variable_refresh(client, &state);
+        return;
+    }
+    let next = {
+        let mut state = state.borrow_mut();
+        while state.update_index < state.variables.len()
+            && state.variables[state.update_index].varobj.is_none()
+        {
+            state.update_index += 1;
+        }
+        (state.update_index < state.variables.len()).then(|| {
+            let index = state.update_index;
+            state.update_index += 1;
+            (
+                index,
+                state.variables[index]
+                    .varobj
+                    .clone()
+                    .expect("variable update requires a varobj"),
+            )
+        })
+    };
+    let Some((index, varobj)) = next else {
+        let recreate = state.borrow().recreate_after_updates;
+        if recreate {
+            let mut refresh = state.borrow_mut();
+            refresh.next_index = 0;
+            refresh.created = 0;
+            drop(refresh);
+            request_next_variable_object(client, state);
+        } else {
+            finish_variable_refresh(state);
+        }
+        return;
+    };
+    let command = format!(
+        "-var-update --all-values {}",
+        crate::debugger::quote(&varobj)
+    );
+    let state_for_guard = Rc::clone(&state);
+    let state_for_response = Rc::clone(&state);
+    if client
+        .request_with_print_limit_when(
+            &command,
+            AUTOMATIC_PRINT_ELEMENTS,
+            move || {
+                let state = state_for_guard.borrow();
+                variable_refresh_is_current(&state)
+            },
+            move |client, record| {
+                if !variable_refresh_is_current(&state_for_response.borrow()) {
+                    discard_variable_refresh(client, &state_for_response);
+                    return;
+                }
+                let updates = if record.is_done() {
+                    crate::debugger::variable_updates(&record)
+                } else {
+                    Vec::new()
+                };
+                let update = updates.into_iter().find(|update| update.varobj == varobj);
+                {
+                    let mut state = state_for_response.borrow_mut();
+                    let invalid = !record.is_done()
+                        || update.as_ref().is_some_and(|update| {
+                            update.in_scope == Some(false) || update.type_changed
+                        });
+                    if invalid {
+                        delete_variable_object(client, &varobj);
+                        state.created_varobjs.remove(&varobj);
+                        state.variables[index] = state.fallbacks[index].clone();
+                        state.recreate_after_updates |=
+                            state.fallbacks[index].needs_variable_object();
+                    } else if let Some(update) = update {
+                        if let Some(value) = update.value.as_ref() {
+                            state.variables[index].value.clone_from(value);
+                        }
+                        if let Some(new_type) = update.new_type.as_ref() {
+                            state.variables[index].type_name = Some(new_type.clone());
+                        }
+                        if let Some(children) = update.new_num_children {
+                            state.variables[index].num_children = children;
+                        }
+                        if let Some(has_more) = update.has_more {
+                            state.variables[index].has_more = has_more;
+                        }
+                    }
+                }
+                request_next_variable_update(client, state_for_response);
+            },
+        )
+        .is_err()
+    {
+        request_next_variable_update(client, state);
+    }
+}
+
+fn finish_variable_refresh(state: Rc<RefCell<VariableRefresh>>) {
+    let (ui, generation, target, variables) = {
+        let mut state = state.borrow_mut();
+        (
+            state.ui.clone(),
+            state.generation,
+            match &state.target {
+                VariableRefreshTarget::Locals => VariableRefreshTarget::Locals,
+                VariableRefreshTarget::ExpressionWatches(expressions) => {
+                    VariableRefreshTarget::ExpressionWatches(expressions.clone())
+                }
+            },
+            std::mem::take(&mut state.variables),
+        )
+    };
+    if let Some(ui) = ui.upgrade() {
+        show_variable_refresh(&ui, generation, &target, &variables);
     }
 }
 
@@ -375,11 +627,7 @@ pub(super) fn delete_variable_object(client: &MiClient, varobj: &str) {
 
 pub(super) fn discard_variable_refresh(client: &MiClient, state: &Rc<RefCell<VariableRefresh>>) {
     let state = state.borrow();
-    for varobj in state
-        .variables
-        .iter()
-        .filter_map(|variable| variable.varobj.as_deref())
-    {
+    for varobj in &state.created_varobjs {
         delete_variable_object(client, varobj);
     }
 }
@@ -920,6 +1168,7 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
             };
             annotate_memory_regions(&mut regions, &registers, architecture);
             if let Some(current_ui) = ui.upgrade() {
+                current_ui.set_inferior_pid(pid);
                 if pid.is_some() {
                     current_ui.set_inferior_started(true);
                 }
@@ -927,6 +1176,7 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
                 current_ui.show_memory_regions_for_refresh(generation, &regions);
                 current_ui.refresh_memory_watches();
                 current_ui.refresh_kernel_after_stop();
+                current_ui.refresh_misc_after_stop();
             }
             request_tls_runtime(&ui, client, generation, &registers, &regions, architecture);
             request_stack_memory(ui, client, generation, registers, frames, regions);
@@ -937,6 +1187,8 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
         ui.show_stack_for_refresh(generation, &[]);
         ui.show_memory_regions_for_refresh(generation, &[]);
         ui.refresh_memory_watches();
+        ui.refresh_kernel_after_stop();
+        ui.refresh_misc_after_stop();
     }
 }
 
@@ -1403,4 +1655,44 @@ pub(super) fn stack_pointer_expression(register: &str, offset: usize, depth: usi
         expression = format!("*(void**)({expression})");
     }
     expression
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Variable, reuse_variable_objects};
+
+    fn variable(
+        name: &str,
+        value: &str,
+        type_name: Option<&str>,
+        varobj: Option<&str>,
+    ) -> Variable {
+        Variable {
+            name: name.to_owned(),
+            value: value.to_owned(),
+            type_name: type_name.map(str::to_owned),
+            varobj: varobj.map(str::to_owned),
+            num_children: usize::from(varobj.is_some()),
+            has_more: false,
+        }
+    }
+
+    #[test]
+    fn reuses_live_roots_and_discards_only_stale_variable_objects() {
+        let fallbacks = vec![
+            variable("pointer", "0x20", Some("Node *"), None),
+            variable("count", "7", Some("int"), None),
+        ];
+        let existing = vec![
+            variable("pointer", "0x10", Some("Node *"), Some("var1")),
+            variable("removed", "0x30", Some("Node *"), Some("var2")),
+        ];
+
+        let (reused, stale) = reuse_variable_objects(&fallbacks, existing);
+
+        assert_eq!(reused[0].varobj.as_deref(), Some("var1"));
+        assert_eq!(reused[0].value, "0x10");
+        assert_eq!(reused[1], fallbacks[1]);
+        assert_eq!(stale, [String::from("var2")]);
+    }
 }

@@ -601,7 +601,7 @@ fn build_remote_session(
     }
     if endpoint.chars().any(char::is_whitespace) {
         return Err(String::from(
-            "Remote endpoints cannot contain whitespace; use HOST:PORT or a device path",
+            "Remote endpoints cannot contain whitespace. Use HOST:PORT or a device path",
         ));
     }
     Ok(DebugSession::Remote {

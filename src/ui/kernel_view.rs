@@ -193,7 +193,6 @@ enum TlsSymbolColumn {
 
 pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView {
     let active = Rc::new(Cell::new(false));
-    let tracking_enabled = Rc::new(Cell::new(false));
     let in_flight = Rc::new(Cell::new(false));
     let needs_refresh = Rc::new(Cell::new(true));
     let tls_requested = Rc::new(Cell::new(false));
@@ -341,7 +340,6 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
         wide_subtabs: navigation.root,
         compact_subtabs: navigation.compact_root,
         active,
-        tracking_enabled,
         in_flight,
         needs_refresh,
         tls_requested,
@@ -397,15 +395,11 @@ pub(super) fn connect_kernel_tab_visibility(
     refresh_handler: &Rc<RefCell<Option<KernelRefreshHandler>>>,
 ) {
     let active = Rc::clone(&view.active);
-    let tracking_enabled = Rc::clone(&view.tracking_enabled);
     let needs_refresh = Rc::clone(&view.needs_refresh);
     let handler = Rc::clone(refresh_handler);
     notebook.connect_switch_page(move |_, _, page| {
         let now_active = page == kernel_page;
         active.set(now_active);
-        if now_active {
-            tracking_enabled.set(true);
-        }
         if now_active
             && needs_refresh.get()
             && let Some(handler) = handler.borrow().as_ref()
@@ -3362,7 +3356,6 @@ impl Ui {
         let generation = self.kernel_refresh_generation.get().wrapping_add(1);
         self.kernel_refresh_generation.set(generation);
         self.kernel_view.in_flight.set(true);
-        self.update_control_sensitivity();
         Some(generation)
     }
 
@@ -3380,7 +3373,6 @@ impl Ui {
             self.kernel_view
                 .needs_refresh
                 .set(!snapshot.tls_metadata_scanned);
-            self.update_control_sensitivity();
             self.refresh_kernel_after_stop();
             return;
         }
@@ -3391,7 +3383,6 @@ impl Ui {
         self.kernel_view.previous_snapshot.replace(Some(baseline));
         self.kernel_view.show_snapshot(snapshot);
         self.kernel_view.needs_refresh.set(needs_tls_refresh);
-        self.update_control_sensitivity();
         self.refresh_kernel_after_stop();
     }
 
@@ -3410,11 +3401,10 @@ impl Ui {
             self.kernel_view.clear();
         }
         populate_warnings(&self.kernel_view.warnings, &[error.to_owned()]);
-        self.update_control_sensitivity();
     }
 
     pub fn refresh_kernel_after_stop(&self) {
-        if self.kernel_view.tracking_enabled.get()
+        if self.kernel_view.active.get()
             && self.kernel_view.needs_refresh.get()
             && self.kernel_refresh_allowed()
             && let Some(handler) = self.kernel_refresh_handler.borrow().as_ref()
@@ -3428,7 +3418,6 @@ impl Ui {
             .set(self.kernel_refresh_generation.get().wrapping_add(1));
         self.kernel_view.needs_refresh.set(true);
         self.kernel_view.metadata_only_refresh.set(false);
-        self.update_control_sensitivity();
     }
 
     pub fn kernel_refresh_is_current(&self, generation: u64) -> bool {
@@ -3437,7 +3426,6 @@ impl Ui {
 
     pub fn finish_stale_kernel_refresh(&self) {
         self.kernel_view.in_flight.set(false);
-        self.update_control_sensitivity();
         self.refresh_kernel_after_stop();
     }
 

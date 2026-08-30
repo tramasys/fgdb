@@ -411,27 +411,6 @@ impl MiClient {
         validate_mi_command(command)?;
         let command = scoped_mi_command(command, elements);
         validate_mi_command(&command)?;
-        let queued_requests = usize::from(self.scoped_request.borrow().is_some())
-            .saturating_add(self.scoped_queue.borrow().len());
-        if queued_requests >= MAX_SCOPED_REQUESTS {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "too many queued scoped GDB/MI requests",
-            ));
-        }
-        let queued_bytes = self
-            .scoped_queue
-            .borrow()
-            .iter()
-            .fold(0_usize, |total, request| {
-                total.saturating_add(request.command.len())
-            });
-        if queued_bytes.saturating_add(command.len()) > MAX_QUEUED_MI_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "queued scoped GDB/MI commands exceed the 8 MiB limit",
-            ));
-        }
         let token = self.allocate_token();
         let request = ScopedMiRequest {
             token,
@@ -441,16 +420,42 @@ impl MiClient {
             handler: Box::new(handler),
             deadline: Instant::now() + REQUEST_TIMEOUT,
         };
+        self.queue_scoped_request(request)?;
+        Ok(token)
+    }
+
+    fn queue_scoped_request(&self, request: ScopedMiRequest) -> io::Result<()> {
+        let queued_requests = usize::from(self.scoped_request.borrow().is_some())
+            .saturating_add(self.scoped_queue.borrow().len());
+        if queued_requests >= MAX_SCOPED_REQUESTS {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "too many queued scoped GDB requests",
+            ));
+        }
+        let queued_bytes = self
+            .scoped_queue
+            .borrow()
+            .iter()
+            .fold(0_usize, |total, queued| {
+                total.saturating_add(queued.command.len())
+            });
+        if queued_bytes.saturating_add(request.command.len()) > MAX_QUEUED_MI_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "queued scoped GDB commands exceed the 8 MiB limit",
+            ));
+        }
         if !(request.is_current)() {
             (request.handler)(self, error_record("request superseded"));
-            return Ok(token);
+            return Ok(());
         }
         if self.scoped_request.borrow().is_some() || !self.scoped_queue.borrow().is_empty() {
             self.scoped_queue.borrow_mut().push_back(request);
         } else if let Err(failure) = self.start_scoped_request(request) {
             return Err(failure.0);
         }
-        Ok(token)
+        Ok(())
     }
 
     fn start_scoped_request(
@@ -664,7 +669,7 @@ impl MiClient {
                 (self.event_handler)(
                     self,
                     MiEvent::Error(format!(
-                        "GDB emitted an MI record larger than {} MiB; the record was discarded",
+                        "GDB emitted an MI record larger than {} MiB. The record was discarded",
                         MAX_MI_RECORD_BYTES / (1024 * 1024)
                     )),
                 );
@@ -1134,6 +1139,11 @@ impl<'a> Parser<'a> {
             b'f' => output.push(12),
             b'v' => output.push(11),
             b'a' => output.push(7),
+            // GDB console streams can use the common `\e` extension for the
+            // ESC byte even though it is not part of ISO C. Preserve it as an
+            // actual terminal escape so downstream ANSI sanitizers can remove
+            // the complete control sequence instead of exposing `e[31m`.
+            b'e' => output.push(0x1b),
             b'"' => output.push(b'"'),
             b'\\' => output.push(b'\\'),
             b'x' => {
@@ -1408,6 +1418,16 @@ mod tests {
         assert_eq!(
             record.field("value").and_then(MiValue::as_const),
             Some("bounded")
+        );
+    }
+
+    #[test]
+    fn decodes_gdb_console_escape_extensions_as_terminal_escapes() {
+        let output = parse_stream_output(r#"~"\e[1m\e[31m[!]\e[0m Heap not initialized\n""#)
+            .expect("valid GDB console stream");
+        assert_eq!(
+            output,
+            "\u{1b}[1m\u{1b}[31m[!]\u{1b}[0m Heap not initialized\n"
         );
     }
 }

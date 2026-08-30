@@ -53,7 +53,7 @@ Set `break c_page_checkpoint`, then continue through all three hits:
 2. `populated` touches alternating anonymous pages, dirties shared and copy-on-write file pages, and attempts to lock one page.
 3. `reclaimed` applies `MADV_DONTNEED` and exposes the resulting stop-to-stop RSS/PSS and page-state changes.
 
-At each stop, inspect **Kernel → Changes** for deltas and **Kernel → Maps** for RSS/PSS, NUMA placement, VM flags and pagemap samples. The fixture resets its own soft-dirty tracking through `/proc/self/clear_refs`; failure to do so is intentionally non-fatal on restricted systems.
+At each stop, inspect **Kernel → Changes** for deltas and **Kernel → Maps** for RSS/PSS, NUMA placement, VM flags and pagemap samples. The fixture resets its own soft-dirty tracking through `/proc/self/clear_refs`. Failure to do so is intentionally non-fatal on restricted systems.
 
 The default targets use `-O0`, full debug information, frame pointers and disabled C/C++ inlining. The `-o2` variants deliberately retain optimization. Override `CC`, `CXX`, `RUSTC`, or the corresponding flags to compare toolchains and DWARF versions.
 

@@ -9,10 +9,8 @@ impl Ui {
         self.expression_watches.borrow().as_slice() == expected
     }
 
-    pub fn expression_watch_variable_object_names(&self) -> Vec<String> {
-        let mut names = Vec::new();
-        collect_variable_object_roots(&self.expression_watches_store, None, &mut names);
-        names
+    pub fn expression_watch_variable_objects(&self) -> Vec<Variable> {
+        root_variables(&self.expression_watches_store)
     }
 
     pub fn show_expression_watches_for_refresh(&self, generation: u64, variables: &[Variable]) {
@@ -24,12 +22,13 @@ impl Ui {
             self.expression_watches_selection.selected(),
         )
         .map(|variable| variable.name);
-        replace_boxed_store(
-            &self.expression_watches_store,
-            variables.iter().cloned().map(VariableNode::new),
-        );
+        let changed = replace_variable_roots_if_changed(&self.expression_watches_store, variables);
         self.expression_watches_empty
             .set_visible(variables.is_empty());
+        if !changed {
+            self.update_control_sensitivity();
+            return;
+        }
         self.expression_watches_selection
             .set_selected(gtk::INVALID_LIST_POSITION);
         if !variables.is_empty() {
@@ -152,8 +151,21 @@ impl Ui {
         let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
         let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
+        let debugger_ready = Rc::clone(&self.debugger_ready);
+        let inferior_started = Rc::clone(&self.inferior_started);
+        let inferior_running = Rc::clone(&self.inferior_running);
+        let command_pending = Rc::clone(&self.command_pending);
+        let session_pending = Rc::clone(&self.session_pending);
         self.expression_watches_view
             .connect_activate(move |_, position| {
+                if !debugger_ready.get()
+                    || !inferior_started.get()
+                    || inferior_running.get()
+                    || command_pending.get()
+                    || session_pending.get()
+                {
+                    return;
+                }
                 let Some((row, node)) = variable_node_at(&selection, position) else {
                     return;
                 };

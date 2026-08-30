@@ -411,9 +411,9 @@ pub(super) fn populate_page_samples(snapshot: &mut KernelSnapshot, root: &Path) 
         }
     }
     let access = if disclosed_pfn {
-        "Available; per-mapping samples include PFN and physical address"
+        "Available. Per-mapping samples include PFN and physical address"
     } else if sampled > 0 {
-        "Metadata available; PFNs are masked by kernel permissions"
+        "Metadata available. PFNs are masked by kernel permissions"
     } else {
         "Readable, but no mapping sample was available"
     };

@@ -76,34 +76,39 @@ pub(super) fn find_variable_node(store: &gio::ListStore, varobj: &str) -> Option
     None
 }
 
-pub(super) fn collect_variable_object_roots(
+pub(super) fn root_variables(store: &gio::ListStore) -> Vec<Variable> {
+    (0..store.n_items())
+        .filter_map(|position| {
+            store
+                .item(position)
+                .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+                .and_then(|item| {
+                    let node = item.borrow::<VariableNode>();
+                    (!node.placeholder).then(|| node.variable.clone())
+                })
+        })
+        .collect()
+}
+
+pub(super) fn replace_variable_roots_if_changed(
     store: &gio::ListStore,
-    owner: Option<&str>,
-    names: &mut Vec<String>,
-) {
-    for position in 0..store.n_items() {
-        let Some(item) = store
-            .item(position)
-            .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
-        else {
-            continue;
-        };
-        let node = item.borrow::<VariableNode>();
-        let mut child_owner = owner.map(str::to_owned);
-        if let Some(name) = &node.variable.varobj {
-            let belongs_to_owner = owner.is_some_and(|owner| {
-                name == owner
-                    || name
-                        .strip_prefix(owner)
-                        .is_some_and(|suffix| suffix.starts_with('.'))
-            });
-            if !belongs_to_owner {
-                names.push(name.clone());
-                child_owner = Some(name.clone());
-            }
-        }
-        collect_variable_object_roots(&node.children, child_owner.as_deref(), names);
+    variables: &[Variable],
+) -> bool {
+    let unchanged = usize::try_from(store.n_items()).ok() == Some(variables.len())
+        && variables.iter().enumerate().all(|(index, variable)| {
+            store
+                .item(u32::try_from(index).unwrap_or(u32::MAX))
+                .and_downcast::<glib::BoxedAnyObject>()
+                .is_some_and(|item| {
+                    let node = item.borrow::<VariableNode>();
+                    !node.placeholder && node.variable == *variable
+                })
+        });
+    if unchanged {
+        return false;
     }
+    replace_boxed_store(store, variables.iter().cloned().map(VariableNode::new));
+    true
 }
 
 pub(super) fn remove_load_more_rows(store: &gio::ListStore) {
@@ -1017,7 +1022,7 @@ fn update_string_editor(
         return;
     }
     entry.set_tooltip_text(Some(
-        "Edit text directly; use C escapes such as \\n, \\t, \\0, or \\x41 for individual bytes",
+        "Edit text directly. Use C escapes such as \\n, \\t, \\0, or \\x41 for individual bytes",
     ));
     match (parse_string_input(&entry.text()), string.storage) {
         (Ok(bytes), StringStorage::Buffer { capacity, pointer }) if bytes.len() <= capacity => {
@@ -1196,7 +1201,7 @@ pub(super) fn open_vector_editor(
     content.append(&radix_row);
 
     let hint = gtk::Label::new(Some(
-        "Each view addresses the same register bits. Apply edits before changing the interpretation; switching views resets unapplied lane edits.",
+        "Each view addresses the same register bits. Apply edits before changing the interpretation. Switching views resets unapplied lane edits.",
     ));
     hint.add_css_class("muted");
     hint.set_halign(gtk::Align::Start);

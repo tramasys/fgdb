@@ -544,7 +544,7 @@ impl KernelSnapshot {
         }) else {
             self.changes.push(fact(
                 "Baseline",
-                "Captured; values will be compared at the next stop or refresh",
+                "Captured. Values will be compared at the next stop or refresh",
             ));
             return;
         };

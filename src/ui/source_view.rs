@@ -78,7 +78,7 @@ pub(super) fn replace_boxed_store<T: 'static>(
 pub(super) fn replace_boxed_store_if_changed<T: PartialEq + 'static>(
     store: &gio::ListStore,
     values: impl IntoIterator<Item = T>,
-) {
+) -> bool {
     let values = values.into_iter().collect::<Vec<_>>();
     let unchanged = usize::try_from(store.n_items()).ok() == Some(values.len())
         && values.iter().enumerate().all(|(index, value)| {
@@ -88,13 +88,14 @@ pub(super) fn replace_boxed_store_if_changed<T: PartialEq + 'static>(
                 .is_some_and(|item| *item.borrow::<T>() == *value)
         });
     if unchanged {
-        return;
+        return false;
     }
     let values = values
         .into_iter()
         .map(glib::BoxedAnyObject::new)
         .collect::<Vec<_>>();
     store.splice(0, store.n_items(), &values);
+    true
 }
 
 pub(super) fn update_selected_frame_buttons(buttons: &[(u32, gtk::Button)], selected: u32) {

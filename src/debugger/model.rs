@@ -30,6 +30,17 @@ pub struct Variable {
     pub has_more: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VariableUpdate {
+    pub varobj: String,
+    pub value: Option<String>,
+    pub in_scope: Option<bool>,
+    pub type_changed: bool,
+    pub new_type: Option<String>,
+    pub new_num_children: Option<usize>,
+    pub has_more: Option<bool>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ValueTypeKind {
     Integer,
@@ -319,6 +330,33 @@ pub fn variable_object(record: &MiRecord, display_name: &str) -> Option<Variable
             .unwrap_or(0),
         has_more: record.field("has_more").and_then(MiValue::as_const) == Some("1"),
     })
+}
+
+pub fn variable_updates(record: &MiRecord) -> Vec<VariableUpdate> {
+    record
+        .field("changelist")
+        .and_then(MiValue::as_list)
+        .into_iter()
+        .flatten()
+        .filter_map(tuple_from_item)
+        .filter_map(|tuple| {
+            let in_scope = match constant(tuple, "in_scope") {
+                Some("true") => Some(true),
+                Some("false" | "invalid") => Some(false),
+                _ => None,
+            };
+            Some(VariableUpdate {
+                varobj: constant(tuple, "name")?.to_owned(),
+                value: owned_constant(tuple, "value"),
+                in_scope,
+                type_changed: constant(tuple, "type_changed") == Some("true"),
+                new_type: owned_constant(tuple, "new_type"),
+                new_num_children: constant(tuple, "new_num_children")
+                    .and_then(|value| value.parse().ok()),
+                has_more: constant(tuple, "has_more").map(|value| value == "1"),
+            })
+        })
+        .collect()
 }
 
 pub fn variable_children(record: &MiRecord) -> Vec<Variable> {
@@ -829,7 +867,8 @@ mod tests {
         breakpoints, compact_register_numbers, current_source, has_exact_command_completion,
         inferior_pid, inserted_breakpoints, instructions, memory_block, register_names, registers,
         shared_libraries, source_locations, stack_frames, threads, variable_children,
-        variable_children_have_more, variable_object, variable_path_expression, variables,
+        variable_children_have_more, variable_object, variable_path_expression, variable_updates,
+        variables,
     };
     use crate::debugger::mi::parse_record;
     use crate::debugger::{TargetArchitecture, TargetEndian};
@@ -1139,6 +1178,25 @@ mod tests {
             has_more: false,
         };
         assert!(!null_pointer.can_expand());
+    }
+
+    #[test]
+    fn converts_incremental_variable_object_updates() {
+        let record = parse_record(
+            r#"14^done,changelist=[{name="var1",value="std::vector of length 4",in_scope="true",type_changed="false",new_num_children="4",has_more="1"},{name="var2",in_scope="invalid",type_changed="true",new_type="long"}]"#,
+        )
+        .unwrap();
+        let updates = variable_updates(&record);
+        assert_eq!(updates.len(), 2);
+        assert_eq!(updates[0].varobj, "var1");
+        assert_eq!(updates[0].value.as_deref(), Some("std::vector of length 4"));
+        assert_eq!(updates[0].in_scope, Some(true));
+        assert!(!updates[0].type_changed);
+        assert_eq!(updates[0].new_num_children, Some(4));
+        assert_eq!(updates[0].has_more, Some(true));
+        assert_eq!(updates[1].in_scope, Some(false));
+        assert!(updates[1].type_changed);
+        assert_eq!(updates[1].new_type.as_deref(), Some("long"));
     }
 
     #[test]

@@ -105,7 +105,7 @@ pub(super) fn populate_tls_metadata(snapshot: &mut KernelSnapshot, root: &Path) 
         let detail = if failures.is_empty() {
             String::new()
         } else {
-            format!(" ({})", failures.join("; "))
+            format!(" ({})", failures.join(" · "))
         };
         snapshot.warnings.push(format!(
             "TLS metadata scan skipped {skipped} module(s) because of scan limits or read errors{detail}"

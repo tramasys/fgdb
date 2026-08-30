@@ -104,7 +104,7 @@ pub(super) fn remove_relocated_source_breakpoint(
                 ui.set_status(
                     "No breakpoint added",
                     &format!(
-                        "{requested_location} did not resolve exactly; GDB's relocated breakpoint was removed"
+                        "{requested_location} did not resolve exactly. GDB's relocated breakpoint was removed"
                     ),
                     None,
                 );
@@ -634,7 +634,13 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
         }
         ui.show_threads_for_refresh(generation, &threads);
         drop(ui);
-        if !threads.iter().any(|thread| thread.current) {
+        if !threads.iter().any(|thread| {
+            thread.current
+                && thread
+                    .frame
+                    .as_ref()
+                    .is_some_and(|frame| frame.function == "??")
+        }) {
             return;
         }
         let weak_ui = weak_ui.clone();

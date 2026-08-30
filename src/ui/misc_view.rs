@@ -40,6 +40,44 @@ struct CallAbiWidgets {
     split: gtk::Paned,
 }
 
+struct AllocatorWidgets {
+    root: gtk::Box,
+    implementation: gtk::Label,
+    basis: gtk::Label,
+    bindings: gtk::Label,
+    runtimes: gtk::Label,
+    frontends: gtk::Label,
+    evidence: gtk::Label,
+    safety: gtk::Label,
+    heap_bytes: gtk::Label,
+    anonymous_bytes: gtk::Label,
+    mapping_count: gtk::Label,
+    store: gio::ListStore,
+    empty: gtk::Label,
+    inspector: HeapInspectorWidgets,
+}
+
+struct HeapInspectorWidgets {
+    root: gtk::Box,
+    actions: Vec<(gtk::Button, HeapInspectionAction)>,
+    expression: gtk::Entry,
+    status: gtk::Label,
+    command: gtk::Label,
+    store: gio::ListStore,
+    empty: gtk::Label,
+    in_flight: Rc<Cell<bool>>,
+}
+
+struct HeapTableWidgets {
+    root: gtk::Box,
+    store: gio::ListStore,
+    empty: gtk::Label,
+    view: gtk::ColumnView,
+    selection: gtk::SingleSelection,
+    copy_selected: gtk::Button,
+    inspect_selected: gtk::Button,
+}
+
 struct CoreWidgets {
     root: gtk::Box,
     summary: gtk::Label,
@@ -52,9 +90,10 @@ struct CoreWidgets {
 
 pub(super) fn build_misc_view() -> MiscView {
     let active = Rc::new(Cell::new(false));
-    let tracking_enabled = Rc::new(Cell::new(false));
     let in_flight = Rc::new(Cell::new(false));
     let needs_refresh = Rc::new(Cell::new(true));
+    let allocator_requested = Rc::new(Cell::new(false));
+    let allocator_probe_fresh = Rc::new(Cell::new(false));
     let locks_requested = Rc::new(Cell::new(false));
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_size_request(0, 0);
@@ -101,10 +140,12 @@ pub(super) fn build_misc_view() -> MiscView {
         wide_subtabs: navigation.root,
         compact_subtabs: navigation.compact_root,
         active,
-        tracking_enabled,
         in_flight,
         needs_refresh,
         pages,
+        allocator_requested,
+        allocator_probe_fresh,
+        allocator_probe_cache: Rc::new(RefCell::new(None)),
         locks_requested,
         summary: startup.summary,
         warning: startup.warning,
@@ -122,9 +163,25 @@ pub(super) fn build_misc_view() -> MiscView {
         call_abi_register_empty: call_abi.register_empty,
         call_abi_contract_store: call_abi.contract_store,
         call_abi_split: call_abi.split,
-        allocator_summary: allocator.summary,
+        allocator_implementation: allocator.implementation,
+        allocator_basis: allocator.basis,
+        allocator_bindings: allocator.bindings,
+        allocator_runtimes: allocator.runtimes,
+        allocator_frontends: allocator.frontends,
+        allocator_evidence: allocator.evidence,
+        allocator_safety: allocator.safety,
+        allocator_heap_bytes: allocator.heap_bytes,
+        allocator_anonymous_bytes: allocator.anonymous_bytes,
+        allocator_mapping_count: allocator.mapping_count,
         allocator_store: allocator.store,
         allocator_empty: allocator.empty,
+        heap_inspector_actions: allocator.inspector.actions,
+        heap_inspector_expression: allocator.inspector.expression,
+        heap_inspector_status: allocator.inspector.status,
+        heap_inspector_command: allocator.inspector.command,
+        heap_inspector_store: allocator.inspector.store,
+        heap_inspector_empty: allocator.inspector.empty,
+        heap_inspector_in_flight: allocator.inspector.in_flight,
         lock_summary: locks.summary,
         lock_note: locks.note,
         lock_store: locks.store,
@@ -288,34 +345,653 @@ fn build_call_abi_page() -> CallAbiWidgets {
     }
 }
 
-fn build_allocator_page() -> MiscTablePage {
-    let page = build_misc_table_page("No allocator-related mappings are available");
-    page.note.set_visible(false);
-    page.view.append_column(&misc_column::<AllocatorRegion>(
+fn build_allocator_page() -> AllocatorWidgets {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.set_vexpand(true);
+    let views = gtk::Stack::new();
+    views.set_vexpand(true);
+    views.set_vhomogeneous(false);
+    views.set_hhomogeneous(false);
+    views.set_transition_type(gtk::StackTransitionType::None);
+    let switcher = gtk::StackSwitcher::new();
+    switcher.add_css_class("allocator-view-tabs");
+    switcher.set_stack(Some(&views));
+    switcher.set_hexpand(true);
+    root.append(&switcher);
+
+    let summary = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    summary.set_vexpand(true);
+
+    let detection = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    detection.add_css_class("allocator-detection-card");
+    let caption = gtk::Label::new(Some("DETECTED ALLOCATOR"));
+    caption.add_css_class("allocator-detection-caption");
+    caption.set_halign(gtk::Align::Start);
+    let implementation = allocator_value_label("allocator-detection-identity");
+    let basis = allocator_value_label("allocator-detection-basis");
+    detection.append(&caption);
+    detection.append(&implementation);
+    detection.append(&basis);
+
+    let bindings = append_allocator_detail(&detection, "DEFAULT C BINDINGS", None);
+    let runtimes = append_allocator_detail(&detection, "DETECTED RUNTIMES", None);
+    let frontends = append_allocator_detail(
+        &detection,
+        "LANGUAGE / RUNTIME ALLOCATORS",
+        Some("allocator-frontend-value"),
+    );
+    let evidence = append_allocator_detail(
+        &detection,
+        "SUPPORTING EVIDENCE",
+        Some("allocator-evidence-value"),
+    );
+    let safety = allocator_value_label("allocator-detection-safety");
+    detection.append(&safety);
+    summary.append(&detection);
+
+    let metrics = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .homogeneous(true)
+        .min_children_per_line(1)
+        .max_children_per_line(3)
+        .column_spacing(1)
+        .row_spacing(1)
+        .build();
+    metrics.add_css_class("allocator-metrics");
+    let heap_bytes = append_allocator_metric(&metrics, "BRK HEAP");
+    let anonymous_bytes = append_allocator_metric(&metrics, "ANONYMOUS WRITABLE");
+    let mapping_count = append_allocator_metric(&metrics, "RELEVANT MAPPINGS");
+    summary.append(&metrics);
+
+    let (mappings, store, empty, view) =
+        build_misc_table("No allocator-related mappings are available");
+    mappings.prepend(&section_title("ALLOCATOR-RELATED MAPPINGS"));
+    view.append_column(&misc_column::<AllocatorRegion>(
         "ADDRESS RANGE",
         330,
         false,
         |row| format!("0x{:016x}–0x{:016x}", row.start, row.end),
     ));
-    page.view
-        .append_column(&misc_column::<AllocatorRegion>("SIZE", 120, false, |row| {
-            crate::kernel::format_bytes(row.size())
-        }));
-    page.view
-        .append_column(&misc_column::<AllocatorRegion>("PERM", 78, false, |row| {
-            row.permissions.clone()
-        }));
-    page.view
-        .append_column(&misc_column::<AllocatorRegion>("ROLE", 260, false, |row| {
-            row.role.clone()
-        }));
-    page.view.append_column(&misc_column::<AllocatorRegion>(
+    view.append_column(&misc_column::<AllocatorRegion>("SIZE", 120, false, |row| {
+        crate::kernel::format_bytes(row.size())
+    }));
+    view.append_column(&misc_column::<AllocatorRegion>("PERM", 78, false, |row| {
+        row.permissions.clone()
+    }));
+    view.append_column(&misc_column::<AllocatorRegion>("ROLE", 260, false, |row| {
+        row.role.clone()
+    }));
+    view.append_column(&misc_column::<AllocatorRegion>(
         "BACKING",
         420,
         true,
         |row| row.path.clone(),
     ));
-    page
+    summary.append(&mappings);
+    views.add_titled(&summary, Some("detection"), "Detection");
+
+    let inspector = build_heap_inspector();
+    views.add_titled(&inspector.root, Some("structures"), "Heap structures");
+    root.append(&views);
+
+    AllocatorWidgets {
+        root,
+        implementation,
+        basis,
+        bindings,
+        runtimes,
+        frontends,
+        evidence,
+        safety,
+        heap_bytes,
+        anonymous_bytes,
+        mapping_count,
+        store,
+        empty,
+        inspector,
+    }
+}
+
+fn build_heap_inspector() -> HeapInspectorWidgets {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.set_vexpand(true);
+    let controls = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    controls.add_css_class("heap-inspector-controls");
+
+    let note = gtk::Label::new(Some(
+        "Read-only heap structure views for the detected allocator.",
+    ));
+    note.add_css_class("heap-inspector-note");
+    note.set_halign(gtk::Align::Fill);
+    note.set_xalign(0.0);
+    note.set_wrap(true);
+    controls.append(&note);
+
+    let actions = RefCell::new(Vec::new());
+    let structures = heap_action_group(
+        "GLIBC STRUCTURES",
+        &[
+            ("Arenas", HeapInspectionAction::Arenas),
+            ("Arena detail", HeapInspectionAction::Arena),
+            ("Top chunk", HeapInspectionAction::Top),
+            ("Chunks", HeapInspectionAction::Chunks),
+            ("Parsed heap", HeapInspectionAction::Parsed),
+        ],
+        &actions,
+    );
+    controls.append(&structures);
+    let bins = heap_action_group(
+        "FREE LISTS / BINS",
+        &[
+            ("Compact", HeapInspectionAction::CompactBins),
+            ("All", HeapInspectionAction::AllBins),
+            ("Tcache", HeapInspectionAction::TcacheBins),
+            ("Fast", HeapInspectionAction::FastBins),
+            ("Unsorted", HeapInspectionAction::UnsortedBin),
+            ("Small", HeapInspectionAction::SmallBins),
+            ("Large", HeapInspectionAction::LargeBins),
+        ],
+        &actions,
+    );
+    controls.append(&bins);
+
+    let expression_group = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let expression_title = gtk::Label::new(Some("TARGETED INSPECTION"));
+    expression_title.add_css_class("heap-inspector-group-title");
+    expression_title.set_halign(gtk::Align::Start);
+    expression_group.append(&expression_title);
+    let expression = gtk::Entry::builder()
+        .placeholder_text("chunk address or side-effect-free GDB expression")
+        .hexpand(true)
+        .build();
+    expression.add_css_class("heap-inspector-expression");
+    expression.set_tooltip_text(Some(
+        "Inspect the allocation containing this user pointer or chunk address",
+    ));
+    expression_group.append(&expression);
+    let targeted_actions = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .homogeneous(false)
+        .min_children_per_line(1)
+        .max_children_per_line(2)
+        .column_spacing(3)
+        .row_spacing(3)
+        .build();
+    targeted_actions.add_css_class("heap-inspector-actions");
+    let chunk = heap_action_button("Inspect chunk", HeapInspectionAction::Chunk, &actions);
+    targeted_actions.insert(&chunk, -1);
+    let backend = heap_action_button("Detected backend", HeapInspectionAction::Backend, &actions);
+    backend.set_tooltip_text(Some(
+        "Inspect the detected backend when fgdb has a verified native decoder",
+    ));
+    targeted_actions.insert(&backend, -1);
+    expression_group.append(&targeted_actions);
+    controls.append(&expression_group);
+    root.append(&controls);
+
+    let result_header = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    result_header.add_css_class("heap-inspector-result-header");
+    let command = gtk::Label::new(Some("No heap structure query has run"));
+    command.add_css_class("heap-inspector-command");
+    command.set_halign(gtk::Align::Fill);
+    command.set_xalign(0.0);
+    command.set_ellipsize(pango::EllipsizeMode::Middle);
+    let status = gtk::Label::new(Some("Choose a heap view above while the target is paused"));
+    status.add_css_class("heap-inspector-status");
+    status.set_halign(gtk::Align::Fill);
+    status.set_xalign(0.0);
+    status.set_wrap(true);
+    result_header.append(&command);
+    result_header.append(&status);
+    root.append(&result_header);
+
+    let table = build_heap_inspection_table();
+    table.view.append_column(&heap_inspection_column(
+        "STRUCTURE",
+        125,
+        false,
+        HeapCellKind::Structure,
+        |row| &row.kind,
+    ));
+    table.view.append_column(&heap_inspection_column(
+        "ADDRESS / INDEX",
+        190,
+        false,
+        HeapCellKind::Location,
+        |row| &row.location,
+    ));
+    table.view.append_column(&heap_inspection_column(
+        "SIZE / COUNT",
+        180,
+        false,
+        HeapCellKind::Metric,
+        |row| &row.metric,
+    ));
+    table.view.append_column(&heap_inspection_column(
+        "STATE",
+        110,
+        false,
+        HeapCellKind::State,
+        |row| &row.state,
+    ));
+    table.view.append_column(&heap_inspection_column(
+        "DETAILS / LINKS",
+        500,
+        true,
+        HeapCellKind::Details,
+        |row| &row.details,
+    ));
+    connect_heap_table_interactions(&table, &expression, &chunk);
+    root.append(&table.root);
+
+    HeapInspectorWidgets {
+        root,
+        actions: actions.into_inner(),
+        expression,
+        status,
+        command,
+        store: table.store,
+        empty: table.empty,
+        in_flight: Rc::new(Cell::new(false)),
+    }
+}
+
+fn build_heap_inspection_table() -> HeapTableWidgets {
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.set_vexpand(true);
+
+    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    controls.add_css_class("heap-table-controls");
+    let search = gtk::SearchEntry::builder()
+        .placeholder_text("Filter structures, addresses, states, or links")
+        .hexpand(true)
+        .build();
+    search.add_css_class("kernel-change-search");
+    search.add_css_class("kernel-table-search");
+    search.set_tooltip_text(Some("Filter the current heap result"));
+    let copy_selected = gtk::Button::with_label("Copy row");
+    copy_selected.add_css_class("inline-action");
+    copy_selected.set_tooltip_text(Some("Copy every field from the selected row"));
+    copy_selected.set_sensitive(false);
+    let inspect_selected = gtk::Button::with_label("Inspect chunk");
+    inspect_selected.add_css_class("inline-action");
+    inspect_selected.set_tooltip_text(Some(
+        "Inspect the selected chunk, or the first chunk in an occupied bin",
+    ));
+    inspect_selected.set_sensitive(false);
+    controls.append(&search);
+    controls.append(&copy_selected);
+    controls.append(&inspect_selected);
+    root.append(&controls);
+
+    let query = Rc::new(RefCell::new(String::new()));
+    let query_for_filter = Rc::clone(&query);
+    let filter = gtk::CustomFilter::new(move |object| {
+        object
+            .downcast_ref::<glib::BoxedAnyObject>()
+            .is_some_and(|row| {
+                heap_row_matches(
+                    &row.borrow::<HeapInspectionRow>(),
+                    &query_for_filter.borrow(),
+                )
+            })
+    });
+    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
+    let selection = gtk::SingleSelection::new(Some(filtered.clone()));
+    selection.set_autoselect(false);
+    selection.set_can_unselect(true);
+    let view = gtk::ColumnView::new(Some(selection.clone()));
+    view.add_css_class("debug-table");
+    view.add_css_class("misc-data-table");
+    view.add_css_class("heap-inspector-table");
+    view.set_vexpand(true);
+    view.set_reorderable(true);
+    view.set_single_click_activate(false);
+
+    let empty = empty_label("No heap rows match the current view or filter");
+    let empty_for_filter = empty.clone();
+    filtered.connect_items_changed(move |model, _, _, _| {
+        empty_for_filter.set_visible(model.n_items() == 0);
+    });
+    search.connect_search_changed(move |search| {
+        let text = search.text().trim().to_lowercase();
+        if *query.borrow() != text {
+            query.replace(text);
+            filter.changed(gtk::FilterChange::Different);
+        }
+    });
+    let scrolled = gtk::ScrolledWindow::builder()
+        .child(&view)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .build();
+    configure_misc_scroller(&scrolled);
+    root.append(&empty);
+    root.append(&scrolled);
+
+    HeapTableWidgets {
+        root,
+        store,
+        empty,
+        view,
+        selection,
+        copy_selected,
+        inspect_selected,
+    }
+}
+
+fn heap_row_matches(row: &HeapInspectionRow, query: &str) -> bool {
+    query.is_empty()
+        || [
+            row.kind.as_str(),
+            row.location.as_str(),
+            row.metric.as_str(),
+            row.state.as_str(),
+            row.details.as_str(),
+        ]
+        .into_iter()
+        .any(|field| contains_case_insensitive(field, query))
+}
+
+fn contains_case_insensitive(value: &str, lowercase_query: &str) -> bool {
+    if lowercase_query.is_ascii() {
+        let query = lowercase_query.as_bytes();
+        return query.is_empty()
+            || value
+                .as_bytes()
+                .windows(query.len())
+                .any(|window| window.eq_ignore_ascii_case(query));
+    }
+    value.to_lowercase().contains(lowercase_query)
+}
+
+fn selected_heap_row(selection: &gtk::SingleSelection) -> Option<glib::BoxedAnyObject> {
+    selection
+        .selected_item()
+        .and_downcast::<glib::BoxedAnyObject>()
+}
+
+fn selected_heap_inspect_address(selection: &gtk::SingleSelection) -> Option<u64> {
+    selected_heap_row(selection).and_then(|row| row.borrow::<HeapInspectionRow>().inspect_address)
+}
+
+fn update_heap_row_actions(
+    selection: &gtk::SingleSelection,
+    copy: &gtk::Button,
+    inspect: &gtk::Button,
+    targeted_inspect: &gtk::Button,
+) {
+    let selected = selected_heap_row(selection);
+    copy.set_sensitive(selected.is_some());
+    inspect.set_sensitive(
+        targeted_inspect.is_sensitive()
+            && selected
+                .is_some_and(|row| row.borrow::<HeapInspectionRow>().inspect_address.is_some()),
+    );
+}
+
+fn activate_selected_heap_chunk(
+    selection: &gtk::SingleSelection,
+    expression: &gtk::Entry,
+    targeted_inspect: &gtk::Button,
+) {
+    let Some(address) = selected_heap_inspect_address(selection) else {
+        return;
+    };
+    if targeted_inspect.is_sensitive() {
+        expression.set_text(&format_address(Some(address)));
+        targeted_inspect.emit_clicked();
+    }
+}
+
+fn connect_heap_table_interactions(
+    table: &HeapTableWidgets,
+    expression: &gtk::Entry,
+    targeted_inspect: &gtk::Button,
+) {
+    let selection = table.selection.clone();
+    let copy = table.copy_selected.clone();
+    let inspect = table.inspect_selected.clone();
+    let targeted = targeted_inspect.clone();
+    table.selection.connect_selected_item_notify(move |_| {
+        update_heap_row_actions(&selection, &copy, &inspect, &targeted);
+    });
+
+    let selection = table.selection.clone();
+    let copy = table.copy_selected.clone();
+    let inspect = table.inspect_selected.clone();
+    let targeted = targeted_inspect.clone();
+    targeted_inspect.connect_sensitive_notify(move |_| {
+        update_heap_row_actions(&selection, &copy, &inspect, &targeted);
+    });
+
+    let selection = table.selection.clone();
+    table.copy_selected.connect_clicked(move |_| {
+        let Some(row) = selected_heap_row(&selection) else {
+            return;
+        };
+        let row = row.borrow::<HeapInspectionRow>();
+        let text = [
+            row.kind.as_str(),
+            row.location.as_str(),
+            row.metric.as_str(),
+            row.state.as_str(),
+            row.details.as_str(),
+        ]
+        .into_iter()
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<&str>>()
+        .join("\t");
+        if let Some(display) = gtk::gdk::Display::default() {
+            display.clipboard().set_text(&text);
+        }
+    });
+
+    let selection = table.selection.clone();
+    let expression_for_button = expression.clone();
+    let targeted = targeted_inspect.clone();
+    table.inspect_selected.connect_clicked(move |_| {
+        activate_selected_heap_chunk(&selection, &expression_for_button, &targeted);
+    });
+
+    let selection = table.selection.clone();
+    let expression = expression.clone();
+    let targeted = targeted_inspect.clone();
+    table.view.connect_activate(move |_, _| {
+        activate_selected_heap_chunk(&selection, &expression, &targeted);
+    });
+}
+
+#[derive(Clone, Copy)]
+enum HeapCellKind {
+    Structure,
+    Location,
+    Metric,
+    State,
+    Details,
+}
+
+fn heap_inspection_column(
+    title: &str,
+    width: i32,
+    expand: bool,
+    cell_kind: HeapCellKind,
+    value: impl Fn(&HeapInspectionRow) -> &str + Copy + 'static,
+) -> gtk::ColumnViewColumn {
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(move |_, object| {
+        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let label = gtk::Label::new(None);
+        label.add_css_class("debug-table-cell");
+        label.add_css_class("heap-inspector-cell");
+        label.add_css_class(match cell_kind {
+            HeapCellKind::Structure => "heap-inspector-structure-cell",
+            HeapCellKind::Location => "heap-inspector-location-cell",
+            HeapCellKind::Metric => "heap-inspector-metric-cell",
+            HeapCellKind::State => "heap-inspector-state-cell",
+            HeapCellKind::Details => "heap-inspector-details-cell",
+        });
+        label.set_halign(gtk::Align::Start);
+        label.set_ellipsize(pango::EllipsizeMode::Middle);
+        enable_stable_text_selection(&label);
+        item.set_child(Some(&label));
+    });
+    factory.connect_bind(move |_, object| {
+        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let (Some(label), Some(data)) = (
+            item.child().and_downcast::<gtk::Label>(),
+            item.item().and_downcast::<glib::BoxedAnyObject>(),
+        ) else {
+            return;
+        };
+        for class in [
+            "heap-inspector-section-cell",
+            "heap-inspector-error-cell",
+            "heap-inspector-warning-cell",
+            "heap-state-active",
+            "heap-state-idle",
+            "heap-state-free",
+            "heap-state-special",
+        ] {
+            label.remove_css_class(class);
+        }
+        clear_label_selection(&label);
+        let row = data.borrow::<HeapInspectionRow>();
+        let text = value(&row);
+        label.set_text(text);
+        label.set_tooltip_text(Some(text));
+        if row.kind == "Section" {
+            label.add_css_class("heap-inspector-section-cell");
+        } else if row.kind == "Error" {
+            label.add_css_class("heap-inspector-error-cell");
+        } else if row.state == "warning" {
+            label.add_css_class("heap-inspector-warning-cell");
+        }
+        if matches!(cell_kind, HeapCellKind::State) {
+            match row.state.to_ascii_lowercase().as_str() {
+                "used" | "occupied" | "main" | "native" | "inside chunk" => {
+                    label.add_css_class("heap-state-active");
+                }
+                "empty" | "thread" => label.add_css_class("heap-state-idle"),
+                "freed" => label.add_css_class("heap-state-free"),
+                "top" | "mapped" => label.add_css_class("heap-state-special"),
+                _ => {}
+            }
+        }
+    });
+    let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
+    column.set_fixed_width(width);
+    column.set_resizable(true);
+    column.set_expand(expand);
+    column
+}
+
+fn heap_action_group(
+    title: &str,
+    definitions: &[(&str, HeapInspectionAction)],
+    actions: &RefCell<Vec<(gtk::Button, HeapInspectionAction)>>,
+) -> gtk::Box {
+    let group = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let title = gtk::Label::new(Some(title));
+    title.add_css_class("heap-inspector-group-title");
+    title.set_halign(gtk::Align::Start);
+    group.append(&title);
+    let buttons = gtk::FlowBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .homogeneous(false)
+        .min_children_per_line(1)
+        .max_children_per_line(8)
+        .column_spacing(3)
+        .row_spacing(3)
+        .build();
+    buttons.add_css_class("heap-inspector-actions");
+    for (label, action) in definitions {
+        buttons.insert(&heap_action_button(label, *action, actions), -1);
+    }
+    group.append(&buttons);
+    group
+}
+
+fn heap_action_button(
+    label: &str,
+    action: HeapInspectionAction,
+    actions: &RefCell<Vec<(gtk::Button, HeapInspectionAction)>>,
+) -> gtk::Button {
+    let button = gtk::Button::with_label(label);
+    button.add_css_class("heap-inspector-action");
+    // Native heap inspection does not depend on command discovery. Keep every
+    // supported action present and only gate interaction on the inferior state.
+    button.set_visible(true);
+    button.set_sensitive(false);
+    actions.borrow_mut().push((button.clone(), action));
+    button
+}
+
+fn allocator_value_label(class: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some("—"));
+    label.add_css_class(class);
+    label.set_halign(gtk::Align::Fill);
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_wrap_mode(pango::WrapMode::WordChar);
+    enable_stable_text_selection(&label);
+    label
+}
+
+fn append_allocator_detail(
+    parent: &gtk::Box,
+    title: &str,
+    value_class: Option<&str>,
+) -> gtk::Label {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    row.add_css_class("allocator-detail");
+    let key = gtk::Label::new(Some(title));
+    key.add_css_class("allocator-detail-key");
+    key.set_halign(gtk::Align::Start);
+    let value = allocator_value_label("allocator-detail-value");
+    if let Some(value_class) = value_class {
+        value.add_css_class(value_class);
+    }
+    row.append(&key);
+    row.append(&value);
+    parent.append(&row);
+    value
+}
+
+fn append_allocator_metric(metrics: &gtk::FlowBox, title: &str) -> gtk::Label {
+    let cell = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    cell.add_css_class("allocator-metric-cell");
+    let key = gtk::Label::new(Some(title));
+    key.add_css_class("allocator-metric-key");
+    key.set_halign(gtk::Align::Start);
+    let value = allocator_value_label("allocator-metric-value");
+    cell.append(&key);
+    cell.append(&value);
+    metrics.insert(&cell, -1);
+    value
+}
+
+fn set_allocator_value(label: &gtk::Label, value: &str) {
+    if label.text() != value {
+        label.set_text(value);
+        label.set_tooltip_text(Some(value));
+    }
+}
+
+fn set_allocator_class(label: &gtk::Label, class: &str, enabled: bool) {
+    if label.has_css_class(class) == enabled {
+        return;
+    }
+    if enabled {
+        label.add_css_class(class);
+    } else {
+        label.remove_css_class(class);
+    }
 }
 
 fn build_locks_page() -> MiscTablePage {
@@ -911,14 +1587,18 @@ pub(super) fn connect_misc_tab_visibility(
     refresh_handler: &Rc<RefCell<Option<MiscRefreshHandler>>>,
 ) {
     let active = Rc::clone(&view.active);
-    let tracking_enabled = Rc::clone(&view.tracking_enabled);
     let needs_refresh = Rc::clone(&view.needs_refresh);
+    let allocator_probe_fresh = Rc::clone(&view.allocator_probe_fresh);
+    let pages = view.pages.clone();
     let handler = Rc::clone(refresh_handler);
     notebook.connect_switch_page(move |_, _, page| {
         let now_active = page == misc_page;
         active.set(now_active);
-        if now_active {
-            tracking_enabled.set(true);
+        if now_active
+            && pages.visible_child_name().as_deref() == Some("allocator")
+            && !allocator_probe_fresh.get()
+        {
+            needs_refresh.set(true);
         }
         if now_active
             && needs_refresh.get()
@@ -929,13 +1609,22 @@ pub(super) fn connect_misc_tab_visibility(
     });
 
     let active = Rc::clone(&view.active);
+    let allocator_requested = Rc::clone(&view.allocator_requested);
+    let allocator_probe_fresh = Rc::clone(&view.allocator_probe_fresh);
     let locks_requested = Rc::clone(&view.locks_requested);
     let needs_refresh = Rc::clone(&view.needs_refresh);
     let in_flight = Rc::clone(&view.in_flight);
     let handler = Rc::clone(refresh_handler);
     view.pages.connect_visible_child_name_notify(move |pages| {
-        if pages.visible_child_name().as_deref() == Some("locks") && !locks_requested.replace(true)
-        {
+        let newly_requested = match pages.visible_child_name().as_deref() {
+            Some("allocator") => {
+                let first_request = !allocator_requested.replace(true);
+                first_request || !allocator_probe_fresh.get()
+            }
+            Some("locks") => !locks_requested.replace(true),
+            _ => false,
+        };
+        if newly_requested {
             needs_refresh.set(true);
             if active.get()
                 && !in_flight.get()
@@ -948,6 +1637,21 @@ pub(super) fn connect_misc_tab_visibility(
 }
 
 impl MiscView {
+    pub(super) fn set_heap_inspector_sensitive(&self, sensitive: bool, busy: bool) {
+        let sensitive = sensitive && !self.heap_inspector_in_flight.get();
+        for (button, _) in &self.heap_inspector_actions {
+            set_execution_sensitive(button, sensitive && button.is_visible(), busy);
+        }
+        set_execution_sensitive(
+            &self.heap_inspector_expression,
+            sensitive
+                && self.heap_inspector_actions.iter().any(|(button, action)| {
+                    *action == HeapInspectionAction::Chunk && button.is_visible()
+                }),
+            busy,
+        );
+    }
+
     fn show_startup(&self, snapshot: ProcessStartupSnapshot) {
         let argument_count = snapshot.arguments.len();
         let environment_count = snapshot.environment.len();
@@ -995,14 +1699,126 @@ impl MiscView {
 
     fn show_allocator(&self, allocator: AllocatorSnapshot) {
         let region_count = allocator.regions.len();
-        self.allocator_summary.set_text(&format!(
-            "{}  ·  brk heap {}  ·  anonymous writable {}  ·  {region_count} relevant mappings",
-            allocator.implementation,
-            crate::kernel::format_bytes(allocator.heap_bytes),
-            crate::kernel::format_bytes(allocator.anonymous_writable_bytes),
-        ));
+        let basis_class = match allocator.implementation.as_str() {
+            "split allocator bindings" => Some("allocator-detection-error"),
+            "allocator binding unresolved"
+            | "multiple allocator runtimes detected"
+            | "conflicting allocator evidence" => Some("allocator-detection-warning"),
+            _ => None,
+        };
+        set_allocator_class(
+            &self.allocator_basis,
+            "allocator-detection-warning",
+            basis_class == Some("allocator-detection-warning"),
+        );
+        set_allocator_class(
+            &self.allocator_basis,
+            "allocator-detection-error",
+            basis_class == Some("allocator-detection-error"),
+        );
+        set_allocator_value(&self.allocator_implementation, &allocator.implementation);
+        set_allocator_value(
+            &self.allocator_basis,
+            &allocator.detection_basis.to_ascii_uppercase(),
+        );
+
+        let bindings = if allocator.default_bindings.is_empty() {
+            if allocator.probe_complete {
+                String::from("malloc / free could not be resolved by GDB")
+            } else {
+                String::from("Awaiting a paused target")
+            }
+        } else {
+            allocator
+                .default_bindings
+                .iter()
+                .map(|binding| {
+                    let resolution = if binding.indirect {
+                        "  [PLT / GOT · owner unproven]"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{}  0x{:x}  →  {}{}",
+                        binding.symbol, binding.address, binding.owner, resolution
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        set_allocator_value(&self.allocator_bindings, &bindings);
+
+        let runtimes = if allocator.detected_runtimes.is_empty() {
+            String::from("No recognized allocator runtime")
+        } else {
+            allocator.detected_runtimes.join("  ·  ")
+        };
+        set_allocator_value(&self.allocator_runtimes, &runtimes);
+
+        let frontends = if allocator.allocation_frontends.is_empty() {
+            String::from("No language or managed-runtime allocation frontend detected")
+        } else {
+            allocator.allocation_frontends.join("  ·  ")
+        };
+        set_allocator_value(&self.allocator_frontends, &frontends);
+
+        let evidence = if allocator.evidence.is_empty() {
+            String::from("No additional allocator-specific symbols or modules")
+        } else {
+            allocator.evidence.join("  ·  ")
+        };
+        set_allocator_value(&self.allocator_evidence, &evidence);
+        set_allocator_value(
+            &self.allocator_safety,
+            if allocator.probe_dispatch_failures > 0 {
+                "PARTIAL READ-ONLY PROBE  ·  some optional GDB queries were not queued"
+            } else if allocator.probe_complete {
+                "READ ONLY  ·  resolved for this stop without executing allocator code"
+            } else {
+                "MAPPING FALLBACK  ·  allocator code was not executed"
+            },
+        );
+        set_allocator_class(
+            &self.allocator_safety,
+            "allocator-safety-warning",
+            allocator.probe_dispatch_failures > 0,
+        );
+        set_allocator_value(
+            &self.allocator_heap_bytes,
+            &crate::kernel::format_bytes(allocator.heap_bytes),
+        );
+        set_allocator_value(
+            &self.allocator_anonymous_bytes,
+            &crate::kernel::format_bytes(allocator.anonymous_writable_bytes),
+        );
+        set_allocator_value(&self.allocator_mapping_count, &region_count.to_string());
         replace_boxed_store_if_changed(&self.allocator_store, allocator.regions);
         self.allocator_empty.set_visible(region_count == 0);
+    }
+
+    fn show_heap_inspection(&self, snapshot: HeapInspectionSnapshot) {
+        self.heap_inspector_command
+            .set_text(&format!("FGDB  ·  {}", snapshot.command));
+        self.heap_inspector_command
+            .set_tooltip_text(Some(&snapshot.command));
+        self.heap_inspector_status
+            .remove_css_class("heap-inspector-error");
+        self.heap_inspector_status
+            .remove_css_class("heap-inspector-warning");
+        if let Some(diagnostic) = snapshot.diagnostic.as_deref() {
+            self.heap_inspector_status
+                .add_css_class("heap-inspector-error");
+            self.heap_inspector_status.set_text(diagnostic);
+        } else {
+            if snapshot.truncated {
+                self.heap_inspector_status
+                    .add_css_class("heap-inspector-warning");
+            }
+            self.heap_inspector_status.set_text(&snapshot.summary);
+        }
+        let row_count = snapshot.rows.len();
+        replace_boxed_store_if_changed(&self.heap_inspector_store, snapshot.rows);
+        self.heap_inspector_empty.set_visible(row_count == 0);
     }
 
     fn show_locks(&self, locks: LockSnapshot) {
@@ -1120,9 +1936,33 @@ impl MiscView {
         self.auxv_summary.set_text("—");
         self.auxv_store.remove_all();
         self.auxv_empty.set_visible(true);
-        self.allocator_summary.set_text("—");
+        for value in [
+            &self.allocator_implementation,
+            &self.allocator_basis,
+            &self.allocator_bindings,
+            &self.allocator_runtimes,
+            &self.allocator_frontends,
+            &self.allocator_evidence,
+            &self.allocator_safety,
+            &self.allocator_heap_bytes,
+            &self.allocator_anonymous_bytes,
+            &self.allocator_mapping_count,
+        ] {
+            set_allocator_value(value, "—");
+        }
         self.allocator_store.remove_all();
         self.allocator_empty.set_visible(true);
+        self.heap_inspector_in_flight.set(false);
+        self.heap_inspector_command
+            .set_text("No heap structure query has run");
+        self.heap_inspector_status
+            .set_text("Choose a discovered command above while the target is paused");
+        self.heap_inspector_status
+            .remove_css_class("heap-inspector-error");
+        self.heap_inspector_status
+            .remove_css_class("heap-inspector-warning");
+        self.heap_inspector_store.remove_all();
+        self.heap_inspector_empty.set_visible(true);
         self.lock_summary.set_text("—");
         self.lock_store.remove_all();
         self.lock_empty.set_visible(true);
@@ -1139,12 +1979,139 @@ impl MiscView {
 }
 
 impl Ui {
+    pub(crate) fn set_heap_inspection_handler(
+        &self,
+        handler: impl Fn(HeapInspectionRequest) + 'static,
+    ) {
+        self.heap_inspection_handler.replace(Some(Rc::new(handler)));
+        for (button, action) in &self.misc_view.heap_inspector_actions {
+            let action = *action;
+            let expression = self.misc_view.heap_inspector_expression.clone();
+            let callback = Rc::clone(&self.heap_inspection_handler);
+            button.connect_clicked(move |_| {
+                let Some(callback) = callback.borrow().clone() else {
+                    return;
+                };
+                callback(HeapInspectionRequest {
+                    action,
+                    expression: expression.text().trim().to_owned(),
+                });
+            });
+        }
+        let chunk_button = self
+            .misc_view
+            .heap_inspector_actions
+            .iter()
+            .find(|(_, action)| *action == HeapInspectionAction::Chunk)
+            .map(|(button, _)| button.clone());
+        self.misc_view
+            .heap_inspector_expression
+            .connect_activate(move |_| {
+                if let Some(button) = chunk_button.as_ref().filter(|button| button.is_sensitive()) {
+                    button.emit_clicked();
+                }
+            });
+    }
+
+    pub(crate) fn begin_heap_inspection(&self, command: &str) -> Option<u64> {
+        if !self.misc_refresh_allowed() || self.misc_view.heap_inspector_in_flight.replace(true) {
+            return None;
+        }
+        let generation = self.current_stop_refresh_generation();
+        self.misc_view
+            .heap_inspector_command
+            .set_text(&format!("FGDB  ·  {command}"));
+        self.misc_view
+            .heap_inspector_command
+            .set_tooltip_text(Some(command));
+        self.misc_view
+            .heap_inspector_status
+            .set_text("Reading heap structures…");
+        self.misc_view
+            .heap_inspector_status
+            .remove_css_class("heap-inspector-error");
+        self.misc_view
+            .heap_inspector_status
+            .remove_css_class("heap-inspector-warning");
+        self.misc_view.heap_inspector_store.remove_all();
+        self.misc_view.heap_inspector_empty.set_visible(false);
+        self.update_control_sensitivity();
+        Some(generation)
+    }
+
+    pub(crate) fn heap_inspection_is_current(&self, generation: u64) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self.misc_view.heap_inspector_in_flight.get()
+            && !self.inferior_is_running()
+    }
+
+    pub(crate) fn allocator_identity(&self) -> String {
+        self.misc_view.allocator_implementation.text().to_string()
+    }
+
+    pub(crate) fn show_heap_inspection(&self, generation: u64, snapshot: HeapInspectionSnapshot) {
+        if !self.is_stop_refresh_current(generation) {
+            self.finish_heap_inspection();
+            return;
+        }
+        self.misc_view.heap_inspector_in_flight.set(false);
+        self.misc_view.show_heap_inspection(snapshot);
+        self.update_control_sensitivity();
+    }
+
+    pub(crate) fn show_heap_inspection_error(&self, generation: u64, command: &str, error: &str) {
+        if !self.is_stop_refresh_current(generation) {
+            self.finish_heap_inspection();
+            return;
+        }
+        self.misc_view.heap_inspector_in_flight.set(false);
+        self.misc_view
+            .heap_inspector_command
+            .set_text(&format!("FGDB  ·  {command}"));
+        self.misc_view
+            .heap_inspector_status
+            .add_css_class("heap-inspector-error");
+        self.misc_view.heap_inspector_status.set_text(error);
+        self.misc_view.heap_inspector_store.remove_all();
+        self.misc_view.heap_inspector_empty.set_visible(true);
+        self.update_control_sensitivity();
+    }
+
+    fn finish_heap_inspection(&self) {
+        self.misc_view.heap_inspector_in_flight.set(false);
+        self.update_control_sensitivity();
+    }
+
     pub fn set_misc_refresh_handler(&self, handler: impl Fn() + 'static) {
         self.misc_refresh_handler.replace(Some(Rc::new(handler)));
     }
 
     pub fn misc_locks_requested(&self) -> bool {
         self.misc_view.locks_requested.get()
+    }
+
+    pub fn misc_allocator_requested(&self) -> bool {
+        self.misc_view.active.get()
+            && self.misc_view.pages.visible_child_name().as_deref() == Some("allocator")
+    }
+
+    pub(crate) fn cached_allocator_probe(&self) -> Option<crate::misc::AllocatorProbe> {
+        self.misc_view.allocator_probe_cache.borrow().clone()
+    }
+
+    pub(crate) fn cache_allocator_probe(&self, probe: crate::misc::AllocatorProbe) {
+        if probe.complete {
+            self.misc_view.allocator_probe_cache.replace(Some(probe));
+            self.misc_view.allocator_probe_fresh.set(true);
+        }
+    }
+
+    pub(crate) fn invalidate_allocator_probe_cache(&self) {
+        self.misc_view.allocator_probe_cache.replace(None);
+        self.misc_view.allocator_probe_fresh.set(false);
+        if self.misc_view.allocator_requested.get() {
+            self.misc_view.needs_refresh.set(true);
+        }
     }
 
     pub fn begin_misc_refresh(&self) -> Option<u64> {
@@ -1154,7 +2121,6 @@ impl Ui {
         let generation = self.misc_refresh_generation.get().wrapping_add(1);
         self.misc_refresh_generation.set(generation);
         self.misc_view.in_flight.set(true);
-        self.update_control_sensitivity();
         Some(generation)
     }
 
@@ -1164,12 +2130,19 @@ impl Ui {
             return;
         }
         let needs_locks = self.misc_view.locks_requested.get() && snapshot.locks.is_none();
+        if snapshot.allocator.probe_complete {
+            self.misc_view.allocator_probe_fresh.set(true);
+        }
+        let needs_allocator =
+            self.misc_allocator_requested() && !self.misc_view.allocator_probe_fresh.get();
         self.misc_view.in_flight.set(false);
-        self.misc_view.needs_refresh.set(needs_locks);
+        self.misc_view
+            .needs_refresh
+            .set(needs_locks || needs_allocator);
         self.misc_view.clear_core();
         self.misc_view.show_live_snapshot(snapshot);
         self.update_control_sensitivity();
-        if needs_locks {
+        if needs_locks || needs_allocator {
             self.refresh_misc_after_stop();
         }
     }
@@ -1302,7 +2275,7 @@ impl Ui {
     }
 
     pub fn refresh_misc_after_stop(&self) {
-        if self.misc_view.tracking_enabled.get()
+        if self.misc_view.active.get()
             && self.misc_view.needs_refresh.get()
             && self.misc_refresh_allowed()
             && let Some(handler) = self.misc_refresh_handler.borrow().as_ref()
@@ -1315,7 +2288,6 @@ impl Ui {
         self.misc_refresh_generation
             .set(self.misc_refresh_generation.get().wrapping_add(1));
         self.misc_view.needs_refresh.set(true);
-        self.update_control_sensitivity();
     }
 
     pub fn misc_refresh_is_current(&self, generation: u64) -> bool {
@@ -1324,12 +2296,12 @@ impl Ui {
 
     pub fn finish_stale_misc_refresh(&self) {
         self.misc_view.in_flight.set(false);
-        self.update_control_sensitivity();
         self.refresh_misc_after_stop();
     }
 
     pub fn clear_misc_snapshot(&self) {
         self.invalidate_misc_refresh();
+        self.invalidate_allocator_probe_cache();
         self.misc_view.clear();
         self.misc_view.clear_core();
         self.misc_view.call_abi_summary.set_text("—");

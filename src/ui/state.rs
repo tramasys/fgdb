@@ -94,21 +94,26 @@ impl Ui {
             until_button: topbar.until_button,
             until_popover: topbar.until_popover,
             gef_tools_button: topbar.gef_tools_button,
+            gef_tools_content: topbar.gef_tools_content,
             gef_tool_controls: topbar.gef_tool_controls,
             gef_tool_groups: topbar.gef_tool_groups,
             status_label: topbar.status_label,
             status_detail: workspace.status_detail,
-            debug_state_panels: workspace.debug_state_panels,
             inspector_notebook: workspace.inspector_notebook,
             source_notebook,
             source_documents,
+            execution_source_path: Rc::new(RefCell::new(None)),
+            execution_source_line: Rc::new(Cell::new(None)),
             source_theme: theme.clone(),
             source_style_scheme,
             resolved_source_paths: Rc::new(RefCell::new(HashMap::new())),
             call_stack_list: workspace.call_stack_list,
             frame_buttons: Rc::new(RefCell::new(Vec::new())),
+            latest_frames: Rc::new(RefCell::new(Vec::new())),
             selected_frame_level: Rc::new(Cell::new(0)),
             threads_list: workspace.threads_list,
+            thread_buttons: Rc::new(RefCell::new(Vec::new())),
+            latest_threads: Rc::new(RefCell::new(None)),
             modules_list: workspace.modules_list,
             latest_modules: Rc::new(RefCell::new(Vec::new())),
             locals_store: workspace.locals_store,
@@ -121,6 +126,7 @@ impl Ui {
             expression_watches_view: workspace.expression_watches_view,
             expression_watches_empty: workspace.expression_watches_empty,
             expression_watches: Rc::new(RefCell::new(Vec::new())),
+            deferred_variable_object_deletions: Rc::new(RefCell::new(HashSet::new())),
             expression_watch_entry: workspace.expression_watch_entry,
             expression_watch_add_button: workspace.expression_watch_add_button,
             expression_watch_remove_button: workspace.expression_watch_remove_button,
@@ -190,6 +196,7 @@ impl Ui {
             misc_refresh_handler,
             misc_refresh_generation: Rc::new(Cell::new(0)),
             debugger_pid: Rc::new(Cell::new(None)),
+            inferior_pid: Rc::new(Cell::new(None)),
             layout,
             breakpoints,
             previous_registers: Rc::new(RefCell::new(HashMap::new())),
@@ -202,8 +209,11 @@ impl Ui {
             modules_dirty: Rc::new(Cell::new(false)),
             command_pending: Rc::new(Cell::new(false)),
             session_pending: Rc::new(Cell::new(false)),
+            applied_control_state: Rc::new(RefCell::new(None)),
             gef_available: Rc::new(Cell::new(false)),
+            gef_capabilities: Rc::new(RefCell::new(HashSet::new())),
             gef_context_control: Rc::new(Cell::new(GefContextControl::None)),
+            heap_inspection_handler: Rc::new(RefCell::new(None)),
             source_roots: Rc::new(RefCell::new(source::roots(config))),
             current_session: Rc::new(RefCell::new(initial_session)),
             session_handler: Rc::new(RefCell::new(None)),
@@ -262,6 +272,14 @@ impl Ui {
 
     pub fn debugger_pid(&self) -> Option<u32> {
         self.debugger_pid.get()
+    }
+
+    pub fn set_inferior_pid(&self, pid: Option<u32>) {
+        self.inferior_pid.set(pid);
+    }
+
+    pub fn inferior_pid(&self) -> Option<u32> {
+        self.inferior_pid.get()
     }
 
     pub fn set_target_endian(&self, endian: Option<TargetEndian>) {
@@ -367,6 +385,14 @@ impl Ui {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
+            if ui.inferior_running.get()
+                || ui.command_pending.get()
+                || ui.session_pending.get()
+                || ui.native_until_active.get()
+                || !ui.debugger_ready.get()
+            {
+                return;
+            }
             let (command, detail) = {
                 let session = ui.current_session.borrow();
                 if ui.inferior_started.get() {
@@ -393,7 +419,12 @@ impl Ui {
             };
             if ui.native_until_active() {
                 ui.cancel_native_until();
-            } else {
+            } else if ui.debugger_ready.get()
+                && ui.inferior_started.get()
+                && ui.inferior_running.get()
+                && !ui.command_pending.get()
+                && !ui.session_pending.get()
+            {
                 issue_execution_command(
                     &ui,
                     &client_for_pause,
@@ -464,14 +495,24 @@ impl Ui {
         let symbol_client = Rc::clone(client);
         let weak_ui = Rc::downgrade(self);
         self.load_symbols_button.connect_clicked(move |_| {
+            let Some(ui) = weak_ui.upgrade() else {
+                return;
+            };
+            if !ui.debugger_ready.get()
+                || !ui.inferior_started.get()
+                || ui.inferior_running.get()
+                || ui.command_pending.get()
+                || ui.session_pending.get()
+            {
+                return;
+            }
             let command = format!(
                 "-interpreter-exec console {}",
                 crate::debugger::quote("sharedlibrary")
             );
             let weak_ui_for_response = weak_ui.clone();
-            if let Some(ui) = weak_ui.upgrade() {
-                ui.set_status("Loading symbols", "Loading shared-library symbols…", None);
-            }
+            ui.set_status("Loading symbols", "Loading shared-library symbols…", None);
+            drop(ui);
             if symbol_client
                 .request(&command, move |_, record| {
                     if let Some(ui) = weak_ui_for_response.upgrade() {
@@ -553,6 +594,13 @@ impl Ui {
         let step_instruction = self.step_instruction_button.clone();
         let finish = self.finish_button.clone();
         let terminal_toggle = self.terminal_toggle_button.clone();
+        let debugger_ready = Rc::clone(&self.debugger_ready);
+        let inferior_started = Rc::clone(&self.inferior_started);
+        let inferior_running = Rc::clone(&self.inferior_running);
+        let command_pending = Rc::clone(&self.command_pending);
+        let session_pending = Rc::clone(&self.session_pending);
+        let native_until_active = Rc::clone(&self.native_until_active);
+        let current_session = Rc::clone(&self.current_session);
         keys.connect_key_pressed(move |_, key, _, state| {
             let control = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
@@ -575,7 +623,39 @@ impl Ui {
                 (gtk::gdk::Key::F11, false, true) => Some(&finish),
                 _ => None,
             };
-            let Some(button) = button.filter(|button| button.is_sensitive()) else {
+            let can_move = debugger_ready.get()
+                && inferior_started.get()
+                && !inferior_running.get()
+                && !command_pending.get()
+                && !session_pending.get()
+                && !native_until_active.get()
+                && current_session
+                    .borrow()
+                    .as_ref()
+                    .is_none_or(DebugSession::supports_execution);
+            let can_run = debugger_ready.get()
+                && !inferior_running.get()
+                && !command_pending.get()
+                && !session_pending.get()
+                && !native_until_active.get()
+                && current_session.borrow().as_ref().is_none_or(|session| {
+                    if inferior_started.get() {
+                        session.supports_execution()
+                    } else {
+                        session.can_start()
+                    }
+                });
+            let can_pause = debugger_ready.get()
+                && inferior_started.get()
+                && !session_pending.get()
+                && (native_until_active.get()
+                    || (inferior_running.get() && !command_pending.get()));
+            let allowed = match key {
+                gtk::gdk::Key::F5 => can_run,
+                gtk::gdk::Key::F6 => can_pause,
+                _ => can_move,
+            };
+            let Some(button) = button.filter(|_| allowed) else {
                 return gtk::glib::Propagation::Proceed;
             };
             button.emit_clicked();
@@ -589,7 +669,9 @@ impl Ui {
     }
 
     pub fn set_controls_ready(&self, ready: bool) {
-        self.debugger_ready.set(ready);
+        if self.debugger_ready.replace(ready) == ready {
+            return;
+        }
         if !ready {
             self.inferior_running.set(false);
             self.command_pending.set(false);
@@ -600,7 +682,9 @@ impl Ui {
     }
 
     pub fn set_controls_running(&self, running: bool) {
-        self.inferior_running.set(running);
+        if self.inferior_running.replace(running) == running {
+            return;
+        }
         self.update_control_sensitivity();
     }
 
@@ -625,13 +709,30 @@ impl Ui {
                 .is_none_or(DebugSession::supports_execution)
     }
 
+    pub(crate) fn stopped_inspection_available(&self) -> bool {
+        self.debugger_ready.get()
+            && self.inferior_started.get()
+            && !self.inferior_running.get()
+            && !self.command_pending.get()
+            && !self.session_pending.get()
+            && !self.native_until_active.get()
+    }
+
+    pub(crate) fn disassembly_commands_available(&self) -> bool {
+        self.stopped_inspection_available() && !self.disassembly_controls.loading.get()
+    }
+
     pub fn set_command_pending(&self, pending: bool) {
-        self.command_pending.set(pending);
+        if self.command_pending.replace(pending) == pending {
+            return;
+        }
         self.update_control_sensitivity();
     }
 
     pub fn set_session_pending(&self, pending: bool) {
-        self.session_pending.set(pending);
+        if self.session_pending.replace(pending) == pending {
+            return;
+        }
         self.update_control_sensitivity();
     }
 
@@ -645,6 +746,7 @@ impl Ui {
 
     fn set_gef_capabilities(&self, gef_available: bool, capabilities: &HashSet<&'static str>) {
         self.gef_available.set(gef_available);
+        self.gef_capabilities.replace(capabilities.clone());
         let context_control = if !gef_available {
             GefContextControl::None
         } else if capabilities.contains("context off") && capabilities.contains("context on") {
@@ -681,18 +783,15 @@ impl Ui {
         self.update_control_sensitivity();
     }
 
-    pub fn set_debug_state_stale(&self, stale: bool) {
-        for panel in &self.debug_state_panels {
-            if stale {
-                panel.add_css_class("debug-state-stale");
-            } else {
-                panel.remove_css_class("debug-state-stale");
-            }
-        }
-    }
+    pub fn set_debug_state_stale(&self, _stale: bool) {}
 
     pub fn set_inferior_started(&self, started: bool) {
-        self.inferior_started.set(started);
+        if !started {
+            self.inferior_pid.set(None);
+        }
+        if self.inferior_started.replace(started) == started {
+            return;
+        }
         self.update_control_sensitivity();
         self.run_button
             .set_label(if started { "Continue" } else { "Run" });
@@ -704,6 +803,7 @@ impl Ui {
         let running = self.inferior_running.get();
         let until_active = self.native_until_active.get();
         let pending = self.command_pending.get() || self.session_pending.get() || until_active;
+        let busy = running || pending;
         let session = self.current_session.borrow();
         let supports_execution = session
             .as_ref()
@@ -712,125 +812,179 @@ impl Ui {
         let can_inspect = ready && started && !running && !pending;
         let can_move = can_inspect && supports_execution;
 
-        self.run_button.set_sensitive(
-            ready
+        let can_manage_watches = ready && !running && !pending;
+        let expression = self.expression_watch_entry.text();
+        let can_replace_session =
+            !started || matches!(session.as_ref(), Some(DebugSession::CoreDump { .. }));
+        let breakpoints = self.breakpoints.borrow();
+        let can_edit_stop_points = ready && !running && !pending;
+        let state = ControlState {
+            busy,
+            run: ready
                 && !running
                 && !pending
                 && ((started && supports_execution) || (!started && can_start)),
-        );
-        self.pause_button.set_sensitive(
-            ready
+            pause: ready
                 && started
                 && !self.session_pending.get()
                 && (until_active || (running && !self.command_pending.get())),
-        );
-        self.next_button.set_sensitive(can_move);
-        self.step_button.set_sensitive(can_move);
-        self.next_instruction_button.set_sensitive(can_move);
-        self.step_instruction_button.set_sensitive(can_move);
-        self.finish_button.set_sensitive(can_move);
-        self.until_button.set_sensitive(can_move);
-        self.disassembly_controls
-            .root
-            .set_sensitive(can_inspect && !self.disassembly_controls.loading.get());
-        self.disassembly_controls
-            .syntax
-            .set_sensitive(self.disassembly_controls.syntax_applicable.get());
-        self.gef_tools_button
-            .set_sensitive(self.gef_available.get() && ready && !running && !pending);
-        self.locals_view.set_sensitive(can_inspect);
-        self.locals_edit_button.set_sensitive(
-            can_inspect
+            move_target: can_move,
+            inspect: can_inspect,
+            syntax: self.disassembly_controls.syntax_applicable.get(),
+            gef_tools: self.gef_available.get() && ready && !running && !pending,
+            heap_inspector_in_flight: self.misc_view.heap_inspector_in_flight.get(),
+            heap_action_visibility: self
+                .misc_view
+                .heap_inspector_actions
+                .iter()
+                .enumerate()
+                .fold(0_u64, |mask, (index, (button, _))| {
+                    mask | (u64::from(button.is_visible()) << index.min(63))
+                }),
+            edit_local: can_inspect
                 && variable_at(&self.locals_selection, self.locals_selection.selected()).is_some(),
-        );
-        self.expression_watches_view.set_sensitive(can_inspect);
-        let can_manage_watches = ready && !running && !pending;
-        let expression = self.expression_watch_entry.text();
-        self.expression_watch_entry
-            .set_sensitive(can_manage_watches);
-        self.expression_watch_add_button.set_sensitive(
-            can_manage_watches
+            manage_watches: can_manage_watches,
+            add_watch: can_manage_watches
+                && self.expression_watches.borrow().len() < MAX_EXPRESSION_WATCHES
                 && !expression.trim().is_empty()
                 && !self
                     .expression_watches
                     .borrow()
                     .iter()
                     .any(|existing| existing == expression.trim()),
-        );
-        self.expression_watch_remove_button.set_sensitive(
-            can_manage_watches
+            remove_watch: can_manage_watches
                 && root_variable_at(
                     &self.expression_watches_selection,
                     self.expression_watches_selection.selected(),
                 )
                 .is_some(),
-        );
-        for group in &self.register_groups {
-            group.view.set_sensitive(can_inspect);
-        }
-        self.memory_add_button
-            .set_sensitive(can_inspect && !self.memory_address_entry.text().trim().is_empty());
-        self.watchpoint_add_button.set_sensitive(can_inspect);
-        self.load_symbols_button.set_sensitive(can_inspect);
-        self.session_button.set_sensitive(ready && !pending);
-        let can_replace_session =
-            !started || matches!(session.as_ref(), Some(DebugSession::CoreDump { .. }));
-        self.new_session_button
-            .set_sensitive(ready && !pending && !running && can_replace_session);
-        self.restart_session_button.set_sensitive(
-            ready
+            add_memory: can_inspect && !self.memory_address_entry.text().trim().is_empty(),
+            session: ready && !pending,
+            new_session: ready && !pending && !running && can_replace_session,
+            restart_session: ready
                 && started
                 && !running
                 && !pending
                 && session.as_ref().is_some_and(DebugSession::supports_restart),
-        );
-        self.kill_session_button.set_sensitive(
-            ready
+            kill_session: ready
                 && started
                 && !running
                 && !pending
                 && session.as_ref().is_some_and(DebugSession::supports_kill),
-        );
-        self.detach_session_button.set_sensitive(
-            ready
+            detach_session: ready
                 && started
                 && !running
                 && !pending
                 && session.as_ref().is_some_and(DebugSession::supports_detach),
-        );
-        let breakpoints = self.breakpoints.borrow();
-        let can_edit_stop_points = ready && !running && !pending;
-        self.add_breakpoint_button
-            .set_sensitive(can_edit_stop_points);
-        for (button, _, _) in &self.signal_buttons {
-            button.set_sensitive(can_edit_stop_points);
-        }
-        for (button, _) in &self.event_catchpoint_buttons {
-            button.set_sensitive(can_edit_stop_points);
-        }
-        self.signal_entry.set_sensitive(can_edit_stop_points);
-        self.signal_add_button.set_sensitive(
-            can_edit_stop_points && normalized_signal_name(&self.signal_entry.text()).is_some(),
-        );
-        self.delete_all_signal_catchpoints_button.set_sensitive(
-            can_edit_stop_points && breakpoints.iter().any(Breakpoint::is_signal_catchpoint),
-        );
-        self.delete_all_catchpoints_button.set_sensitive(
-            can_edit_stop_points
+            edit_stop_points: can_edit_stop_points,
+            add_signal: can_edit_stop_points
+                && normalized_signal_name(&self.signal_entry.text()).is_some(),
+            delete_signal_catchpoints: can_edit_stop_points
+                && breakpoints.iter().any(Breakpoint::is_signal_catchpoint),
+            delete_event_catchpoints: can_edit_stop_points
                 && breakpoints.iter().any(|breakpoint| {
                     EventCatchpoint::ALL
                         .iter()
                         .any(|(event, _, _)| event.matches(breakpoint))
                 }),
-        );
-        self.delete_all_breakpoints_button.set_sensitive(
-            can_edit_stop_points
+            delete_breakpoints: can_edit_stop_points
                 && breakpoints
                     .iter()
                     .any(|breakpoint| !breakpoint.is_watchpoint() && !breakpoint.is_catchpoint()),
+            delete_watchpoints: can_edit_stop_points
+                && breakpoints.iter().any(Breakpoint::is_watchpoint),
+        };
+        drop(breakpoints);
+        drop(session);
+        if self.applied_control_state.borrow().as_ref() == Some(&state) {
+            return;
+        }
+        self.applied_control_state.replace(Some(state));
+
+        set_header_execution_sensitive(&self.run_button, state.run, state.busy);
+        set_header_execution_sensitive(&self.pause_button, state.pause, state.busy);
+        for button in [
+            &self.next_button,
+            &self.step_button,
+            &self.next_instruction_button,
+            &self.step_instruction_button,
+            &self.finish_button,
+        ] {
+            set_header_execution_sensitive(button, state.move_target, state.busy);
+        }
+        set_header_execution_sensitive(&self.until_button, state.move_target, state.busy);
+        self.disassembly_controls.syntax.set_sensitive(state.syntax);
+        set_header_execution_sensitive(&self.gef_tools_button, state.gef_tools, state.busy);
+        self.gef_tools_content.set_sensitive(state.gef_tools);
+        self.misc_view
+            .set_heap_inspector_sensitive(state.inspect, state.busy);
+        set_execution_sensitive(&self.locals_edit_button, state.edit_local, state.busy);
+        set_execution_sensitive(
+            &self.expression_watch_entry,
+            state.manage_watches,
+            state.busy,
         );
-        self.delete_all_watchpoints_button.set_sensitive(
-            can_edit_stop_points && breakpoints.iter().any(Breakpoint::is_watchpoint),
+        set_execution_sensitive(
+            &self.expression_watch_add_button,
+            state.add_watch,
+            state.busy,
+        );
+        set_execution_sensitive(
+            &self.expression_watch_remove_button,
+            state.remove_watch,
+            state.busy,
+        );
+        set_execution_sensitive(&self.memory_add_button, state.add_memory, state.busy);
+        set_execution_sensitive(&self.watchpoint_add_button, state.inspect, state.busy);
+        set_header_execution_sensitive(&self.load_symbols_button, state.inspect, state.busy);
+        // Keep the top-level session affordance visually stable during a
+        // short execution transition. Its mutating actions remain genuinely
+        // insensitive inside the popover until the debugger is ready again.
+        set_header_execution_sensitive(&self.session_button, state.session, state.busy);
+        set_execution_sensitive(&self.new_session_button, state.new_session, state.busy);
+        set_execution_sensitive(
+            &self.restart_session_button,
+            state.restart_session,
+            state.busy,
+        );
+        set_execution_sensitive(&self.kill_session_button, state.kill_session, state.busy);
+        set_execution_sensitive(
+            &self.detach_session_button,
+            state.detach_session,
+            state.busy,
+        );
+        set_execution_sensitive(
+            &self.add_breakpoint_button,
+            state.edit_stop_points,
+            state.busy,
+        );
+        for (button, _, _) in &self.signal_buttons {
+            set_execution_sensitive(button, state.edit_stop_points, state.busy);
+        }
+        for (button, _) in &self.event_catchpoint_buttons {
+            set_execution_sensitive(button, state.edit_stop_points, state.busy);
+        }
+        set_execution_sensitive(&self.signal_entry, state.edit_stop_points, state.busy);
+        set_execution_sensitive(&self.signal_add_button, state.add_signal, state.busy);
+        set_execution_sensitive(
+            &self.delete_all_signal_catchpoints_button,
+            state.delete_signal_catchpoints,
+            state.busy,
+        );
+        set_execution_sensitive(
+            &self.delete_all_catchpoints_button,
+            state.delete_event_catchpoints,
+            state.busy,
+        );
+        set_execution_sensitive(
+            &self.delete_all_breakpoints_button,
+            state.delete_breakpoints,
+            state.busy,
+        );
+        set_execution_sensitive(
+            &self.delete_all_watchpoints_button,
+            state.delete_watchpoints,
+            state.busy,
         );
     }
 
@@ -881,7 +1035,9 @@ impl Ui {
     }
 
     pub(crate) fn set_native_until_active(&self, active: bool) {
-        self.native_until_active.set(active);
+        if self.native_until_active.replace(active) == active {
+            return;
+        }
         self.update_control_sensitivity();
     }
 

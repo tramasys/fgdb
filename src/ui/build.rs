@@ -88,6 +88,7 @@ pub(super) fn build_topbar(
     topbar.pack_start(&leading);
 
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    controls.add_css_class("execution-controls");
     let run = control_button("Run", "Start or continue the inferior · F5", true);
     let pause = control_button("Pause", "Interrupt the inferior · F6", false);
     let next = control_button("Next", "Step over the current source line · F10", false);
@@ -192,8 +193,8 @@ pub(super) fn build_topbar(
     status.add_css_class("status-readout");
     let trailing = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     trailing.add_css_class("titlebar-actions");
-    trailing.append(&controls);
     trailing.append(&status);
+    trailing.append(&controls);
     let window_controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     window_controls.add_css_class("window-controls");
 
@@ -244,6 +245,7 @@ pub(super) fn build_topbar(
         until_button: until,
         until_popover,
         gef_tools_button: gef_tools.button,
+        gef_tools_content: gef_tools.content,
         gef_tool_controls: gef_tools.controls,
         gef_tool_groups: gef_tools.groups,
         until_actions,
@@ -353,21 +355,6 @@ pub(super) fn build_gef_tools_menu(
                 ("Runtime link map", "link-map", "link-map", "link-map"),
             ][..],
         ),
-        (
-            "Heap",
-            &[
-                (
-                    "Compact bins",
-                    "heap bins-simple",
-                    "heap bins-simple",
-                    "heap bins-simple",
-                ),
-                ("Heap arenas", "heap arenas", "heap arenas", "heap arenas"),
-                ("Heap chunks", "heap chunks", "heap chunks", "heap chunks"),
-                ("Top chunk", "heap top", "heap top", "heap top"),
-                ("Parsed heap", "heap parse", "heap parse", "heap parse"),
-            ][..],
-        ),
     ] {
         let capabilities = commands
             .iter()
@@ -471,6 +458,7 @@ pub(super) fn build_gef_tools_menu(
     button.set_sensitive(false);
     GefToolsMenu {
         button,
+        content: menu,
         controls,
         groups,
     }
@@ -628,14 +616,11 @@ pub(super) fn build_workspace(
             0.34,
         ),
     ];
-    let mut debug_state_panels = inspector.stale_panels.clone();
-    debug_state_panels.push(left_sidebar.root.clone().upcast());
     Workspace {
         root: workspace,
         layout_panes,
         terminal_panel,
         status_detail: inspector.status_detail,
-        debug_state_panels,
         inspector_notebook: inspector.notebook.clone(),
         call_stack_list: left_sidebar.call_stack_list,
         threads_list: left_sidebar.threads_list,
@@ -834,7 +819,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     let locals_hint = gtk::Label::new(Some("Click name to expand"));
     locals_hint.add_css_class("muted");
     locals_hint.set_tooltip_text(Some(
-        "Click an expandable name or its chevron to open it. Double-click a scalar to edit; the Edit button works for every selected value.",
+        "Click an expandable name or its chevron to open it. Double-click a scalar to edit. The Edit button works for every selected value.",
     ));
     locals_header.append(&locals_hint);
     let locals_edit_button = gtk::Button::with_label("Edit");
@@ -915,7 +900,6 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     disassembly_browser.append(&disassembly_navigation);
     disassembly_browser.append(&disassembly_actions);
     let disassembly_controls = DisassemblyControls {
-        root: disassembly_browser.clone(),
         back: disassembly_back,
         forward: disassembly_forward,
         previous_function: disassembly_previous,
@@ -1304,7 +1288,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         .hexpand(true)
         .build();
     signal_entry.set_tooltip_text(Some(
-        "Signal name or number; names without the SIG prefix are normalized",
+        "Signal name or number. Names without the SIG prefix are normalized",
     ));
     let signal_add_button = gtk::Button::with_label("Toggle catch");
     signal_add_button.add_css_class("inline-action");
@@ -1348,16 +1332,6 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         &misc_view,
         bindings.misc.refresh_handler,
     );
-    let stale_panels = vec![
-        state.clone().upcast(),
-        expression_watches_page.clone().upcast(),
-        registers_page.clone().upcast(),
-        stack_page.clone().upcast(),
-        memory_page.clone().upcast(),
-        signals_page.clone().upcast(),
-        kernel_view.root.clone().upcast(),
-        misc_view.root.clone().upcast(),
-    ];
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_size_request(0, 0);
     root.set_vexpand(true);
@@ -1369,7 +1343,6 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         compact_tabs,
         context_split: context,
         status_detail: detail,
-        stale_panels,
         locals_store,
         locals_selection,
         locals_view,
