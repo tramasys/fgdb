@@ -1179,6 +1179,7 @@ mod float_tests {
             name: String::from("platform_long"),
             value: String::from("1"),
             type_name: Some(String::from("long")),
+            argument: false,
             varobj: None,
             num_children: 0,
             has_more: false,

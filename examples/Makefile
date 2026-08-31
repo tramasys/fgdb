@@ -24,7 +24,8 @@ C_TARGETS := \
 	$(TARGET_DIR)/c-process-target
 CXX_TARGETS := \
 	$(TARGET_DIR)/cpp-debug-target \
-	$(TARGET_DIR)/cpp-object-target
+	$(TARGET_DIR)/cpp-object-target \
+	$(TARGET_DIR)/cpp-variable-viewer-target
 RUST_TARGETS := $(TARGET_DIR)/rust-debug-target
 OPTIMIZED_TARGETS := \
 	$(TARGET_DIR)/cpp-debug-target-o2 \
@@ -76,6 +77,9 @@ $(TARGET_DIR)/cpp-debug-target: cpp_debug_target.cpp | $(TARGET_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LDFLAGS) -pthread -o $@
 
 $(TARGET_DIR)/cpp-object-target: cpp_object_target.cpp | $(TARGET_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LDFLAGS) -o $@
+
+$(TARGET_DIR)/cpp-variable-viewer-target: cpp_variable_viewer_target.cpp | $(TARGET_DIR)
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LDFLAGS) -o $@
 
 $(TARGET_DIR)/rust-debug-target: rust_debug_target.rs | $(TARGET_DIR)

@@ -28,6 +28,8 @@ impl Ui {
         let source_documents = Rc::new(RefCell::new(Vec::new()));
         let breakpoints = Rc::new(RefCell::new(Vec::new()));
         let variable_children_handler = Rc::new(RefCell::new(None));
+        let variable_viewer_handler = Rc::new(RefCell::new(None));
+        let variable_viewers = Rc::new(VariableViewerRegistry::with_builtins());
         let kernel_refresh_handler = Rc::new(RefCell::new(None));
         let misc_refresh_handler = Rc::new(RefCell::new(None));
         let kernel_section_handler = Rc::new(RefCell::new(None));
@@ -36,6 +38,8 @@ impl Ui {
         let target_pointer_bits_known = Rc::new(Cell::new(false));
         let inspector_bindings = InspectorBindings {
             variable_children_handler: &variable_children_handler,
+            variable_viewer_handler: &variable_viewer_handler,
+            variable_viewers: &variable_viewers,
             target_pointer_bits: &target_pointer_bits,
             kernel: KernelViewBindings {
                 refresh_handler: &kernel_refresh_handler,
@@ -180,6 +184,7 @@ impl Ui {
             locals_selection: workspace.locals_selection,
             locals_view: workspace.locals_view,
             locals_empty: workspace.locals_empty,
+            locals_summary: workspace.locals_summary,
             locals_edit_button: workspace.locals_edit_button,
             expression_watches_store: workspace.expression_watches_store,
             expression_watches_selection: workspace.expression_watches_selection,
@@ -302,6 +307,8 @@ impl Ui {
             float_assignment_handler: Rc::new(RefCell::new(None)),
             string_assignment_handler: Rc::new(RefCell::new(None)),
             variable_children_handler,
+            variable_viewer_handler,
+            variable_viewer_windows: Rc::new(RefCell::new(Vec::new())),
             expression_watch_refresh_handler: Rc::new(RefCell::new(None)),
             vector_assignment_handler: Rc::new(RefCell::new(None)),
             breakpoint_insert_handler: Rc::new(RefCell::new(None)),
@@ -1521,6 +1528,13 @@ impl Ui {
     pub fn set_variable_children_handler(&self, handler: impl Fn(Variable, usize) + 'static) {
         self.variable_children_handler
             .replace(Some(Rc::new(handler)));
+    }
+
+    pub(crate) fn set_variable_viewer_handler(
+        &self,
+        handler: impl Fn(VariableViewerRequest) + 'static,
+    ) {
+        self.variable_viewer_handler.replace(Some(Rc::new(handler)));
     }
 
     pub fn set_expression_watch_refresh_handler(&self, handler: impl Fn() + 'static) {

@@ -4,6 +4,7 @@ use std::{
     fmt::Write as _,
     path::PathBuf,
     rc::{Rc, Weak},
+    sync::atomic::{AtomicU64, Ordering},
 };
 
 use gtk::prelude::*;
@@ -26,7 +27,8 @@ use crate::{
         HeapInspectionAction, HeapInspectionRequest, InferiorAction, InferiorActionPending,
         SchedulerLockingMode, SessionAction, SourceDiscoveryRequest, ThreadAction,
         ThreadActionPending, ThreadBacktrace, ThreadComparison, ThreadComparisonRow, Ui,
-        UntilAction, WatchpointAccess,
+        UntilAction, VariableViewerPlan, VariableViewerRequest, VariableViewerRow,
+        VariableViewerSession, WatchpointAccess, compact_variable_type,
     },
 };
 
@@ -37,6 +39,12 @@ const STACK_WORD_COUNT: usize = 32;
 const POINTER_STRING_PREVIEW_ELEMENTS: usize = 256;
 const POINTER_ENRICHMENT_CONCURRENCY: usize = 4;
 const MAX_AUTOMATIC_VARIABLE_OBJECTS: usize = 256;
+static NEXT_VARIABLE_OBJECT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_variable_object_name() -> String {
+    let id = NEXT_VARIABLE_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
+    format!("fgdb_var_{}_{id}", std::process::id())
+}
 
 struct RegisterRefresh {
     ui: Weak<Ui>,
@@ -73,6 +81,7 @@ struct VariableRefresh {
     target: VariableRefreshTarget,
     variables: Vec<Variable>,
     fallbacks: Vec<Variable>,
+    needs_update: Vec<bool>,
     next_index: usize,
     created: usize,
     created_varobjs: HashSet<String>,
@@ -102,6 +111,7 @@ mod symbols;
 mod threads;
 mod type_metadata;
 mod until;
+mod variable_viewers;
 mod watches;
 
 pub use build::build;
@@ -124,6 +134,7 @@ use symbols::*;
 use threads::*;
 use type_metadata::*;
 use until::*;
+use variable_viewers::*;
 use watches::*;
 
 #[cfg(test)]

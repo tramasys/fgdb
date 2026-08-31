@@ -29,6 +29,7 @@ cargo run -- target/debug-fixtures/c-page-target
 | `c-misc-core-target` | `c_misc_core_checkpoint` | Misc → Core dump with an intentional SIGSEGV, nested crash frames, heap state and anonymous mappings |
 | `cpp-debug-target` | `debugger_checkpoint` | Integer families, STL containers, structs, pointer cycles, watchpoints, threads, signals and exceptions |
 | `cpp-object-target` | `cpp_objects_checkpoint` | Virtual dispatch, multiple inheritance, templates, smart pointers, variants, lambdas and nested exceptions |
+| `cpp-variable-viewer-target` | `variable_viewer_checkpoint` | Locals/arguments context actions, native and standard arrays, STL sequences, null-terminated lists and cyclic lists |
 | `rust-debug-target` | `rust_debugger_checkpoint` | Rust enums, `Option`, `Result`, collections, trait objects, `Rc` cycles, primitives, Unicode and a named worker thread |
 | `cpp-debug-target-o2` | `debugger_checkpoint` | Optimized C++ stepping, inlined/optimized-out values and less direct source mappings |
 | `rust-debug-target-o2` | `rust_debugger_checkpoint` | Optimized Rust DWARF, monomorphized frames and optimized-out values |
@@ -56,6 +57,29 @@ Set `break c_page_checkpoint`, then continue through all three hits:
 At each stop, inspect **Kernel → Changes** for deltas and **Kernel → Maps** for RSS/PSS, NUMA placement, VM flags and pagemap samples. The fixture resets its own soft-dirty tracking through `/proc/self/clear_refs`. Failure to do so is intentionally non-fatal on restricted systems.
 
 The default targets use `-O0`, full debug information, frame pointers and disabled C/C++ inlining. The `-o2` variants deliberately retain optimization. Override `CC`, `CXX`, `RUSTC`, or the corresponding flags to compare toolchains and DWARF versions.
+
+## Variable viewer fixture
+
+Launch the focused locals/arguments fixture with:
+
+```bash
+cargo run -- target/debug-fixtures/cpp-variable-viewer-target
+```
+
+In the terminal, stop at the viewer checkpoint:
+
+```gdb
+break variable_viewer_checkpoint
+run
+```
+
+Right-click these entries in Locals / Arguments:
+
+- `native_values` tests the direct native-array viewer.
+- `fixed_values` tests transparent `std::array` wrapper handling.
+- `words` tests STL pretty-printer integration and the missing-printer fallback.
+- `linear_head` tests a four-node list ending in null.
+- `cycle_head` tests a three-node cycle and cycle detection.
 
 ## Thread-local storage fixture
 

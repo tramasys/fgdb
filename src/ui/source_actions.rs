@@ -302,6 +302,15 @@ impl Ui {
             .collect()
     }
 
+    pub(crate) fn defer_variable_object_deletions(
+        &self,
+        variable_objects: impl IntoIterator<Item = String>,
+    ) {
+        self.deferred_variable_object_deletions
+            .borrow_mut()
+            .extend(variable_objects);
+    }
+
     pub(super) fn connect_open_source(self: &Rc<Self>) {
         let weak_ui = Rc::downgrade(self);
         self.open_source_button.connect_clicked(move |_| {

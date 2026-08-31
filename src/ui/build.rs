@@ -669,6 +669,7 @@ pub(super) fn build_workspace(
         locals_selection: inspector.locals_selection,
         locals_view: inspector.locals_view,
         locals_empty: inspector.locals_empty,
+        locals_summary: inspector.locals_summary,
         locals_edit_button: inspector.locals_edit_button,
         expression_watches_store: inspector.expression_watches_store,
         expression_watches_selection: inspector.expression_watches_selection,
@@ -823,14 +824,27 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     detail.set_halign(gtk::Align::Start);
     detail.set_ellipsize(pango::EllipsizeMode::Middle);
     detail.set_single_line_mode(true);
+    let locals_filter = source_search_entry("Filter name, type, or value");
+    locals_filter.add_css_class("locals-filter-entry");
+    locals_filter.set_hexpand(true);
+    let locals_changed = gtk::ToggleButton::with_label("Changed");
+    locals_changed.add_css_class("inline-action");
+    locals_changed.add_css_class("locals-changed-filter");
+    locals_changed.set_tooltip_text(Some("Show only values changed since the previous stop"));
     let (locals_view, locals_store, locals_selection) = build_locals_view(
         bindings.variable_children_handler,
+        bindings.variable_viewer_handler,
+        bindings.variable_viewers,
         bindings.target_pointer_bits,
+        Some((&locals_filter, &locals_changed)),
     );
     let (expression_watches_view, expression_watches_store, expression_watches_selection) =
         build_locals_view(
             bindings.variable_children_handler,
+            bindings.variable_viewer_handler,
+            bindings.variable_viewers,
             bindings.target_pointer_bits,
+            None,
         );
     let locals_empty = empty_label("Values appear when the target is paused");
     let locals_scrolled = gtk::ScrolledWindow::builder()
@@ -855,23 +869,30 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     context.set_shrink_start_child(false);
     let locals_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
     locals_panel.set_vexpand(true);
-    let locals_header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    locals_panel.add_css_class("locals-panel");
+    let locals_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     locals_header.add_css_class("subpanel-header");
-    let locals_title = section_title("LOCALS / ARGUMENTS");
+    locals_header.add_css_class("locals-header");
+    let locals_title = section_title("LOCALS AND ARGUMENTS");
     locals_title.set_hexpand(true);
     locals_header.append(&locals_title);
-    let locals_hint = gtk::Label::new(Some("Click name to expand"));
-    locals_hint.add_css_class("muted");
-    locals_hint.set_tooltip_text(Some(
-        "Click an expandable name or its chevron to open it. Double-click a scalar to edit. The Edit button works for every selected value.",
+    let locals_summary = gtk::Label::new(Some("No values"));
+    locals_summary.add_css_class("locals-summary");
+    locals_summary.set_tooltip_text(Some(
+        "Arguments and locals in the selected stack frame. Changed values are marked after each stop.",
     ));
-    locals_header.append(&locals_hint);
+    locals_header.append(&locals_summary);
     let locals_edit_button = gtk::Button::with_label("Edit");
     locals_edit_button.add_css_class("inline-action");
     locals_edit_button.set_tooltip_text(Some("Edit the selected value"));
     locals_edit_button.set_sensitive(false);
     locals_header.append(&locals_edit_button);
     locals_panel.append(&locals_header);
+    let locals_tools = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    locals_tools.add_css_class("locals-toolbar");
+    locals_tools.append(&locals_filter);
+    locals_tools.append(&locals_changed);
+    locals_panel.append(&locals_tools);
     locals_panel.append(&locals_empty);
     locals_panel.append(&locals_scrolled);
     let instructions_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1462,6 +1483,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         locals_selection,
         locals_view,
         locals_empty,
+        locals_summary,
         locals_edit_button,
         expression_watches_store,
         expression_watches_selection,

@@ -25,6 +25,7 @@ pub struct Variable {
     pub name: String,
     pub value: String,
     pub type_name: Option<String>,
+    pub argument: bool,
     pub varobj: Option<String>,
     pub num_children: usize,
     pub has_more: bool,
@@ -80,14 +81,24 @@ impl Variable {
     }
 
     pub fn can_expand(&self) -> bool {
+        let value = self.value.trim();
         self.varobj.is_some()
             && (self.num_children > 0
                 || self.has_more
-                || (self.is_pointer()
-                    && !matches!(
-                        self.value.trim(),
-                        "0" | "0x0" | "nullptr" | "<not available>" | "<optimized out>"
-                    )))
+                || (self.is_pointer() && !self.is_null_pointer() && !value.starts_with('<')))
+    }
+
+    pub fn is_null_pointer(&self) -> bool {
+        if !self.is_pointer() {
+            return false;
+        }
+        if super::context::pointer_address(&self.value) == Some(0) {
+            return true;
+        }
+        matches!(
+            self.value.trim().to_ascii_lowercase().as_str(),
+            "0" | "null" | "nullptr" | "none" | "nil" | "<null>"
+        )
     }
 
     /// Scalar values returned by `-stack-list-variables --simple-values` are
@@ -339,6 +350,7 @@ pub fn variables(record: &MiRecord) -> Vec<Variable> {
                     .unwrap_or("<not available>")
                     .to_owned(),
                 type_name: owned_constant(tuple, "type"),
+                argument: constant(tuple, "arg") == Some("1"),
                 varobj: None,
                 num_children: 0,
                 has_more: false,
@@ -359,6 +371,7 @@ pub fn variable_object(record: &MiRecord, display_name: &str) -> Option<Variable
             .field("type")
             .and_then(MiValue::as_const)
             .map(str::to_owned),
+        argument: false,
         varobj: Some(record.field("name")?.as_const()?.to_owned()),
         num_children: record
             .field("numchild")
@@ -369,7 +382,6 @@ pub fn variable_object(record: &MiRecord, display_name: &str) -> Option<Variable
     })
 }
 
-#[cfg(test)]
 pub fn variable_updates(record: &MiRecord) -> Vec<VariableUpdate> {
     record
         .field("changelist")
@@ -381,6 +393,7 @@ pub fn variable_updates(record: &MiRecord) -> Vec<VariableUpdate> {
         .collect()
 }
 
+#[cfg(test)]
 pub fn variable_update_named(record: &MiRecord, varobj: &str) -> Option<VariableUpdate> {
     record
         .field("changelist")
@@ -423,6 +436,7 @@ pub fn variable_children(record: &MiRecord) -> Vec<Variable> {
                     .unwrap_or("<not available>")
                     .to_owned(),
                 type_name: owned_constant(tuple, "type"),
+                argument: false,
                 varobj: owned_constant(tuple, "name"),
                 num_children: constant(tuple, "numchild")
                     .and_then(|value| value.parse().ok())
@@ -1102,9 +1116,11 @@ mod tests {
         assert_eq!(frames[0].function, "main");
         assert_eq!(frames[0].line, Some(9));
 
-        let locals =
-            variables(&parse_record(r#"2^done,variables=[{name="answer",value="42"}]"#).unwrap());
+        let locals = variables(
+            &parse_record(r#"2^done,variables=[{name="answer",arg="1",value="42"}]"#).unwrap(),
+        );
         assert_eq!(locals[0].value, "42");
+        assert!(locals[0].argument);
         assert!(!locals[0].needs_variable_object());
 
         let expandable = variables(
@@ -1398,11 +1414,18 @@ mod tests {
             name: String::from("pointer"),
             value: String::from("0x0"),
             type_name: Some(String::from("Demo *")),
+            argument: false,
             varobj: Some(String::from("var2")),
             num_children: 0,
             has_more: false,
         };
         assert!(!null_pointer.can_expand());
+        for value in ["(Demo *) 0x0", "@0x0", "nullptr", "NULL"] {
+            let mut null_pointer = null_pointer.clone();
+            null_pointer.value = String::from(value);
+            assert!(null_pointer.is_null_pointer(), "{value}");
+            assert!(!null_pointer.can_expand(), "{value}");
+        }
     }
 
     #[test]

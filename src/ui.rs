@@ -40,7 +40,7 @@ use crate::{
         Breakpoint, GdbCapabilities, InferiorInfo, InferiorState, Instruction, MemoryBlock,
         MemoryKind, MiClient, Register, SharedLibrary, SourceFile, SourceLocation, StackEntry,
         StackFrame, TargetArchitecture, TargetEndian, ThreadInfo, ValueTypeKind, ValueTypeMetadata,
-        Variable, context::MemoryRegion,
+        Variable, VariableUpdate, context::MemoryRegion,
     },
     kernel::{
         KernelBaseline, KernelFileDescriptor, KernelLimit, KernelMapping, KernelMappingChange,
@@ -179,6 +179,7 @@ type VariableAssignmentHandler = Rc<dyn Fn(Variable, String)>;
 type VariableEditorHandler = Rc<dyn Fn(Variable)>;
 type FloatAssignmentHandler = Rc<dyn Fn(Variable, Vec<u8>)>;
 type VariableChildrenHandler = Rc<dyn Fn(Variable, usize)>;
+type VariableViewerHandler = Rc<dyn Fn(VariableViewerRequest)>;
 type ExpressionWatchRefreshHandler = Rc<dyn Fn()>;
 type StringAssignmentHandler = Rc<dyn Fn(Variable, Vec<u8>, StringAssignmentKind)>;
 type VectorAssignmentHandler = Rc<dyn Fn(String, String, Vec<(usize, String)>)>;
@@ -492,6 +493,8 @@ struct MiscViewBindings<'a> {
 
 struct InspectorBindings<'a> {
     variable_children_handler: &'a Rc<RefCell<Option<VariableChildrenHandler>>>,
+    variable_viewer_handler: &'a Rc<RefCell<Option<VariableViewerHandler>>>,
+    variable_viewers: &'a Rc<VariableViewerRegistry>,
     target_pointer_bits: &'a Rc<Cell<u32>>,
     kernel: KernelViewBindings<'a>,
     misc: MiscViewBindings<'a>,
@@ -678,6 +681,8 @@ struct VariableNode {
     children_loaded: Rc<Cell<bool>>,
     children_loading: Rc<Cell<bool>>,
     expansion_observer_attached: Rc<Cell<bool>>,
+    expanded: Rc<Cell<bool>>,
+    changed: bool,
     load_more: Option<(Variable, usize)>,
     placeholder: bool,
 }
@@ -690,6 +695,8 @@ impl VariableNode {
             children_loaded: Rc::new(Cell::new(false)),
             children_loading: Rc::new(Cell::new(false)),
             expansion_observer_attached: Rc::new(Cell::new(false)),
+            expanded: Rc::new(Cell::new(false)),
+            changed: false,
             load_more: None,
             placeholder: false,
         }
@@ -701,6 +708,7 @@ impl VariableNode {
                 name: name.to_owned(),
                 value: value.to_owned(),
                 type_name: None,
+                argument: false,
                 varobj: None,
                 num_children: 0,
                 has_more: false,
@@ -709,6 +717,8 @@ impl VariableNode {
             children_loaded: Rc::new(Cell::new(true)),
             children_loading: Rc::new(Cell::new(false)),
             expansion_observer_attached: Rc::new(Cell::new(true)),
+            expanded: Rc::new(Cell::new(false)),
+            changed: false,
             load_more: None,
             placeholder: true,
         }
@@ -729,6 +739,7 @@ impl VariableNode {
                 name: String::from("Load more…"),
                 value: detail,
                 type_name: None,
+                argument: false,
                 varobj: None,
                 num_children: 0,
                 has_more: false,
@@ -737,9 +748,75 @@ impl VariableNode {
             children_loaded: Rc::new(Cell::new(true)),
             children_loading: Rc::new(Cell::new(false)),
             expansion_observer_attached: Rc::new(Cell::new(true)),
+            expanded: Rc::new(Cell::new(false)),
+            changed: false,
             load_more: Some((parent, next)),
             placeholder: true,
         }
+    }
+
+    fn updated(&self, variable: Variable, mark_changed: bool) -> Self {
+        let structure_unchanged = self.variable.varobj == variable.varobj
+            && self.variable.type_name == variable.type_name
+            && self.variable.num_children == variable.num_children
+            && self.variable.has_more == variable.has_more;
+        Self {
+            changed: if mark_changed {
+                self.variable.value != variable.value
+            } else {
+                self.changed
+            },
+            variable,
+            children: if structure_unchanged {
+                self.children.clone()
+            } else {
+                gio::ListStore::new::<glib::BoxedAnyObject>()
+            },
+            children_loaded: if structure_unchanged {
+                Rc::clone(&self.children_loaded)
+            } else {
+                Rc::new(Cell::new(false))
+            },
+            children_loading: if structure_unchanged {
+                Rc::clone(&self.children_loading)
+            } else {
+                Rc::new(Cell::new(false))
+            },
+            expansion_observer_attached: Rc::new(Cell::new(false)),
+            expanded: Rc::clone(&self.expanded),
+            load_more: None,
+            placeholder: false,
+        }
+    }
+
+    fn has_changes(&self) -> bool {
+        self.changed
+            || (0..self.children.n_items()).any(|position| {
+                self.children
+                    .item(position)
+                    .and_downcast::<glib::BoxedAnyObject>()
+                    .is_some_and(|item| item.borrow::<VariableNode>().has_changes())
+            })
+    }
+
+    fn without_change_marker(&self) -> Self {
+        Self {
+            variable: self.variable.clone(),
+            children: self.children.clone(),
+            children_loaded: Rc::clone(&self.children_loaded),
+            children_loading: Rc::clone(&self.children_loading),
+            expansion_observer_attached: Rc::new(Cell::new(false)),
+            expanded: Rc::clone(&self.expanded),
+            changed: false,
+            load_more: self.load_more.clone(),
+            placeholder: self.placeholder,
+        }
+    }
+
+    fn rebound(&self) -> Self {
+        let mut node = self.clone();
+        node.expansion_observer_attached = Rc::new(Cell::new(false));
+        node
     }
 }
 
@@ -1219,7 +1296,6 @@ enum RegisterColumn {
 enum LocalColumn {
     Type,
     Value,
-    Details,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1475,6 +1551,7 @@ pub struct Ui {
     locals_selection: gtk::SingleSelection,
     locals_view: gtk::ColumnView,
     locals_empty: gtk::Label,
+    locals_summary: gtk::Label,
     locals_edit_button: gtk::Button,
     expression_watches_store: gio::ListStore,
     expression_watches_selection: gtk::SingleSelection,
@@ -1597,6 +1674,8 @@ pub struct Ui {
     float_assignment_handler: Rc<RefCell<Option<FloatAssignmentHandler>>>,
     string_assignment_handler: Rc<RefCell<Option<StringAssignmentHandler>>>,
     variable_children_handler: Rc<RefCell<Option<VariableChildrenHandler>>>,
+    variable_viewer_handler: Rc<RefCell<Option<VariableViewerHandler>>>,
+    variable_viewer_windows: Rc<RefCell<Vec<gtk::Window>>>,
     expression_watch_refresh_handler: Rc<RefCell<Option<ExpressionWatchRefreshHandler>>>,
     vector_assignment_handler: Rc<RefCell<Option<VectorAssignmentHandler>>>,
     breakpoint_insert_handler: Rc<RefCell<Option<BreakpointInsertHandler>>>,
@@ -1673,6 +1752,7 @@ struct Workspace {
     locals_selection: gtk::SingleSelection,
     locals_view: gtk::ColumnView,
     locals_empty: gtk::Label,
+    locals_summary: gtk::Label,
     locals_edit_button: gtk::Button,
     expression_watches_store: gio::ListStore,
     expression_watches_selection: gtk::SingleSelection,
@@ -1730,6 +1810,7 @@ struct Inspector {
     locals_selection: gtk::SingleSelection,
     locals_view: gtk::ColumnView,
     locals_empty: gtk::Label,
+    locals_summary: gtk::Label,
     locals_edit_button: gtk::Button,
     expression_watches_store: gio::ListStore,
     expression_watches_selection: gtk::SingleSelection,
@@ -1803,8 +1884,15 @@ mod source_actions;
 mod source_view;
 mod state;
 mod threads;
+mod variable_viewers;
 mod views;
 mod watches;
+
+pub(crate) use variable_viewers::{
+    VariableViewerPlan, VariableViewerRegistry, VariableViewerRequest, VariableViewerRow,
+    VariableViewerSession,
+};
+pub(crate) use views::compact_variable_type;
 
 use build::*;
 use controls::*;
@@ -1825,18 +1913,19 @@ mod tests {
         EventCatchpoint, GEF_COMMAND_CAPABILITIES, IntegerFormat, IntegerRadix, RefreshGate,
         StringStorage, TerminalClipboardAction, UntilAction, VectorLaneFormat,
         breakpoint_command_number_at_address, breakpoint_command_numbers, call_abi_phase,
-        compact_function_name, conditional_branch_taken, event_catchpoint_command_number,
-        event_catchpoint_command_numbers, flags_markup, format_register_value,
-        format_register_value_for_architecture, format_register_value_for_target, full_address,
-        instruction_arguments_description, instruction_flow_description, instruction_flow_target,
-        instruction_matches_until, instruction_memory_expression, integer_decimal_value,
-        normalized_signal_name, parse_character_input, parse_integer_input, parse_string_input,
-        register_details, register_integer_format, register_value_css, set_breakpoint_enabled,
+        compact_function_name, compact_variable_type, conditional_branch_taken,
+        event_catchpoint_command_number, event_catchpoint_command_numbers, flags_markup,
+        format_register_value, format_register_value_for_architecture,
+        format_register_value_for_target, full_address, instruction_arguments_description,
+        instruction_flow_description, instruction_flow_target, instruction_matches_until,
+        instruction_memory_expression, integer_decimal_value, normalized_signal_name,
+        parse_character_input, parse_integer_input, parse_string_input, register_details,
+        register_integer_format, register_value_css, set_breakpoint_enabled,
         signal_catchpoint_command_number, signal_catchpoint_command_numbers, source_location_score,
         source_symbol_at_offset, source_tab_title, stop_reason_label, string_edit,
         terminal_clipboard_action, thread_os_id, variable_boolean_value, variable_character_format,
-        variable_details, variable_integer_format, variable_is_address, variable_value_parts,
-        vector_field_values, without_generic_arguments,
+        variable_details, variable_integer_format, variable_is_address, variable_matches_filter,
+        variable_value_parts, vector_field_values, without_generic_arguments,
     };
     use crate::debugger::{
         Breakpoint, Instruction, Register, SourceLocation, TargetArchitecture, TargetEndian,
@@ -1984,6 +2073,7 @@ mod tests {
             name: String::from("value"),
             value: value.to_owned(),
             type_name: Some(type_name.to_owned()),
+            argument: false,
             varobj: None,
             num_children: 0,
             has_more: false,
@@ -2012,12 +2102,51 @@ mod tests {
     }
 
     #[test]
+    fn compacts_cpp_and_rust_debug_types_without_losing_user_types() {
+        assert_eq!(
+            compact_variable_type(
+                "const std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >"
+            ),
+            "const std::string"
+        );
+        assert_eq!(
+            compact_variable_type(
+                "core::option::Option<alloc::boxed::Box<demo::Node, alloc::alloc::Global>>"
+            ),
+            "Option<Box<demo::Node>>"
+        );
+        assert_eq!(
+            compact_variable_type(
+                "std::collections::hash::map::HashMap<alloc::string::String, usize, std::hash::random::RandomState, alloc::alloc::Global>"
+            ),
+            "HashMap<String, usize>"
+        );
+    }
+
+    #[test]
+    fn filters_variables_across_scope_type_and_pretty_value() {
+        let variable = Variable {
+            name: String::from("state"),
+            value: String::from("PacketKind::Payload"),
+            type_name: Some(String::from("core::option::Option<demo::PacketKind>")),
+            argument: true,
+            varobj: None,
+            num_children: 0,
+            has_more: false,
+        };
+        assert!(variable_matches_filter(&variable, "state payload"));
+        assert!(variable_matches_filter(&variable, "option packet"));
+        assert!(!variable_matches_filter(&variable, "vector"));
+    }
+
+    #[test]
     fn decodes_rust_c_and_cpp_integer_types() {
         let decimal = |type_name: &str, value: &str, pointer_bits| {
             let variable = Variable {
                 name: String::from("value"),
                 value: value.to_owned(),
                 type_name: Some(type_name.to_owned()),
+                argument: false,
                 varobj: None,
                 num_children: 0,
                 has_more: false,
@@ -2109,6 +2238,7 @@ mod tests {
             name: name.to_owned(),
             value: value.to_owned(),
             type_name: Some(type_name.to_owned()),
+            argument: false,
             varobj: None,
             num_children: 0,
             has_more: false,

@@ -31,12 +31,50 @@ pub(super) fn clear_label_selection(label: &gtk::Label) {
     }
 }
 
+#[derive(Clone)]
+struct VariableMenuContext {
+    selection: gtk::SingleSelection,
+    handler: Rc<RefCell<Option<VariableViewerHandler>>>,
+    viewers: Rc<VariableViewerRegistry>,
+}
+
 pub(super) fn build_locals_view(
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
+    viewer_handler: &Rc<RefCell<Option<VariableViewerHandler>>>,
+    viewers: &Rc<VariableViewerRegistry>,
     target_pointer_bits: &Rc<Cell<u32>>,
+    filter_controls: Option<(&gtk::Entry, &gtk::ToggleButton)>,
 ) -> (gtk::ColumnView, gio::ListStore, gtk::SingleSelection) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-    let tree = gtk::TreeListModel::new(store.clone(), false, false, |item| {
+    let roots: gio::ListModel = if let Some((search, changed_toggle)) = filter_controls {
+        let query = Rc::new(RefCell::new(String::new()));
+        let changed_only = Rc::new(Cell::new(false));
+        let query_for_filter = Rc::clone(&query);
+        let changed_for_filter = Rc::clone(&changed_only);
+        let filter = gtk::CustomFilter::new(move |object| {
+            let Some(item) = object.downcast_ref::<glib::BoxedAnyObject>() else {
+                return false;
+            };
+            let node = item.borrow::<VariableNode>();
+            (!changed_for_filter.get() || node.has_changes())
+                && variable_matches_filter(&node.variable, &query_for_filter.borrow())
+        });
+        let query_for_search = Rc::clone(&query);
+        let filter_for_search = filter.clone();
+        search.connect_changed(move |search| {
+            query_for_search.replace(search.text().trim().to_ascii_lowercase());
+            filter_for_search.changed(gtk::FilterChange::Different);
+        });
+        let filter_for_changed = filter.clone();
+        changed_toggle.connect_toggled(move |toggle| {
+            changed_only.set(toggle.is_active());
+            filter_for_changed.changed(gtk::FilterChange::Different);
+        });
+        gtk::FilterListModel::new(Some(store.clone()), Some(filter)).upcast()
+    } else {
+        store.clone().upcast()
+    };
+    let tree = gtk::TreeListModel::new(roots, false, false, |item| {
         let item = item.downcast_ref::<glib::BoxedAnyObject>()?;
         let node = item.borrow::<VariableNode>();
         node.variable
@@ -53,29 +91,46 @@ pub(super) fn build_locals_view(
     view.set_single_click_activate(false);
     view.set_reorderable(true);
 
-    view.append_column(&local_name_column(&selection, children_handler));
+    let variable_menu = VariableMenuContext {
+        selection: selection.clone(),
+        handler: Rc::clone(viewer_handler),
+        viewers: Rc::clone(viewers),
+    };
+    view.append_column(&local_name_column(children_handler, &variable_menu));
+    view.append_column(&local_text_column(
+        "VALUE",
+        360,
+        true,
+        LocalColumn::Value,
+        Rc::clone(target_pointer_bits),
+        &variable_menu,
+    ));
     view.append_column(&local_text_column(
         "TYPE",
-        155,
+        260,
         false,
         LocalColumn::Type,
         Rc::clone(target_pointer_bits),
-    ));
-    view.append_column(&local_text_column(
-        "VALUE",
-        190,
-        false,
-        LocalColumn::Value,
-        Rc::clone(target_pointer_bits),
-    ));
-    view.append_column(&local_text_column(
-        "DETAILS",
-        300,
-        true,
-        LocalColumn::Details,
-        Rc::clone(target_pointer_bits),
+        &variable_menu,
     ));
     (view, store, selection)
+}
+
+pub(super) fn variable_matches_filter(variable: &Variable, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let search_text = format!(
+        "{} {} {} {}",
+        variable.name,
+        variable.type_name.as_deref().unwrap_or_default(),
+        compact_variable_type(variable.type_name.as_deref().unwrap_or_default()),
+        variable.value,
+    )
+    .to_ascii_lowercase();
+    query
+        .split_whitespace()
+        .all(|term| search_text.contains(term))
 }
 
 pub(super) fn insight_label(placeholder: &str) -> gtk::Label {
@@ -229,122 +284,335 @@ pub(super) fn format_memory_size(bytes: u64) -> String {
     }
 }
 
-pub(super) fn local_name_column(
-    selection: &gtk::SingleSelection,
+fn local_name_column(
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
+    variable_menu: &VariableMenuContext,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
-    let selection = selection.clone();
-    let children_handler_for_setup = Rc::clone(children_handler);
-    factory.connect_setup(move |_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        let label = gtk::Label::new(None);
-        label.add_css_class("debug-table-cell");
-        label.add_css_class("local-name");
-        label.set_halign(gtk::Align::Start);
-        label.set_ellipsize(pango::EllipsizeMode::End);
-        label.set_hexpand(true);
-        let expander = gtk::TreeExpander::new();
-        expander.set_hexpand(true);
-        expander.set_child(Some(&label));
-
-        let click = gtk::GestureClick::new();
-        click.set_button(gtk::gdk::BUTTON_PRIMARY);
-        click.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let expander_for_click = expander.clone();
-        let selection = selection.clone();
-        let children_handler = Rc::clone(&children_handler_for_setup);
-        click.connect_pressed(move |gesture, presses, _, _| {
-            if presses != 1 {
-                return;
-            }
-            let Some(row) = expander_for_click.list_row() else {
-                return;
-            };
-            let node = row
-                .item()
-                .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
-                .map(|item| item.borrow::<VariableNode>().clone());
-            let Some(node) = node else {
-                return;
-            };
-            if !row.is_expandable() && node.load_more.is_none() {
-                return;
-            }
-            selection.set_selected(row.position());
-            if row.is_expandable() {
-                row.set_expanded(!row.is_expanded());
-            } else {
-                request_next_variable_page_if_needed(&node, &children_handler);
-            }
-            gesture.set_state(gtk::EventSequenceState::Claimed);
-        });
-        expander.add_controller(click);
-        item.set_child(Some(&expander));
-    });
+    let selection = variable_menu.selection.clone();
     let children_handler = Rc::clone(children_handler);
+    let variable_menu = variable_menu.clone();
     factory.connect_bind(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
         };
-        let (Some(expander), Some(row)) = (
-            item.child().and_downcast::<gtk::TreeExpander>(),
-            item.item().and_downcast::<gtk::TreeListRow>(),
-        ) else {
+        let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else {
+            return;
+        };
+        let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+            return;
+        };
+        let node = data.borrow::<VariableNode>().clone();
+        let expandable = node.variable.can_expand();
+        let load_more = node.load_more.is_some();
+
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        content.add_css_class("local-name-cell");
+        content.set_hexpand(true);
+        let disclosure = gtk::Label::new(Some(if expandable {
+            if row.is_expanded() {
+                DISCLOSURE_EXPANDED_ICON
+            } else {
+                DISCLOSURE_COLLAPSED_ICON
+            }
+        } else if load_more {
+            DISCLOSURE_COLLAPSED_ICON
+        } else {
+            ""
+        }));
+        disclosure.add_css_class("local-disclosure");
+        disclosure.set_width_chars(1);
+        if expandable {
+            row.bind_property("expanded", &disclosure, "label")
+                .transform_to(|_, expanded: bool| {
+                    Some(if expanded {
+                        DISCLOSURE_EXPANDED_ICON
+                    } else {
+                        DISCLOSURE_COLLAPSED_ICON
+                    })
+                })
+                .sync_create()
+                .build();
+        }
+        content.append(&disclosure);
+        let scope = gtk::Label::new((row.depth() == 0).then_some(if node.variable.argument {
+            "ARG"
+        } else {
+            "LOCAL"
+        }));
+        scope.add_css_class("local-scope");
+        scope.set_visible(row.depth() == 0 && !node.placeholder);
+        content.append(&scope);
+        let changed = gtk::Label::new(Some("●"));
+        changed.add_css_class("local-changed-marker");
+        changed.set_tooltip_text(Some("Value changed since the previous stop"));
+        changed.set_opacity(if node.changed { 1.0 } else { 0.0 });
+        changed.set_visible(!node.placeholder);
+        content.append(&changed);
+        let label = gtk::Label::new(Some(&node.variable.name));
+        label.add_css_class("debug-table-cell");
+        label.add_css_class("local-name");
+        label.set_halign(gtk::Align::Start);
+        label.set_xalign(0.0);
+        label.set_ellipsize(pango::EllipsizeMode::End);
+        label.set_hexpand(true);
+        content.append(&label);
+
+        let tooltip = if node.placeholder {
+            format!("{}\n{}", node.variable.name, node.variable.value)
+        } else {
+            variable_tooltip(&node.variable)
+        };
+        content.set_tooltip_text(Some(&tooltip));
+        if expandable || load_more {
+            content.add_css_class("local-expandable");
+            content.set_cursor_from_name(Some("pointer"));
+        }
+        if load_more {
+            label.remove_css_class("local-name");
+            label.add_css_class("local-load-more");
+        } else if node.placeholder {
+            label.remove_css_class("local-name");
+            label.add_css_class("muted");
+        }
+
+        let click = gtk::GestureClick::new();
+        click.set_button(gtk::gdk::BUTTON_PRIMARY);
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let selection_for_click = selection.clone();
+        let row_for_click = row.clone();
+        let node_for_click = node.clone();
+        let children_handler_for_click = Rc::clone(&children_handler);
+        click.connect_pressed(move |gesture, presses, _, _| {
+            if presses != 1 {
+                return;
+            }
+            if !row_for_click.is_expandable() && node_for_click.load_more.is_none() {
+                return;
+            }
+            selection_for_click.set_selected(row_for_click.position());
+            if row_for_click.is_expandable() {
+                row_for_click.set_expanded(!row_for_click.is_expanded());
+            } else {
+                request_next_variable_page_if_needed(&node_for_click, &children_handler_for_click);
+            }
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        content.add_controller(click);
+        if !node.placeholder {
+            connect_current_variable_context_menu(&content, item, &variable_menu);
+        }
+
+        if expandable && !node.expansion_observer_attached.replace(true) {
+            let node = node.clone();
+            let children_handler = Rc::clone(&children_handler);
+            row.connect_expanded_notify(move |row| {
+                node.expanded.set(row.is_expanded());
+                if row.is_expanded() {
+                    request_variable_children_if_needed(&node, &children_handler);
+                }
+            });
+        }
+        if expandable && node.expanded.get() && !row.is_expanded() {
+            row.set_expanded(true);
+        }
+        let expander = gtk::TreeExpander::new();
+        expander.set_list_row(Some(&row));
+        expander.set_hide_expander(true);
+        expander.set_indent_for_icon(false);
+        expander.set_child(Some(&content));
+        item.set_child(Some(&expander));
+    });
+    factory.connect_unbind(|_, object| {
+        if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
+            item.set_child(None::<&gtk::Widget>);
+        }
+    });
+    let column = gtk::ColumnViewColumn::new(Some("NAME / EXPRESSION"), Some(factory));
+    column.set_fixed_width(230);
+    column.set_resizable(true);
+    column
+}
+
+fn connect_current_variable_context_menu(
+    row_widget: &impl IsA<gtk::Widget>,
+    item: &gtk::ListItem,
+    variable_menu: &VariableMenuContext,
+) {
+    let click = gtk::GestureClick::new();
+    click.set_button(gtk::gdk::BUTTON_SECONDARY);
+    click.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let row_widget = row_widget.as_ref().clone();
+    let row_widget_for_click = row_widget.downgrade();
+    let item = item.downgrade();
+    let variable_menu = variable_menu.clone();
+    click.connect_pressed(move |gesture, presses, x, y| {
+        if presses != 1 {
+            return;
+        }
+        let Some(row_widget_for_click) = row_widget_for_click.upgrade() else {
+            return;
+        };
+        let Some(item) = item.upgrade() else {
+            return;
+        };
+        let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else {
             return;
         };
         let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
             return;
         };
         let node = data.borrow::<VariableNode>();
-        let Some(label) = expander.child().and_downcast::<gtk::Label>() else {
+        if node.placeholder {
             return;
-        };
-        expander.set_list_row(Some(&row));
-        label.set_text(&node.variable.name);
-        let expandable = node.variable.can_expand();
-        if expandable && !node.expansion_observer_attached.replace(true) {
-            let node = node.clone();
-            let children_handler = Rc::clone(&children_handler);
-            row.connect_expanded_notify(move |row| {
-                if row.is_expanded() {
-                    request_variable_children_if_needed(&node, &children_handler);
+        }
+        let variable = node.variable.clone();
+        drop(node);
+        variable_menu.selection.set_selected(row.position());
+        show_variable_context_menu(
+            &row_widget_for_click,
+            &variable,
+            &variable_menu.handler,
+            &variable_menu.viewers,
+            x,
+            y,
+        );
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+    });
+    row_widget.add_controller(click);
+}
+
+fn show_variable_context_menu(
+    row_widget: &gtk::Widget,
+    variable: &Variable,
+    viewer_handler: &Rc<RefCell<Option<VariableViewerHandler>>>,
+    viewers: &VariableViewerRegistry,
+    x: f64,
+    y: f64,
+) {
+    let popover = gtk::Popover::new();
+    popover.add_css_class("local-variable-menu");
+    popover.set_autohide(true);
+    popover.set_has_arrow(false);
+    popover.set_parent(row_widget);
+    popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
+        x.round() as i32,
+        y.round() as i32,
+        1,
+        1,
+    )));
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    menu.add_css_class("local-variable-menu-content");
+    let summary = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    summary.add_css_class("local-variable-menu-summary");
+    let caption = gtk::Label::new(Some(if variable.argument {
+        "ARGUMENT"
+    } else {
+        "VARIABLE"
+    }));
+    caption.add_css_class("local-variable-menu-caption");
+    caption.set_halign(gtk::Align::Start);
+    let name = gtk::Label::new(Some(&variable.name));
+    name.add_css_class("local-variable-menu-name");
+    name.set_halign(gtk::Align::Start);
+    name.set_ellipsize(pango::EllipsizeMode::Middle);
+    let type_name =
+        compact_variable_type(variable.type_name.as_deref().unwrap_or("<unknown type>"));
+    let type_label = gtk::Label::new(Some(&type_name));
+    type_label.add_css_class("local-variable-menu-type");
+    type_label.set_halign(gtk::Align::Start);
+    type_label.set_ellipsize(pango::EllipsizeMode::Middle);
+    let value = gtk::Label::new(Some(&variable.value));
+    value.add_css_class("local-variable-menu-value");
+    value.set_halign(gtk::Align::Start);
+    value.set_ellipsize(pango::EllipsizeMode::Middle);
+    summary.append(&caption);
+    summary.append(&name);
+    summary.append(&type_label);
+    summary.append(&value);
+    menu.append(&summary);
+
+    let matching_viewers = viewers.matching(variable);
+    if !matching_viewers.is_empty() {
+        menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        menu.append(&variable_menu_section("VIEW AS"));
+        for descriptor in matching_viewers {
+            let button = variable_menu_action(&descriptor.title, &descriptor.detail);
+            button.add_css_class("local-variable-viewer-action");
+            let request = VariableViewerRequest {
+                descriptor,
+                variable: variable.clone(),
+            };
+            let viewer_handler = Rc::clone(viewer_handler);
+            let popover = popover.downgrade();
+            button.connect_clicked(move |_| {
+                let handler = viewer_handler.borrow().clone();
+                if let Some(handler) = handler {
+                    handler(request.clone());
+                }
+                if let Some(popover) = popover.upgrade() {
+                    popover.popdown();
                 }
             });
+            menu.append(&button);
         }
-        let load_more = node.load_more.is_some();
-        if expandable || load_more {
-            label.add_css_class("local-expandable");
-            expander.set_cursor_from_name(Some("pointer"));
-        } else {
-            label.remove_css_class("local-expandable");
-            expander.set_cursor(None);
-        }
-        let tooltip = if node.placeholder {
-            format!("{}\n{}", node.variable.name, node.variable.value)
-        } else {
-            variable_tooltip(&node.variable)
-        };
-        label.set_tooltip_text(Some(&tooltip));
-        label.remove_css_class("local-load-more");
-        if load_more {
-            label.remove_css_class("muted");
-            label.remove_css_class("local-name");
-            label.add_css_class("local-load-more");
-        } else if node.placeholder {
-            label.remove_css_class("local-name");
-            label.add_css_class("muted");
-        } else {
-            label.remove_css_class("muted");
-            label.add_css_class("local-name");
+    }
+
+    menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    menu.append(&variable_menu_section("COPY"));
+    for (label, detail, text) in [
+        ("Copy name", "expression", variable.name.clone()),
+        ("Copy value", "formatted value", variable.value.clone()),
+        (
+            "Copy type",
+            "full debugger type",
+            variable
+                .type_name
+                .clone()
+                .unwrap_or_else(|| String::from("<unknown>")),
+        ),
+    ] {
+        let button = variable_menu_action(label, detail);
+        let display = row_widget.display();
+        let popover = popover.downgrade();
+        button.connect_clicked(move |_| {
+            display.clipboard().set_text(&text);
+            if let Some(popover) = popover.upgrade() {
+                popover.popdown();
+            }
+        });
+        menu.append(&button);
+    }
+    popover.set_child(Some(&menu));
+    popover.connect_closed(|popover| {
+        if popover.parent().is_some() {
+            popover.unparent();
         }
     });
-    let column = gtk::ColumnViewColumn::new(Some("NAME / EXPRESSION"), Some(factory));
-    column.set_fixed_width(175);
-    column.set_resizable(true);
-    column
+    popover.popup();
+}
+
+fn variable_menu_section(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.add_css_class("local-variable-menu-section");
+    label.set_halign(gtk::Align::Start);
+    label
+}
+
+fn variable_menu_action(label: &str, detail: &str) -> gtk::Button {
+    let row = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    let label = gtk::Label::new(Some(label));
+    label.add_css_class("local-variable-menu-action-label");
+    label.set_halign(gtk::Align::Start);
+    let detail = gtk::Label::new(Some(detail));
+    detail.add_css_class("local-variable-menu-action-detail");
+    detail.set_halign(gtk::Align::Start);
+    row.append(&label);
+    row.append(&detail);
+    let button = gtk::Button::builder().child(&row).build();
+    button.add_css_class("local-variable-menu-action");
+    button.set_halign(gtk::Align::Fill);
+    button
 }
 
 pub(super) fn request_variable_children_if_needed(
@@ -359,7 +627,8 @@ pub(super) fn request_variable_children_if_needed(
             "loading…",
             "waiting for GDB",
         )));
-    if let Some(handler) = children_handler.borrow().as_ref() {
+    let handler = children_handler.borrow().clone();
+    if let Some(handler) = handler {
         handler(node.variable.clone(), 0);
     } else {
         node.children.remove_all();
@@ -377,21 +646,24 @@ pub(super) fn request_next_variable_page_if_needed(
     if node.children_loading.replace(true) {
         return;
     }
-    if let Some(handler) = children_handler.borrow().as_ref() {
+    let handler = children_handler.borrow().clone();
+    if let Some(handler) = handler {
         handler(parent.clone(), *from);
     } else {
         node.children_loading.set(false);
     }
 }
 
-pub(super) fn local_text_column(
+fn local_text_column(
     title: &str,
     width: i32,
     expand: bool,
     column: LocalColumn,
     target_pointer_bits: Rc<Cell<u32>>,
+    variable_menu: &VariableMenuContext,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
+    let variable_menu = variable_menu.clone();
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -401,11 +673,11 @@ pub(super) fn local_text_column(
         label.add_css_class(match column {
             LocalColumn::Type => "local-type",
             LocalColumn::Value => "local-value",
-            LocalColumn::Details => "local-details",
         });
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
         enable_stable_text_selection(&label);
+        connect_current_variable_context_menu(&label, item, &variable_menu);
         item.set_child(Some(&label));
     });
     factory.connect_bind(move |_, object| {
@@ -426,16 +698,21 @@ pub(super) fn local_text_column(
         clear_label_selection(&label);
         let (value, details) = variable_value_parts(&variable.value);
         label.remove_css_class("local-details-error");
+        label.remove_css_class("local-changed-value");
         match column {
             LocalColumn::Type => {
-                label.set_text(variable.type_name.as_deref().unwrap_or("<unknown>"));
+                label.set_text(&compact_variable_type(
+                    variable.type_name.as_deref().unwrap_or("<unknown>"),
+                ));
             }
-            LocalColumn::Value => label.set_text(value),
-            LocalColumn::Details => {
-                let decoded = variable_details(variable, value, details, target_pointer_bits.get());
-                label.set_text(&decoded);
-                if decoded.contains("<error:") {
+            LocalColumn::Value => {
+                let display =
+                    variable_display_value(variable, value, details, target_pointer_bits.get());
+                label.set_text(&display);
+                if display.contains("<error:") {
                     label.add_css_class("local-details-error");
+                } else if node.changed {
+                    label.add_css_class("local-changed-value");
                 }
             }
         }
@@ -456,6 +733,71 @@ pub(super) fn local_text_column(
     column_view.set_resizable(true);
     column_view.set_expand(expand);
     column_view
+}
+
+pub(super) fn variable_display_value(
+    variable: &Variable,
+    value: &str,
+    details: &str,
+    target_pointer_bits: u32,
+) -> String {
+    let decimal = integer_decimal_value(variable, value, target_pointer_bits);
+    match (details.is_empty(), decimal) {
+        (true, Some(decimal)) if decimal != value => format!("{value}  ({decimal})"),
+        (false, Some(decimal)) => format!("{value}  {details}  ({decimal})"),
+        (false, None) => format!("{value}  {details}"),
+        _ => compact_pretty_value(variable, value),
+    }
+}
+
+fn compact_pretty_value(variable: &Variable, value: &str) -> String {
+    let Some(type_name) = variable.type_name.as_deref() else {
+        return value.to_owned();
+    };
+    let type_name = type_name
+        .trim_start_matches("const ")
+        .trim_start_matches(['&', '*'])
+        .trim_start();
+    let Some((namespace, _)) = type_name.rsplit_once("::") else {
+        return value.to_owned();
+    };
+    value
+        .strip_prefix(namespace)
+        .and_then(|value| value.strip_prefix("::"))
+        .unwrap_or(value)
+        .to_owned()
+}
+
+pub(crate) fn compact_variable_type(type_name: &str) -> String {
+    let mut compact = type_name.trim().replace("std::__cxx11::", "std::");
+    for (qualified, short) in [
+        ("alloc::string::String", "String"),
+        ("alloc::vec::Vec<", "Vec<"),
+        ("alloc::boxed::Box<", "Box<"),
+        ("alloc::rc::Rc<", "Rc<"),
+        ("alloc::sync::Arc<", "Arc<"),
+        ("core::cell::RefCell<", "RefCell<"),
+        ("core::option::Option<", "Option<"),
+        ("core::result::Result<", "Result<"),
+        ("alloc::collections::vec_deque::VecDeque<", "VecDeque<"),
+        ("alloc::collections::btree::map::BTreeMap<", "BTreeMap<"),
+        ("std::collections::hash::map::HashMap<", "HashMap<"),
+    ] {
+        compact = compact.replace(qualified, short);
+    }
+    compact = compact.replace(
+        "std::basic_string<char, std::char_traits<char>, std::allocator<char> >",
+        "std::string",
+    );
+    compact = compact.replace(
+        ", std::hash::random::RandomState, alloc::alloc::Global>",
+        ">",
+    );
+    compact = compact.replace(", alloc::alloc::Global>", ">");
+    while compact.contains("> >") {
+        compact = compact.replace("> >", ">>");
+    }
+    compact
 }
 
 pub(super) fn variable_value_parts(value: &str) -> (&str, &str) {
@@ -481,6 +823,7 @@ pub(super) fn variable_value_parts(value: &str) -> (&str, &str) {
     }
 }
 
+#[cfg(test)]
 pub(super) fn variable_details(
     variable: &Variable,
     value: &str,

@@ -90,25 +90,220 @@ pub(super) fn root_variables(store: &gio::ListStore) -> Vec<Variable> {
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum VariableRootChange {
+    Unchanged,
+    Updated,
+    Rebuilt,
+}
+
 pub(super) fn replace_variable_roots_if_changed(
     store: &gio::ListStore,
     variables: &[Variable],
-) -> bool {
-    let unchanged = usize::try_from(store.n_items()).ok() == Some(variables.len())
+) -> VariableRootChange {
+    replace_variable_roots(store, variables, true)
+}
+
+pub(super) fn replace_variable_roots(
+    store: &gio::ListStore,
+    variables: &[Variable],
+    mark_changed: bool,
+) -> VariableRootChange {
+    let same_roots = usize::try_from(store.n_items()).ok() == Some(variables.len())
         && variables.iter().enumerate().all(|(index, variable)| {
             store
                 .item(u32::try_from(index).unwrap_or(u32::MAX))
                 .and_downcast::<glib::BoxedAnyObject>()
                 .is_some_and(|item| {
                     let node = item.borrow::<VariableNode>();
-                    !node.placeholder && node.variable == *variable
+                    !node.placeholder
+                        && node.variable.name == variable.name
+                        && node.variable.argument == variable.argument
                 })
         });
-    if unchanged {
+    if !same_roots {
+        replace_boxed_store(store, variables.iter().cloned().map(VariableNode::new));
+        return VariableRootChange::Rebuilt;
+    }
+    let mut changed = false;
+    for (index, variable) in variables.iter().enumerate() {
+        let position = u32::try_from(index).unwrap_or(u32::MAX);
+        let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+            continue;
+        };
+        let node = item.borrow::<VariableNode>().clone();
+        let value_changed = if mark_changed {
+            node.variable.value != variable.value
+        } else {
+            node.changed
+        };
+        if node.variable == *variable && node.changed == value_changed {
+            continue;
+        }
+        store.splice(
+            position,
+            1,
+            &[glib::BoxedAnyObject::new(
+                node.updated(variable.clone(), mark_changed),
+            )],
+        );
+        changed = true;
+    }
+    if changed {
+        VariableRootChange::Updated
+    } else {
+        VariableRootChange::Unchanged
+    }
+}
+
+pub(super) fn replace_variable_root(
+    store: &gio::ListStore,
+    index: usize,
+    variable: &Variable,
+    mark_changed: bool,
+) -> bool {
+    let Ok(position) = u32::try_from(index) else {
+        return false;
+    };
+    let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+        return false;
+    };
+    let node = item.borrow::<VariableNode>().clone();
+    if node.placeholder
+        || node.variable.name != variable.name
+        || node.variable.argument != variable.argument
+    {
         return false;
     }
-    replace_boxed_store(store, variables.iter().cloned().map(VariableNode::new));
+    let target_changed = if mark_changed {
+        node.variable.value != variable.value
+    } else {
+        node.changed
+    };
+    if node.variable == *variable && node.changed == target_changed {
+        return true;
+    }
+    store.splice(
+        position,
+        1,
+        &[glib::BoxedAnyObject::new(
+            node.updated(variable.clone(), mark_changed),
+        )],
+    );
     true
+}
+
+pub(super) fn changed_variable_roots(store: &gio::ListStore) -> usize {
+    (0..store.n_items())
+        .filter(|position| {
+            store
+                .item(*position)
+                .and_downcast::<glib::BoxedAnyObject>()
+                .is_some_and(|item| item.borrow::<VariableNode>().has_changes())
+        })
+        .count()
+}
+
+pub(super) fn apply_variable_updates(store: &gio::ListStore, updates: &[VariableUpdate]) -> usize {
+    let updates = updates
+        .iter()
+        .map(|update| (update.varobj.as_str(), update))
+        .collect::<HashMap<_, _>>();
+    apply_variable_updates_to_store(store, &updates)
+}
+
+pub(super) fn clear_variable_change_markers(store: &gio::ListStore) {
+    for position in 0..store.n_items() {
+        let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+            continue;
+        };
+        let node = item.borrow::<VariableNode>().clone();
+        clear_variable_change_markers(&node.children);
+        if node.changed {
+            store.splice(
+                position,
+                1,
+                &[glib::BoxedAnyObject::new(node.without_change_marker())],
+            );
+        }
+    }
+}
+
+pub(super) fn refresh_changed_variable_roots(store: &gio::ListStore) {
+    for position in 0..store.n_items() {
+        let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+            continue;
+        };
+        let node = item.borrow::<VariableNode>().clone();
+        if !node.changed && node.has_changes() {
+            store.splice(position, 1, &[glib::BoxedAnyObject::new(node.rebound())]);
+        }
+    }
+}
+
+fn apply_variable_updates_to_store(
+    store: &gio::ListStore,
+    updates: &HashMap<&str, &VariableUpdate>,
+) -> usize {
+    let mut applied = 0;
+    for position in 0..store.n_items() {
+        let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+            continue;
+        };
+        let node = item.borrow::<VariableNode>().clone();
+        applied += apply_variable_updates_to_store(&node.children, updates);
+        let Some(update) = node
+            .variable
+            .varobj
+            .as_deref()
+            .and_then(|varobj| updates.get(varobj).copied())
+        else {
+            continue;
+        };
+        let mut variable = node.variable.clone();
+        if let Some(value) = update.value.as_ref() {
+            variable.value.clone_from(value);
+        }
+        if let Some(type_name) = update.new_type.as_ref() {
+            variable.type_name = Some(type_name.clone());
+        }
+        if let Some(num_children) = update.new_num_children {
+            variable.num_children = num_children;
+        }
+        if let Some(has_more) = update.has_more {
+            variable.has_more = has_more;
+        }
+        if update.in_scope == Some(false) {
+            variable.value = String::from("<out of scope>");
+            variable.num_children = 0;
+            variable.has_more = false;
+        } else if update.type_changed {
+            variable.value = update
+                .value
+                .clone()
+                .unwrap_or_else(|| String::from("<type changed>"));
+        }
+        store.splice(
+            position,
+            1,
+            &[glib::BoxedAnyObject::new(node.updated(variable, true))],
+        );
+        applied += 1;
+    }
+    applied
+}
+
+pub(super) fn root_variable_position(
+    selection: &gtk::SingleSelection,
+    name: &str,
+    argument: bool,
+) -> Option<u32> {
+    let model = selection.model()?;
+    (0..model.n_items()).find(|position| {
+        variable_node_at(selection, *position).is_some_and(|(row, node)| {
+            row.depth() == 0 && node.variable.name == name && node.variable.argument == argument
+        })
+    })
 }
 
 pub(super) fn remove_load_more_rows(store: &gio::ListStore) {
@@ -1444,6 +1639,7 @@ pub(super) fn open_flag_editor(
         name: format!("${}", register.name),
         value: register.value,
         type_name: Some(String::from("flags register")),
+        argument: false,
         varobj: None,
         num_children: 0,
         has_more: false,
@@ -1820,4 +2016,99 @@ pub(super) fn connect_escape_to_close(window: &gtk::Window) {
         gtk::glib::Propagation::Stop
     });
     window.add_controller(keys);
+}
+
+#[cfg(test)]
+mod variable_tree_tests {
+    use super::*;
+
+    fn variable(name: &str, value: &str, varobj: Option<&str>, children: usize) -> Variable {
+        Variable {
+            name: name.to_owned(),
+            value: value.to_owned(),
+            type_name: Some(String::from("demo::Value")),
+            argument: false,
+            varobj: varobj.map(str::to_owned),
+            num_children: children,
+            has_more: false,
+        }
+    }
+
+    #[test]
+    fn incremental_child_updates_preserve_expansion_and_clear_per_stop_markers() {
+        let root = VariableNode::new(variable("root", "{...}", Some("var1"), 1));
+        root.children
+            .append(&glib::BoxedAnyObject::new(VariableNode::new(variable(
+                "field",
+                "1",
+                Some("var1.field"),
+                0,
+            ))));
+        root.children_loaded.set(true);
+        root.expanded.set(true);
+        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        store.append(&glib::BoxedAnyObject::new(root));
+
+        let applied = apply_variable_updates(
+            &store,
+            &[VariableUpdate {
+                varobj: String::from("var1.field"),
+                value: Some(String::from("2")),
+                in_scope: Some(true),
+                type_changed: false,
+                new_type: None,
+                new_num_children: None,
+                has_more: None,
+            }],
+        );
+        assert_eq!(applied, 1);
+        let root = store
+            .item(0)
+            .and_downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+        let root = root.borrow::<VariableNode>();
+        assert!(root.expanded.get());
+        assert!(root.has_changes());
+        let child = root
+            .children
+            .item(0)
+            .and_downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+        assert_eq!(child.borrow::<VariableNode>().variable.value, "2");
+        assert!(child.borrow::<VariableNode>().changed);
+        drop(root);
+
+        clear_variable_change_markers(&store);
+        let root = store
+            .item(0)
+            .and_downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+        let root = root.borrow::<VariableNode>();
+        assert!(root.expanded.get());
+        assert!(!root.has_changes());
+        assert_eq!(
+            root.children
+                .item(0)
+                .and_downcast::<glib::BoxedAnyObject>()
+                .unwrap()
+                .borrow::<VariableNode>()
+                .variable
+                .value,
+            "2"
+        );
+    }
+
+    #[test]
+    fn argument_scope_is_part_of_a_root_identity() {
+        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        store.append(&glib::BoxedAnyObject::new(VariableNode::new(variable(
+            "value", "1", None, 0,
+        ))));
+        let mut argument = variable("value", "1", None, 0);
+        argument.argument = true;
+        assert_eq!(
+            replace_variable_roots_if_changed(&store, &[argument]),
+            VariableRootChange::Rebuilt
+        );
+    }
 }

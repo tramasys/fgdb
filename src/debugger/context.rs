@@ -49,8 +49,27 @@ impl MemoryRegion {
 }
 
 pub(crate) fn pointer_address(value: &str) -> Option<u64> {
-    let value = value.split_whitespace().next()?.strip_prefix("0x")?;
-    u64::from_str_radix(value, 16).ok()
+    // GDB uses several pointer renderings depending on the language, pretty
+    // printer, and command. Accept both a bare address and forms such as
+    // `(Node *) 0x1234`, while stopping before symbols and punctuation.
+    let bytes = value.as_bytes();
+    for start in 0..bytes.len().saturating_sub(1) {
+        if bytes[start] != b'0' || !matches!(bytes[start + 1], b'x' | b'X') {
+            continue;
+        }
+        let digits = value[start + 2..]
+            .bytes()
+            .take_while(u8::is_ascii_hexdigit)
+            .count();
+        if digits == 0 {
+            continue;
+        }
+        let end = start + 2 + digits;
+        if let Ok(address) = u64::from_str_radix(&value[start + 2..end], 16) {
+            return Some(address);
+        }
+    }
+    None
 }
 
 pub(crate) fn is_pointer_register(name: &str, architecture: TargetArchitecture) -> bool {
@@ -236,7 +255,14 @@ mod tests {
     #[test]
     fn extracts_addresses_from_symbolic_values() {
         assert_eq!(pointer_address("0x40116f <main+15>"), Some(0x40116f));
+        assert_eq!(
+            pointer_address("(Node *) 0X40116f <main+15>"),
+            Some(0x40116f)
+        );
+        assert_eq!(pointer_address("@0x2a"), Some(0x2a));
+        assert_eq!(pointer_address("(void *) 0x0"), Some(0));
         assert_eq!(pointer_address("[loop detected]"), None);
+        assert_eq!(pointer_address("0x"), None);
     }
 
     #[test]

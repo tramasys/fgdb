@@ -51,6 +51,18 @@ fn preserve_stack_render_details(entries: &mut [StackEntry], previous: &[StackEn
     }
 }
 
+fn locals_summary_text(locals: usize, arguments: usize, changed: usize) -> String {
+    let mut summary = format!(
+        "{locals} local{}  {arguments} arg{}",
+        if locals == 1 { "" } else { "s" },
+        if arguments == 1 { "" } else { "s" },
+    );
+    if changed > 0 {
+        summary.push_str(&format!("  {changed} changed"));
+    }
+    summary
+}
+
 impl Ui {
     pub(crate) fn current_thread_id(&self) -> Option<String> {
         self.selected_thread_id.borrow().clone()
@@ -153,33 +165,70 @@ impl Ui {
 
     pub fn show_locals(&self, variables: &[Variable]) {
         let selected_name = variable_at(&self.locals_selection, self.locals_selection.selected())
-            .map(|variable| variable.name);
+            .map(|variable| (variable.name, variable.argument));
         let changed = replace_variable_roots_if_changed(&self.locals_store, variables);
-        if !changed {
-            self.locals_empty.set_visible(variables.is_empty());
-            self.locals_edit_button.set_sensitive(!variables.is_empty());
-            return;
-        }
-        self.locals_selection
-            .set_selected(gtk::INVALID_LIST_POSITION);
+        let arguments = variables
+            .iter()
+            .filter(|variable| variable.argument)
+            .count();
+        let locals = variables.len().saturating_sub(arguments);
+        let changed_count = changed_variable_roots(&self.locals_store);
+        self.locals_summary
+            .set_text(&locals_summary_text(locals, arguments, changed_count));
         if variables.is_empty() {
             self.locals_empty.set_visible(true);
             self.locals_edit_button.set_sensitive(false);
         } else {
             self.locals_empty.set_visible(false);
-            let selected = selected_name
-                .as_deref()
-                .and_then(|name| variables.iter().position(|variable| variable.name == name))
-                .and_then(|position| u32::try_from(position).ok())
-                .unwrap_or(0);
-            self.locals_selection.set_selected(selected);
-            self.locals_edit_button.set_sensitive(true);
+            if changed == VariableRootChange::Rebuilt {
+                self.locals_selection
+                    .set_selected(gtk::INVALID_LIST_POSITION);
+                let selected = selected_name
+                    .as_ref()
+                    .and_then(|(name, argument)| {
+                        root_variable_position(&self.locals_selection, name, *argument)
+                    })
+                    .unwrap_or(0);
+                self.locals_selection.set_selected(selected);
+            }
+            self.locals_edit_button.set_sensitive(
+                variable_at(&self.locals_selection, self.locals_selection.selected()).is_some(),
+            );
         }
     }
 
     pub fn show_locals_for_refresh(&self, generation: u64, variables: &[Variable]) {
         if self.is_stop_refresh_current(generation) {
             self.show_locals(variables);
+        }
+    }
+
+    pub fn show_local_root_for_refresh(&self, generation: u64, index: usize, variable: &Variable) {
+        if !self.is_stop_refresh_current(generation) {
+            return;
+        }
+        replace_variable_root(&self.locals_store, index, variable, false);
+    }
+
+    pub fn show_variable_descendant_updates_for_refresh(
+        &self,
+        generation: u64,
+        updates: &[VariableUpdate],
+    ) {
+        if !self.is_stop_refresh_current(generation) || updates.is_empty() {
+            return;
+        }
+        let locals_updated = apply_variable_updates(&self.locals_store, updates);
+        apply_variable_updates(&self.expression_watches_store, updates);
+        if locals_updated > 0 {
+            refresh_changed_variable_roots(&self.locals_store);
+            let roots = root_variables(&self.locals_store);
+            let arguments = roots.iter().filter(|variable| variable.argument).count();
+            self.locals_summary.set_text(&locals_summary_text(
+                roots.len().saturating_sub(arguments),
+                arguments,
+                changed_variable_roots(&self.locals_store),
+            ));
         }
     }
 
@@ -405,6 +454,7 @@ impl Ui {
                             name: format!("${}", register.name),
                             value: register.value,
                             type_name: None,
+                            argument: false,
                             varobj: None,
                             num_children: 0,
                             has_more: false,
@@ -1217,6 +1267,15 @@ impl Ui {
     }
 
     pub fn start_stop_refresh(&self) -> u64 {
+        clear_variable_change_markers(&self.locals_store);
+        clear_variable_change_markers(&self.expression_watches_store);
+        let roots = root_variables(&self.locals_store);
+        let arguments = roots.iter().filter(|variable| variable.argument).count();
+        self.locals_summary.set_text(&locals_summary_text(
+            roots.len().saturating_sub(arguments),
+            arguments,
+            0,
+        ));
         let latest = self.latest_registers.borrow();
         let mut previous = self.previous_registers.borrow_mut();
         previous.clear();

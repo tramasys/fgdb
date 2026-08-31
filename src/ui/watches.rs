@@ -25,21 +25,34 @@ impl Ui {
         let changed = replace_variable_roots_if_changed(&self.expression_watches_store, variables);
         self.expression_watches_empty
             .set_visible(variables.is_empty());
-        if !changed {
+        if changed == VariableRootChange::Unchanged {
             self.update_control_sensitivity();
             return;
         }
-        self.expression_watches_selection
-            .set_selected(gtk::INVALID_LIST_POSITION);
-        if !variables.is_empty() {
+        if changed == VariableRootChange::Rebuilt && !variables.is_empty() {
+            self.expression_watches_selection
+                .set_selected(gtk::INVALID_LIST_POSITION);
             let selected = selected
                 .as_deref()
-                .and_then(|name| variables.iter().position(|variable| variable.name == name))
-                .and_then(|position| u32::try_from(position).ok())
+                .and_then(|name| {
+                    root_variable_position(&self.expression_watches_selection, name, false)
+                })
                 .unwrap_or(0);
             self.expression_watches_selection.set_selected(selected);
         }
         self.update_control_sensitivity();
+    }
+
+    pub fn show_expression_watch_root_for_refresh(
+        &self,
+        generation: u64,
+        index: usize,
+        variable: &Variable,
+    ) {
+        if !self.is_stop_refresh_current(generation) {
+            return;
+        }
+        replace_variable_root(&self.expression_watches_store, index, variable, false);
     }
 
     pub fn show_expression_watches_unavailable(&self, value: &str) {
@@ -51,6 +64,7 @@ impl Ui {
                 name: expression.clone(),
                 value: value.to_owned(),
                 type_name: None,
+                argument: false,
                 varobj: None,
                 num_children: 0,
                 has_more: false,

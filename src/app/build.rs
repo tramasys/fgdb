@@ -653,6 +653,14 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+    ui.set_variable_viewer_handler(move |request| {
+        let Some(client) = weak_client.upgrade() else {
+            return;
+        };
+        open_variable_viewer(weak_ui.clone(), client, request);
+    });
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
     ui.set_expression_watch_refresh_handler(move || {
         let (Some(client), Some(ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
             return;

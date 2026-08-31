@@ -294,6 +294,7 @@ pub(super) fn refresh_expression_variable_objects(
             name: expression.clone(),
             value: String::from("<not available>"),
             type_name: None,
+            argument: false,
             varobj: None,
             num_children: 0,
             has_more: false,
@@ -322,7 +323,7 @@ fn refresh_persistent_variable_objects(
             delete_variable_object(client, &varobj);
         }
     }
-    let (variables, stale) = reuse_variable_objects(&fallbacks, existing);
+    let (variables, needs_update, stale) = reuse_variable_objects(&fallbacks, existing);
     for varobj in stale {
         delete_variable_object(client, &varobj);
     }
@@ -341,6 +342,7 @@ fn refresh_persistent_variable_objects(
         target,
         variables,
         fallbacks,
+        needs_update,
         next_index: 0,
         created: 0,
         created_varobjs: HashSet::new(),
@@ -380,39 +382,42 @@ fn show_variable_refresh(
 fn reuse_variable_objects(
     fallbacks: &[Variable],
     existing: Vec<Variable>,
-) -> (Vec<Variable>, Vec<String>) {
+) -> (Vec<Variable>, Vec<bool>, Vec<String>) {
     let mut existing = existing.into_iter().fold(
-        HashMap::<String, Vec<Variable>>::new(),
+        HashMap::<(String, bool), Vec<Variable>>::new(),
         |mut by_name, variable| {
             by_name
-                .entry(variable.name.clone())
+                .entry((variable.name.clone(), variable.argument))
                 .or_default()
                 .push(variable);
             by_name
         },
     );
-    let variables = fallbacks
+    let reused = fallbacks
         .iter()
         .map(|fallback| {
             if !fallback.needs_variable_object() {
-                return fallback.clone();
+                return (fallback.clone(), false);
             }
-            let Some(mut variable) = existing.get_mut(&fallback.name).and_then(Vec::pop) else {
-                return fallback.clone();
+            let key = (fallback.name.clone(), fallback.argument);
+            let Some(mut variable) = existing.get_mut(&key).and_then(Vec::pop) else {
+                return (fallback.clone(), false);
             };
             variable.name.clone_from(&fallback.name);
+            variable.argument = fallback.argument;
             if fallback.type_name.is_some() {
                 variable.type_name.clone_from(&fallback.type_name);
             }
-            variable
+            (variable, true)
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let (variables, needs_update) = reused.into_iter().unzip();
     let stale = existing
         .into_values()
         .flatten()
         .filter_map(|variable| variable.varobj)
         .collect();
-    (variables, stale)
+    (variables, needs_update, stale)
 }
 
 pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<VariableRefresh>>) {
@@ -447,9 +452,14 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
         }
         return;
     };
-    let command = format!("-var-create - * {}", crate::debugger::quote(&display_name));
+    let varobj_name = next_variable_object_name();
+    let command = format!(
+        "-var-create {varobj_name} * {}",
+        crate::debugger::quote(&display_name)
+    );
     let state_for_response = Rc::clone(&state);
     let state_for_guard = Rc::clone(&state);
+    let varobj_for_response = varobj_name.clone();
     if client
         .request_with_print_limit_when(
             &command,
@@ -464,28 +474,42 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
                     .then(|| crate::debugger::variable_object(&record, &display_name))
                     .flatten();
                 if !variable_refresh_is_current(&state_for_response.borrow()) {
-                    if let Some(varobj) = variable
-                        .as_ref()
-                        .and_then(|variable| variable.varobj.as_deref())
-                    {
-                        delete_variable_object(client, varobj);
-                    }
+                    // The scoped callback can be superseded after GDB already
+                    // created the object. Its explicit name remains safe to
+                    // delete even when the real response was quarantined.
+                    delete_variable_object(client, &varobj_for_response);
                     discard_variable_refresh(client, &state_for_response);
                     return;
                 }
-                if let Some(variable) = variable {
-                    let mut state = state_for_response.borrow_mut();
-                    if let Some(varobj) = variable.varobj.as_ref() {
-                        state.created_varobjs.insert(varobj.clone());
+                if let Some(mut variable) = variable {
+                    let (ui, generation, target, shown) = {
+                        let mut state = state_for_response.borrow_mut();
+                        variable.argument = state.fallbacks[index].argument;
+                        if let Some(varobj) = variable.varobj.as_ref() {
+                            state.created_varobjs.insert(varobj.clone());
+                        }
+                        state.variables[index] = variable;
+                        state.needs_update[index] = false;
+                        (
+                            state.ui.clone(),
+                            state.generation,
+                            variable_refresh_target_clone(&state.target),
+                            state.variables[index].clone(),
+                        )
+                    };
+                    if let Some(ui) = ui.upgrade() {
+                        show_variable_root_refresh(&ui, generation, &target, index, &shown);
                     }
-                    state.variables[index] = variable;
-                } else if !record.is_done() {
-                    state_for_response.borrow_mut().variables[index].value = format!(
-                        "<error: {}>",
-                        record
-                            .error_message()
-                            .unwrap_or("expression is unavailable")
-                    );
+                } else {
+                    delete_variable_object(client, &varobj_for_response);
+                    if !record.is_done() {
+                        state_for_response.borrow_mut().variables[index].value = format!(
+                            "<error: {}>",
+                            record
+                                .error_message()
+                                .unwrap_or("expression is unavailable")
+                        );
+                    }
                 }
                 request_next_variable_object(client, state_for_response);
             },
@@ -506,7 +530,8 @@ fn request_next_variable_update(client: &MiClient, state: Rc<RefCell<VariableRef
     let next = {
         let mut state = state.borrow_mut();
         while state.update_index < state.variables.len()
-            && state.variables[state.update_index].varobj.is_none()
+            && (state.variables[state.update_index].varobj.is_none()
+                || !state.needs_update[state.update_index])
         {
             state.update_index += 1;
         }
@@ -554,10 +579,25 @@ fn request_next_variable_update(client: &MiClient, state: Rc<RefCell<VariableRef
                     discard_variable_refresh(client, &state_for_response);
                     return;
                 }
-                let update = record
-                    .is_done()
-                    .then(|| crate::debugger::variable_update_named(&record, &varobj))
-                    .flatten();
+                let updates = if record.is_done() {
+                    crate::debugger::variable_updates(&record)
+                } else {
+                    Vec::new()
+                };
+                let update = updates
+                    .iter()
+                    .find(|update| update.varobj == varobj)
+                    .cloned();
+                let descendants = updates
+                    .into_iter()
+                    .filter(|update| update.varobj != varobj)
+                    .collect::<Vec<_>>();
+                if let Some(ui) = state_for_response.borrow().ui.upgrade() {
+                    ui.show_variable_descendant_updates_for_refresh(
+                        state_for_response.borrow().generation,
+                        &descendants,
+                    );
+                }
                 {
                     let mut state = state_for_response.borrow_mut();
                     let invalid = !record.is_done()
@@ -568,6 +608,7 @@ fn request_next_variable_update(client: &MiClient, state: Rc<RefCell<VariableRef
                         delete_variable_object(client, &varobj);
                         state.created_varobjs.remove(&varobj);
                         state.variables[index] = state.fallbacks[index].clone();
+                        state.needs_update[index] = false;
                         state.recreate_after_updates |=
                             state.fallbacks[index].needs_variable_object();
                     } else if let Some(update) = update {
@@ -600,12 +641,7 @@ fn finish_variable_refresh(state: Rc<RefCell<VariableRefresh>>) {
         (
             state.ui.clone(),
             state.generation,
-            match &state.target {
-                VariableRefreshTarget::Locals => VariableRefreshTarget::Locals,
-                VariableRefreshTarget::ExpressionWatches(expressions) => {
-                    VariableRefreshTarget::ExpressionWatches(expressions.clone())
-                }
-            },
+            variable_refresh_target_clone(&state.target),
             std::mem::take(&mut state.variables),
         )
     };
@@ -614,16 +650,88 @@ fn finish_variable_refresh(state: Rc<RefCell<VariableRefresh>>) {
     }
 }
 
+fn variable_refresh_target_clone(target: &VariableRefreshTarget) -> VariableRefreshTarget {
+    match target {
+        VariableRefreshTarget::Locals => VariableRefreshTarget::Locals,
+        VariableRefreshTarget::ExpressionWatches(expressions) => {
+            VariableRefreshTarget::ExpressionWatches(expressions.clone())
+        }
+    }
+}
+
+fn show_variable_root_refresh(
+    ui: &Ui,
+    generation: u64,
+    target: &VariableRefreshTarget,
+    index: usize,
+    variable: &Variable,
+) {
+    match target {
+        VariableRefreshTarget::Locals => {
+            ui.show_local_root_for_refresh(generation, index, variable);
+        }
+        VariableRefreshTarget::ExpressionWatches(_) => {
+            ui.show_expression_watch_root_for_refresh(generation, index, variable);
+        }
+    }
+}
+
 pub(super) fn stop_refresh_is_current(ui: &Weak<Ui>, generation: u64) -> bool {
     ui.upgrade()
         .is_some_and(|ui| ui.is_stop_refresh_current(generation))
 }
 
+thread_local! {
+    static OWNED_VARIABLE_OBJECTS: RefCell<HashMap<String, HashSet<String>>> =
+        RefCell::new(HashMap::new());
+}
+
+fn register_owned_variable_object(owner: &str, child: &str) {
+    if owner == child {
+        return;
+    }
+    OWNED_VARIABLE_OBJECTS.with(|owned| {
+        owned
+            .borrow_mut()
+            .entry(owner.to_owned())
+            .or_default()
+            .insert(child.to_owned());
+    });
+}
+
 pub(super) fn delete_variable_object(client: &MiClient, varobj: &str) {
-    let command = format!("-var-delete {}", crate::debugger::quote(varobj));
-    // Parent deletion can legitimately remove child objects also present in
-    // the expanded UI tree, so consume any resulting errors locally.
-    let _ = client.request(&command, |_, _| {});
+    let objects = OWNED_VARIABLE_OBJECTS
+        .with(|owned| take_owned_variable_objects(&mut owned.borrow_mut(), varobj));
+    for object in objects.into_iter().rev() {
+        let command = format!("-var-delete {}", crate::debugger::quote(&object));
+        // Parent deletion can legitimately remove child objects also present
+        // in the expanded UI tree, so consume any resulting errors locally.
+        let _ = client.request(&command, |_, _| {});
+    }
+}
+
+fn take_owned_variable_objects(
+    owned: &mut HashMap<String, HashSet<String>>,
+    root: &str,
+) -> Vec<String> {
+    let mut objects = vec![root.to_owned()];
+    let mut visited = HashSet::from([root.to_owned()]);
+    let mut index = 0;
+    while index < objects.len() {
+        if let Some(children) = owned.remove(&objects[index]) {
+            for child in children {
+                if visited.insert(child.clone()) {
+                    objects.push(child);
+                }
+            }
+        }
+        index += 1;
+    }
+    owned.retain(|_, children| {
+        children.retain(|child| !visited.contains(child));
+        !children.is_empty()
+    });
+    objects
 }
 
 pub(super) fn discard_variable_refresh(client: &MiClient, state: &Rc<RefCell<VariableRefresh>>) {
@@ -720,8 +828,9 @@ pub(super) fn request_variable_children(
                 }
                 return;
             };
+            let dereference_varobj = next_variable_object_name();
             let command = format!(
-                "-var-create - * {}",
+                "-var-create {dereference_varobj} * {}",
                 crate::debugger::quote(&format!("*({path})"))
             );
             if !ui_for_path
@@ -736,6 +845,7 @@ pub(super) fn request_variable_children(
             let varobj_for_guard = varobj_for_path.clone();
             let ui_for_request_error = ui_for_path.clone();
             let varobj_for_request_error = varobj_for_path.clone();
+            let dereference_varobj_for_response = dereference_varobj.clone();
             if client_for_path
                 .request_with_print_limit_when(
                     &command,
@@ -762,16 +872,24 @@ pub(super) fn request_variable_children(
                                     std::slice::from_ref(&child),
                                 )
                             });
-                            if !attached && let Some(varobj) = child.varobj.as_deref() {
-                                delete_variable_object(client, varobj);
+                            if attached {
+                                register_owned_variable_object(
+                                    &varobj_for_dereference,
+                                    &dereference_varobj_for_response,
+                                );
+                            } else {
+                                delete_variable_object(client, &dereference_varobj_for_response);
                             }
                         } else if let Some(ui) = ui_for_dereference.upgrade() {
+                            delete_variable_object(client, &dereference_varobj_for_response);
                             ui.show_variable_children_error(
                                 &varobj_for_dereference,
                                 record
                                     .error_message()
                                     .unwrap_or("GDB cannot dereference this pointer"),
                             );
+                        } else {
+                            delete_variable_object(client, &dereference_varobj_for_response);
                         }
                     },
                 )
@@ -1700,7 +1818,9 @@ pub(super) fn stack_pointer_expression(register: &str, offset: usize, depth: usi
 
 #[cfg(test)]
 mod tests {
-    use super::{Variable, reuse_variable_objects};
+    use std::collections::{HashMap, HashSet};
+
+    use super::{Variable, reuse_variable_objects, take_owned_variable_objects};
 
     fn variable(
         name: &str,
@@ -1712,6 +1832,7 @@ mod tests {
             name: name.to_owned(),
             value: value.to_owned(),
             type_name: type_name.map(str::to_owned),
+            argument: false,
             varobj: varobj.map(str::to_owned),
             num_children: usize::from(varobj.is_some()),
             has_more: false,
@@ -1729,11 +1850,36 @@ mod tests {
             variable("removed", "0x30", Some("Node *"), Some("var2")),
         ];
 
-        let (reused, stale) = reuse_variable_objects(&fallbacks, existing);
+        let (reused, needs_update, stale) = reuse_variable_objects(&fallbacks, existing);
 
         assert_eq!(reused[0].varobj.as_deref(), Some("var1"));
         assert_eq!(reused[0].value, "0x10");
         assert_eq!(reused[1], fallbacks[1]);
+        assert_eq!(needs_update, [true, false]);
         assert_eq!(stale, [String::from("var2")]);
+    }
+
+    #[test]
+    fn deletes_independent_dereference_objects_with_their_owner() {
+        let mut owned = HashMap::from([
+            (
+                String::from("root"),
+                HashSet::from([String::from("child"), String::from("sibling")]),
+            ),
+            (
+                String::from("child"),
+                HashSet::from([String::from("grandchild")]),
+            ),
+            (
+                String::from("other"),
+                HashSet::from([String::from("sibling")]),
+            ),
+        ]);
+
+        let removed = take_owned_variable_objects(&mut owned, "root");
+
+        assert_eq!(removed.first().map(String::as_str), Some("root"));
+        assert_eq!(removed.iter().collect::<HashSet<_>>().len(), 4);
+        assert!(owned.is_empty());
     }
 }
