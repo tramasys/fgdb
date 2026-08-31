@@ -5,8 +5,22 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         return;
     };
 
+    // Once protocol or target corruption has quarantined the backend, late
+    // records from the old command must not make the UI look usable again.
+    // Ready is allowed to establish a freshly reconnected backend and
+    // Disconnected still performs final transport cleanup.
+    if ui.gdb_recovery_required()
+        && !matches!(
+            &event,
+            MiEvent::Ready(_) | MiEvent::DebuggerUnusable(_) | MiEvent::Disconnected
+        )
+    {
+        return;
+    }
+
     match event {
         MiEvent::Ready(capabilities) => {
+            ui.finish_execution_transition();
             ui.set_command_pending(false);
             ui.set_active_thread_execution(None);
             ui.set_thread_execution_exit_candidate(None);
@@ -52,15 +66,70 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             refresh_thread_policy(weak_ui, client);
         }
         MiEvent::InferiorExited { id, exit_code: _ } => {
-            ui.set_active_thread_execution(None);
-            ui.set_thread_execution_exit_candidate(None);
+            let selected_exited = ui.selected_inferior_id().as_deref() == Some(id.as_str());
+            let pending_exited = ui.pending_execution_inferior().as_deref() == Some(id.as_str());
+            let active_execution_exited = selected_exited
+                || ui
+                    .active_thread_execution()
+                    .as_deref()
+                    .and_then(|thread| ui.inferior_for_thread(thread))
+                    .as_deref()
+                    == Some(id.as_str());
+            let execution_transition_exited = pending_exited
+                || (active_execution_exited && ui.execution_transition_matches_thread(None, true));
+            if active_execution_exited {
+                ui.set_active_thread_execution(None);
+                ui.set_thread_execution_exit_candidate(None);
+            }
             ui.record_inferior_exited(&id);
+            if execution_transition_exited {
+                ui.finish_execution_transition();
+                ui.set_command_pending(false);
+            }
+            if pending_exited {
+                ui.set_pending_execution_inferior(None);
+                ui.finish_inferior_execution_action();
+            }
+            if selected_exited {
+                if ui.native_until_active() {
+                    ui.abort_native_until();
+                }
+                ui.finish_thread_execution_action();
+                ui.set_current_thread_id(None);
+                ui.set_thread_stop_reason(None);
+                ui.set_debug_state_stale(false);
+                ui.clear_debugger_state();
+                ui.set_status(
+                    "Inferior exited",
+                    &format!("{id} no longer has a live process."),
+                    Some("status-ready"),
+                );
+            }
             refresh_inferiors(weak_ui, client);
         }
         MiEvent::Running { thread_id } => {
-            let selected_affected = ui.mark_inferior_running(thread_id.as_deref());
-            ui.finish_inferior_execution_action();
-            ui.finish_thread_execution_action();
+            let transition_targets_group = ui.pending_execution_inferior().is_some();
+            let thread_transition_affected =
+                ui.execution_transition_matches_thread(thread_id.as_deref(), false);
+            let thread_action_affected =
+                ui.thread_execution_transition_matches(thread_id.as_deref(), false);
+            let (selected_affected, inferior_transition_affected) =
+                ui.mark_inferior_running(thread_id.as_deref());
+            if inferior_transition_affected {
+                ui.finish_inferior_execution_action();
+            }
+            if thread_action_affected {
+                ui.finish_thread_execution_action();
+            }
+            let execution_transition_affected = if transition_targets_group {
+                inferior_transition_affected
+            } else {
+                thread_transition_affected
+            };
+            if execution_transition_affected {
+                ui.finish_execution_transition();
+                ui.set_command_pending(false);
+            }
             if !selected_affected {
                 return;
             }
@@ -68,7 +137,6 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             // transition. Clearing `pending` first briefly made every stop-only
             // control sensitive before `running` disabled it again.
             ui.set_controls_running(true);
-            ui.set_command_pending(false);
             if ui.native_until_active() {
                 return;
             }
@@ -100,32 +168,94 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             fork_pid,
             all_stopped,
         } => {
-            ui.set_active_thread_execution(None);
-            ui.set_thread_execution_exit_candidate(None);
-            ui.set_command_pending(false);
+            // In all-stop mode a selected thread can exit while completing a
+            // step, after which GDB reports the replacement stop on a
+            // different thread. Some GDB versions omit stopped-threads="all"
+            // on that replacement record. The preceding exit candidate makes
+            // this stop unambiguous and prevents a false 15-second hang.
+            let replacement_after_thread_exit =
+                ui.thread_execution_exit_candidate().is_some() && ui.non_stop_mode() != Some(true);
+            let terminal_all_stopped = all_stopped || replacement_after_thread_exit;
+            let transition_targets_group = ui.pending_execution_inferior().is_some();
+            let thread_transition_affected =
+                ui.execution_transition_matches_thread(thread_id.as_deref(), terminal_all_stopped);
+            let thread_action_affected =
+                ui.thread_execution_transition_matches(thread_id.as_deref(), terminal_all_stopped);
+            let active_execution_stopped = terminal_all_stopped
+                || ui
+                    .active_thread_execution()
+                    .as_deref()
+                    .is_some_and(|active| {
+                        matches!(thread_id.as_deref(), None | Some("all"))
+                            || thread_id.as_deref() == Some(active)
+                    });
+            let was_until_active = ui.native_until_active();
+            if active_execution_stopped || was_until_active {
+                ui.set_active_thread_execution(None);
+                ui.set_thread_execution_exit_candidate(None);
+            }
             ui.set_current_thread_id(thread_id.as_deref());
             // The preceding *running event marks the inferior as running, but
             // stopped-state queries intentionally refuse to run in that state.
             // Clear it before populating context, source marks, registers and
             // stack data.
             ui.set_controls_running(false);
-            if ui.handle_native_until_stop(
+            let handled_until = ui.handle_native_until_stop(
                 reason.as_deref(),
                 address.as_deref(),
                 thread_id.as_deref(),
-            ) {
+            );
+            if handled_until {
+                // Internal Until stops deliberately avoid rebuilding every
+                // inspector. The terminal stop that completes the operation
+                // must still reconcile the process/thread model.
+                if !ui.native_until_active() {
+                    let inferior_transition_affected =
+                        ui.mark_inferior_stopped(thread_id.as_deref(), terminal_all_stopped);
+                    if inferior_transition_affected {
+                        ui.finish_inferior_execution_action();
+                    }
+                    if thread_action_affected {
+                        ui.finish_thread_execution_action();
+                    }
+                    let execution_transition_affected = if transition_targets_group {
+                        inferior_transition_affected
+                    } else {
+                        thread_transition_affected
+                    };
+                    if execution_transition_affected {
+                        ui.finish_execution_transition();
+                        ui.set_command_pending(false);
+                    }
+                    refresh_inferiors(weak_ui, client);
+                }
                 return;
             }
             ui.record_pending_fork(thread_id.as_deref(), fork_pid);
-            ui.mark_inferior_stopped(thread_id.as_deref(), all_stopped);
-            ui.finish_inferior_execution_action();
-            ui.finish_thread_execution_action();
+            let inferior_transition_affected =
+                ui.mark_inferior_stopped(thread_id.as_deref(), terminal_all_stopped);
+            if inferior_transition_affected {
+                ui.finish_inferior_execution_action();
+            }
+            if thread_action_affected {
+                ui.finish_thread_execution_action();
+            }
+            let execution_transition_affected = if transition_targets_group {
+                inferior_transition_affected
+            } else {
+                thread_transition_affected
+            };
+            if execution_transition_affected {
+                ui.finish_execution_transition();
+                ui.set_command_pending(false);
+            }
             refresh_inferiors(weak_ui, client);
             drop(ui);
             finish_stopped_state(weak_ui, client, reason, signal_name, signal_meaning, None);
         }
         MiEvent::BreakpointsChanged => refresh_breakpoints(weak_ui, client),
-        MiEvent::ThreadsChanged { group_id } => {
+        MiEvent::ThreadsChanged { id, group_id } => {
+            ui.record_thread_group(id.as_deref(), group_id.as_deref());
             if !ui.inferior_is_running() && !ui.native_until_active() {
                 refresh_inferiors(weak_ui, client);
                 if group_id.is_none() || group_id == ui.selected_inferior_id() {
@@ -134,6 +264,13 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             }
         }
         MiEvent::ThreadExited { id, group_id } => {
+            let current_thread_exited = ui.current_thread_id().as_deref() == Some(id.as_str());
+            let execution_transition_affected =
+                ui.execution_transition_matches_thread(Some(&id), false);
+            let thread_action_affected = ui.thread_execution_transition_matches(Some(&id), false);
+            let active_thread_exited = ui.active_thread_execution().as_deref() == Some(id.as_str());
+            let until_thread_exited = ui.native_until_active() && active_thread_exited;
+            ui.forget_thread_group(&id);
             let watch_for_orphaned_step = selected_thread_execution_may_be_orphaned(
                 ui.active_thread_execution().as_deref(),
                 ui.current_thread_id().as_deref(),
@@ -142,7 +279,37 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 ui.non_stop_mode(),
             );
             if watch_for_orphaned_step {
-                ui.set_thread_execution_exit_candidate(Some(id));
+                ui.set_thread_execution_exit_candidate(Some(id.clone()));
+            }
+            if active_thread_exited && ui.non_stop_mode() == Some(true) {
+                if until_thread_exited {
+                    ui.abort_native_until();
+                }
+                if execution_transition_affected {
+                    ui.finish_execution_transition();
+                    ui.set_command_pending(false);
+                }
+                if thread_action_affected {
+                    ui.finish_thread_execution_action();
+                }
+                ui.set_active_thread_execution(None);
+                ui.set_thread_execution_exit_candidate(None);
+            }
+            if current_thread_exited && ui.non_stop_mode() == Some(true) {
+                ui.set_current_thread_id(None);
+                ui.set_controls_running(false);
+                ui.set_debug_state_stale(true);
+                ui.clear_debugger_state();
+                ui.set_status(
+                    "Thread exited",
+                    &format!(
+                        "Thread {id} exited. fgdb is selecting another stopped thread when one is available."
+                    ),
+                    Some("status-ready"),
+                );
+                refresh_inferiors(weak_ui, client);
+                refresh_threads(weak_ui, client);
+                return;
             }
             if !ui.inferior_is_running() && !ui.native_until_active() {
                 refresh_inferiors(weak_ui, client);
@@ -162,7 +329,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                     ui.non_stop_mode(),
                 )
             {
-                recover_from_orphaned_thread_execution(&ui, id);
+                recover_from_orphaned_thread_execution(client, id);
             } else {
                 ui.set_thread_execution_exit_candidate(None);
             }
@@ -186,13 +353,16 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             let inspectable = ui.selected_inferior_context_stopped() && !ui.native_until_active();
             refresh_inferiors(weak_ui, client);
             if inspectable {
+                ui.set_controls_running(false);
+                ui.set_debug_state_stale(false);
                 refresh_stopped_state(weak_ui, client);
             }
         }
         MiEvent::Error(message) => {
             if ui.native_until_active() {
-                ui.cancel_native_until();
+                ui.abort_native_until();
             }
+            ui.finish_execution_transition();
             ui.set_command_pending(false);
             ui.set_active_thread_execution(None);
             ui.set_thread_execution_exit_candidate(None);
@@ -201,7 +371,14 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ui.clear_thread_action_pending();
             ui.set_status("Command failed", &message, Some("status-error"));
         }
+        MiEvent::DebuggerUnusable(message) => {
+            enter_gdb_recovery(&ui, "GDB recovery required", &message);
+        }
         MiEvent::Disconnected => {
+            if ui.native_until_active() {
+                ui.abort_native_until();
+            }
+            ui.finish_execution_transition();
             ui.set_command_pending(false);
             ui.set_active_thread_execution(None);
             ui.set_thread_execution_exit_candidate(None);
@@ -219,10 +396,11 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ui.clear_debugger_state();
             ui.set_status(
                 "Disconnected",
-                "The GDB/MI channel was closed.",
+                "The GDB/MI channel was closed. Restart GDB from the Session menu.",
                 Some("status-error"),
             );
             ui.set_controls_ready(false);
+            ui.set_gdb_recovery_available(true);
         }
     }
 }
@@ -240,23 +418,14 @@ fn selected_thread_execution_may_be_orphaned(
         && current_thread == Some(exited_thread)
 }
 
-fn recover_from_orphaned_thread_execution(ui: &Ui, thread_id: &str) {
-    ui.set_active_thread_execution(None);
-    ui.set_thread_execution_exit_candidate(None);
-    ui.set_pending_execution_inferior(None);
-    ui.clear_inferior_action_pending();
-    ui.clear_thread_action_pending();
-    ui.set_debug_state_stale(true);
-    ui.clear_debugger_state();
-    ui.set_controls_ready(false);
-    ui.set_gdb_recovery_available(true);
-    ui.set_status(
-        "GDB recovery required",
-        &format!(
-            "Thread {thread_id} exited while GDB was completing its step and no replacement stop was reported. Restart GDB from the Session menu."
-        ),
-        Some("status-error"),
-    );
+fn recover_from_orphaned_thread_execution(client: &MiClient, thread_id: &str) {
+    client.quarantine(format!(
+        "Thread {thread_id} exited while GDB was completing its step and no replacement stop was reported. Restart GDB from the Session menu."
+    ));
+}
+
+fn enter_gdb_recovery(ui: &Ui, title: &str, detail: &str) {
+    ui.require_gdb_recovery(title, detail);
 }
 
 pub(super) fn finish_stopped_state(
@@ -270,12 +439,12 @@ pub(super) fn finish_stopped_state(
     let Some(ui) = weak_ui.upgrade() else {
         return;
     };
-    ui.set_command_pending(false);
     ui.set_debug_state_stale(false);
     ui.set_controls_running(false);
     let reason = reason.unwrap_or_else(|| String::from("stopped"));
+    let exited = reason.starts_with("exited");
     ui.set_thread_stop_reason(Some(&reason));
-    if reason.starts_with("exited") {
+    if exited {
         ui.clear_debugger_state();
         refresh_inferiors(weak_ui, client);
         refresh_breakpoints(weak_ui, client);
@@ -294,7 +463,11 @@ pub(super) fn finish_stopped_state(
             |owner| format!("{owner} stopped: {reason}"),
         )
     });
-    ui.set_status("Paused", &detail, Some("status-ready"));
+    ui.set_status(
+        if exited { "Inferior exited" } else { "Paused" },
+        &detail,
+        Some("status-ready"),
+    );
 }
 
 pub(super) fn detect_target_abi(ui: &Weak<Ui>, client: &MiClient) {
@@ -396,14 +569,18 @@ fn refresh_after_target_abi_detection(ui: &Weak<Ui>, client: &MiClient) {
         return;
     };
     let started = current_ui.inferior_has_started();
+    let running = current_ui.inferior_is_running();
     let resynchronized = current_ui.finish_full_resynchronization();
     drop(current_ui);
-    if started {
+    if started && !running {
         refresh_stopped_state(ui, client);
-    } else {
+    } else if !started {
         infer_initial_stop_reason(ui, client);
     }
-    if resynchronized && let Some(ui) = ui.upgrade() {
+    if resynchronized
+        && !running
+        && let Some(ui) = ui.upgrade()
+    {
         ui.set_status(
             "Paused",
             "Debugger state was re-read from GDB.",

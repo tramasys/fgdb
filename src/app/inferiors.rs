@@ -286,10 +286,7 @@ fn execute_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resume: bool
         );
         return;
     };
-    current_ui.set_inferior_action_pending(Some(InferiorActionPending::Execution));
-    if resume {
-        current_ui.set_pending_execution_inferior(Some(id.clone()));
-    }
+    let execution_generation = current_ui.begin_inferior_execution_action(id.clone());
     current_ui.set_status(
         if resume {
             "Resuming inferior"
@@ -311,12 +308,15 @@ fn execute_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resume: bool
     );
     let weak_ui = ui.clone();
     let weak_ui_for_error = ui.clone();
-    if client
-        .request(&command, move |_, record| {
+    let request = client.request(&command, move |client, record| {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
-            if !record.is_success() {
+            if record.class == "timeout" {
+                client.quarantine(
+                    "GDB did not answer the process-level execution command within 30 seconds. The inferior state can no longer be determined safely.",
+                );
+            } else if !record.is_success() {
                 ui.set_pending_execution_inferior(None);
                 ui.clear_inferior_action_pending();
                 ui.set_status(
@@ -331,17 +331,33 @@ fn execute_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resume: bool
                     Some("status-error"),
                 );
             }
-        })
-        .is_err()
-        && let Some(ui) = weak_ui_for_error.upgrade()
-    {
-        ui.clear_inferior_action_pending();
-        ui.set_pending_execution_inferior(None);
-        ui.set_status(
-            "Inferior control failed",
-            "Could not queue the process-level execution command",
-            Some("status-error"),
-        );
+        });
+    if request.is_err() {
+        if let Some(ui) = weak_ui_for_error.upgrade() {
+            ui.clear_inferior_action_pending();
+            ui.set_pending_execution_inferior(None);
+            ui.set_status(
+                "Inferior control failed",
+                "Could not queue the process-level execution command",
+                Some("status-error"),
+            );
+        }
+    } else {
+        let weak_ui = ui;
+        let weak_client = Rc::downgrade(&client);
+        gtk::glib::timeout_add_local_once(std::time::Duration::from_secs(15), move || {
+            let Some(ui) = weak_ui.upgrade() else {
+                return;
+            };
+            if ui.inferior_execution_action_pending_for(&id, execution_generation) {
+                let message = "GDB accepted a process-level execution command but did not report a running or stopped transition within 15 seconds. Restart GDB from the Session menu.";
+                if let Some(client) = weak_client.upgrade() {
+                    client.quarantine(message);
+                } else {
+                    ui.require_gdb_recovery("GDB recovery required", message);
+                }
+            }
+        });
     }
 }
 

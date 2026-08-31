@@ -647,11 +647,22 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
         }
         let selection_changed = ui.reconcile_stop_owner_from_threads(&threads);
         let threads = ui.threads_for_selected_inferior(threads);
+        let recovered_stopped_context = ui.debug_state_is_stale()
+            && threads
+                .iter()
+                .any(|thread| thread.current && thread.state == "stopped");
         if !threads.is_empty() {
             ui.set_inferior_started(true);
         }
         ui.show_threads_for_refresh(generation, &threads);
+        if recovered_stopped_context {
+            ui.set_controls_running(false);
+            ui.set_debug_state_stale(false);
+        }
         drop(ui);
+        if recovered_stopped_context {
+            refresh_stopped_state(&weak_ui, client);
+        }
         if selection_changed {
             refresh_modules(&weak_ui, client);
             detect_target_abi(&weak_ui, client);

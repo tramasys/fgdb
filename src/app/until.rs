@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::*;
 use crate::debugger::Instruction;
@@ -11,6 +11,7 @@ const DISASSEMBLY_LOOKAHEAD_BYTES: u64 = 512;
 const MAX_UNTIL_LOOKAHEAD_INSTRUCTIONS: usize = 256;
 const MAX_TRACKED_UNTIL_PCS: usize = 8192;
 const MIN_NATIVE_ADVANCE_STEPS: u16 = 4;
+const EXECUTION_TRANSITION_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct MappingIdentity {
@@ -75,6 +76,7 @@ struct UntilRun {
     context_control: GefContextControl,
     cancel_requested: bool,
     pending_steps: u64,
+    pending_since: Option<Instant>,
     pending_location: Option<u64>,
     counted_steps_supported: bool,
     native_advance_supported: bool,
@@ -169,6 +171,7 @@ impl NativeUntilController {
             context_control: GefContextControl::None,
             cancel_requested: false,
             pending_steps: 0,
+            pending_since: None,
             pending_location: None,
             counted_steps_supported: true,
             native_advance_supported: true,
@@ -220,12 +223,21 @@ impl NativeUntilController {
             if let Some(run) = self.state.borrow_mut().as_mut() {
                 run.cancel_requested = true;
             }
-            issue_execution_command(
+            if !issue_execution_command(
                 &ui,
                 &self.client,
                 "-exec-interrupt --all",
                 "Cancelling the active Until operation…",
-            );
+            ) {
+                if let Some(run) = self.state.borrow_mut().as_mut() {
+                    run.cancel_requested = false;
+                }
+                ui.set_status(
+                    "Until cancel failed",
+                    "Could not queue the interrupt. The Until operation remains active; retry Cancel or restart GDB if no stop arrives.",
+                    Some("status-error"),
+                );
+            }
         } else {
             let Some(run) = self.state.borrow_mut().take() else {
                 return;
@@ -245,6 +257,20 @@ impl NativeUntilController {
         }
     }
 
+    pub(super) fn abort(&self) {
+        let run = self.state.borrow_mut().take();
+        if run.is_none() {
+            return;
+        }
+        self.next_generation();
+        if let Some(run) = run {
+            self.restore_context(run.context_control, false);
+        }
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_native_until_active(false);
+        }
+    }
+
     pub(super) fn on_stopped(
         self: &Rc<Self>,
         reason: Option<&str>,
@@ -260,6 +286,7 @@ impl NativeUntilController {
             let Some(run) = state.as_mut() else {
                 return false;
             };
+            run.pending_since.take();
             (
                 std::mem::take(&mut run.pending_steps),
                 run.pending_location.take(),
@@ -342,6 +369,9 @@ impl NativeUntilController {
             .client
             .request("-list-thread-groups", move |_, record| {
                 if !controller.is_current(generation) {
+                    return;
+                }
+                if controller.recover_timed_out_request(&record) {
                     return;
                 }
                 let Some(pid) = crate::debugger::inferior_pid(&record) else {
@@ -460,7 +490,7 @@ impl NativeUntilController {
             let Some(ui) = controller.ui.upgrade() else {
                 return gtk::glib::ControlFlow::Break;
             };
-            let (detail, cancel_requested) = {
+            let (detail, cancel_requested, transition_stalled) = {
                 let state = controller.state.borrow();
                 let Some(state) = state.as_ref() else {
                     return gtk::glib::ControlFlow::Break;
@@ -468,8 +498,19 @@ impl NativeUntilController {
                 (
                     progress_detail(state, state.pending_steps),
                     state.cancel_requested,
+                    state.pending_steps > 0
+                        && !ui.inferior_is_running()
+                        && state.pending_since.is_some_and(|started| {
+                            started.elapsed() >= EXECUTION_TRANSITION_TIMEOUT
+                        }),
                 )
             };
+            if transition_stalled {
+                controller.client.quarantine(
+                    "GDB accepted an Until execution step but did not report a running or stopped transition within 15 seconds. Restart GDB from the Session menu.",
+                );
+                return gtk::glib::ControlFlow::Break;
+            }
             let (title, detail) = if cancel_requested {
                 (
                     "Cancelling until",
@@ -489,6 +530,9 @@ impl NativeUntilController {
             self.client
                 .request("-data-evaluate-expression $pc", move |_, record| {
                     if !controller.is_current(generation) {
+                        return;
+                    }
+                    if controller.recover_timed_out_request(&record) {
                         return;
                     }
                     let address = record
@@ -643,6 +687,9 @@ impl NativeUntilController {
             if !controller.is_current(generation) {
                 return;
             }
+            if controller.recover_timed_out_request(&record) {
+                return;
+            }
             let instructions = if record.is_done() {
                 crate::debugger::instructions(&record)
             } else {
@@ -716,6 +763,9 @@ impl NativeUntilController {
             if !controller.is_current(generation) {
                 return;
             }
+            if controller.recover_timed_out_request(&record) {
+                return;
+            }
             if !record.is_done() {
                 controller.fail(
                     generation,
@@ -783,6 +833,7 @@ impl NativeUntilController {
             let thread_id = run.thread_id.clone();
             run.pending_location = native_target;
             run.pending_steps = steps;
+            run.pending_since = Some(Instant::now());
             (steps, command_kind, native_target, thread_id)
         };
         let command = match command_kind {
@@ -797,6 +848,7 @@ impl NativeUntilController {
                 let (Some(target), Some(thread_id)) = (native_target, thread_id.as_deref()) else {
                     if let Some(run) = self.state.borrow_mut().as_mut() {
                         run.pending_steps = 0;
+                        run.pending_since = None;
                         run.pending_location = None;
                     }
                     self.fail(generation, "The native Until target became unavailable");
@@ -805,15 +857,27 @@ impl NativeUntilController {
                 format!("-exec-until --thread {thread_id} *0x{target:x}")
             }
         };
+        if let Some(ui) = self.ui.upgrade() {
+            ui.set_active_thread_execution(thread_id.as_deref().map(str::to_owned));
+            ui.set_thread_execution_exit_candidate(None);
+        }
         let controller = Rc::clone(self);
         if let Err(error) = self.client.request(&command, move |_, record| {
-            if !controller.is_current(generation) || record.is_success() {
+            if !controller.is_current(generation) {
                 return;
+            }
+            if controller.recover_timed_out_request(&record) || record.is_success() {
+                return;
+            }
+            if let Some(ui) = controller.ui.upgrade() {
+                ui.set_active_thread_execution(None);
+                ui.set_thread_execution_exit_candidate(None);
             }
             match command_kind {
                 StepCommand::NativeAdvance => {
                     if let Some(run) = controller.state.borrow_mut().as_mut() {
                         run.pending_steps = 0;
+                        run.pending_since = None;
                         run.pending_location = None;
                         run.native_advance_supported = false;
                     }
@@ -822,6 +886,7 @@ impl NativeUntilController {
                 StepCommand::Counted => {
                     if let Some(run) = controller.state.borrow_mut().as_mut() {
                         run.pending_steps = 0;
+                        run.pending_since = None;
                         run.pending_location = None;
                         run.counted_steps_supported = false;
                     }
@@ -835,8 +900,13 @@ impl NativeUntilController {
                 ),
             }
         }) {
+            if let Some(ui) = self.ui.upgrade() {
+                ui.set_active_thread_execution(None);
+                ui.set_thread_execution_exit_candidate(None);
+            }
             if let Some(run) = self.state.borrow_mut().as_mut() {
                 run.pending_steps = 0;
+                run.pending_since = None;
                 run.pending_location = None;
             }
             self.fail(generation, &error.to_string());
@@ -864,6 +934,9 @@ impl NativeUntilController {
                             .is_some_and(|ui| !ui.inferior_is_running());
                         controller.restore_context(context_control, render_context);
                     }
+                    return;
+                }
+                if controller.recover_timed_out_request(&record) {
                     return;
                 }
                 if record.is_success()
@@ -936,7 +1009,7 @@ impl NativeUntilController {
         let Some(command) = context_restore_command(control, render_current_stop) else {
             return;
         };
-        let _ = self.client.send(&command);
+        let _ = self.client.request(&command, |_, _| {});
     }
 
     fn complete(self: &Rc<Self>, generation: u64) {
@@ -997,6 +1070,22 @@ impl NativeUntilController {
             && self.ui.upgrade().is_some_and(|ui| ui.native_until_active())
     }
 
+    fn recover_timed_out_request(&self, record: &MiRecord) -> bool {
+        match record.class.as_str() {
+            "timeout" => {
+                self.client.quarantine(
+                    "GDB stopped answering while Until was controlling execution. The target state can no longer be determined safely.",
+                );
+                true
+            }
+            "unavailable" => {
+                self.abort();
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn next_generation(&self) -> u64 {
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
@@ -1051,12 +1140,11 @@ fn is_internal_until_stop(
     if pending_steps == 0 {
         return false;
     }
+    if expected_thread.is_some_and(|expected| stopped_thread != Some(expected)) {
+        return false;
+    }
     match pending_location {
-        Some(location) => {
-            reason == Some("location-reached")
-                && address == Some(location)
-                && expected_thread.is_none_or(|expected| stopped_thread == Some(expected))
-        }
+        Some(location) => reason == Some("location-reached") && address == Some(location),
         None => reason == Some("end-stepping-range"),
     }
 }
@@ -1448,6 +1536,14 @@ mod tests {
             Some("2"),
             8,
             Some(0x1010),
+            Some("1"),
+        ));
+        assert!(!is_internal_until_stop(
+            Some("end-stepping-range"),
+            Some(0x1001),
+            Some("2"),
+            1,
+            None,
             Some("1"),
         ));
         assert!(!is_internal_until_stop(

@@ -11,7 +11,6 @@ pub(super) struct SessionController {
 
 enum SequenceCompletion {
     Configure(DebugSession),
-    Restart,
     Kill,
     Detach,
 }
@@ -104,13 +103,19 @@ impl SessionController {
         if self.busy.replace(true) {
             return;
         }
+        if action == SessionAction::Restart {
+            ui.set_session_pending(true);
+            crate::ui::controls::issue_execution_command(
+                &ui,
+                &self.client,
+                "-exec-run",
+                "Restarting the configured inferior",
+            );
+            self.busy.set(false);
+            ui.set_session_pending(false);
+            return;
+        }
         let (commands, completion, title, detail) = match action {
-            SessionAction::Restart => (
-                vec![String::from("-exec-run")],
-                SequenceCompletion::Restart,
-                "Restarting",
-                "Restarting the configured inferior…",
-            ),
             SessionAction::Kill => (
                 vec![console_command("kill")],
                 SequenceCompletion::Kill,
@@ -129,6 +134,7 @@ impl SessionController {
                 "Detaching",
                 "Releasing and resuming the inferior…",
             ),
+            SessionAction::Restart => unreachable!(),
         };
         ui.set_session_pending(true);
         ui.set_status(title, detail, None);
@@ -198,13 +204,6 @@ impl SessionController {
                         establish_session_target(&self.ui, &self.client, session.kind_label());
                     }
                 }
-            }
-            SequenceCompletion::Restart => {
-                ui.set_status(
-                    "Restarting",
-                    "GDB accepted the restart. Waiting for target state…",
-                    Some("status-running"),
-                );
             }
             SequenceCompletion::Kill => {
                 ui.set_controls_running(false);
@@ -286,9 +285,14 @@ fn run_next(sequence: Rc<CommandSequence>) {
     if let Err(error) = sequence
         .controller
         .client
-        .request(&command, move |_, record| {
+        .request(&command, move |client, record| {
             if record.is_success() {
                 run_next(sequence_for_response);
+            } else if record.class == "timeout" {
+                sequence_for_response.controller.busy.set(false);
+                client.quarantine(
+                    "GDB did not answer a session command within 30 seconds. The target and session state can no longer be determined safely.",
+                );
             } else {
                 sequence_for_response.controller.fail(
                     record

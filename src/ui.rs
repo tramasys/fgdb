@@ -208,6 +208,7 @@ type DebugSessionHandler = Rc<dyn Fn(DebugSession)>;
 type SessionActionHandler = Rc<dyn Fn(SessionAction)>;
 type UntilActionHandler = Rc<dyn Fn(UntilAction)>;
 type UntilCancelHandler = Rc<dyn Fn()>;
+type UntilAbortHandler = Rc<dyn Fn()>;
 type UntilStopHandler = Rc<dyn Fn(Option<&str>, Option<&str>, Option<&str>) -> bool>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -304,6 +305,7 @@ pub(crate) enum ThreadActionPending {
     Setting,
     Execution,
     Analysis,
+    Selection,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1454,6 +1456,7 @@ pub struct Ui {
     latest_modules: Rc<RefCell<Vec<SharedLibrary>>>,
     inferior_controls: InferiorControls,
     inferiors: Rc<RefCell<Vec<InferiorInfo>>>,
+    thread_inferior_ids: Rc<RefCell<HashMap<String, String>>>,
     selected_inferior_id: Rc<RefCell<Option<String>>>,
     stop_owner_inferior_id: Rc<RefCell<Option<String>>>,
     stop_owner_thread_id: Rc<RefCell<Option<String>>>,
@@ -1464,6 +1467,7 @@ pub struct Ui {
     fork_follow_mode: Rc<Cell<Option<ForkFollowMode>>>,
     detach_on_fork: Rc<Cell<Option<bool>>>,
     inferior_action_pending: Rc<Cell<Option<InferiorActionPending>>>,
+    inferior_execution_generation: Rc<Cell<u64>>,
     pending_execution_inferior: Rc<RefCell<Option<String>>>,
     active_thread_execution: Rc<RefCell<Option<String>>>,
     thread_execution_exit_candidate: Rc<RefCell<Option<String>>>,
@@ -1560,6 +1564,8 @@ pub struct Ui {
     module_refresh_gate: Rc<RefreshGate>,
     modules_dirty: Rc<Cell<bool>>,
     command_pending: Rc<Cell<bool>>,
+    execution_transition_pending: Rc<Cell<bool>>,
+    execution_transition_generation: Rc<Cell<u64>>,
     session_pending: Rc<Cell<bool>>,
     applied_control_state: Rc<RefCell<Option<ControlState>>>,
     gef_available: Rc<Cell<bool>>,
@@ -1580,6 +1586,7 @@ pub struct Ui {
     session_action_handler: Rc<RefCell<Option<SessionActionHandler>>>,
     until_action_handler: Rc<RefCell<Option<UntilActionHandler>>>,
     until_cancel_handler: Rc<RefCell<Option<UntilCancelHandler>>>,
+    until_abort_handler: Rc<RefCell<Option<UntilAbortHandler>>>,
     until_stop_handler: Rc<RefCell<Option<UntilStopHandler>>>,
     native_until_active: Rc<Cell<bool>>,
     frame_selection_handler: Rc<RefCell<Option<FrameSelectionHandler>>>,
@@ -1608,6 +1615,7 @@ pub struct Ui {
     debugger_ready: Rc<Cell<bool>>,
     inferior_running: Rc<Cell<bool>>,
     inferior_started: Rc<Cell<bool>>,
+    debug_state_stale: Rc<Cell<bool>>,
 }
 
 struct Topbar {

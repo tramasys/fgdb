@@ -44,6 +44,8 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let controller = Rc::clone(&until_controller);
     ui.set_until_cancel_handler(move || controller.cancel());
     let controller = Rc::clone(&until_controller);
+    ui.set_until_abort_handler(move || controller.abort());
+    let controller = Rc::clone(&until_controller);
     ui.set_until_stop_handler(move |reason, address, thread_id| {
         controller.on_stopped(reason, address, thread_id)
     });
@@ -68,15 +70,27 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
+        let Some(current_ui) = weak_ui.upgrade() else {
+            return;
+        };
+        if !current_ui.frame_selection_can_dispatch(level) {
+            return;
+        }
+        current_ui.set_thread_action_pending(Some(ThreadActionPending::Selection));
+        drop(current_ui);
         let weak_ui_for_error = weak_ui.clone();
         if client
             .request(
                 &format!("-stack-select-frame {level}"),
                 move |client, record| {
+                    if let Some(ui) = weak_ui.upgrade() {
+                        ui.clear_thread_action_pending();
+                    }
                     if record.is_done()
-                        && weak_ui
-                            .upgrade()
-                            .is_some_and(|ui| !ui.inferior_is_running())
+                        && weak_ui.upgrade().is_some_and(|ui| {
+                            ui.select_frame_in_view(level);
+                            !ui.inferior_is_running()
+                        })
                     {
                         refresh_stopped_state(&weak_ui, client);
                     } else if !record.is_done()
@@ -95,6 +109,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             .is_err()
             && let Some(ui) = weak_ui_for_error.upgrade()
         {
+            ui.clear_thread_action_pending();
             ui.set_status(
                 "Frame selection failed",
                 "Could not queue the frame-selection command",
@@ -108,21 +123,30 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
-        let Some(selected_id) = crate::debugger::thread_id_argument(&id).map(str::to_owned) else {
-            if let Some(ui) = weak_ui.upgrade() {
-                ui.set_status(
-                    "Thread selection failed",
-                    &format!("GDB reported an unsupported thread identifier: {id}"),
-                    Some("status-error"),
-                );
-            }
+        let Some(current_ui) = weak_ui.upgrade() else {
             return;
         };
+        if !current_ui.thread_selection_can_dispatch(&id) {
+            return;
+        }
+        let Some(selected_id) = crate::debugger::thread_id_argument(&id).map(str::to_owned) else {
+            current_ui.set_status(
+                "Thread selection failed",
+                &format!("GDB reported an unsupported thread identifier: {id}"),
+                Some("status-error"),
+            );
+            return;
+        };
+        current_ui.set_thread_action_pending(Some(ThreadActionPending::Selection));
+        drop(current_ui);
         let weak_ui_for_error = weak_ui.clone();
         if client
             .request(
                 &format!("-thread-select {selected_id}"),
                 move |client, record| {
+                    if let Some(ui) = weak_ui.upgrade() {
+                        ui.clear_thread_action_pending();
+                    }
                     if record.is_done() {
                         let stopped = weak_ui.upgrade().is_some_and(|ui| {
                             ui.select_thread_in_view(&selected_id);
@@ -145,6 +169,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             .is_err()
             && let Some(ui) = weak_ui_for_error.upgrade()
         {
+            ui.clear_thread_action_pending();
             ui.set_status(
                 "Thread selection failed",
                 "Could not queue the thread-selection command",

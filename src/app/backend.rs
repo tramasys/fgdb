@@ -14,6 +14,7 @@ const TERMINATE_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(1000);
 const GDB_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const RESTART_QUIT_TIMEOUT: Duration = Duration::from_millis(1500);
 const RESTART_TERMINATE_TIMEOUT: Duration = Duration::from_millis(1000);
+const RESTART_KILL_TIMEOUT: Duration = Duration::from_millis(1500);
 
 pub(super) struct BackendController {
     ui: Weak<Ui>,
@@ -31,6 +32,7 @@ pub(super) struct BackendController {
     connection_timeout: RefCell<Option<glib::SourceId>>,
     restart_terminate_timeout: RefCell<Option<glib::SourceId>>,
     restart_kill_timeout: RefCell<Option<glib::SourceId>>,
+    restart_failure_timeout: RefCell<Option<glib::SourceId>>,
 }
 
 impl BackendController {
@@ -57,6 +59,7 @@ impl BackendController {
             connection_timeout: RefCell::new(None),
             restart_terminate_timeout: RefCell::new(None),
             restart_kill_timeout: RefCell::new(None),
+            restart_failure_timeout: RefCell::new(None),
         })
     }
 
@@ -113,7 +116,6 @@ impl BackendController {
         self.restart_requested.set(true);
         self.cancel_connection_timeout();
         self.pending_restore.replace(ui.current_session());
-        ui.set_gdb_recovery_available(false);
         ui.clear_gdb_capabilities();
         ui.set_controls_ready(false);
         if ui.debugger_pid().is_some() {
@@ -155,10 +157,13 @@ impl BackendController {
 
     pub fn on_ready(&self) {
         self.cancel_connection_timeout();
-        if self.restart_requested.replace(false) {
-            if let Some(session) = self.pending_restore.borrow_mut().take() {
-                self.session.restore(session);
-            }
+        let restart_completed = self.restart_requested.replace(false);
+        let restore = self.pending_restore.borrow_mut().take();
+        if let Some(session) = restore {
+            self.session.restore(session);
+            return;
+        }
+        if restart_completed {
             return;
         }
         if self.initial_configuration_pending.replace(false)
@@ -282,6 +287,10 @@ impl BackendController {
             if controller.client.is_ready() || controller.closing.get() {
                 return;
             }
+            // Allow the recovery action to terminate this newly spawned but
+            // unresponsive debugger and retry. Keep pending_restore intact so
+            // either a late Ready or the next backend can restore the session.
+            controller.restart_requested.set(false);
             if let Some(ui) = controller.ui.upgrade() {
                 ui.set_controls_ready(false);
                 ui.set_gdb_recovery_available(true);
@@ -323,8 +332,33 @@ impl BackendController {
             };
             controller.restart_kill_timeout.borrow_mut().take();
             controller.signal_debugger(Signal::SIGKILL);
+            controller.start_restart_failure_timeout();
         });
         self.restart_kill_timeout.replace(Some(timeout));
+    }
+
+    fn start_restart_failure_timeout(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        let timeout = glib::timeout_add_local_once(RESTART_KILL_TIMEOUT, move || {
+            let Some(controller) = weak.upgrade() else {
+                return;
+            };
+            controller.restart_failure_timeout.borrow_mut().take();
+            if !controller.waiting_for_old_exit.replace(false) {
+                return;
+            }
+            controller.restart_requested.set(false);
+            if let Some(ui) = controller.ui.upgrade() {
+                ui.set_controls_ready(false);
+                ui.set_gdb_recovery_available(true);
+                ui.set_status(
+                    "GDB restart blocked",
+                    "The old debugger did not exit after quit, SIGTERM, and SIGKILL. fgdb remains responsive, but the debugger process must exit before a fresh backend can be launched.",
+                    Some("status-error"),
+                );
+            }
+        });
+        self.restart_failure_timeout.replace(Some(timeout));
     }
 
     fn cancel_restart_timeouts(&self) {
@@ -332,6 +366,9 @@ impl BackendController {
             timeout.remove();
         }
         if let Some(timeout) = self.restart_kill_timeout.borrow_mut().take() {
+            timeout.remove();
+        }
+        if let Some(timeout) = self.restart_failure_timeout.borrow_mut().take() {
             timeout.remove();
         }
     }

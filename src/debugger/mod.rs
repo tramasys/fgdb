@@ -4,7 +4,7 @@ mod model;
 mod session;
 mod target;
 
-pub use mi::{GdbCapabilities, MiClient, MiEvent, quote};
+pub use mi::{GdbCapabilities, MiClient, MiEvent, MiRecord, quote};
 pub use model::{
     Breakpoint, EnumVariant, InferiorInfo, InferiorState, Instruction, MemoryBlock, MemoryKind,
     Register, SharedLibrary, SourceFile, SourceLocation, StackEntry, StackFrame, ThreadInfo,

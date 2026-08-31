@@ -322,9 +322,40 @@ impl Ui {
     fn thread_action_dispatch_available(&self) -> bool {
         self.debugger_ready.get()
             && !self.command_pending.get()
+            && !self.execution_transition_pending.get()
             && !self.session_pending.get()
             && !self.native_until_active.get()
+            && !self.resynchronization_pending.get()
             && self.thread_controls.action_pending.get().is_none()
+    }
+
+    pub(crate) fn thread_selection_can_dispatch(&self, id: &str) -> bool {
+        self.debugger_ready.get()
+            && !self.command_pending.get()
+            && !self.execution_transition_pending.get()
+            && !self.session_pending.get()
+            && !self.native_until_active.get()
+            && !self.resynchronization_pending.get()
+            && self.inferior_action_pending.get().is_none()
+            && self.thread_controls.action_pending.get().is_none()
+            && self.current_thread_id().as_deref() != Some(id)
+            && self
+                .latest_threads
+                .borrow()
+                .as_ref()
+                .is_some_and(|state| state.source_threads.iter().any(|thread| thread.id == id))
+    }
+
+    pub(crate) fn frame_selection_can_dispatch(&self, level: u32) -> bool {
+        self.stopped_inspection_available()
+            && self.inferior_action_pending.get().is_none()
+            && self.thread_controls.action_pending.get().is_none()
+            && self.selected_frame_level.get() != level
+            && self
+                .latest_frames
+                .borrow()
+                .iter()
+                .any(|frame| frame.level == level)
     }
 
     pub(crate) fn thread_action_can_dispatch(&self, action: &ThreadAction) -> bool {
@@ -375,7 +406,9 @@ impl Ui {
 
     pub(crate) fn set_thread_action_pending(&self, pending: Option<ThreadActionPending>) {
         if self.thread_controls.action_pending.replace(pending) != pending {
+            self.update_control_sensitivity();
             self.update_thread_control_sensitivity();
+            self.render_inferior_controls();
         }
     }
 
@@ -383,6 +416,21 @@ impl Ui {
         if self.thread_controls.action_pending.get() == Some(ThreadActionPending::Execution) {
             self.set_thread_action_pending(None);
         }
+    }
+
+    pub(crate) fn thread_execution_transition_matches(
+        &self,
+        thread_id: Option<&str>,
+        all_stopped: bool,
+    ) -> bool {
+        if self.thread_controls.action_pending.get() != Some(ThreadActionPending::Execution) {
+            return false;
+        }
+        if all_stopped {
+            return true;
+        }
+        let active = self.active_thread_execution.borrow();
+        super::controls::execution_event_matches_thread(active.as_deref(), thread_id, false)
     }
 
     pub(crate) fn clear_thread_action_pending(&self) {
@@ -499,6 +547,7 @@ impl Ui {
         }
         self.set_current_thread_id(Some(id));
         self.set_controls_running(running);
+        self.set_debug_state_stale(running);
         self.latest_threads.borrow_mut().take();
         self.show_threads(&threads);
     }
@@ -633,6 +682,35 @@ impl Ui {
     pub(super) fn update_thread_control_sensitivity(&self) {
         let pending = self.thread_controls.action_pending.get().is_some();
         let ready = self.debugger_ready.get();
+        let selection_available = ready
+            && !self.command_pending.get()
+            && !self.execution_transition_pending.get()
+            && !self.session_pending.get()
+            && !self.native_until_active.get()
+            && !self.resynchronization_pending.get()
+            && self.inferior_action_pending.get().is_none()
+            && !pending;
+        let current_thread = self.current_thread_id();
+        for (id, button) in self.thread_buttons.borrow().iter() {
+            button.set_sensitive(
+                selection_available && current_thread.as_deref() != Some(id.as_str()),
+            );
+        }
+        let debugger_available = ready
+            && !self.command_pending.get()
+            && !self.execution_transition_pending.get()
+            && !self.session_pending.get()
+            && !self.native_until_active.get()
+            && !self.resynchronization_pending.get();
+        let stopped_inspection_available = debugger_available && !self.debug_state_stale.get();
+        for (level, button) in self.frame_buttons.borrow().iter() {
+            button.set_sensitive(
+                stopped_inspection_available
+                    && self.inferior_action_pending.get().is_none()
+                    && !pending
+                    && self.selected_frame_level.get() != *level,
+            );
+        }
         let latest = self.latest_threads.borrow();
         let threads = latest
             .as_ref()
@@ -651,24 +729,26 @@ impl Ui {
         let all_threads_stopped = threads.iter().all(|thread| thread.state != "running");
         self.thread_controls
             .refresh
-            .set_sensitive(ready && !pending);
+            .set_sensitive(debugger_available && !pending);
         self.thread_controls
             .scheduler_locking
-            .set_sensitive(ready && !pending);
+            .set_sensitive(debugger_available && !pending);
         self.thread_controls
             .non_stop
-            .set_sensitive(ready && !pending && !self.inferior_has_started());
-        self.thread_controls
-            .run_only
-            .set_sensitive(ready && !pending && selected_stopped && all_threads_stopped);
+            .set_sensitive(debugger_available && !pending && !self.inferior_has_started());
+        self.thread_controls.run_only.set_sensitive(
+            debugger_available && !pending && selected_stopped && all_threads_stopped,
+        );
         self.thread_controls
             .freeze
-            .set_sensitive(ready && !pending && non_stop && selected_running);
+            .set_sensitive(debugger_available && !pending && non_stop && selected_running);
         self.thread_controls
             .thaw
-            .set_sensitive(ready && !pending && non_stop && selected_stopped);
+            .set_sensitive(debugger_available && !pending && non_stop && selected_stopped);
         self.thread_controls.backtraces.set_sensitive(
-            ready && !pending && threads.iter().any(|thread| thread.state == "stopped"),
+            debugger_available
+                && !pending
+                && threads.iter().any(|thread| thread.state == "stopped"),
         );
         let ids = self.thread_controls.compare_ids.borrow();
         let left = ids.get(self.thread_controls.compare_left.selected() as usize);
@@ -685,7 +765,7 @@ impl Ui {
         });
         self.thread_controls
             .compare
-            .set_sensitive(ready && !pending && comparable);
+            .set_sensitive(debugger_available && !pending && comparable);
     }
 
     fn begin_thread_analysis(self: &Rc<Self>, title: &str, detail: &str) -> u64 {

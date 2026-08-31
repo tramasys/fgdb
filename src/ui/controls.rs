@@ -192,31 +192,110 @@ pub(super) fn connect_execution_button(
 }
 
 pub(crate) fn issue_execution_command(
-    ui: &Ui,
+    ui: &Rc<Ui>,
     client: &MiClient,
     command: &str,
     detail: &str,
 ) -> bool {
-    ui.set_pending_execution_inferior(execution_thread_group(command).map(str::to_owned));
-    ui.set_thread_execution_exit_candidate(None);
-    ui.set_active_thread_execution(
-        selected_thread_execution(command)
-            .then(|| ui.current_thread_id())
-            .flatten(),
-    );
+    let interrupt = execution_interrupt(command);
+    let previous_active_thread = ui.active_thread_execution();
+    let targeted_thread = execution_thread(command).map(str::to_owned);
+    let pending_group = execution_thread_group(command)
+        .map(str::to_owned)
+        .or_else(|| {
+            execution_targets_selected_group(command)
+                .then(|| ui.selected_inferior_id())
+                .flatten()
+        });
+    ui.set_pending_execution_inferior(pending_group);
+    if interrupt {
+        if previous_active_thread.is_none() {
+            ui.set_active_thread_execution(targeted_thread);
+        }
+    } else {
+        ui.set_thread_execution_exit_candidate(None);
+        ui.set_active_thread_execution(targeted_thread.or_else(|| {
+            selected_thread_execution(command)
+                .then(|| ui.current_thread_id())
+                .flatten()
+        }));
+    }
     match client.send(command) {
         Ok(_) => {
             ui.set_command_pending(true);
+            let generation = ui.begin_execution_transition();
+            let weak_ui = Rc::downgrade(ui);
+            let weak_client = client.weak();
+            gtk::glib::timeout_add_local_once(Duration::from_secs(15), move || {
+                let Some(ui) = weak_ui.upgrade() else {
+                    return;
+                };
+                if ui.execution_transition_is_pending(generation) {
+                    let message = "GDB accepted an execution command but did not report a running or stopped transition within 15 seconds. Restart GDB from the Session menu.";
+                    if let Some(client) = weak_client.upgrade() {
+                        client.quarantine(message);
+                    } else {
+                        ui.require_gdb_recovery("GDB recovery required", message);
+                    }
+                }
+            });
             ui.set_execution_status("Executing", detail);
             true
         }
         Err(error) => {
             ui.set_pending_execution_inferior(None);
-            ui.set_active_thread_execution(None);
+            ui.set_active_thread_execution(previous_active_thread);
             ui.set_status("Command failed", &error.to_string(), Some("status-error"));
             false
         }
     }
+}
+
+fn execution_resumes(command: &str) -> bool {
+    matches!(
+        command.split_whitespace().next(),
+        Some(
+            "-exec-run"
+                | "-exec-continue"
+                | "-exec-next"
+                | "-exec-step"
+                | "-exec-next-instruction"
+                | "-exec-step-instruction"
+                | "-exec-finish"
+                | "-exec-until"
+        )
+    )
+}
+
+fn execution_interrupt(command: &str) -> bool {
+    command.split_whitespace().next() == Some("-exec-interrupt")
+}
+
+fn execution_targets_selected_group(command: &str) -> bool {
+    let explicitly_scoped = command
+        .split_whitespace()
+        .any(|word| matches!(word, "--thread" | "--thread-group" | "--all"));
+    (execution_resumes(command) || execution_interrupt(command))
+        && !selected_thread_execution(command)
+        && !explicitly_scoped
+}
+
+fn execution_thread(command: &str) -> Option<&str> {
+    let mut words = command.split_whitespace();
+    while let Some(word) = words.next() {
+        if word == "--thread" {
+            return words.next();
+        }
+    }
+    None
+}
+
+pub(super) fn execution_event_matches_thread(
+    active: Option<&str>,
+    reported: Option<&str>,
+    all_stopped: bool,
+) -> bool {
+    all_stopped || active.is_none() || matches!(reported, None | Some("all")) || active == reported
 }
 
 fn selected_thread_execution(command: &str) -> bool {
@@ -303,7 +382,11 @@ pub(super) fn set_status_widgets(
 
 #[cfg(test)]
 mod tests {
-    use super::{addresses_equal, execution_thread_group, selected_thread_execution};
+    use super::{
+        addresses_equal, execution_event_matches_thread, execution_interrupt, execution_resumes,
+        execution_targets_selected_group, execution_thread, execution_thread_group,
+        selected_thread_execution,
+    };
 
     #[test]
     fn compares_only_valid_normalized_addresses() {
@@ -341,5 +424,54 @@ mod tests {
         }
         assert!(!selected_thread_execution("-exec-continue"));
         assert!(!selected_thread_execution("-exec-interrupt --all"));
+    }
+
+    #[test]
+    fn distinguishes_resume_and_interrupt_transitions() {
+        for command in [
+            "-exec-run",
+            "-exec-continue --thread-group i2",
+            "-exec-step --thread 4",
+            "-exec-until *0x401000",
+        ] {
+            assert!(execution_resumes(command), "{command}");
+            assert!(!execution_interrupt(command), "{command}");
+        }
+        assert!(execution_interrupt("-exec-interrupt --thread 4"));
+        assert!(!execution_resumes("-exec-interrupt --thread 4"));
+        assert_eq!(execution_thread("-exec-continue --thread 4"), Some("4"));
+        assert_eq!(execution_thread("-exec-interrupt --thread 12"), Some("12"));
+        assert_eq!(execution_thread("-exec-continue --thread-group i2"), None);
+        assert_eq!(execution_thread("-exec-step --thread"), None);
+    }
+
+    #[test]
+    fn distinguishes_thread_group_and_global_execution_targets() {
+        for command in ["-exec-run", "-exec-continue", "-exec-interrupt"] {
+            assert!(execution_targets_selected_group(command), "{command}");
+        }
+        for command in [
+            "-exec-next",
+            "-exec-finish --thread 4",
+            "-exec-continue --thread 4",
+            "-exec-continue --thread-group i2",
+            "-exec-continue --all",
+            "-exec-interrupt --all",
+        ] {
+            assert!(!execution_targets_selected_group(command), "{command}");
+        }
+    }
+
+    #[test]
+    fn correlates_targeted_thread_transitions_without_accepting_unrelated_events() {
+        assert!(execution_event_matches_thread(Some("4"), Some("4"), false));
+        assert!(execution_event_matches_thread(
+            Some("4"),
+            Some("all"),
+            false
+        ));
+        assert!(execution_event_matches_thread(Some("4"), Some("2"), true));
+        assert!(!execution_event_matches_thread(Some("4"), Some("2"), false));
+        assert!(execution_event_matches_thread(None, Some("2"), false));
     }
 }

@@ -118,8 +118,10 @@ impl Ui {
     pub(crate) fn inferior_action_is_current(&self, action: &InferiorAction) -> bool {
         if !self.debugger_ready.get()
             || self.command_pending.get()
+            || self.execution_transition_pending.get()
             || self.session_pending.get()
             || self.native_until_active.get()
+            || self.resynchronization_pending.get()
             || self.inferior_action_pending.get().is_some()
         {
             return false;
@@ -194,6 +196,19 @@ impl Ui {
             .iter()
             .find(|inferior| inferior.threads.iter().any(|thread| thread.id == thread_id))
             .map(|inferior| inferior.id.clone())
+            .or_else(|| self.thread_inferior_ids.borrow().get(thread_id).cloned())
+    }
+
+    pub(crate) fn record_thread_group(&self, thread_id: Option<&str>, group_id: Option<&str>) {
+        if let (Some(thread_id), Some(group_id)) = (thread_id, group_id) {
+            self.thread_inferior_ids
+                .borrow_mut()
+                .insert(thread_id.to_owned(), group_id.to_owned());
+        }
+    }
+
+    pub(crate) fn forget_thread_group(&self, thread_id: &str) {
+        self.thread_inferior_ids.borrow_mut().remove(thread_id);
     }
 
     pub(crate) fn apply_gdb_selection(&self, thread_id: Option<&str>, group_id: Option<&str>) {
@@ -398,13 +413,35 @@ impl Ui {
         self.show_threads(&threads);
     }
 
-    pub(crate) fn mark_inferior_running(&self, thread_id: Option<&str>) -> bool {
-        let pending_group = self.pending_execution_inferior.borrow_mut().take();
+    pub(crate) fn mark_inferior_running(&self, thread_id: Option<&str>) -> (bool, bool) {
+        let pending_group = self.pending_execution_inferior.borrow().clone();
         let exact_thread = thread_id.filter(|thread| *thread != "all");
         let current_thread = self.current_thread_id();
         let group = exact_thread
             .and_then(|thread| self.inferior_for_thread(thread))
-            .or(pending_group);
+            .or_else(|| {
+                // In non-stop mode the first running notification can arrive
+                // before the initial thread-group refresh. A sole live
+                // inferior is still an unambiguous owner for that thread.
+                exact_thread.and_then(|_| {
+                    let inferiors = self.inferiors.borrow();
+                    let mut live = inferiors
+                        .iter()
+                        .filter(|inferior| inferior.state != InferiorState::Exited);
+                    let only = live.next()?;
+                    live.next().is_none().then(|| only.id.clone())
+                })
+            })
+            .or_else(|| {
+                exact_thread
+                    .is_none()
+                    .then(|| pending_group.clone())
+                    .flatten()
+            });
+        let pending_affected = pending_group.is_some() && group == pending_group;
+        if pending_affected {
+            self.pending_execution_inferior.borrow_mut().take();
+        }
         // An exact thread ID that is not in our latest snapshot means the
         // snapshot is stale. It does not mean every inferior started running.
         let all = running_event_affects_all(group.as_deref(), exact_thread);
@@ -449,12 +486,19 @@ impl Ui {
             self.apply_selected_inferior_state();
         }
         self.render_inferior_controls();
-        selected_affected
+        (selected_affected, pending_affected)
     }
 
-    pub(crate) fn mark_inferior_stopped(&self, thread_id: Option<&str>, all_stopped: bool) {
-        self.pending_execution_inferior.borrow_mut().take();
-        let group = thread_id.and_then(|thread| self.inferior_for_thread(thread));
+    pub(crate) fn mark_inferior_stopped(&self, thread_id: Option<&str>, all_stopped: bool) -> bool {
+        let pending_group = self.pending_execution_inferior.borrow().clone();
+        let group = thread_id
+            .and_then(|thread| self.inferior_for_thread(thread))
+            .or_else(|| thread_id.is_none().then(|| pending_group.clone()).flatten());
+        let pending_affected =
+            pending_group.is_some() && (all_stopped || (group.is_some() && group == pending_group));
+        if pending_affected {
+            self.pending_execution_inferior.borrow_mut().take();
+        }
         if let Some(thread_id) = thread_id {
             self.stop_owner_thread_id
                 .replace(Some(thread_id.to_owned()));
@@ -499,6 +543,7 @@ impl Ui {
             self.apply_selected_inferior_state();
         }
         self.render_inferior_controls();
+        pending_affected
     }
 
     pub(crate) fn record_pending_fork(&self, thread_id: Option<&str>, child_pid: Option<u32>) {
@@ -526,6 +571,9 @@ impl Ui {
     }
 
     pub(crate) fn record_inferior_exited(&self, id: &str) {
+        self.thread_inferior_ids
+            .borrow_mut()
+            .retain(|_, group| group != id);
         if let Some(inferior) = self
             .inferiors
             .borrow_mut()
@@ -547,6 +595,7 @@ impl Ui {
     pub(crate) fn clear_inferiors(&self) {
         self.start_inferior_refresh();
         self.inferiors.borrow_mut().clear();
+        self.thread_inferior_ids.borrow_mut().clear();
         self.selected_inferior_id.borrow_mut().take();
         self.stop_owner_inferior_id.borrow_mut().take();
         self.stop_owner_thread_id.borrow_mut().take();
@@ -577,21 +626,47 @@ impl Ui {
     pub(crate) fn set_inferior_action_pending(&self, pending: Option<InferiorActionPending>) {
         if self.inferior_action_pending.replace(pending) != pending {
             self.render_inferior_controls();
+            self.update_control_sensitivity();
+            self.update_thread_control_sensitivity();
         }
     }
 
     pub(crate) fn finish_inferior_execution_action(&self) {
         if self.inferior_action_pending.get() == Some(InferiorActionPending::Execution) {
+            self.inferior_execution_generation
+                .set(self.inferior_execution_generation.get().wrapping_add(1));
             self.set_inferior_action_pending(None);
         }
     }
 
+    pub(crate) fn begin_inferior_execution_action(&self, id: String) -> u64 {
+        let generation = self.inferior_execution_generation.get().wrapping_add(1);
+        self.inferior_execution_generation.set(generation);
+        self.set_inferior_action_pending(Some(InferiorActionPending::Execution));
+        self.set_pending_execution_inferior(Some(id));
+        generation
+    }
+
+    pub(crate) fn inferior_execution_action_pending_for(&self, id: &str, generation: u64) -> bool {
+        self.inferior_execution_generation.get() == generation
+            && self.inferior_action_pending.get() == Some(InferiorActionPending::Execution)
+            && self.pending_execution_inferior.borrow().as_deref() == Some(id)
+    }
+
     pub(crate) fn clear_inferior_action_pending(&self) {
+        if self.inferior_action_pending.get() == Some(InferiorActionPending::Execution) {
+            self.inferior_execution_generation
+                .set(self.inferior_execution_generation.get().wrapping_add(1));
+        }
         self.set_inferior_action_pending(None);
     }
 
     pub(crate) fn set_pending_execution_inferior(&self, id: Option<String>) {
         self.pending_execution_inferior.replace(id);
+    }
+
+    pub(crate) fn pending_execution_inferior(&self) -> Option<String> {
+        self.pending_execution_inferior.borrow().clone()
     }
 
     pub(crate) fn set_active_thread_execution(&self, id: Option<String>) {
@@ -675,7 +750,14 @@ impl Ui {
             controls.detach_on_fork.set_active(detach_on_fork);
         }
         controls.selector_updating.set(false);
-        let available = self.inferior_action_pending.get().is_none();
+        let available = self.debugger_ready.get()
+            && !self.command_pending.get()
+            && !self.execution_transition_pending.get()
+            && !self.session_pending.get()
+            && !self.native_until_active.get()
+            && !self.resynchronization_pending.get()
+            && !self.debug_state_stale.get()
+            && self.inferior_action_pending.get().is_none();
         controls
             .follow_parent
             .set_sensitive(available && self.fork_follow_mode.get().is_some());
@@ -687,7 +769,7 @@ impl Ui {
             .set_sensitive(available && self.detach_on_fork.get().is_some());
     }
 
-    fn render_inferior_controls(&self) {
+    pub(super) fn render_inferior_controls(&self) {
         let controls = &self.inferior_controls;
         let inferiors = self.inferiors.borrow();
         let selected = self.selected_inferior_id.borrow().clone();
@@ -725,9 +807,17 @@ impl Ui {
             controls.selector.set_selected(selected_index);
         }
         controls.selector_updating.set(false);
+        let process_controls_available = self.debugger_ready.get()
+            && !self.command_pending.get()
+            && !self.execution_transition_pending.get()
+            && !self.session_pending.get()
+            && !self.native_until_active.get()
+            && !self.resynchronization_pending.get()
+            && self.inferior_action_pending.get().is_none();
         controls
             .selector
-            .set_sensitive(!inferiors.is_empty() && self.inferior_action_pending.get().is_none());
+            .set_sensitive(!inferiors.is_empty() && process_controls_available);
+        controls.refresh.set_sensitive(process_controls_available);
         let selected_inferior = inferiors
             .iter()
             .find(|inferior| Some(inferior.id.as_str()) == selected.as_deref());
@@ -766,7 +856,9 @@ impl Ui {
         let child = selected
             .as_deref()
             .and_then(|selected| self.first_inferior_child(selected));
-        let available = self.inferior_action_pending.get().is_none();
+        let available = process_controls_available
+            && !self.debug_state_stale.get()
+            && self.inferior_action_pending.get().is_none();
         controls
             .switch_parent
             .set_sensitive(available && parent.is_some());
@@ -908,7 +1000,13 @@ impl Ui {
         } else {
             card.relationship.set_visible(false);
         }
-        let available = self.inferior_action_pending.get().is_none();
+        let available = self.debugger_ready.get()
+            && !self.command_pending.get()
+            && !self.execution_transition_pending.get()
+            && !self.session_pending.get()
+            && !self.native_until_active.get()
+            && !self.resynchronization_pending.get()
+            && self.inferior_action_pending.get().is_none();
         set_button_label(&card.select, if selected { "Selected" } else { "Switch" });
         card.select.set_sensitive(!selected && available);
         let execution = match inferior.state {

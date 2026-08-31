@@ -97,6 +97,7 @@ impl Ui {
                 &self.frame_buttons.borrow(),
                 self.selected_frame_level.get(),
             );
+            self.update_thread_control_sensitivity();
             return;
         }
         self.latest_frames.replace(frames.to_vec());
@@ -131,11 +132,7 @@ impl Ui {
             }
             let level = frame.level;
             let handler = Rc::clone(&self.frame_selection_handler);
-            let frame_buttons = Rc::clone(&self.frame_buttons);
-            let selected_frame_level = Rc::clone(&self.selected_frame_level);
             button.connect_clicked(move |_| {
-                selected_frame_level.set(level);
-                update_selected_frame_buttons(&frame_buttons.borrow(), level);
                 if let Some(handler) = handler.borrow().as_ref() {
                     handler(level);
                 }
@@ -145,6 +142,13 @@ impl Ui {
                 .push((level, button.clone()));
             self.call_stack_list.append(&button);
         }
+        self.update_thread_control_sensitivity();
+    }
+
+    pub(crate) fn select_frame_in_view(&self, level: u32) {
+        self.selected_frame_level.set(level);
+        update_selected_frame_buttons(&self.frame_buttons.borrow(), level);
+        self.update_thread_control_sensitivity();
     }
 
     pub fn show_locals(&self, variables: &[Variable]) {
@@ -543,6 +547,7 @@ impl Ui {
                 .push((thread.id.clone(), button.clone()));
             self.threads_list.append(&button);
         }
+        self.update_thread_control_sensitivity();
     }
 
     pub fn show_modules(&self, modules: &[SharedLibrary]) {

@@ -11,7 +11,7 @@ use gtk::prelude::*;
 use crate::{
     config::{DebugSession, LaunchConfig},
     debugger::{
-        MemoryKind, MiClient, MiEvent, Register, SessionEvent, StackEntry, StackFrame,
+        MemoryKind, MiClient, MiEvent, MiRecord, Register, SessionEvent, StackEntry, StackFrame,
         TargetArchitecture, TargetEndian, ThreadInfo, Variable,
         context::{
             MemoryRegion, annotate_memory_regions, build_stack_entries, is_pointer_register,
