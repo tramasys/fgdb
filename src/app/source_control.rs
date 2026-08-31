@@ -50,22 +50,13 @@ pub(super) fn run_to_source_line(ui: Weak<Ui>, client: &MiClient, path: PathBuf,
         SourceLineOperation::RunTo,
         |ui, client, source| {
             let command = format!("-exec-until {}", crate::debugger::quote(&source.location));
-            match client.send(&command) {
-                Ok(_) => {
-                    if let Some(ui) = ui.upgrade() {
-                        ui.set_status(
-                            "Executing",
-                            &format!("Running to {}", source.location),
-                            Some("status-running"),
-                        );
-                    }
-                }
-                Err(error) => {
-                    if let Some(ui) = ui.upgrade() {
-                        ui.set_command_pending(false);
-                        ui.set_status("Jump failed", &error.to_string(), Some("status-error"));
-                    }
-                }
+            if let Some(ui) = ui.upgrade() {
+                crate::ui::controls::issue_execution_command(
+                    &ui,
+                    client,
+                    &command,
+                    &format!("Running to {}", source.location),
+                );
             }
         },
     );

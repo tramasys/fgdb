@@ -8,6 +8,8 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
     match event {
         MiEvent::Ready(capabilities) => {
             ui.set_command_pending(false);
+            ui.set_active_thread_execution(None);
+            ui.set_thread_execution_exit_candidate(None);
             ui.set_debug_state_stale(false);
             ui.set_gdb_recovery_available(false);
             ui.set_gdb_capabilities(capabilities.clone());
@@ -31,6 +33,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             refresh_breakpoints(weak_ui, client);
             refresh_inferiors(weak_ui, client);
             refresh_fork_policy(weak_ui, client);
+            refresh_thread_policy(weak_ui, client);
             ui.take_modules_dirty();
             refresh_modules(weak_ui, client);
         }
@@ -46,14 +49,18 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ui.invalidate_allocator_probe_cache();
             ui.record_inferior_started(&id, pid);
             refresh_inferiors(weak_ui, client);
+            refresh_thread_policy(weak_ui, client);
         }
         MiEvent::InferiorExited { id, exit_code: _ } => {
+            ui.set_active_thread_execution(None);
+            ui.set_thread_execution_exit_candidate(None);
             ui.record_inferior_exited(&id);
             refresh_inferiors(weak_ui, client);
         }
         MiEvent::Running { thread_id } => {
             let selected_affected = ui.mark_inferior_running(thread_id.as_deref());
-            ui.set_inferior_action_pending(false);
+            ui.finish_inferior_execution_action();
+            ui.finish_thread_execution_action();
             if !selected_affected {
                 return;
             }
@@ -93,6 +100,8 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             fork_pid,
             all_stopped,
         } => {
+            ui.set_active_thread_execution(None);
+            ui.set_thread_execution_exit_candidate(None);
             ui.set_command_pending(false);
             ui.set_current_thread_id(thread_id.as_deref());
             // The preceding *running event marks the inferior as running, but
@@ -109,7 +118,8 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             }
             ui.record_pending_fork(thread_id.as_deref(), fork_pid);
             ui.mark_inferior_stopped(thread_id.as_deref(), all_stopped);
-            ui.set_inferior_action_pending(false);
+            ui.finish_inferior_execution_action();
+            ui.finish_thread_execution_action();
             refresh_inferiors(weak_ui, client);
             drop(ui);
             finish_stopped_state(weak_ui, client, reason, signal_name, signal_meaning, None);
@@ -123,6 +133,40 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 }
             }
         }
+        MiEvent::ThreadExited { id, group_id } => {
+            let watch_for_orphaned_step = selected_thread_execution_may_be_orphaned(
+                ui.active_thread_execution().as_deref(),
+                ui.current_thread_id().as_deref(),
+                &id,
+                ui.inferior_is_running(),
+                ui.non_stop_mode(),
+            );
+            if watch_for_orphaned_step {
+                ui.set_thread_execution_exit_candidate(Some(id));
+            }
+            if !ui.inferior_is_running() && !ui.native_until_active() {
+                refresh_inferiors(weak_ui, client);
+                if group_id.is_none() || group_id == ui.selected_inferior_id() {
+                    refresh_threads(weak_ui, client);
+                }
+            }
+        }
+        MiEvent::ThreadExitPrompt => {
+            let candidate = ui.thread_execution_exit_candidate();
+            if let Some(id) = candidate.as_deref()
+                && selected_thread_execution_may_be_orphaned(
+                    ui.active_thread_execution().as_deref(),
+                    ui.current_thread_id().as_deref(),
+                    id,
+                    ui.inferior_is_running(),
+                    ui.non_stop_mode(),
+                )
+            {
+                recover_from_orphaned_thread_execution(&ui, id);
+            } else {
+                ui.set_thread_execution_exit_candidate(None);
+            }
+        }
         MiEvent::LibrariesChanged { group_id } => {
             ui.invalidate_allocator_probe_cache();
             ui.mark_modules_dirty();
@@ -134,9 +178,14 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 refresh_modules(weak_ui, client);
             }
         }
-        MiEvent::SelectionChanged => {
-            if !ui.inferior_is_running() && !ui.native_until_active() {
-                refresh_inferiors(weak_ui, client);
+        MiEvent::SelectionChanged {
+            thread_id,
+            group_id,
+        } => {
+            ui.apply_gdb_selection(thread_id.as_deref(), group_id.as_deref());
+            let inspectable = ui.selected_inferior_context_stopped() && !ui.native_until_active();
+            refresh_inferiors(weak_ui, client);
+            if inspectable {
                 refresh_stopped_state(weak_ui, client);
             }
         }
@@ -145,16 +194,25 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 ui.cancel_native_until();
             }
             ui.set_command_pending(false);
+            ui.set_active_thread_execution(None);
+            ui.set_thread_execution_exit_candidate(None);
             ui.set_pending_execution_inferior(None);
+            ui.clear_inferior_action_pending();
+            ui.clear_thread_action_pending();
             ui.set_status("Command failed", &message, Some("status-error"));
         }
         MiEvent::Disconnected => {
             ui.set_command_pending(false);
+            ui.set_active_thread_execution(None);
+            ui.set_thread_execution_exit_candidate(None);
             ui.set_pending_execution_inferior(None);
+            ui.clear_inferior_action_pending();
+            ui.clear_thread_action_pending();
             ui.finish_full_resynchronization();
             ui.set_debug_state_stale(true);
             ui.clear_gef_capabilities();
             ui.clear_gdb_capabilities();
+            ui.set_thread_control_policy(None, None);
             ui.clear_inferiors();
             ui.set_inferior_started(false);
             ui.reset_target_abi();
@@ -167,6 +225,38 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ui.set_controls_ready(false);
         }
     }
+}
+
+fn selected_thread_execution_may_be_orphaned(
+    active_thread: Option<&str>,
+    current_thread: Option<&str>,
+    exited_thread: &str,
+    running: bool,
+    non_stop: Option<bool>,
+) -> bool {
+    running
+        && non_stop != Some(true)
+        && active_thread == Some(exited_thread)
+        && current_thread == Some(exited_thread)
+}
+
+fn recover_from_orphaned_thread_execution(ui: &Ui, thread_id: &str) {
+    ui.set_active_thread_execution(None);
+    ui.set_thread_execution_exit_candidate(None);
+    ui.set_pending_execution_inferior(None);
+    ui.clear_inferior_action_pending();
+    ui.clear_thread_action_pending();
+    ui.set_debug_state_stale(true);
+    ui.clear_debugger_state();
+    ui.set_controls_ready(false);
+    ui.set_gdb_recovery_available(true);
+    ui.set_status(
+        "GDB recovery required",
+        &format!(
+            "Thread {thread_id} exited while GDB was completing its step and no replacement stop was reported. Restart GDB from the Session menu."
+        ),
+        Some("status-error"),
+    );
 }
 
 pub(super) fn finish_stopped_state(
@@ -477,6 +567,7 @@ pub(super) fn resynchronize_debugger_state(ui: &Weak<Ui>, client: &MiClient) {
     refresh_breakpoints(ui, client);
     refresh_inferiors(ui, client);
     refresh_fork_policy(ui, client);
+    refresh_thread_policy(ui, client);
     refresh_modules(ui, client);
     detect_gef(ui, client);
     detect_target_abi(ui, client);
@@ -484,7 +575,10 @@ pub(super) fn resynchronize_debugger_state(ui: &Weak<Ui>, client: &MiClient) {
 
 #[cfg(test)]
 mod tests {
-    use super::{GefContextControl, gef_context_configuration_command, parse_pointer_size};
+    use super::{
+        GefContextControl, gef_context_configuration_command, parse_pointer_size,
+        selected_thread_execution_may_be_orphaned,
+    };
 
     #[test]
     fn accepts_decimal_and_gdb_hex_pointer_sizes() {
@@ -516,5 +610,44 @@ mod tests {
             gef_context_configuration_command(GefContextControl::None, false),
             None
         );
+    }
+
+    #[test]
+    fn only_flags_an_exited_selected_thread_during_all_stop_stepping() {
+        assert!(selected_thread_execution_may_be_orphaned(
+            Some("2"),
+            Some("2"),
+            "2",
+            true,
+            Some(false),
+        ));
+        assert!(!selected_thread_execution_may_be_orphaned(
+            Some("2"),
+            Some("1"),
+            "2",
+            true,
+            Some(false),
+        ));
+        assert!(!selected_thread_execution_may_be_orphaned(
+            Some("2"),
+            Some("2"),
+            "2",
+            false,
+            Some(false),
+        ));
+        assert!(!selected_thread_execution_may_be_orphaned(
+            Some("2"),
+            Some("2"),
+            "2",
+            true,
+            Some(true),
+        ));
+        assert!(!selected_thread_execution_may_be_orphaned(
+            None,
+            Some("2"),
+            "2",
+            true,
+            Some(false),
+        ));
     }
 }

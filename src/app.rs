@@ -12,7 +12,7 @@ use crate::{
     config::{DebugSession, LaunchConfig},
     debugger::{
         MemoryKind, MiClient, MiEvent, Register, SessionEvent, StackEntry, StackFrame,
-        TargetArchitecture, TargetEndian, Variable,
+        TargetArchitecture, TargetEndian, ThreadInfo, Variable,
         context::{
             MemoryRegion, annotate_memory_regions, build_stack_entries, is_pointer_register,
             looks_like_string_word, pointer_address, read_memory_regions,
@@ -23,8 +23,10 @@ use crate::{
     ui::{
         BreakpointEditRequest, BreakpointSpec, CallAbiTargetRequest, DisassemblyRequest,
         DisassemblySyntax, EventCatchpoint, ForkFollowMode, GefContextControl,
-        HeapInspectionAction, HeapInspectionRequest, InferiorAction, SessionAction,
-        SourceDiscoveryRequest, Ui, UntilAction, WatchpointAccess,
+        HeapInspectionAction, HeapInspectionRequest, InferiorAction, InferiorActionPending,
+        SchedulerLockingMode, SessionAction, SourceDiscoveryRequest, ThreadAction,
+        ThreadActionPending, ThreadBacktrace, ThreadComparison, ThreadComparisonRow, Ui,
+        UntilAction, WatchpointAccess,
     },
 };
 
@@ -97,6 +99,7 @@ mod refresh;
 mod session;
 mod source_control;
 mod symbols;
+mod threads;
 mod type_metadata;
 mod until;
 mod watches;
@@ -118,6 +121,7 @@ pub(crate) use refresh::*;
 use session::*;
 use source_control::*;
 use symbols::*;
+use threads::*;
 use type_metadata::*;
 use until::*;
 use watches::*;

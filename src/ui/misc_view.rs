@@ -30,6 +30,17 @@ struct MiscTablePage {
     view: gtk::ColumnView,
 }
 
+struct LocksWidgets {
+    root: gtk::Paned,
+    summary: gtk::Label,
+    note: gtk::Label,
+    store: gio::ListStore,
+    empty: gtk::Label,
+    graph_summary: gtk::Label,
+    dependency_store: gio::ListStore,
+    graph_empty: gtk::Label,
+}
+
 struct CallAbiWidgets {
     root: gtk::Box,
     summary: gtk::Label,
@@ -186,6 +197,10 @@ pub(super) fn build_misc_view() -> MiscView {
         lock_note: locks.note,
         lock_store: locks.store,
         lock_empty: locks.empty,
+        lock_graph_summary: locks.graph_summary,
+        lock_dependency_store: locks.dependency_store,
+        lock_graph_empty: locks.graph_empty,
+        lock_split: locks.root,
         core_summary: core.summary,
         core_warning: core.warning,
         core_note_store: core.note_store,
@@ -994,7 +1009,7 @@ fn set_allocator_class(label: &gtk::Label, class: &str, enabled: bool) {
     }
 }
 
-fn build_locks_page() -> MiscTablePage {
+fn build_locks_page() -> LocksWidgets {
     let page = build_misc_table_page("Open this tab to inspect kernel-visible futex waits");
     page.note.set_text(LOCKS_NOTE);
     page.view
@@ -1035,7 +1050,76 @@ fn build_locks_page() -> MiscTablePage {
         .append_column(&misc_column::<LockWait>("DETAILS", 360, true, |row| {
             row.details.clone()
         }));
-    page
+
+    let graph = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    graph.add_css_class("lock-graph");
+    graph.append(&section_title("WAIT-FOR GRAPH"));
+    let graph_summary = misc_note_label();
+    graph_summary
+        .set_text("Owner edges appear only when the live futex word identifies a scanned thread");
+    graph.append(&graph_summary);
+    let dependency_store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let dependency_selection = gtk::NoSelection::new(Some(dependency_store.clone()));
+    let dependency_view = gtk::ColumnView::new(Some(dependency_selection));
+    dependency_view.add_css_class("debug-table");
+    dependency_view.set_vexpand(true);
+    dependency_view.set_reorderable(true);
+    dependency_view.append_column(&misc_column::<LockDependency>(
+        "WAITER",
+        200,
+        false,
+        |row| format!("{}  {}", row.waiter_tid, row.waiter),
+    ));
+    dependency_view.append_column(&misc_column::<LockDependency>(
+        "RELATION",
+        110,
+        false,
+        |_| String::from("waits for"),
+    ));
+    dependency_view.append_column(&misc_column::<LockDependency>("OWNER", 200, false, |row| {
+        format!("{}  {}", row.owner_tid, row.owner)
+    }));
+    dependency_view.append_column(&misc_column::<LockDependency>(
+        "ADDRESS",
+        190,
+        false,
+        |row| format!("0x{:016x}", row.address),
+    ));
+    dependency_view.append_column(&misc_column::<LockDependency>(
+        "FUTEX WORD",
+        130,
+        true,
+        |row| format!("0x{:08x}", row.futex_value),
+    ));
+    let graph_empty = empty_label("No reliable thread-owner edges were found");
+    graph.append(&graph_empty);
+    let dependency_scrolled = gtk::ScrolledWindow::builder()
+        .child(&dependency_view)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .build();
+    configure_misc_scroller(&dependency_scrolled);
+    graph.append(&dependency_scrolled);
+
+    let root = gtk::Paned::new(gtk::Orientation::Vertical);
+    root.set_wide_handle(true);
+    root.set_shrink_start_child(false);
+    root.set_shrink_end_child(false);
+    root.set_resize_start_child(true);
+    root.set_resize_end_child(true);
+    root.set_start_child(Some(&page.root));
+    root.set_end_child(Some(&graph));
+    root.set_position(390);
+    LocksWidgets {
+        root,
+        summary: page.summary,
+        note: page.note,
+        store: page.store,
+        empty: page.empty,
+        graph_summary,
+        dependency_store,
+        graph_empty,
+    }
 }
 
 fn build_core_page() -> CoreWidgets {
@@ -1275,19 +1359,16 @@ fn misc_column<T: 'static>(
     column
 }
 
-fn build_startup_summary() -> (gtk::FlowBox, MiscStartupSummary) {
-    let summary = gtk::FlowBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .homogeneous(true)
-        .min_children_per_line(1)
-        .max_children_per_line(3)
+fn build_startup_summary() -> (gtk::Grid, MiscStartupSummary) {
+    let summary = gtk::Grid::builder()
+        .column_homogeneous(true)
         .column_spacing(1)
-        .row_spacing(1)
         .build();
     summary.add_css_class("misc-startup-summary");
-    let (argc, env) = append_startup_counts_cell(&summary);
-    let argv = append_startup_summary_cell(&summary, "ARGV RANGE");
-    let envp = append_startup_summary_cell(&summary, "ENVP RANGE");
+    let argc = append_startup_summary_cell(&summary, "ARGC", 0, 1);
+    let env = append_startup_summary_cell(&summary, "ENV", 1, 1);
+    let argv = append_startup_summary_cell(&summary, "ARGV RANGE", 2, 2);
+    let envp = append_startup_summary_cell(&summary, "ENVP RANGE", 4, 2);
     set_startup_summary_value(&argc, "—");
     set_startup_summary_value(&env, "—");
     set_startup_summary_value(&argv, "—");
@@ -1303,36 +1384,12 @@ fn build_startup_summary() -> (gtk::FlowBox, MiscStartupSummary) {
     )
 }
 
-fn append_startup_counts_cell(summary: &gtk::FlowBox) -> (gtk::Label, gtk::Label) {
-    let cell = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    cell.add_css_class("misc-startup-summary-cell");
-    cell.set_homogeneous(true);
-
-    let argc_group = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let argc_key = gtk::Label::new(Some("ARGC"));
-    argc_key.add_css_class("misc-startup-summary-key");
-    let argc = gtk::Label::new(None);
-    argc.add_css_class("misc-startup-summary-value");
-    enable_stable_text_selection(&argc);
-    argc_group.append(&argc_key);
-    argc_group.append(&argc);
-
-    let env_group = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let env_key = gtk::Label::new(Some("ENV"));
-    env_key.add_css_class("misc-startup-summary-key");
-    let env = gtk::Label::new(None);
-    env.add_css_class("misc-startup-summary-value");
-    enable_stable_text_selection(&env);
-    env_group.append(&env_key);
-    env_group.append(&env);
-
-    cell.append(&argc_group);
-    cell.append(&env_group);
-    summary.insert(&cell, -1);
-    (argc, env)
-}
-
-fn append_startup_summary_cell(summary: &gtk::FlowBox, title: &str) -> gtk::Label {
+fn append_startup_summary_cell(
+    summary: &gtk::Grid,
+    title: &str,
+    column: i32,
+    width: i32,
+) -> gtk::Label {
     let cell = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     cell.add_css_class("misc-startup-summary-cell");
     let key = gtk::Label::new(Some(title));
@@ -1348,7 +1405,7 @@ fn append_startup_summary_cell(summary: &gtk::FlowBox, title: &str) -> gtk::Labe
     enable_stable_text_selection(&value);
     cell.append(&key);
     cell.append(&value);
-    summary.insert(&cell, -1);
+    summary.attach(&cell, column, 0, width, 1);
     value
 }
 
@@ -1857,6 +1914,8 @@ impl MiscView {
 
     fn show_locks(&self, locks: LockSnapshot) {
         let wait_count = locks.waits.len();
+        let dependency_count = locks.dependencies.len();
+        let deadlock_count = locks.deadlocks.len();
         let address_count = locks
             .waits
             .iter()
@@ -1879,6 +1938,27 @@ impl MiscView {
         self.lock_empty
             .set_text("No kernel-visible futex waits are present");
         self.lock_empty.set_visible(wait_count == 0);
+        let graph_summary = if deadlock_count == 0 {
+            format!("{dependency_count} reliable wait-for edges  ·  no deadlock cycles detected")
+        } else {
+            format!(
+                "{dependency_count} reliable wait-for edges  ·  {deadlock_count} deadlock cycle(s)\n{}",
+                locks
+                    .deadlocks
+                    .iter()
+                    .map(|cycle| cycle.description.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        };
+        self.lock_graph_summary.set_text(&graph_summary);
+        if deadlock_count > 0 {
+            self.lock_graph_summary.add_css_class("status-error");
+        } else {
+            self.lock_graph_summary.remove_css_class("status-error");
+        }
+        replace_boxed_store_if_changed(&self.lock_dependency_store, locks.dependencies);
+        self.lock_graph_empty.set_visible(dependency_count == 0);
     }
 
     fn show_call_abi(&self, snapshot: CallAbiSnapshot) {
@@ -2000,6 +2080,12 @@ impl MiscView {
         self.lock_summary.set_text("—");
         self.lock_store.remove_all();
         self.lock_empty.set_visible(true);
+        self.lock_graph_summary.set_text(
+            "Owner edges appear only when the live futex word identifies a scanned thread",
+        );
+        self.lock_graph_summary.remove_css_class("status-error");
+        self.lock_dependency_store.remove_all();
+        self.lock_graph_empty.set_visible(true);
     }
 
     fn clear_core(&self) {

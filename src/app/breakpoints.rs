@@ -588,11 +588,26 @@ pub(super) fn refresh_modules(ui: &Weak<Ui>, client: &MiClient) {
         return;
     }
     let inferior_id = current_ui.selected_inferior_id();
+    let command = match inferior_id.as_deref() {
+        Some(id) => {
+            let Some(group) = crate::debugger::thread_group_argument(id) else {
+                current_ui.finish_module_refresh();
+                current_ui.set_status(
+                    "Module refresh failed",
+                    "GDB reported an unsupported inferior identifier",
+                    Some("status-error"),
+                );
+                return;
+            };
+            format!("-file-list-shared-libraries --thread-group {group}")
+        }
+        None => String::from("-file-list-shared-libraries"),
+    };
     drop(current_ui);
     let weak_ui = ui.clone();
     let weak_ui_for_error = ui.clone();
     if client
-        .request("-file-list-shared-libraries", move |client, record| {
+        .request(&command, move |client, record| {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };

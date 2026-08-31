@@ -36,6 +36,7 @@ pub(super) fn build_signal_grid(
             };
             let button = gtk::Button::with_label(label);
             button.add_css_class("signal-action");
+            button.add_css_class("catchpoint-action");
             button.set_halign(gtk::Align::Fill);
             button.set_hexpand(true);
             button.set_tooltip_text(Some(&format!(

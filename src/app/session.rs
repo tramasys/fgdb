@@ -193,6 +193,7 @@ impl SessionController {
                         refresh_breakpoints(&self.ui, &self.client);
                         refresh_inferiors(&self.ui, &self.client);
                         refresh_fork_policy(&self.ui, &self.client);
+                        refresh_thread_policy(&self.ui, &self.client);
                         refresh_modules(&self.ui, &self.client);
                         establish_session_target(&self.ui, &self.client, session.kind_label());
                     }

@@ -436,10 +436,17 @@ impl Ui {
             .and_then(std::ffi::OsStr::to_str)
             .map(str::to_owned);
         let stop_reason = self.thread_stop_reason.borrow().clone();
+        let rendered_threads = self.filtered_sorted_threads(threads);
+        let visible_thread_count = rendered_threads.len();
+        let (query, state_filter, sort) = self.current_thread_filter_state();
         if self.latest_threads.borrow().as_ref().is_some_and(|state| {
-            state.threads == threads
+            state.source_threads == threads
+                && state.rendered_threads == rendered_threads
                 && state.stop_reason == stop_reason
                 && state.executable_name == executable_name
+                && state.query == query
+                && state.state_filter == state_filter
+                && state.sort == sort
         }) {
             return;
         }
@@ -450,12 +457,12 @@ impl Ui {
             .borrow()
             .as_ref()
             .is_some_and(|previous| {
-                previous.threads.len() == threads.len()
-                    && self.thread_buttons.borrow().len() == threads.len()
+                previous.rendered_threads.len() == rendered_threads.len()
+                    && self.thread_buttons.borrow().len() == rendered_threads.len()
                     && previous
-                        .threads
+                        .rendered_threads
                         .iter()
-                        .zip(threads)
+                        .zip(&rendered_threads)
                         .all(|(previous, current)| previous.id == current.id)
             });
         if can_update_in_place {
@@ -467,8 +474,8 @@ impl Ui {
                 .thread_buttons
                 .borrow()
                 .iter()
-                .zip(previous.threads.iter())
-                .zip(threads)
+                .zip(previous.rendered_threads.iter())
+                .zip(&rendered_threads)
             {
                 let reason = thread
                     .current
@@ -482,25 +489,39 @@ impl Ui {
             }
             drop(latest);
             self.latest_threads.replace(Some(ThreadRenderState {
-                threads: threads.to_vec(),
+                source_threads: threads.to_vec(),
+                rendered_threads,
                 stop_reason,
                 executable_name,
+                query,
+                state_filter,
+                sort,
             }));
+            self.sync_thread_controls(threads, visible_thread_count);
             return;
         }
         self.latest_threads.replace(Some(ThreadRenderState {
-            threads: threads.to_vec(),
+            source_threads: threads.to_vec(),
+            rendered_threads: rendered_threads.clone(),
             stop_reason: stop_reason.clone(),
             executable_name,
+            query,
+            state_filter,
+            sort,
         }));
+        self.sync_thread_controls(threads, visible_thread_count);
         clear_box(&self.threads_list);
         self.thread_buttons.borrow_mut().clear();
-        if threads.is_empty() {
+        if rendered_threads.is_empty() {
             self.threads_list
-                .append(&empty_label("No threads available"));
+                .append(&empty_label(if threads.is_empty() {
+                    "No threads available"
+                } else {
+                    "No threads match the current filter"
+                }));
             return;
         }
-        for thread in threads {
+        for thread in &rendered_threads {
             let reason = thread
                 .current
                 .then(|| stop_reason.as_deref().unwrap_or("STOPPED"));
@@ -2020,7 +2041,7 @@ impl Ui {
     }
 }
 
-fn frame_location_text(frame: &StackFrame) -> String {
+pub(super) fn frame_location_text(frame: &StackFrame) -> String {
     frame.line.map_or_else(
         || frame.address.clone(),
         |line| {

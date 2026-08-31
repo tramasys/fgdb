@@ -45,10 +45,18 @@ pub enum MiEvent {
     ThreadsChanged {
         group_id: Option<String>,
     },
+    ThreadExited {
+        id: String,
+        group_id: Option<String>,
+    },
+    ThreadExitPrompt,
     LibrariesChanged {
         group_id: Option<String>,
     },
-    SelectionChanged,
+    SelectionChanged {
+        thread_id: Option<String>,
+        group_id: Option<String>,
+    },
     Error(String),
     Disconnected,
 }
@@ -341,6 +349,7 @@ pub struct MiClient {
     write_source: RefCell<Option<glib::SourceId>>,
     timeout_source: RefCell<Option<glib::SourceId>>,
     discarding_oversized_line: Cell<bool>,
+    thread_exit_since_prompt: Cell<bool>,
 }
 
 struct MiTransport {
@@ -389,6 +398,7 @@ impl MiClient {
             write_source: RefCell::new(None),
             timeout_source: RefCell::new(None),
             discarding_oversized_line: Cell::new(false),
+            thread_exit_since_prompt: Cell::new(false),
         });
         client.install_sources();
         Ok(client)
@@ -428,6 +438,7 @@ impl MiClient {
         self.incoming.borrow_mut().clear();
         self.outgoing.borrow_mut().clear();
         self.discarding_oversized_line.set(false);
+        self.thread_exit_since_prompt.set(false);
         self.ready.set(false);
         self.initializing.set(false);
         self.capabilities.replace(GdbCapabilities::default());
@@ -1026,6 +1037,8 @@ impl MiClient {
         if line == "(gdb)" {
             if !self.ready.get() && !self.initializing.replace(true) {
                 self.begin_initialization();
+            } else if self.ready.get() && self.thread_exit_since_prompt.replace(false) {
+                (self.event_handler)(self, MiEvent::ThreadExitPrompt);
             }
             return;
         }
@@ -1138,12 +1151,27 @@ impl MiClient {
             '=' if record.class.starts_with("breakpoint-") => {
                 (self.event_handler)(self, MiEvent::BreakpointsChanged);
             }
-            '=' if matches!(record.class.as_str(), "thread-created" | "thread-exited") => {
+            '=' if record.class == "thread-created" => {
                 let group_id = record
                     .field("group-id")
                     .and_then(MiValue::as_const)
                     .map(str::to_owned);
                 (self.event_handler)(self, MiEvent::ThreadsChanged { group_id });
+            }
+            '=' if record.class == "thread-exited" => {
+                let Some(id) = record
+                    .field("id")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned)
+                else {
+                    return;
+                };
+                let group_id = record
+                    .field("group-id")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned);
+                self.thread_exit_since_prompt.set(true);
+                (self.event_handler)(self, MiEvent::ThreadExited { id, group_id });
             }
             '=' if record.class == "thread-group-started" => {
                 let Some(id) = record
@@ -1187,12 +1215,31 @@ impl MiClient {
                     .map(str::to_owned);
                 (self.event_handler)(self, MiEvent::LibrariesChanged { group_id });
             }
-            '=' if matches!(
-                record.class.as_str(),
-                "thread-selected" | "thread-group-selected"
-            ) =>
-            {
-                (self.event_handler)(self, MiEvent::SelectionChanged);
+            '=' if record.class == "thread-selected" => {
+                let thread_id = record
+                    .field("id")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned);
+                (self.event_handler)(
+                    self,
+                    MiEvent::SelectionChanged {
+                        thread_id,
+                        group_id: None,
+                    },
+                );
+            }
+            '=' if record.class == "thread-group-selected" => {
+                let group_id = record
+                    .field("id")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned);
+                (self.event_handler)(
+                    self,
+                    MiEvent::SelectionChanged {
+                        thread_id: None,
+                        group_id,
+                    },
+                );
             }
             _ => {}
         }
@@ -1713,12 +1760,16 @@ mod tests {
                 client.ready.set(true);
                 client.process_line(r#"=thread-group-started,id="i2",pid="4312""#);
                 client.process_line(r#"=thread-created,id="3",group-id="i2""#);
+                client.process_line(r#"=thread-exited,id="4",group-id="i2""#);
                 client.process_line(r#"=library-loaded,id="libc",thread-group="i2""#);
+                client.process_line(r#"=thread-selected,id="3""#);
+                client.process_line(r#"=thread-group-selected,id="i2""#);
                 client.process_line(r#"*running,thread-id="all""#);
                 client.process_line(
                     r#"*stopped,reason="fork",newpid="4313",thread-id="3",stopped-threads="all",frame={addr="0x401000"}"#,
                 );
                 client.process_line(r#"=thread-group-exited,id="i2",exit-code="0""#);
+                client.process_line("(gdb)");
 
                 assert_eq!(
                     events.borrow().as_slice(),
@@ -1730,7 +1781,19 @@ mod tests {
                         super::MiEvent::ThreadsChanged {
                             group_id: Some(String::from("i2")),
                         },
+                        super::MiEvent::ThreadExited {
+                            id: String::from("4"),
+                            group_id: Some(String::from("i2")),
+                        },
                         super::MiEvent::LibrariesChanged {
+                            group_id: Some(String::from("i2")),
+                        },
+                        super::MiEvent::SelectionChanged {
+                            thread_id: Some(String::from("3")),
+                            group_id: None,
+                        },
+                        super::MiEvent::SelectionChanged {
+                            thread_id: None,
                             group_id: Some(String::from("i2")),
                         },
                         super::MiEvent::Running {
@@ -1749,6 +1812,7 @@ mod tests {
                             id: String::from("i2"),
                             exit_code: Some(String::from("0")),
                         },
+                        super::MiEvent::ThreadExitPrompt,
                     ]
                 );
             })

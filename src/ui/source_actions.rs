@@ -168,7 +168,15 @@ impl Ui {
             path.to_string_lossy(),
             frame.function
         )));
-        if same_location {
+        let mark_present = i32::try_from(line.saturating_sub(1))
+            .ok()
+            .is_some_and(|line| {
+                !document
+                    .buffer
+                    .source_marks_at_line(line, Some(EXECUTION_CATEGORY))
+                    .is_empty()
+            });
+        if same_location && mark_present {
             return;
         }
         let Ok(line) = i32::try_from(line.saturating_sub(1)) else {
@@ -240,6 +248,8 @@ impl Ui {
     }
 
     pub fn clear_debugger_state(&self) {
+        self.reset_thread_analysis();
+        self.clear_thread_action_pending();
         self.defer_displayed_variable_object_deletions();
         if let Some(handler) = self.disassembly_handler.borrow().as_ref() {
             handler(DisassemblyRequest::Clear);

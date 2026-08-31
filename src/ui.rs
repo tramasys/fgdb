@@ -51,7 +51,7 @@ use crate::{
     misc::{
         AllocatorRegion, AllocatorSnapshot, AuxvEntry, CallAbiFact, CallAbiPhase, CallAbiRegister,
         CallAbiSnapshot, CoreDumpSnapshot, CoreMappedFile, CoreNote, HeapInspectionRow,
-        HeapInspectionSnapshot, LiveMiscSnapshot, LockSnapshot, LockWait,
+        HeapInspectionSnapshot, LiveMiscSnapshot, LockDependency, LockSnapshot, LockWait,
     },
     source,
     theme::Theme,
@@ -120,9 +120,13 @@ struct ControlState {
 
 #[derive(Clone, PartialEq, Eq)]
 struct ThreadRenderState {
-    threads: Vec<ThreadInfo>,
+    source_threads: Vec<ThreadInfo>,
+    rendered_threads: Vec<ThreadInfo>,
     stop_reason: Option<String>,
     executable_name: Option<String>,
+    query: String,
+    state_filter: u32,
+    sort: u32,
 }
 
 const FLAGS: &[(u8, &str)] = &[
@@ -188,6 +192,7 @@ type SourceDiscoveryHandler = Rc<dyn Fn(SourceDiscoveryRequest)>;
 type SourceTreePathHandler = Rc<dyn Fn(PathBuf)>;
 type SourceTreeRefreshHandler = Rc<dyn Fn()>;
 type InferiorActionHandler = Rc<dyn Fn(InferiorAction)>;
+type ThreadActionHandler = Rc<dyn Fn(ThreadAction)>;
 type SignalCatchpointHandler = Rc<dyn Fn(String, Option<String>)>;
 type EventCatchpointHandler = Rc<dyn Fn(EventCatchpoint, Option<String>)>;
 type WatchpointInsertHandler = Rc<dyn Fn(String, WatchpointAccess)>;
@@ -235,6 +240,94 @@ pub(crate) enum InferiorAction {
     SetFollowFork(ForkFollowMode),
     SetDetachOnFork(bool),
     Refresh,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InferiorActionPending {
+    Selection,
+    Execution,
+    Setting,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SchedulerLockingMode {
+    Off,
+    On,
+    Step,
+    Replay,
+}
+
+impl SchedulerLockingMode {
+    pub(crate) const fn gdb_value(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+            Self::Step => "step",
+            Self::Replay => "replay",
+        }
+    }
+
+    const fn index(self) -> u32 {
+        match self {
+            Self::Off => 0,
+            Self::On => 1,
+            Self::Step => 2,
+            Self::Replay => 3,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ThreadAction {
+    Refresh,
+    SetSchedulerLocking(SchedulerLockingMode),
+    SetNonStop(bool),
+    RunOnly(String),
+    Freeze(String),
+    Thaw(String),
+    Backtraces {
+        generation: u64,
+    },
+    Compare {
+        generation: u64,
+        left: String,
+        right: String,
+    },
+    SelectFrame {
+        thread: String,
+        frame: u32,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThreadActionPending {
+    Setting,
+    Execution,
+    Analysis,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ThreadBacktrace {
+    pub(crate) thread: ThreadInfo,
+    pub(crate) frames: Vec<StackFrame>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ThreadComparisonRow {
+    pub(crate) item: String,
+    pub(crate) left: String,
+    pub(crate) right: String,
+    pub(crate) different: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ThreadComparison {
+    pub(crate) left: ThreadInfo,
+    pub(crate) right: ThreadInfo,
+    pub(crate) frames: Vec<ThreadComparisonRow>,
+    pub(crate) registers: Vec<ThreadComparisonRow>,
+    pub(crate) warnings: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -798,6 +891,37 @@ struct InferiorCardControls {
     execution_action: Rc<RefCell<Option<InferiorAction>>>,
 }
 
+#[derive(Clone)]
+struct ThreadControls {
+    root: gtk::Box,
+    list: gtk::Box,
+    summary: gtk::Label,
+    search: gtk::SearchEntry,
+    state_filter: gtk::DropDown,
+    sort: gtk::DropDown,
+    scheduler_locking: gtk::DropDown,
+    scheduler_updating: Rc<Cell<bool>>,
+    non_stop: gtk::CheckButton,
+    mode_note: gtk::Label,
+    refresh: gtk::Button,
+    run_only: gtk::Button,
+    freeze: gtk::Button,
+    thaw: gtk::Button,
+    backtraces: gtk::Button,
+    compare: gtk::Button,
+    compare_left: gtk::DropDown,
+    compare_right: gtk::DropDown,
+    compare_left_model: gtk::StringList,
+    compare_right_model: gtk::StringList,
+    compare_ids: Rc<RefCell<Vec<String>>>,
+    compare_updating: Rc<Cell<bool>>,
+    action_handler: Rc<RefCell<Option<ThreadActionHandler>>>,
+    action_pending: Rc<Cell<Option<ThreadActionPending>>>,
+    analysis_generation: Rc<Cell<u64>>,
+    analysis_window: Rc<RefCell<Option<gtk::Window>>>,
+    analysis_content: Rc<RefCell<Option<gtk::Box>>>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MemoryWatchFormat {
     Bytes,
@@ -975,6 +1099,10 @@ struct MiscView {
     lock_note: gtk::Label,
     lock_store: gio::ListStore,
     lock_empty: gtk::Label,
+    lock_graph_summary: gtk::Label,
+    lock_dependency_store: gio::ListStore,
+    lock_graph_empty: gtk::Label,
+    lock_split: gtk::Paned,
     core_summary: gtk::Label,
     core_warning: gtk::Label,
     core_note_store: gio::ListStore,
@@ -1315,9 +1443,13 @@ pub struct Ui {
     latest_frames: Rc<RefCell<Vec<StackFrame>>>,
     selected_frame_level: Rc<Cell<u32>>,
     threads_list: gtk::Box,
+    thread_controls: ThreadControls,
     thread_buttons: Rc<RefCell<Vec<(String, gtk::Button)>>>,
     latest_threads: Rc<RefCell<Option<ThreadRenderState>>>,
     selected_thread_id: Rc<RefCell<Option<String>>>,
+    scheduler_locking: Rc<Cell<Option<SchedulerLockingMode>>>,
+    non_stop_mode: Rc<Cell<Option<bool>>>,
+    thread_policy_generation: Rc<Cell<u64>>,
     modules_list: gtk::Box,
     latest_modules: Rc<RefCell<Vec<SharedLibrary>>>,
     inferior_controls: InferiorControls,
@@ -1331,8 +1463,10 @@ pub struct Ui {
     fork_policy_generation: Rc<Cell<u64>>,
     fork_follow_mode: Rc<Cell<Option<ForkFollowMode>>>,
     detach_on_fork: Rc<Cell<Option<bool>>>,
-    inferior_action_pending: Rc<Cell<bool>>,
+    inferior_action_pending: Rc<Cell<Option<InferiorActionPending>>>,
     pending_execution_inferior: Rc<RefCell<Option<String>>>,
+    active_thread_execution: Rc<RefCell<Option<String>>>,
+    thread_execution_exit_candidate: Rc<RefCell<Option<String>>>,
     locals_store: gio::ListStore,
     locals_selection: gtk::SingleSelection,
     locals_view: gtk::ColumnView,
@@ -1435,6 +1569,7 @@ pub struct Ui {
     gef_context_hidden_by_fgdb: Rc<Cell<bool>>,
     heap_inspection_handler: Rc<RefCell<Option<HeapInspectionHandler>>>,
     source_roots: Rc<RefCell<Vec<PathBuf>>>,
+    source_base_roots: Vec<PathBuf>,
     current_session: Rc<RefCell<Option<DebugSession>>>,
     gdb_capabilities: Rc<RefCell<GdbCapabilities>>,
     gdb_recovery_available: Rc<Cell<bool>>,
@@ -1523,6 +1658,7 @@ struct Workspace {
     inspector_notebook: gtk::Notebook,
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
+    thread_controls: ThreadControls,
     modules_list: gtk::Box,
     inferior_controls: InferiorControls,
     locals_store: gio::ListStore,
@@ -1639,6 +1775,7 @@ struct LeftSidebar {
     navigation: gtk::Notebook,
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
+    thread_controls: ThreadControls,
     modules_list: gtk::Box,
     source_tree: SourceTreeControls,
     inferior_controls: InferiorControls,
@@ -1657,6 +1794,7 @@ mod session;
 mod source_actions;
 mod source_view;
 mod state;
+mod threads;
 mod views;
 mod watches;
 
@@ -1668,6 +1806,7 @@ use kernel_view::*;
 use memory_view::*;
 use misc_view::*;
 use source_view::*;
+use threads::*;
 use views::*;
 
 #[cfg(test)]

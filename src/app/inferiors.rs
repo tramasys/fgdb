@@ -1,5 +1,13 @@
 use super::*;
 
+struct ForkPolicyRefresh {
+    ui: Weak<Ui>,
+    generation: u64,
+    remaining: u8,
+    follow: Option<ForkFollowMode>,
+    detach: Option<bool>,
+}
+
 pub(super) fn refresh_inferiors(ui: &Weak<Ui>, client: &MiClient) {
     let Some(current_ui) = ui.upgrade() else {
         return;
@@ -33,8 +41,7 @@ pub(super) fn refresh_inferiors(ui: &Weak<Ui>, client: &MiClient) {
                 current_thread_id.as_deref(),
             ));
             let selection_changed = previous != ui.selected_inferior_id();
-            let refresh_selected = selection_changed
-                && ui.selected_inferior_state() == Some(crate::debugger::InferiorState::Stopped);
+            let refresh_selected = selection_changed && ui.selected_inferior_context_stopped();
             drop(ui);
             if selection_changed {
                 refresh_modules(&weak_ui, client);
@@ -60,47 +67,94 @@ pub(super) fn refresh_fork_policy(ui: &Weak<Ui>, client: &MiClient) {
     };
     let generation = current_ui.start_fork_policy_refresh();
     drop(current_ui);
-    let weak_ui = ui.clone();
-    let _ = client.request("-gdb-show follow-fork-mode", move |_, record| {
-        let mode = record
-            .is_done()
-            .then(|| record.field("value"))
-            .flatten()
-            .and_then(|value| value.as_const())
-            .and_then(|value| match value {
-                "parent" => Some(ForkFollowMode::Parent),
-                "child" => Some(ForkFollowMode::Child),
-                _ => None,
-            });
-        if let Some(ui) = weak_ui
-            .upgrade()
-            .filter(|ui| ui.is_fork_policy_refresh_current(generation))
-        {
-            ui.set_fork_follow_mode(mode);
+    let refresh = Rc::new(RefCell::new(ForkPolicyRefresh {
+        ui: ui.clone(),
+        generation,
+        remaining: 2,
+        follow: None,
+        detach: None,
+    }));
+    let refresh_for_response = Rc::clone(&refresh);
+    if client
+        .request("-gdb-show follow-fork-mode", move |_, record| {
+            let mode = record
+                .is_done()
+                .then(|| record.field("value"))
+                .flatten()
+                .and_then(|value| value.as_const())
+                .and_then(|value| match value {
+                    "parent" => Some(ForkFollowMode::Parent),
+                    "child" => Some(ForkFollowMode::Child),
+                    _ => None,
+                });
+            complete_fork_policy_refresh(&refresh_for_response, Some(mode), None);
+        })
+        .is_err()
+    {
+        complete_fork_policy_refresh(&refresh, Some(None), None);
+    }
+    let refresh_for_response = Rc::clone(&refresh);
+    if client
+        .request("-gdb-show detach-on-fork", move |_, record| {
+            let detach = record
+                .is_done()
+                .then(|| record.field("value"))
+                .flatten()
+                .and_then(|value| value.as_const())
+                .and_then(|value| match value {
+                    "on" => Some(true),
+                    "off" => Some(false),
+                    _ => None,
+                });
+            complete_fork_policy_refresh(&refresh_for_response, None, Some(detach));
+        })
+        .is_err()
+    {
+        complete_fork_policy_refresh(&refresh, None, Some(None));
+    }
+}
+
+fn complete_fork_policy_refresh(
+    refresh: &Rc<RefCell<ForkPolicyRefresh>>,
+    follow: Option<Option<ForkFollowMode>>,
+    detach: Option<Option<bool>>,
+) {
+    let finished = {
+        let mut refresh = refresh.borrow_mut();
+        if let Some(follow) = follow {
+            refresh.follow = follow;
         }
-    });
-    let weak_ui = ui.clone();
-    let _ = client.request("-gdb-show detach-on-fork", move |_, record| {
-        let detach = record
-            .is_done()
-            .then(|| record.field("value"))
-            .flatten()
-            .and_then(|value| value.as_const())
-            .and_then(|value| match value {
-                "on" => Some(true),
-                "off" => Some(false),
-                _ => None,
-            });
-        if let Some(ui) = weak_ui
-            .upgrade()
-            .filter(|ui| ui.is_fork_policy_refresh_current(generation))
-        {
-            ui.set_detach_on_fork(detach);
+        if let Some(detach) = detach {
+            refresh.detach = detach;
         }
-    });
+        refresh.remaining = refresh.remaining.saturating_sub(1);
+        (refresh.remaining == 0).then(|| {
+            (
+                refresh.ui.clone(),
+                refresh.generation,
+                refresh.follow,
+                refresh.detach,
+            )
+        })
+    };
+    let Some((ui, generation, follow, detach)) = finished else {
+        return;
+    };
+    if let Some(ui) = ui
+        .upgrade()
+        .filter(|ui| ui.is_fork_policy_refresh_current(generation))
+    {
+        ui.set_fork_policy(follow, detach);
+    }
 }
 
 pub(super) fn handle_inferior_action(ui: Weak<Ui>, client: Rc<MiClient>, action: InferiorAction) {
+    if !ui
+        .upgrade()
+        .is_some_and(|ui| ui.inferior_action_is_current(&action))
+    {
+        return;
+    }
     match action {
         InferiorAction::Select(id) => select_inferior(ui, client, id),
         InferiorAction::Resume(id) => execute_inferior(ui, client, id, true),
@@ -167,7 +221,7 @@ fn select_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String) {
     if current_ui.selected_inferior_id().as_deref() == Some(id.as_str()) {
         return;
     }
-    current_ui.set_inferior_action_pending(true);
+    current_ui.set_inferior_action_pending(Some(InferiorActionPending::Selection));
     current_ui.set_status("Switching inferior", &format!("Selecting {id}"), None);
     drop(current_ui);
     let command = format!(
@@ -182,7 +236,7 @@ fn select_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String) {
                 return;
             };
             if !record.is_success() {
-                ui.set_inferior_action_pending(false);
+                ui.clear_inferior_action_pending();
                 ui.set_status(
                     "Inferior selection failed",
                     record
@@ -193,14 +247,13 @@ fn select_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String) {
                 return;
             }
             ui.set_selected_inferior(&id);
-            ui.set_inferior_action_pending(false);
+            ui.clear_inferior_action_pending();
             ui.set_status(
                 "Inferior selected",
                 &format!("Threads, modules, and stopped state now follow {id}"),
                 Some("status-ready"),
             );
-            let stopped =
-                ui.selected_inferior_state() == Some(crate::debugger::InferiorState::Stopped);
+            let stopped = ui.selected_inferior_context_stopped();
             drop(ui);
             refresh_inferiors(&weak_ui, client);
             refresh_modules(&weak_ui, client);
@@ -212,7 +265,7 @@ fn select_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String) {
         .is_err()
         && let Some(ui) = weak_ui_for_error.upgrade()
     {
-        ui.set_inferior_action_pending(false);
+        ui.clear_inferior_action_pending();
         ui.set_status(
             "Inferior selection failed",
             "Could not queue the GDB inferior command",
@@ -233,7 +286,7 @@ fn execute_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resume: bool
         );
         return;
     };
-    current_ui.set_inferior_action_pending(true);
+    current_ui.set_inferior_action_pending(Some(InferiorActionPending::Execution));
     if resume {
         current_ui.set_pending_execution_inferior(Some(id.clone()));
     }
@@ -265,7 +318,7 @@ fn execute_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resume: bool
             };
             if !record.is_success() {
                 ui.set_pending_execution_inferior(None);
-                ui.set_inferior_action_pending(false);
+                ui.clear_inferior_action_pending();
                 ui.set_status(
                     if resume {
                         "Inferior resume failed"
@@ -282,7 +335,7 @@ fn execute_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resume: bool
         .is_err()
         && let Some(ui) = weak_ui_for_error.upgrade()
     {
-        ui.set_inferior_action_pending(false);
+        ui.clear_inferior_action_pending();
         ui.set_pending_execution_inferior(None);
         ui.set_status(
             "Inferior control failed",
@@ -303,7 +356,7 @@ fn set_fork_setting(
         return;
     };
     current_ui.start_fork_policy_refresh();
-    current_ui.set_inferior_action_pending(true);
+    current_ui.set_inferior_action_pending(Some(InferiorActionPending::Setting));
     drop(current_ui);
     let command = format!("-gdb-set {setting} {value}");
     let weak_ui = ui.clone();
@@ -315,9 +368,9 @@ fn set_fork_setting(
             };
             if record.is_done() {
                 applied(&ui);
-                ui.set_inferior_action_pending(false);
+                ui.clear_inferior_action_pending();
             } else {
-                ui.set_inferior_action_pending(false);
+                ui.clear_inferior_action_pending();
                 ui.set_status(
                     "Fork policy update failed",
                     record
@@ -330,7 +383,7 @@ fn set_fork_setting(
         .is_err()
         && let Some(ui) = weak_ui_for_error.upgrade()
     {
-        ui.set_inferior_action_pending(false);
+        ui.clear_inferior_action_pending();
         ui.set_status(
             "Fork policy update failed",
             "Could not queue the GDB setting command",

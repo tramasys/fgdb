@@ -650,6 +650,36 @@ pub fn threads(record: &MiRecord) -> Vec<ThreadInfo> {
         .collect()
 }
 
+pub fn thread_id_argument(id: &str) -> Option<&str> {
+    (!id.is_empty()
+        && id.len() <= 64
+        && id
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit())))
+    .then_some(id)
+}
+
+pub fn compare_thread_ids(left: &str, right: &str) -> std::cmp::Ordering {
+    let mut left_parts = left.split('.');
+    let mut right_parts = right.split('.');
+    loop {
+        match (left_parts.next(), right_parts.next()) {
+            (Some(left_part), Some(right_part)) => {
+                let ordering = left_part
+                    .parse::<u64>()
+                    .unwrap_or(u64::MAX)
+                    .cmp(&right_part.parse::<u64>().unwrap_or(u64::MAX));
+                if ordering != std::cmp::Ordering::Equal {
+                    return ordering;
+                }
+            }
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (None, None) => return left.cmp(right),
+        }
+    }
+}
+
 pub fn inferiors(record: &MiRecord, current_thread_id: Option<&str>) -> Vec<InferiorInfo> {
     record
         .field("groups")
@@ -1006,10 +1036,11 @@ fn owned_constant(tuple: &[MiResult], name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        breakpoints, compact_register_numbers, current_source, has_exact_command_completion,
-        inferior_pid, inferior_pid_for_group, inferiors, inserted_breakpoints, instructions,
-        memory_block, register_names, registers, shared_libraries, source_files, source_locations,
-        stack_frames, threads, variable_children, variable_children_have_more, variable_object,
+        breakpoints, compact_register_numbers, compare_thread_ids, current_source,
+        has_exact_command_completion, inferior_pid, inferior_pid_for_group, inferiors,
+        inserted_breakpoints, instructions, memory_block, register_names, registers,
+        shared_libraries, source_files, source_locations, stack_frames, thread_id_argument,
+        threads, variable_children, variable_children_have_more, variable_object,
         variable_path_expression, variable_updates, variables,
     };
     use crate::debugger::mi::parse_record;
@@ -1025,6 +1056,22 @@ mod tests {
             TargetEndian::from_gdb_description("The target is set to big endian"),
             Some(TargetEndian::Big)
         );
+    }
+
+    #[test]
+    fn validates_simple_and_qualified_gdb_thread_identifiers() {
+        assert_eq!(thread_id_argument("7"), Some("7"));
+        assert_eq!(thread_id_argument("2.19"), Some("2.19"));
+        assert_eq!(thread_id_argument(""), None);
+        assert_eq!(thread_id_argument("1 --all"), None);
+        assert_eq!(thread_id_argument("1..2"), None);
+    }
+
+    #[test]
+    fn compares_gdb_thread_identifiers_without_lexical_number_ordering() {
+        assert_eq!(compare_thread_ids("2", "10"), std::cmp::Ordering::Less);
+        assert_eq!(compare_thread_ids("1.3", "2"), std::cmp::Ordering::Less);
+        assert_eq!(compare_thread_ids("1", "1.1"), std::cmp::Ordering::Less);
     }
 
     #[test]

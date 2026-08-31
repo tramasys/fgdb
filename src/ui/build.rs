@@ -645,6 +645,11 @@ pub(super) fn build_workspace(
             &inspector.misc_view.core_split,
             0.34,
         ),
+        layout::Pane::with_default_fraction(
+            "misc_locks_graph",
+            &inspector.misc_view.lock_split,
+            0.6,
+        ),
     ];
     Workspace {
         root: workspace,
@@ -657,6 +662,7 @@ pub(super) fn build_workspace(
         inspector_notebook: inspector.notebook.clone(),
         call_stack_list: left_sidebar.call_stack_list,
         threads_list: left_sidebar.threads_list,
+        thread_controls: left_sidebar.thread_controls,
         modules_list: left_sidebar.modules_list,
         inferior_controls: left_sidebar.inferior_controls,
         locals_store: inspector.locals_store,
@@ -760,12 +766,8 @@ pub(super) fn build_left_sidebar() -> LeftSidebar {
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
-    let threads_list = dynamic_list("Threads appear when the target is paused");
-    let threads_scrolled = gtk::ScrolledWindow::builder()
-        .child(&threads_list)
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .build();
+    let thread_controls = build_thread_controls();
+    let threads_list = thread_controls.list.clone();
     let modules_list = dynamic_list("Modules appear after the inferior starts");
     let modules_scrolled = gtk::ScrolledWindow::builder()
         .child(&modules_list)
@@ -783,7 +785,10 @@ pub(super) fn build_left_sidebar() -> LeftSidebar {
         Some(&gtk::Label::new(Some("Inferiors"))),
     );
     navigation.append_page(&stack_scrolled, Some(&gtk::Label::new(Some("Call Stack"))));
-    navigation.append_page(&threads_scrolled, Some(&gtk::Label::new(Some("Threads"))));
+    navigation.append_page(
+        &thread_controls.root,
+        Some(&gtk::Label::new(Some("Threads"))),
+    );
     navigation.append_page(&modules_scrolled, Some(&gtk::Label::new(Some("Modules"))));
     navigation.append_page(&source_tree.root, Some(&gtk::Label::new(Some("Sources"))));
     let navigation_for_selection = navigation.clone();
@@ -798,6 +803,7 @@ pub(super) fn build_left_sidebar() -> LeftSidebar {
         navigation,
         call_stack_list,
         threads_list,
+        thread_controls,
         modules_list,
         source_tree,
         inferior_controls,
@@ -1282,10 +1288,40 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     breakpoint_bulk_actions.append(&delete_all_catchpoints_button);
     breakpoints_page.append(&breakpoint_bulk_actions);
     breakpoints_page.append(&breakpoints_scrolled);
-    breakpoints_page.append(&section_title("QUICK CATCHPOINTS"));
+
+    let watchpoint_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    watchpoint_section.add_css_class("breakpoint-tool-section");
+    watchpoint_section.append(&section_title("ADD WATCHPOINT"));
+    let watchpoint_controls = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    watchpoint_controls.add_css_class("watchpoint-controls");
+    let watchpoint_expression = gtk::Entry::builder()
+        .placeholder_text("variable or address expression")
+        .hexpand(true)
+        .build();
+    watchpoint_expression.set_tooltip_text(Some("Examples: counter, *pointer, *(int*)0x404040"));
+    let watchpoint_access = gtk::DropDown::from_strings(&["Write", "Read", "Access"]);
+    watchpoint_access.add_css_class("watchpoint-access");
+    watchpoint_access.set_selected(0);
+    watchpoint_access.set_tooltip_text(Some(
+        "Stop on writes, reads, or either kind of memory access",
+    ));
+    let watchpoint_add_button = gtk::Button::with_label("Add");
+    watchpoint_add_button.add_css_class("inline-action");
+    watchpoint_add_button.add_css_class("watchpoint-add-action");
+    watchpoint_add_button.set_tooltip_text(Some("Add this watchpoint"));
+    watchpoint_add_button.set_sensitive(false);
+    watchpoint_controls.append(&watchpoint_expression);
+    watchpoint_controls.append(&watchpoint_access);
+    watchpoint_controls.append(&watchpoint_add_button);
+    watchpoint_section.append(&watchpoint_controls);
+    breakpoints_page.append(&watchpoint_section);
+
+    let catchpoint_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    catchpoint_section.add_css_class("breakpoint-tool-section");
+    catchpoint_section.append(&section_title("QUICK CATCHPOINTS"));
     let event_catchpoint_grid = gtk::Grid::builder()
-        .column_spacing(2)
-        .row_spacing(2)
+        .column_spacing(3)
+        .row_spacing(3)
         .column_homogeneous(true)
         .build();
     let event_catchpoint_buttons = EventCatchpoint::ALL
@@ -1294,74 +1330,72 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         .map(|(index, (event, label, tooltip))| {
             let button = gtk::Button::with_label(label);
             button.add_css_class("signal-action");
+            button.add_css_class("catchpoint-action");
             button.set_tooltip_text(Some(tooltip));
             button.set_sensitive(false);
             event_catchpoint_grid.attach(&button, (index % 3) as i32, (index / 3) as i32, 1, 1);
             (button, event)
         })
         .collect::<Vec<_>>();
-    breakpoints_page.append(&event_catchpoint_grid);
-    breakpoints_page.append(&section_title("ADD WATCHPOINT"));
-    let watchpoint_controls = gtk::Box::new(gtk::Orientation::Horizontal, 2);
-    let watchpoint_expression = gtk::Entry::builder()
-        .placeholder_text("variable or address expression")
-        .hexpand(true)
-        .build();
-    watchpoint_expression.set_tooltip_text(Some("Examples: counter, *pointer, *(int*)0x404040"));
-    let watchpoint_access = gtk::DropDown::from_strings(&["Write", "Read", "Access"]);
-    watchpoint_access.set_selected(0);
-    watchpoint_access.set_tooltip_text(Some(
-        "Stop on writes, reads, or either kind of memory access",
-    ));
-    let watchpoint_add_button = gtk::Button::with_label("Add");
-    watchpoint_add_button.add_css_class("inline-action");
-    watchpoint_add_button.set_sensitive(false);
-    watchpoint_controls.append(&watchpoint_expression);
-    watchpoint_controls.append(&watchpoint_access);
-    watchpoint_controls.append(&watchpoint_add_button);
-    breakpoints_page.append(&watchpoint_controls);
+    catchpoint_section.append(&event_catchpoint_grid);
+    breakpoints_page.append(&catchpoint_section);
 
     let signals_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
     signals_content.add_css_class("sidebar");
-    signals_content.append(&section_title("CURRENT STOP"));
+    let current_signal_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    current_signal_section.add_css_class("signal-tool-section");
+    current_signal_section.append(&section_title("CURRENT STOP"));
     let signal_detail = gtk::Label::new(Some("No signal at the current stop"));
     signal_detail.add_css_class("signal-detail");
-    signal_detail.set_halign(gtk::Align::Start);
+    signal_detail.set_halign(gtk::Align::Fill);
     signal_detail.set_wrap(true);
     signal_detail.set_xalign(0.0);
-    signals_content.append(&signal_detail);
+    current_signal_section.append(&signal_detail);
+    signals_content.append(&current_signal_section);
+
+    let common_signal_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    common_signal_section.add_css_class("signal-tool-section");
     let signal_actions_header = gtk::Box::new(gtk::Orientation::Horizontal, 3);
     let signal_actions_title = section_title("COMMON CATCHPOINTS");
     signal_actions_title.set_hexpand(true);
     let delete_all_signal_catchpoints_button = gtk::Button::with_label("Clear catches");
     delete_all_signal_catchpoints_button.add_css_class("inline-action");
     delete_all_signal_catchpoints_button.add_css_class("danger-action");
+    delete_all_signal_catchpoints_button.add_css_class("signal-clear-action");
     delete_all_signal_catchpoints_button.set_tooltip_text(Some(
         "Delete every signal catchpoint without affecting breakpoints or watchpoints",
     ));
     delete_all_signal_catchpoints_button.set_sensitive(false);
     signal_actions_header.append(&signal_actions_title);
     signal_actions_header.append(&delete_all_signal_catchpoints_button);
-    signals_content.append(&signal_actions_header);
+    common_signal_section.append(&signal_actions_header);
     let signal_hint = gtk::Label::new(Some(
         "Click a signal to add its catchpoint, active signals are green and click again removes them.",
     ));
     signal_hint.add_css_class("muted");
     signal_hint.set_halign(gtk::Align::Start);
     signal_hint.set_wrap(true);
-    signals_content.append(&signal_hint);
+    common_signal_section.append(&signal_hint);
     let (common_signal_grid, mut signal_buttons) = build_signal_grid(COMMON_SIGNALS);
-    signals_content.append(&common_signal_grid);
+    common_signal_section.append(&common_signal_grid);
+    signals_content.append(&common_signal_section);
+
     let (more_signal_grid, mut more_signal_buttons) = build_signal_grid(MORE_SIGNALS);
     signal_buttons.append(&mut more_signal_buttons);
-    signals_content.append(&build_disclosure(
+    let more_signal_section = build_disclosure(
         "MORE POSIX SIGNALS",
         &more_signal_grid,
         false,
         "signal-disclosure",
-    ));
-    signals_content.append(&section_title("CUSTOM SIGNAL"));
-    let custom_signal_row = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    );
+    more_signal_section.add_css_class("signal-tool-section");
+    signals_content.append(&more_signal_section);
+
+    let custom_signal_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    custom_signal_section.add_css_class("signal-tool-section");
+    custom_signal_section.append(&section_title("CUSTOM SIGNAL"));
+    let custom_signal_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    custom_signal_row.add_css_class("custom-signal-controls");
     let signal_entry = gtk::Entry::builder()
         .placeholder_text("SIGRTMIN+1 or 35")
         .hexpand(true)
@@ -1371,10 +1405,12 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     ));
     let signal_add_button = gtk::Button::with_label("Toggle catch");
     signal_add_button.add_css_class("inline-action");
+    signal_add_button.add_css_class("signal-toggle-action");
     signal_add_button.set_sensitive(false);
     custom_signal_row.append(&signal_entry);
     custom_signal_row.append(&signal_add_button);
-    signals_content.append(&custom_signal_row);
+    custom_signal_section.append(&custom_signal_row);
+    signals_content.append(&custom_signal_section);
     let signals_page = gtk::ScrolledWindow::builder()
         .child(&signals_content)
         .vexpand(true)

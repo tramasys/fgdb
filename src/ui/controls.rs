@@ -191,18 +191,46 @@ pub(super) fn connect_execution_button(
     });
 }
 
-pub(crate) fn issue_execution_command(ui: &Ui, client: &MiClient, command: &str, detail: &str) {
+pub(crate) fn issue_execution_command(
+    ui: &Ui,
+    client: &MiClient,
+    command: &str,
+    detail: &str,
+) -> bool {
     ui.set_pending_execution_inferior(execution_thread_group(command).map(str::to_owned));
+    ui.set_thread_execution_exit_candidate(None);
+    ui.set_active_thread_execution(
+        selected_thread_execution(command)
+            .then(|| ui.current_thread_id())
+            .flatten(),
+    );
     match client.send(command) {
         Ok(_) => {
             ui.set_command_pending(true);
             ui.set_execution_status("Executing", detail);
+            true
         }
         Err(error) => {
             ui.set_pending_execution_inferior(None);
+            ui.set_active_thread_execution(None);
             ui.set_status("Command failed", &error.to_string(), Some("status-error"));
+            false
         }
     }
+}
+
+fn selected_thread_execution(command: &str) -> bool {
+    matches!(
+        command.split_whitespace().next(),
+        Some(
+            "-exec-next"
+                | "-exec-step"
+                | "-exec-next-instruction"
+                | "-exec-step-instruction"
+                | "-exec-finish"
+                | "-exec-until"
+        )
+    )
 }
 
 fn execution_thread_group(command: &str) -> Option<&str> {
@@ -275,7 +303,7 @@ pub(super) fn set_status_widgets(
 
 #[cfg(test)]
 mod tests {
-    use super::{addresses_equal, execution_thread_group};
+    use super::{addresses_equal, execution_thread_group, selected_thread_execution};
 
     #[test]
     fn compares_only_valid_normalized_addresses() {
@@ -297,5 +325,21 @@ mod tests {
             execution_thread_group("-exec-interrupt --thread-group"),
             None
         );
+    }
+
+    #[test]
+    fn identifies_execution_that_can_be_orphaned_by_the_selected_thread() {
+        for command in [
+            "-exec-next",
+            "-exec-step --thread 2",
+            "-exec-next-instruction",
+            "-exec-step-instruction",
+            "-exec-finish",
+            "-exec-until main.c:42",
+        ] {
+            assert!(selected_thread_execution(command), "{command}");
+        }
+        assert!(!selected_thread_execution("-exec-continue"));
+        assert!(!selected_thread_execution("-exec-interrupt --all"));
     }
 }

@@ -170,6 +170,9 @@ impl Ui {
             gtk::glib::idle_add_local_once(move || {
                 if let Some(ui) = weak_ui.upgrade() {
                     ui.sync_source_tree_selection();
+                    if ui.source_navigation.find_bar.is_visible() {
+                        ui.update_source_find(false);
+                    }
                 }
             });
         });
@@ -384,7 +387,10 @@ impl Ui {
         self.source_navigation
             .reopen_closed
             .set_sensitive(!self.closed_source_tabs.borrow().is_empty());
-        self.navigate_to_source(&closed.path, closed.line, true);
+        if !self.navigate_to_source(&closed.path, closed.line, true) {
+            self.closed_source_tabs.borrow_mut().push(closed);
+            self.source_navigation.reopen_closed.set_sensitive(true);
+        }
     }
 
     fn current_source_document(&self) -> Option<SourceDocument> {
@@ -657,7 +663,18 @@ impl Ui {
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
         match mode {
-            SourceSearchMode::Files => self.render_source_file_results(),
+            SourceSearchMode::Files => {
+                self.set_source_palette_status("Filtering source files");
+                let weak_ui = Rc::downgrade(self);
+                gtk::glib::timeout_add_local_once(Duration::from_millis(100), move || {
+                    let Some(ui) = weak_ui.upgrade() else {
+                        return;
+                    };
+                    if ui.source_palette_generation.load(Ordering::Relaxed) == generation {
+                        ui.render_source_file_results();
+                    }
+                });
+            }
             SourceSearchMode::Symbols => {
                 clear_source_palette_results(self);
                 if query.trim().chars().count() < 2 {
@@ -949,8 +966,11 @@ impl Ui {
             "Filtering source files"
         });
         let (sender, receiver) = mpsc::channel();
+        let current_generation = Arc::clone(&self.source_tree_render_generation);
         std::thread::spawn(move || {
-            let build = source::build_source_tree(&files, &roots, &loaded, &query);
+            let build = source::build_source_tree_while(&files, &roots, &loaded, &query, || {
+                current_generation.load(Ordering::Relaxed) == generation
+            });
             let _ = sender.send(build);
         });
         let weak_ui = Rc::downgrade(self);
@@ -1084,17 +1104,21 @@ impl Ui {
         };
         let (path_query, requested_line) = split_source_file_query(&query);
         let mut seen = HashSet::new();
-        let loaded_set = loaded.iter().cloned().collect::<HashSet<_>>();
+        let loaded_set = loaded.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
         let mut matches = loaded
             .iter()
             .chain(tree.iter())
-            .filter(|path| seen.insert((*path).clone()))
+            .filter(|path| seen.insert(path.as_path()))
             .cloned()
             .filter_map(|path| {
                 source_file_match_score(&path, path_query).map(|score| (score, path))
             })
             .collect::<Vec<_>>();
-        matches.sort_unstable_by_key(|(score, path)| (Reverse(*score), path.clone()));
+        matches.sort_unstable_by(|(left_score, left_path), (right_score, right_path)| {
+            Reverse(*left_score)
+                .cmp(&Reverse(*right_score))
+                .then_with(|| left_path.cmp(right_path))
+        });
         matches.truncate(MAX_SOURCE_RESULTS);
         clear_source_palette_results(self);
         let palette_state = self.source_palette.borrow();
@@ -1102,7 +1126,7 @@ impl Ui {
             return;
         };
         for (_, path) in &matches {
-            let kind = if loaded_set.contains(path) {
+            let kind = if loaded_set.contains(path.as_path()) {
                 "GDB source"
             } else {
                 "Source tree"

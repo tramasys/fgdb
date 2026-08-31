@@ -143,7 +143,7 @@ impl NativeUntilController {
         let description = action_description(&action);
         let thread_id = ui
             .current_thread_id()
-            .filter(|id| !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()))
+            .and_then(|id| crate::debugger::thread_id_argument(&id).map(str::to_owned))
             .map(Rc::<str>::from);
         let condition_command = if let UntilAction::Expression(expression) = &action {
             Some(

@@ -107,11 +107,45 @@ impl Ui {
     }
 
     fn emit_inferior_action(&self, action: InferiorAction) {
-        if self.inferior_action_pending.get() {
+        if !self.inferior_action_is_current(&action) {
             return;
         }
         if let Some(handler) = self.inferior_controls.action_handler.borrow().clone() {
             handler(action);
+        }
+    }
+
+    pub(crate) fn inferior_action_is_current(&self, action: &InferiorAction) -> bool {
+        if !self.debugger_ready.get()
+            || self.command_pending.get()
+            || self.session_pending.get()
+            || self.native_until_active.get()
+            || self.inferior_action_pending.get().is_some()
+        {
+            return false;
+        }
+        match action {
+            InferiorAction::Select(id) => {
+                self.selected_inferior_id.borrow().as_deref() != Some(id)
+                    && self
+                        .inferiors
+                        .borrow()
+                        .iter()
+                        .any(|inferior| inferior.id == *id)
+            }
+            InferiorAction::Resume(id) => self
+                .inferiors
+                .borrow()
+                .iter()
+                .any(|inferior| inferior.id == *id && inferior.state == InferiorState::Stopped),
+            InferiorAction::Interrupt(id) => self
+                .inferiors
+                .borrow()
+                .iter()
+                .any(|inferior| inferior.id == *id && inferior.state == InferiorState::Running),
+            InferiorAction::SetFollowFork(_)
+            | InferiorAction::SetDetachOnFork(_)
+            | InferiorAction::Refresh => true,
         }
     }
 
@@ -139,13 +173,19 @@ impl Ui {
         self.selected_inferior_id.borrow().clone()
     }
 
-    pub(crate) fn selected_inferior_state(&self) -> Option<InferiorState> {
+    pub(crate) fn selected_inferior_context_stopped(&self) -> bool {
         let selected = self.selected_inferior_id.borrow();
+        let current_thread = self.current_thread_id();
         self.inferiors
             .borrow()
             .iter()
             .find(|inferior| Some(inferior.id.as_str()) == selected.as_deref())
-            .map(|inferior| inferior.state)
+            .is_some_and(|inferior| {
+                inferior_context_thread(inferior, current_thread.as_deref())
+                    .map_or(inferior.state == InferiorState::Stopped, |thread| {
+                        thread.state == "stopped"
+                    })
+            })
     }
 
     pub(crate) fn inferior_for_thread(&self, thread_id: &str) -> Option<String> {
@@ -154,6 +194,31 @@ impl Ui {
             .iter()
             .find(|inferior| inferior.threads.iter().any(|thread| thread.id == thread_id))
             .map(|inferior| inferior.id.clone())
+    }
+
+    pub(crate) fn apply_gdb_selection(&self, thread_id: Option<&str>, group_id: Option<&str>) {
+        let selected_group = group_id
+            .map(str::to_owned)
+            .or_else(|| thread_id.and_then(|thread| self.inferior_for_thread(thread)));
+        if let Some(group) = selected_group.as_deref() {
+            self.set_selected_inferior(group);
+        }
+        let Some(thread_id) = thread_id else {
+            return;
+        };
+        self.set_current_thread_id(Some(thread_id));
+        let mut found = false;
+        for inferior in self.inferiors.borrow_mut().iter_mut() {
+            for thread in &mut inferior.threads {
+                thread.current = thread.id == thread_id;
+                found |= thread.current;
+            }
+        }
+        if found {
+            self.latest_threads.borrow_mut().take();
+            self.apply_selected_inferior_state();
+            self.render_inferior_controls();
+        }
     }
 
     pub(crate) fn threads_for_selected_inferior(
@@ -304,46 +369,79 @@ impl Ui {
     }
 
     fn apply_selected_inferior_state(&self) {
-        let selected = self.selected_inferior_id.borrow();
-        let inferiors = self.inferiors.borrow();
-        let inferior = inferiors
-            .iter()
-            .find(|inferior| Some(inferior.id.as_str()) == selected.as_deref());
-        self.set_inferior_pid(inferior.and_then(|inferior| inferior.pid));
-        self.set_inferior_started(
-            inferior.is_some_and(|inferior| inferior.pid.is_some() && inferior.state.is_live()),
-        );
-        self.set_controls_running(
-            inferior.is_some_and(|inferior| inferior.state == InferiorState::Running),
-        );
-        if let Some(inferior) = inferior {
-            self.show_threads(&inferior.threads);
-        } else {
+        let current_thread = self.current_thread_id();
+        let state = {
+            let selected = self.selected_inferior_id.borrow();
+            self.inferiors
+                .borrow()
+                .iter()
+                .find(|inferior| Some(inferior.id.as_str()) == selected.as_deref())
+                .map(|inferior| {
+                    (
+                        inferior.pid,
+                        inferior.pid.is_some() && inferior.state.is_live(),
+                        inferior_context_running(inferior, current_thread.as_deref()),
+                        inferior.threads.clone(),
+                    )
+                })
+        };
+        let Some((pid, started, running, threads)) = state else {
+            self.set_inferior_pid(None);
+            self.set_inferior_started(false);
+            self.set_controls_running(false);
             self.show_threads(&[]);
-        }
+            return;
+        };
+        self.set_inferior_pid(pid);
+        self.set_inferior_started(started);
+        self.set_controls_running(running);
+        self.show_threads(&threads);
     }
 
     pub(crate) fn mark_inferior_running(&self, thread_id: Option<&str>) -> bool {
         let pending_group = self.pending_execution_inferior.borrow_mut().take();
-        let group = thread_id
-            .filter(|thread| *thread != "all")
+        let exact_thread = thread_id.filter(|thread| *thread != "all");
+        let current_thread = self.current_thread_id();
+        let group = exact_thread
             .and_then(|thread| self.inferior_for_thread(thread))
             .or(pending_group);
-        let all = group.is_none();
+        // An exact thread ID that is not in our latest snapshot means the
+        // snapshot is stale. It does not mean every inferior started running.
+        let all = running_event_affects_all(group.as_deref(), exact_thread);
         let mut inferiors = self.inferiors.borrow_mut();
         for inferior in inferiors.iter_mut() {
             if (all || group.as_deref() == Some(inferior.id.as_str())) && inferior.state.is_live() {
                 inferior.state = InferiorState::Running;
-                for thread in &mut inferior.threads {
-                    thread.state = String::from("running");
+                if let Some(thread_id) = exact_thread {
+                    if let Some(thread) = inferior
+                        .threads
+                        .iter_mut()
+                        .find(|thread| thread.id == thread_id)
+                    {
+                        thread.state = String::from("running");
+                    }
+                } else {
+                    for thread in &mut inferior.threads {
+                        thread.state = String::from("running");
+                    }
                 }
             }
         }
         drop(inferiors);
-        let selected_affected = all
+        let selected_group_affected = all
             || group.as_deref() == self.selected_inferior_id.borrow().as_deref()
             || self.selected_inferior_id.borrow().is_none();
-        if self.stop_owner_inferior_id.borrow().as_deref() == group.as_deref() || all {
+        let selected_affected = exact_thread.map_or(selected_group_affected, |thread| {
+            current_thread
+                .as_deref()
+                .map_or(selected_group_affected, |current| current == thread)
+        });
+        let stop_owner_affected = all
+            || exact_thread.map_or_else(
+                || self.stop_owner_inferior_id.borrow().as_deref() == group.as_deref(),
+                |thread| self.stop_owner_thread_id.borrow().as_deref() == Some(thread),
+            );
+        if stop_owner_affected {
             self.stop_owner_inferior_id.borrow_mut().take();
             self.stop_owner_thread_id.borrow_mut().take();
         }
@@ -371,13 +469,29 @@ impl Ui {
         }
         let mut inferiors = self.inferiors.borrow_mut();
         for inferior in inferiors.iter_mut() {
-            if (all_stopped || group.as_deref() == Some(inferior.id.as_str()))
-                && inferior.state.is_live()
-            {
+            if all_stopped && inferior.state.is_live() {
                 inferior.state = InferiorState::Stopped;
                 for thread in &mut inferior.threads {
                     thread.state = String::from("stopped");
                 }
+            } else if group.as_deref() == Some(inferior.id.as_str()) && inferior.state.is_live() {
+                if let Some(thread_id) = thread_id
+                    && let Some(thread) = inferior
+                        .threads
+                        .iter_mut()
+                        .find(|thread| thread.id == thread_id)
+                {
+                    thread.state = String::from("stopped");
+                }
+                inferior.state = if inferior
+                    .threads
+                    .iter()
+                    .any(|thread| thread.state == "running")
+                {
+                    InferiorState::Running
+                } else {
+                    InferiorState::Stopped
+                };
             }
         }
         drop(inferiors);
@@ -439,7 +553,7 @@ impl Ui {
         self.inferior_parents.borrow_mut().clear();
         self.pending_fork_parents.borrow_mut().clear();
         self.pending_execution_inferior.borrow_mut().take();
-        self.inferior_action_pending.set(false);
+        self.inferior_action_pending.set(None);
         self.set_inferior_pid(None);
         self.render_inferior_controls();
     }
@@ -454,14 +568,46 @@ impl Ui {
         self.render_inferior_policy();
     }
 
-    pub(crate) fn set_inferior_action_pending(&self, pending: bool) {
+    pub(crate) fn set_fork_policy(&self, mode: Option<ForkFollowMode>, detach: Option<bool>) {
+        self.fork_follow_mode.set(mode);
+        self.detach_on_fork.set(detach);
+        self.render_inferior_policy();
+    }
+
+    pub(crate) fn set_inferior_action_pending(&self, pending: Option<InferiorActionPending>) {
         if self.inferior_action_pending.replace(pending) != pending {
             self.render_inferior_controls();
         }
     }
 
+    pub(crate) fn finish_inferior_execution_action(&self) {
+        if self.inferior_action_pending.get() == Some(InferiorActionPending::Execution) {
+            self.set_inferior_action_pending(None);
+        }
+    }
+
+    pub(crate) fn clear_inferior_action_pending(&self) {
+        self.set_inferior_action_pending(None);
+    }
+
     pub(crate) fn set_pending_execution_inferior(&self, id: Option<String>) {
         self.pending_execution_inferior.replace(id);
+    }
+
+    pub(crate) fn set_active_thread_execution(&self, id: Option<String>) {
+        self.active_thread_execution.replace(id);
+    }
+
+    pub(crate) fn active_thread_execution(&self) -> Option<String> {
+        self.active_thread_execution.borrow().clone()
+    }
+
+    pub(crate) fn set_thread_execution_exit_candidate(&self, id: Option<String>) {
+        self.thread_execution_exit_candidate.replace(id);
+    }
+
+    pub(crate) fn thread_execution_exit_candidate(&self) -> Option<String> {
+        self.thread_execution_exit_candidate.borrow().clone()
     }
 
     pub(crate) fn stop_owner_summary(&self) -> Option<String> {
@@ -529,7 +675,7 @@ impl Ui {
             controls.detach_on_fork.set_active(detach_on_fork);
         }
         controls.selector_updating.set(false);
-        let available = !self.inferior_action_pending.get();
+        let available = self.inferior_action_pending.get().is_none();
         controls
             .follow_parent
             .set_sensitive(available && self.fork_follow_mode.get().is_some());
@@ -581,7 +727,7 @@ impl Ui {
         controls.selector_updating.set(false);
         controls
             .selector
-            .set_sensitive(!inferiors.is_empty() && !self.inferior_action_pending.get());
+            .set_sensitive(!inferiors.is_empty() && self.inferior_action_pending.get().is_none());
         let selected_inferior = inferiors
             .iter()
             .find(|inferior| Some(inferior.id.as_str()) == selected.as_deref());
@@ -620,7 +766,7 @@ impl Ui {
         let child = selected
             .as_deref()
             .and_then(|selected| self.first_inferior_child(selected));
-        let available = !self.inferior_action_pending.get();
+        let available = self.inferior_action_pending.get().is_none();
         controls
             .switch_parent
             .set_sensitive(available && parent.is_some());
@@ -762,7 +908,7 @@ impl Ui {
         } else {
             card.relationship.set_visible(false);
         }
-        let available = !self.inferior_action_pending.get();
+        let available = self.inferior_action_pending.get().is_none();
         set_button_label(&card.select, if selected { "Selected" } else { "Switch" });
         card.select.set_sensitive(!selected && available);
         let execution = match inferior.state {
@@ -783,6 +929,26 @@ impl Ui {
         card.execution_action
             .replace(execution.map(|(_, action)| action));
     }
+}
+
+fn inferior_context_running(inferior: &InferiorInfo, current_thread: Option<&str>) -> bool {
+    inferior_context_thread(inferior, current_thread)
+        .map_or(inferior.state == InferiorState::Running, |thread| {
+            thread.state == "running"
+        })
+}
+
+fn inferior_context_thread<'a>(
+    inferior: &'a InferiorInfo,
+    current_thread: Option<&str>,
+) -> Option<&'a ThreadInfo> {
+    current_thread
+        .and_then(|current| inferior.threads.iter().find(|thread| thread.id == current))
+        .or_else(|| inferior.threads.iter().find(|thread| thread.current))
+}
+
+fn running_event_affects_all(group: Option<&str>, exact_thread: Option<&str>) -> bool {
+    group.is_none() && exact_thread.is_none()
 }
 
 fn inferior_selector_label(inferior: &InferiorInfo) -> String {
@@ -857,7 +1023,10 @@ fn inferior_state_css(state: InferiorState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::dispatch_inferior_card_action;
+    use super::{
+        dispatch_inferior_card_action, inferior_context_running, running_event_affects_all,
+    };
+    use crate::debugger::{InferiorInfo, InferiorState, ThreadInfo};
     use crate::ui::{InferiorAction, InferiorActionHandler};
     use std::{cell::RefCell, rc::Rc};
 
@@ -874,5 +1043,37 @@ mod tests {
         dispatch_inferior_card_action(&action, &handler);
 
         assert!(action.borrow().is_none());
+    }
+
+    #[test]
+    fn a_stopped_current_thread_remains_inspectable_in_non_stop_mode() {
+        let thread = |id: &str, state: &str, current: bool| ThreadInfo {
+            id: id.to_owned(),
+            group_id: Some(String::from("i1")),
+            target_id: id.to_owned(),
+            name: None,
+            state: state.to_owned(),
+            core: None,
+            frame: None,
+            pc_symbol: None,
+            current,
+        };
+        let inferior = InferiorInfo {
+            id: String::from("i1"),
+            pid: Some(42),
+            executable: None,
+            exit_code: None,
+            state: InferiorState::Running,
+            threads: vec![thread("1", "stopped", true), thread("2", "running", false)],
+        };
+        assert!(!inferior_context_running(&inferior, Some("1")));
+        assert!(inferior_context_running(&inferior, Some("2")));
+    }
+
+    #[test]
+    fn an_unknown_exact_thread_does_not_mark_every_inferior_running() {
+        assert!(!running_event_affects_all(None, Some("99")));
+        assert!(!running_event_affects_all(Some("i2"), None));
+        assert!(running_event_affects_all(None, None));
     }
 }

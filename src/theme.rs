@@ -381,6 +381,184 @@ button.stack-frame.current-debug-item:hover {{
     font-size: 11px;
 }}
 
+.thread-workspace {{
+    padding: 5px;
+    background: @app_bg;
+}}
+
+.thread-workspace-summary {{
+    min-height: 20px;
+    color: @app_accent_hover;
+    font-size: 10px;
+    font-weight: 700;
+}}
+
+.thread-workspace entry,
+.thread-workspace dropdown > button {{
+    min-height: 24px;
+    padding: 1px 5px;
+    color: @app_fg;
+    background: @app_surface;
+    border: 1px solid @app_border;
+}}
+
+entry.thread-search > image:first-child {{
+    margin-right: 6px;
+}}
+
+dropdown.thread-dropdown > button,
+dropdown.thread-dropdown > button cellview {{
+    color: @app_fg;
+    background: @app_surface;
+    background-image: none;
+}}
+
+dropdown.thread-dropdown > button:hover,
+dropdown.thread-dropdown > button:focus,
+dropdown.thread-dropdown > button:focus-visible,
+dropdown.thread-dropdown > button:active,
+dropdown.thread-dropdown > button:checked,
+dropdown.thread-dropdown > button:hover cellview,
+dropdown.thread-dropdown > button:focus cellview,
+dropdown.thread-dropdown > button:active cellview,
+dropdown.thread-dropdown > button:checked cellview {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.14);
+    background-image: none;
+    border-color: @app_accent;
+    box-shadow: none;
+}}
+
+dropdown.thread-dropdown popover > contents,
+dropdown.thread-dropdown popover listview,
+dropdown.thread-dropdown popover listview > row {{
+    color: @app_fg;
+    background: @app_surface;
+    background-image: none;
+}}
+
+dropdown.thread-dropdown popover > contents {{
+    padding: 2px;
+    border: 1px solid @app_border;
+    box-shadow: none;
+}}
+
+dropdown.thread-dropdown popover listview > row:hover {{
+    color: @app_fg;
+    background: @app_raised;
+}}
+
+dropdown.thread-dropdown popover listview > row:selected {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.20);
+}}
+
+.thread-workspace button {{
+    min-height: 25px;
+    padding: 2px 5px;
+    background: @app_surface;
+    border: 1px solid @app_border;
+}}
+
+.thread-workspace button:hover,
+.thread-workspace button:focus-visible {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.12);
+    border-color: alpha(@app_accent, 0.45);
+}}
+
+.thread-workspace button.stack-frame {{
+    min-height: 31px;
+    padding: 3px 4px;
+    background: transparent;
+    border: 0;
+}}
+
+.thread-workspace button.stack-frame:hover,
+.thread-workspace button.stack-frame:focus-visible {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.16);
+}}
+
+.thread-workspace button.stack-frame.current-debug-item {{
+    background: alpha(@app_accent, 0.16);
+}}
+
+.thread-workspace button.stack-frame.current-debug-item:hover,
+.thread-workspace button.stack-frame.current-debug-item:focus-visible {{
+    background: alpha(@app_accent, 0.23);
+}}
+
+.thread-controls-disclosure > button.disclosure-header {{
+    min-height: 23px;
+    padding: 2px 4px;
+    color: @app_muted;
+    background: alpha(@app_fg, 0.025);
+    border-top: 1px solid @app_border;
+    border-bottom: 1px solid @app_border;
+}}
+
+.thread-controls-disclosure > button.disclosure-header:hover,
+.thread-controls-disclosure > button.disclosure-header.disclosure-expanded {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.10);
+}}
+
+.thread-controls-disclosure > box:last-child {{ padding: 5px 0 2px; }}
+
+window.thread-analysis-window,
+window.thread-analysis-window > box,
+window.thread-analysis-window notebook,
+window.thread-analysis-window scrolledwindow,
+window.thread-analysis-window viewport {{
+    color: @app_fg;
+    background: @app_bg;
+}}
+
+window.thread-analysis-window columnview.debug-table row {{
+    color: @app_fg;
+    background: @app_surface;
+}}
+
+window.thread-analysis-window columnview.debug-table row:nth-child(odd) {{
+    background: alpha(@app_fg, 0.04);
+}}
+
+window.thread-analysis-window columnview.debug-table row:hover {{
+    background: alpha(@app_accent, 0.10);
+}}
+
+.thread-backtrace-section {{
+    padding: 7px;
+    background: @app_surface;
+    border: 1px solid @app_border;
+}}
+
+button.thread-backtrace-frame {{
+    min-height: 34px;
+    padding: 4px 7px;
+    color: @app_fg;
+    background: alpha(@app_fg, 0.025);
+    border: 0;
+    border-left: 2px solid @app_border;
+}}
+
+button.thread-backtrace-frame:hover {{
+    background: alpha(@app_accent, 0.12);
+    border-left-color: @app_accent;
+}}
+
+.thread-comparison-changed {{
+    color: @app_warning;
+    font-weight: 700;
+}}
+
+.lock-graph {{
+    padding: 5px 0 0;
+    background: @app_surface;
+    border-top: 1px solid @app_border;
+}}
+
 .module-row {{
     padding: 3px 4px;
     border-bottom: 1px solid @app_border;
@@ -1412,7 +1590,6 @@ button:focus,
 button:focus-visible {{
     background: alpha(@app_fg, 0.11);
     background-image: none;
-    border: 0;
     outline: none;
     box-shadow: none;
 }}
@@ -1422,7 +1599,6 @@ button:checked {{
     color: @app_fg;
     background: alpha(@app_accent, 0.17);
     background-image: none;
-    border: 0;
     outline: none;
     box-shadow: none;
 }}
@@ -1430,6 +1606,40 @@ button:checked {{
 button:disabled {{
     color: alpha(@app_muted, 0.45);
     background: transparent;
+}}
+
+/* GTK paints the selected value inside a separate cell. Keep that internal
+   layer transparent so it cannot introduce the system theme's bright blue
+   selection color over fgdb's darker dropdown button. */
+dropdown > button cellview,
+dropdown > button > box > stack,
+dropdown > button > box > stack > * {{
+    color: @app_fg;
+    background: transparent;
+    background-image: none;
+}}
+
+dropdown popover > contents,
+dropdown popover listview,
+dropdown popover listview > row {{
+    color: @app_fg;
+    background: @app_surface;
+    background-image: none;
+}}
+
+dropdown popover > contents {{
+    border: 1px solid @app_border;
+    box-shadow: none;
+}}
+
+dropdown popover listview > row:hover {{
+    color: @app_fg;
+    background: @app_raised;
+}}
+
+dropdown popover listview > row:selected {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.18);
 }}
 
 button.pause-availability-pending,
@@ -1568,6 +1778,65 @@ button.signal-action.signal-caught {{
     background: alpha(@app_success, 0.13);
 }}
 
+.breakpoint-tool-section,
+.signal-tool-section {{
+    padding: 5px;
+    background: alpha(@app_fg, 0.018);
+    border: 1px solid @app_border;
+}}
+
+.watchpoint-controls entry,
+.watchpoint-controls dropdown > button,
+.watchpoint-controls button.watchpoint-add-action {{
+    min-height: 27px;
+}}
+
+.watchpoint-controls entry {{ padding: 1px 7px; }}
+
+.watchpoint-controls dropdown.watchpoint-access > button {{
+    min-width: 92px;
+    padding: 1px 7px;
+    color: @app_fg;
+    background: @app_bg;
+    border: 1px solid @app_border;
+}}
+
+.watchpoint-controls dropdown.watchpoint-access > button:hover,
+.watchpoint-controls dropdown.watchpoint-access > button:focus,
+.watchpoint-controls dropdown.watchpoint-access > button:focus-visible,
+.watchpoint-controls dropdown.watchpoint-access > button:checked {{
+    color: @app_fg;
+    background: @app_raised;
+    border-color: @app_accent;
+}}
+
+.watchpoint-controls button.watchpoint-add-action {{
+    min-width: 48px;
+    padding: 1px 10px;
+    border: 1px solid @app_border;
+}}
+
+button.catchpoint-action {{
+    min-height: 25px;
+    padding: 1px 6px;
+    color: @app_muted;
+    background: @app_raised;
+    border: 1px solid alpha(@app_border, 0.85);
+}}
+
+button.catchpoint-action:hover,
+button.catchpoint-action:focus-visible {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.12);
+    border-color: alpha(@app_accent, 0.55);
+}}
+
+button.catchpoint-action.signal-caught {{
+    color: @app_success;
+    background: alpha(@app_success, 0.13);
+    border-color: alpha(@app_success, 0.42);
+}}
+
 .signal-detail {{
     min-height: 27px;
     padding: 2px 5px;
@@ -1581,7 +1850,38 @@ button.signal-action.signal-caught {{
     border-left-color: @app_warning;
 }}
 
-.signal-disclosure grid {{ padding: 0 0 3px; }}
+.signal-disclosure > button.disclosure-header {{
+    min-height: 20px;
+    padding: 0;
+}}
+
+.signal-disclosure > button.disclosure-header:hover,
+.signal-disclosure > button.disclosure-header.disclosure-expanded {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.10);
+}}
+
+.signal-disclosure > box:last-child {{ padding-top: 4px; }}
+.signal-disclosure grid {{ padding: 0; }}
+
+button.signal-clear-action {{
+    min-height: 23px;
+    padding: 1px 8px;
+    border: 1px solid @app_border;
+}}
+
+.custom-signal-controls entry,
+.custom-signal-controls button.signal-toggle-action {{
+    min-height: 27px;
+}}
+
+.custom-signal-controls entry {{ padding: 1px 7px; }}
+
+.custom-signal-controls button.signal-toggle-action {{
+    min-width: 105px;
+    padding: 1px 10px;
+    border: 1px solid @app_border;
+}}
 
 window.value-editor,
 window.value-editor > box {{
@@ -2258,12 +2558,6 @@ stackswitcher.kernel-tabs button:checked {{
     padding: 4px 5px 5px;
     background: @app_surface;
     border-bottom: 1px solid @app_border;
-}}
-
-flowbox.misc-startup-summary > flowboxchild {{
-    min-width: 0;
-    padding: 0;
-    background: transparent;
 }}
 
 .misc-startup-summary-cell {{

@@ -81,6 +81,7 @@ impl Ui {
         window.set_child(Some(&root));
         kernel_section_handler.replace(Some(layout.disclosure_handler()));
         let initial_session = config.initial_session();
+        let source_base_roots = source::roots(config);
         let source_tree_base_roots = source::search_roots(config);
 
         let ui = Self {
@@ -149,9 +150,13 @@ impl Ui {
             latest_frames: Rc::new(RefCell::new(Vec::new())),
             selected_frame_level: Rc::new(Cell::new(0)),
             threads_list: workspace.threads_list,
+            thread_controls: workspace.thread_controls,
             thread_buttons: Rc::new(RefCell::new(Vec::new())),
             latest_threads: Rc::new(RefCell::new(None)),
             selected_thread_id: Rc::new(RefCell::new(None)),
+            scheduler_locking: Rc::new(Cell::new(None)),
+            non_stop_mode: Rc::new(Cell::new(None)),
+            thread_policy_generation: Rc::new(Cell::new(0)),
             modules_list: workspace.modules_list,
             latest_modules: Rc::new(RefCell::new(Vec::new())),
             inferior_controls: workspace.inferior_controls,
@@ -165,8 +170,10 @@ impl Ui {
             fork_policy_generation: Rc::new(Cell::new(0)),
             fork_follow_mode: Rc::new(Cell::new(None)),
             detach_on_fork: Rc::new(Cell::new(None)),
-            inferior_action_pending: Rc::new(Cell::new(false)),
+            inferior_action_pending: Rc::new(Cell::new(None)),
             pending_execution_inferior: Rc::new(RefCell::new(None)),
+            active_thread_execution: Rc::new(RefCell::new(None)),
+            thread_execution_exit_candidate: Rc::new(RefCell::new(None)),
             locals_store: workspace.locals_store,
             locals_selection: workspace.locals_selection,
             locals_view: workspace.locals_view,
@@ -268,7 +275,8 @@ impl Ui {
             gef_context_visible: config.gef_context_visible,
             gef_context_hidden_by_fgdb: Rc::new(Cell::new(false)),
             heap_inspection_handler: Rc::new(RefCell::new(None)),
-            source_roots: Rc::new(RefCell::new(source::roots(config))),
+            source_roots: Rc::new(RefCell::new(source_base_roots.clone())),
+            source_base_roots,
             current_session: Rc::new(RefCell::new(initial_session)),
             gdb_capabilities: Rc::new(RefCell::new(GdbCapabilities::default())),
             gdb_recovery_available: Rc::new(Cell::new(false)),
@@ -525,18 +533,20 @@ impl Ui {
                     {
                         return;
                     }
-                    (
-                        ui.selected_inferior_id().map_or_else(
-                            || String::from("-exec-continue"),
-                            |id| {
-                                crate::debugger::thread_group_argument(&id).map_or_else(
-                                    || String::from("-exec-continue"),
-                                    |id| format!("-exec-continue --thread-group {id}"),
-                                )
-                            },
-                        ),
-                        "Continuing the selected inferior…",
-                    )
+                    let command = if let Some(id) = ui.selected_inferior_id() {
+                        let Some(id) = crate::debugger::thread_group_argument(&id) else {
+                            ui.set_status(
+                                "Continue unavailable",
+                                "GDB reported an unsupported inferior identifier",
+                                Some("status-error"),
+                            );
+                            return;
+                        };
+                        format!("-exec-continue --thread-group {id}")
+                    } else {
+                        String::from("-exec-continue")
+                    };
+                    (command, "Continuing the selected inferior…")
                 } else if session.as_ref().is_none_or(DebugSession::can_start) {
                     (String::from("-exec-run"), "Starting the inferior…")
                 } else {
@@ -559,15 +569,19 @@ impl Ui {
                 && !ui.command_pending.get()
                 && !ui.session_pending.get()
             {
-                let command = ui.selected_inferior_id().map_or_else(
-                    || String::from("-exec-interrupt"),
-                    |id| {
-                        crate::debugger::thread_group_argument(&id).map_or_else(
-                            || String::from("-exec-interrupt"),
-                            |id| format!("-exec-interrupt --thread-group {id}"),
-                        )
-                    },
-                );
+                let command = if let Some(id) = ui.selected_inferior_id() {
+                    let Some(id) = crate::debugger::thread_group_argument(&id) else {
+                        ui.set_status(
+                            "Pause unavailable",
+                            "GDB reported an unsupported inferior identifier",
+                            Some("status-error"),
+                        );
+                        return;
+                    };
+                    format!("-exec-interrupt --thread-group {id}")
+                } else {
+                    String::from("-exec-interrupt")
+                };
                 issue_execution_command(
                     &ui,
                     &client_for_pause,
@@ -905,8 +919,11 @@ impl Ui {
             self.command_pending.set(false);
             self.session_pending.set(false);
             self.native_until_active.set(false);
+            self.active_thread_execution.borrow_mut().take();
+            self.thread_execution_exit_candidate.borrow_mut().take();
         }
         self.update_control_sensitivity();
+        self.update_thread_control_sensitivity();
     }
 
     pub fn set_controls_running(&self, running: bool) {
@@ -914,6 +931,7 @@ impl Ui {
             return;
         }
         self.update_control_sensitivity();
+        self.update_thread_control_sensitivity();
     }
 
     pub fn inferior_is_running(&self) -> bool {
@@ -963,6 +981,7 @@ impl Ui {
             return;
         }
         self.update_control_sensitivity();
+        self.update_thread_control_sensitivity();
     }
 
     pub fn set_session_pending(&self, pending: bool) {
@@ -970,6 +989,7 @@ impl Ui {
             return;
         }
         self.update_control_sensitivity();
+        self.update_thread_control_sensitivity();
     }
 
     pub fn clear_gef_capabilities(&self) {
@@ -1030,6 +1050,7 @@ impl Ui {
             return;
         }
         self.update_control_sensitivity();
+        self.update_thread_control_sensitivity();
         self.run_button
             .set_label(if started { "Continue" } else { "Run" });
     }
@@ -1346,6 +1367,7 @@ impl Ui {
             return;
         }
         self.update_control_sensitivity();
+        self.update_thread_control_sensitivity();
     }
 
     pub fn set_frame_selection_handler(&self, handler: impl Fn(u32) + 'static) {

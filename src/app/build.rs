@@ -7,6 +7,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let ui = Rc::new(Ui::build(application, &launch_config, &theme));
     ui.set_controls_ready(false);
     ui.connect_inferior_controls();
+    ui.connect_thread_controls();
 
     let ready_hook = Rc::new(RefCell::new(None::<Box<dyn Fn()>>));
     let ready_hook_for_event = Rc::clone(&ready_hook);
@@ -57,23 +58,49 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         handle_inferior_action(weak_ui.clone(), Rc::clone(&client), action);
     });
     let weak_ui = Rc::downgrade(&ui);
+    let client = Rc::clone(&mi_client);
+    ui.set_thread_action_handler(move |action| {
+        handle_thread_action(weak_ui.clone(), Rc::clone(&client), action);
+    });
+    let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
     ui.set_frame_selection_handler(move |level| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
-        let _ = client.request(
-            &format!("-stack-select-frame {level}"),
-            move |client, record| {
-                if record.is_done()
-                    && weak_ui
-                        .upgrade()
-                        .is_some_and(|ui| !ui.inferior_is_running())
-                {
-                    refresh_stopped_state(&weak_ui, client);
-                }
-            },
-        );
+        let weak_ui_for_error = weak_ui.clone();
+        if client
+            .request(
+                &format!("-stack-select-frame {level}"),
+                move |client, record| {
+                    if record.is_done()
+                        && weak_ui
+                            .upgrade()
+                            .is_some_and(|ui| !ui.inferior_is_running())
+                    {
+                        refresh_stopped_state(&weak_ui, client);
+                    } else if !record.is_done()
+                        && let Some(ui) = weak_ui.upgrade()
+                    {
+                        ui.set_status(
+                            "Frame selection failed",
+                            record
+                                .error_message()
+                                .unwrap_or("GDB rejected the selected frame"),
+                            Some("status-error"),
+                        );
+                    }
+                },
+            )
+            .is_err()
+            && let Some(ui) = weak_ui_for_error.upgrade()
+        {
+            ui.set_status(
+                "Frame selection failed",
+                "Could not queue the frame-selection command",
+                Some("status-error"),
+            );
+        }
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
@@ -81,23 +108,49 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
-        let _ = client.request(&format!("-thread-select {id}"), move |client, record| {
-            if record.is_done()
-                && weak_ui
-                    .upgrade()
-                    .is_some_and(|ui| !ui.inferior_is_running())
-            {
-                refresh_stopped_state(&weak_ui, client);
-            } else if let Some(ui) = weak_ui.upgrade() {
+        let Some(selected_id) = crate::debugger::thread_id_argument(&id).map(str::to_owned) else {
+            if let Some(ui) = weak_ui.upgrade() {
                 ui.set_status(
                     "Thread selection failed",
-                    record
-                        .error_message()
-                        .unwrap_or("GDB rejected the selected thread"),
+                    &format!("GDB reported an unsupported thread identifier: {id}"),
                     Some("status-error"),
                 );
             }
-        });
+            return;
+        };
+        let weak_ui_for_error = weak_ui.clone();
+        if client
+            .request(
+                &format!("-thread-select {selected_id}"),
+                move |client, record| {
+                    if record.is_done() {
+                        let stopped = weak_ui.upgrade().is_some_and(|ui| {
+                            ui.select_thread_in_view(&selected_id);
+                            !ui.inferior_is_running()
+                        });
+                        if stopped {
+                            refresh_stopped_state(&weak_ui, client);
+                        }
+                    } else if let Some(ui) = weak_ui.upgrade() {
+                        ui.set_status(
+                            "Thread selection failed",
+                            record
+                                .error_message()
+                                .unwrap_or("GDB rejected the selected thread"),
+                            Some("status-error"),
+                        );
+                    }
+                },
+            )
+            .is_err()
+            && let Some(ui) = weak_ui_for_error.upgrade()
+        {
+            ui.set_status(
+                "Thread selection failed",
+                "Could not queue the thread-selection command",
+                Some("status-error"),
+            );
+        }
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);

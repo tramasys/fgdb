@@ -75,11 +75,16 @@ pub fn search_roots(config: &LaunchConfig) -> Vec<PathBuf> {
 
 pub fn discover_source_files(roots: &[PathBuf], limit: usize) -> Vec<PathBuf> {
     let mut pending = roots.iter().cloned().collect::<VecDeque<_>>();
+    let mut visited_directories = HashSet::new();
+    let mut seen_files = HashSet::new();
     let mut files = Vec::new();
     let mut directories = 0_usize;
     while let Some(directory) = pending.pop_front() {
         if files.len() >= limit || directories >= MAX_SOURCE_TREE_DIRECTORIES {
             break;
+        }
+        if !visited_directories.insert(directory.clone()) {
+            continue;
         }
         directories += 1;
         let Ok(entries) = std::fs::read_dir(directory) else {
@@ -97,7 +102,10 @@ pub fn discover_source_files(roots: &[PathBuf], limit: usize) -> Vec<PathBuf> {
                 if !is_ignored_source_directory(&entry.file_name()) {
                     pending.push_back(path);
                 }
-            } else if file_type.is_file() && is_source_path(&path) {
+            } else if file_type.is_file()
+                && is_source_path(&path)
+                && seen_files.insert(path.clone())
+            {
                 files.push(path);
             }
         }
@@ -107,17 +115,31 @@ pub fn discover_source_files(roots: &[PathBuf], limit: usize) -> Vec<PathBuf> {
     files
 }
 
+#[cfg(test)]
 pub fn build_source_tree(
     files: &[PathBuf],
     roots: &[PathBuf],
     loaded_files: &[PathBuf],
     query: &str,
 ) -> SourceTreeBuild {
+    build_source_tree_while(files, roots, loaded_files, query, || true)
+}
+
+pub fn build_source_tree_while(
+    files: &[PathBuf],
+    roots: &[PathBuf],
+    loaded_files: &[PathBuf],
+    query: &str,
+    mut should_continue: impl FnMut() -> bool,
+) -> SourceTreeBuild {
     let terms = query
         .split_whitespace()
         .map(str::to_lowercase)
         .collect::<Vec<_>>();
-    let loaded = loaded_files.iter().cloned().collect::<HashSet<_>>();
+    let loaded = loaded_files
+        .iter()
+        .map(PathBuf::as_path)
+        .collect::<HashSet<_>>();
     let mut directories = roots
         .iter()
         .cloned()
@@ -126,17 +148,26 @@ pub fn build_source_tree(
             ..SourceTreeDirectory::default()
         })
         .collect::<Vec<_>>();
+    let root_depths = roots
+        .iter()
+        .map(|root| root.components().count())
+        .collect::<Vec<_>>();
     let mut file_count = 0;
-    for file in files {
-        let path_text = file.to_string_lossy().to_lowercase();
-        if !terms.iter().all(|term| path_text.contains(term)) {
-            continue;
+    for (index, file) in files.iter().enumerate() {
+        if index % 256 == 0 && !should_continue() {
+            return SourceTreeBuild::default();
+        }
+        if !terms.is_empty() {
+            let path_text = file.to_string_lossy().to_lowercase();
+            if !terms.iter().all(|term| path_text.contains(term)) {
+                continue;
+            }
         }
         let Some((root_index, root)) = roots
             .iter()
             .enumerate()
             .filter(|(_, root)| file.starts_with(root))
-            .max_by_key(|(_, root)| root.components().count())
+            .max_by_key(|(index, _)| root_depths[*index])
         else {
             continue;
         };
@@ -182,7 +213,7 @@ pub fn build_source_tree(
 
 fn source_tree_directory_node(
     directory: SourceTreeDirectory,
-    loaded_files: &HashSet<PathBuf>,
+    loaded_files: &HashSet<&Path>,
     root: bool,
 ) -> SourceTreeNodeData {
     let mut children = directory
@@ -196,7 +227,7 @@ fn source_tree_directory_node(
             .into_iter()
             .map(|(name, path)| SourceTreeNodeData {
                 name: name.to_string_lossy().into_owned(),
-                loaded: loaded_files.contains(&path),
+                loaded: loaded_files.contains(path.as_path()),
                 path,
                 directory: false,
                 children: Vec::new(),
@@ -258,14 +289,16 @@ pub fn search_source_files(
         };
         let contents = String::from_utf8_lossy(&bytes);
         for (line_index, line) in contents.lines().enumerate() {
-            let line_lower = line.to_lowercase();
-            let Some(column) = line_lower.find(&query_lower) else {
+            if line_index % 256 == 0 && !should_continue() {
+                return matches;
+            }
+            let Some(column) = case_insensitive_match_column(line, &query_lower) else {
                 continue;
             };
             matches.push(SourceTreeMatch {
                 path: path.clone(),
                 line: u32::try_from(line_index + 1).unwrap_or(u32::MAX),
-                column: u32::try_from(column + 1).unwrap_or(u32::MAX),
+                column: u32::try_from(column).unwrap_or(u32::MAX),
                 preview: line.trim().chars().take(240).collect(),
             });
             if matches.len() >= match_limit {
@@ -274,6 +307,20 @@ pub fn search_source_files(
         }
     }
     matches
+}
+
+fn case_insensitive_match_column(line: &str, query_lower: &str) -> Option<usize> {
+    let line_lower = line.to_lowercase();
+    let byte_offset = line_lower.find(query_lower)?;
+    let lowered_character_offset = line_lower.get(..byte_offset)?.chars().count();
+    let mut produced_lowercase_characters = 0;
+    for (original_character_offset, character) in line.chars().enumerate() {
+        if produced_lowercase_characters >= lowered_character_offset {
+            return Some(original_character_offset + 1);
+        }
+        produced_lowercase_characters += character.to_lowercase().count();
+    }
+    Some(line.chars().count().saturating_add(1))
 }
 
 fn is_ignored_source_directory(name: &std::ffi::OsStr) -> bool {
@@ -455,7 +502,10 @@ pub fn resolve(reported: &str, roots: &[PathBuf]) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_source_tree, paths_match, search_source_files};
+    use super::{
+        build_source_tree, build_source_tree_while, case_insensitive_match_column,
+        discover_source_files, paths_match, search_source_files,
+    };
     use std::path::{Path, PathBuf};
 
     #[test]
@@ -493,6 +543,35 @@ mod tests {
     }
 
     #[test]
+    fn reports_source_columns_in_original_unicode_characters() {
+        assert_eq!(
+            case_insensitive_match_column("alpha target", "target"),
+            Some(7)
+        );
+        assert_eq!(case_insensitive_match_column("İtarget", "target"), Some(2));
+        assert_eq!(case_insensitive_match_column("Ärger", "är"), Some(1));
+    }
+
+    #[test]
+    fn nested_source_roots_do_not_consume_the_file_limit_twice() {
+        let root = std::env::temp_dir().join(format!(
+            "fgdb-source-roots-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let nested = root.join("nested");
+        let sibling = root.join("sibling");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(root.join("a.c"), "int a;\n").unwrap();
+        std::fs::write(nested.join("b.c"), "int b;\n").unwrap();
+        std::fs::write(sibling.join("c.c"), "int c;\n").unwrap();
+        let files = discover_source_files(&[root.clone(), nested], 3);
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(files.len(), 3);
+    }
+
+    #[test]
     fn builds_filtered_hierarchies_and_marks_loaded_sources() {
         let root = PathBuf::from("/project");
         let main = root.join("src/main.rs");
@@ -513,5 +592,15 @@ mod tests {
         assert!(parser_directory.loaded);
         assert_eq!(parser_directory.children[0].path, parser);
         assert!(!build.roots[0].children.iter().any(|node| node.path == main));
+    }
+
+    #[test]
+    fn cancels_stale_source_tree_builds_before_allocating_the_tree() {
+        let files = (0..300)
+            .map(|index| PathBuf::from(format!("/project/src/file-{index}.rs")))
+            .collect::<Vec<_>>();
+        let build =
+            build_source_tree_while(&files, &[PathBuf::from("/project")], &[], "", || false);
+        assert_eq!(build, Default::default());
     }
 }

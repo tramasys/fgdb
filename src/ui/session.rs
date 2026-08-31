@@ -20,21 +20,15 @@ impl Ui {
             .fetch_add(1, Ordering::Relaxed);
         self.source_tree_render_generation
             .fetch_add(1, Ordering::Relaxed);
-        let mut tree_roots = self.source_tree_base_roots.clone();
-        if let Some(directory) = session.working_directory()
-            && directory.is_dir()
-        {
-            let mut roots = self.source_roots.borrow_mut();
-            if let Some(index) = roots.iter().position(|root| root == directory) {
-                roots.remove(index);
-            }
-            roots.insert(0, directory.to_path_buf());
+        let session_directory = session.working_directory().filter(|path| path.is_dir());
+        let mut resolution_roots = self.source_base_roots.clone();
+        prioritize_source_root(&mut resolution_roots, session_directory);
+        if *self.source_roots.borrow() != resolution_roots {
+            self.source_roots.replace(resolution_roots);
             self.resolved_source_paths.borrow_mut().clear();
-            if let Some(index) = tree_roots.iter().position(|root| root == directory) {
-                tree_roots.remove(index);
-            }
-            tree_roots.insert(0, directory.to_path_buf());
         }
+        let mut tree_roots = self.source_tree_base_roots.clone();
+        prioritize_source_root(&mut tree_roots, session_directory);
         if *self.source_tree_roots.borrow() != tree_roots {
             self.source_tree_roots.replace(tree_roots);
             self.source_tree_cache.borrow_mut().take();
@@ -457,6 +451,16 @@ impl Ui {
     }
 }
 
+fn prioritize_source_root(roots: &mut Vec<PathBuf>, priority: Option<&Path>) {
+    let Some(priority) = priority else {
+        return;
+    };
+    if let Some(index) = roots.iter().position(|root| root == priority) {
+        roots.remove(index);
+    }
+    roots.insert(0, priority.to_path_buf());
+}
+
 fn session_page(hint: Option<&str>) -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
     page.set_margin_top(10);
@@ -707,7 +711,8 @@ fn nonempty(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_environment;
+    use super::{parse_environment, prioritize_source_root};
+    use std::path::PathBuf;
 
     #[test]
     fn parses_environment_values_without_losing_spaces_or_equals() {
@@ -724,5 +729,26 @@ mod tests {
     fn rejects_invalid_environment_names() {
         assert!(parse_environment("9MODE=debug").is_err());
         assert!(parse_environment("NO VALUE").is_err());
+    }
+
+    #[test]
+    fn session_source_roots_replace_instead_of_accumulating() {
+        let base = vec![PathBuf::from("/base")];
+        let mut first = base.clone();
+        prioritize_source_root(&mut first, Some(PathBuf::from("/project-a").as_path()));
+        assert_eq!(first[0], PathBuf::from("/project-a"));
+        let mut roots = base;
+        prioritize_source_root(&mut roots, Some(PathBuf::from("/project-b").as_path()));
+        assert_eq!(roots, [PathBuf::from("/project-b"), PathBuf::from("/base")]);
+        assert!(!roots.contains(&PathBuf::from("/project-a")));
+        prioritize_source_root(&mut roots, Some(PathBuf::from("/base").as_path()));
+        assert_eq!(roots[0], PathBuf::from("/base"));
+        assert_eq!(
+            roots
+                .iter()
+                .filter(|root| *root == &PathBuf::from("/base"))
+                .count(),
+            1
+        );
     }
 }
