@@ -406,6 +406,10 @@ entry.thread-search > image:first-child {{
     margin-right: 6px;
 }}
 
+entry.stop-point-search > image:first-child {{
+    margin-right: 6px;
+}}
+
 dropdown.thread-dropdown > button,
 dropdown.thread-dropdown > button cellview {{
     color: @app_fg;
@@ -1588,6 +1592,222 @@ columnview.memory-map-table row {{ min-height: 28px; }}
 .configuration-setting {{
     min-width: 145px;
     color: @app_accent_hover;
+    font-family: monospace;
+}}
+
+.debug-data-window {{
+    color: @app_fg;
+    background: @app_bg;
+}}
+
+.debug-data-heading {{
+    min-height: 32px;
+    padding: 5px 7px;
+    background: alpha(@app_fg, 0.018);
+    border: 1px solid @app_border;
+}}
+
+.debug-data-title {{ color: @app_fg; }}
+
+.debug-data-window notebook {{
+    background: @app_bg;
+    border: 1px solid @app_border;
+}}
+
+.debug-data-window notebook > header {{
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}}
+
+.debug-data-window notebook > header > tabs {{
+    padding: 2px;
+}}
+
+.debug-data-window notebook > header > tabs > tab {{
+    min-height: 29px;
+    margin: 0 1px;
+    padding: 3px 9px;
+    color: @app_muted;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+}}
+
+.debug-data-window notebook > header > tabs > tab:hover {{
+    color: @app_fg;
+    background: alpha(@app_fg, 0.055);
+}}
+
+.debug-data-window notebook > header > tabs > tab:checked {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.08);
+    border: 0;
+    box-shadow: none;
+}}
+
+.debug-data-window notebook > stack {{
+    background: @app_bg;
+}}
+
+.debug-data-section {{
+    min-height: 20px;
+    padding: 4px 7px 5px;
+    color: @app_muted;
+    background: alpha(@app_fg, 0.018);
+    border: 1px solid @app_border;
+    font-size: 10px;
+    font-weight: 700;
+}}
+
+.debug-data-fact {{
+    min-height: 29px;
+    padding: 5px 7px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+}}
+
+.debug-data-fact-name {{
+    min-width: 135px;
+    color: @app_muted;
+    font-weight: 700;
+}}
+
+.debug-data-control-card {{
+    min-height: 31px;
+    padding: 6px 7px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+}}
+
+.debug-data-row {{
+    padding: 8px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+    border-left: 2px solid transparent;
+}}
+
+.debug-data-row:nth-child(odd) {{ background: alpha(@app_fg, 0.045); }}
+
+.debug-data-row .debug-data-fact {{
+    min-height: 22px;
+    padding: 2px 0;
+    background: transparent;
+    border: 0;
+    border-top: 1px solid alpha(@app_border, 0.58);
+}}
+
+.debug-data-window button.inline-action {{
+    min-height: 29px;
+    margin: 0;
+    padding: 2px 8px;
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.06);
+    border: 1px solid alpha(@app_border, 0.85);
+}}
+
+.debug-data-window button.inline-action:hover,
+.debug-data-window button.inline-action:focus-visible {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.17);
+    border-color: alpha(@app_accent, 0.68);
+}}
+
+.debug-data-window button.inline-action:disabled {{
+    color: alpha(@app_muted, 0.48);
+    background: transparent;
+    border-color: alpha(@app_border, 0.65);
+}}
+
+.debug-data-window entry {{
+    min-height: 29px;
+    padding: 2px 7px;
+    color: @app_fg;
+    background: @app_bg;
+    border: 1px solid @app_border;
+}}
+
+.debug-data-window entry:focus-within {{ border-color: @app_accent; }}
+
+.debug-data-window entry.debug-data-search image.left {{ margin-right: 7px; }}
+
+.debug-data-source,
+.debug-data-activity {{
+    min-height: 25px;
+    padding: 5px 7px;
+    color: @app_fg;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+}}
+
+.debug-data-printer-summary {{
+    min-height: 29px;
+    padding: 5px 8px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+}}
+
+.debug-data-printer-summary-count,
+.debug-data-printer-scope-name,
+.debug-data-printer-provider-name {{
+    color: @app_fg;
+    font-weight: 700;
+}}
+
+.debug-data-printer-match-count {{
+    margin: 0 3px;
+}}
+
+.debug-data-printer-scope {{
+    padding: 8px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+    border-left: 2px solid alpha(@app_accent, 0.72);
+}}
+
+.debug-data-printer-scope-header {{
+    min-height: 25px;
+}}
+
+.debug-data-printer-kind {{
+    min-width: 52px;
+    padding: 2px 6px;
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.12);
+    border: 1px solid alpha(@app_accent, 0.35);
+    font-size: 10px;
+    font-weight: 700;
+}}
+
+.debug-data-printer-count {{
+    color: @app_muted;
+    font-size: 11px;
+}}
+
+.debug-data-printer-path {{
+    min-height: 23px;
+    padding: 3px 6px;
+    color: @app_muted;
+    background: alpha(@app_bg, 0.42);
+    border: 1px solid alpha(@app_border, 0.65);
+}}
+
+.debug-data-printer-provider {{
+    min-height: 24px;
+    padding: 3px 5px;
+    background: alpha(@app_fg, 0.018);
+    border-bottom: 1px solid alpha(@app_border, 0.72);
+}}
+
+.debug-data-printer-grid {{
+    margin: 0;
+}}
+
+.debug-data-printer {{
+    min-height: 25px;
+    padding: 4px 7px;
+    color: @app_fg;
+    background: alpha(@app_bg, 0.5);
+    border: 1px solid alpha(@app_border, 0.72);
     font-family: monospace;
 }}
 

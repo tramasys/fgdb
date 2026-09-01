@@ -26,7 +26,9 @@ CXX_TARGETS := \
 	$(TARGET_DIR)/cpp-debug-target \
 	$(TARGET_DIR)/cpp-object-target \
 	$(TARGET_DIR)/cpp-variable-viewer-target
-RUST_TARGETS := $(TARGET_DIR)/rust-debug-target
+RUST_TARGETS := \
+	$(TARGET_DIR)/rust-debug-target \
+	$(TARGET_DIR)/rust-variable-viewer-target
 OPTIMIZED_TARGETS := \
 	$(TARGET_DIR)/cpp-debug-target-o2 \
 	$(TARGET_DIR)/rust-debug-target-o2
@@ -83,6 +85,9 @@ $(TARGET_DIR)/cpp-variable-viewer-target: cpp_variable_viewer_target.cpp | $(TAR
 	$(CXX) $(CPPFLAGS) $(CXXFLAGS) $< $(LDFLAGS) -o $@
 
 $(TARGET_DIR)/rust-debug-target: rust_debug_target.rs | $(TARGET_DIR)
+	$(RUSTC) $(RUSTFLAGS) $< -o $@
+
+$(TARGET_DIR)/rust-variable-viewer-target: rust_variable_viewer_target.rs | $(TARGET_DIR)
 	$(RUSTC) $(RUSTFLAGS) $< -o $@
 
 $(TARGET_DIR)/cpp-debug-target-o2: cpp_debug_target.cpp | $(TARGET_DIR)

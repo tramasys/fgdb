@@ -106,7 +106,7 @@ impl Ui {
             target_label: topbar.target_label,
             terminal_toggle_button: topbar.terminal_toggle_button,
             open_source_button: topbar.open_source_button,
-            load_symbols_button: topbar.load_symbols_button,
+            debug_data_button: topbar.debug_data_button,
             run_button: topbar.run_button,
             pause_button: topbar.pause_button,
             next_button: topbar.next_button,
@@ -137,6 +137,7 @@ impl Ui {
             source_palette_generation: Arc::new(AtomicU64::new(0)),
             source_loaded_generation: Arc::new(AtomicU64::new(0)),
             source_loaded_cache: Rc::new(RefCell::new(None)),
+            loaded_source_files: Rc::new(RefCell::new(Vec::new())),
             source_tree_roots: Rc::new(RefCell::new(source_tree_base_roots.clone())),
             source_tree_base_roots,
             source_tree_cache: Rc::new(RefCell::new(None)),
@@ -163,6 +164,10 @@ impl Ui {
             thread_policy_generation: Rc::new(Cell::new(0)),
             modules_list: workspace.modules_list,
             latest_modules: Rc::new(RefCell::new(Vec::new())),
+            module_debug_metadata: Rc::new(RefCell::new(HashMap::new())),
+            module_debug_generation: Arc::new(AtomicU64::new(0)),
+            module_debug_worker_active: Arc::new(AtomicBool::new(false)),
+            module_debug_force_pending: Arc::new(AtomicBool::new(false)),
             inferior_controls: workspace.inferior_controls,
             inferiors: Rc::new(RefCell::new(Vec::new())),
             thread_inferior_ids: Rc::new(RefCell::new(HashMap::new())),
@@ -194,6 +199,7 @@ impl Ui {
             expression_watches_empty: workspace.expression_watches_empty,
             expression_watches: Rc::new(RefCell::new(Vec::new())),
             deferred_variable_object_deletions: Rc::new(RefCell::new(HashSet::new())),
+            pending_local_variable_objects: Rc::new(RefCell::new(HashSet::new())),
             expression_watch_entry: workspace.expression_watch_entry,
             expression_watch_add_button: workspace.expression_watch_add_button,
             expression_watch_remove_button: workspace.expression_watch_remove_button,
@@ -298,6 +304,10 @@ impl Ui {
             gdb_recovery_available: Rc::new(Cell::new(false)),
             configuration_report: config.configuration_report().clone(),
             configuration_dialog: Rc::new(RefCell::new(None)),
+            debug_data_view: Rc::new(RefCell::new(None)),
+            debug_data_state: Rc::new(RefCell::new(debug_data::DebugDataState::default())),
+            debug_data_generation: Rc::new(Cell::new(0)),
+            debug_data_action_handler: Rc::new(RefCell::new(None)),
             session_handler: Rc::new(RefCell::new(None)),
             session_action_handler: Rc::new(RefCell::new(None)),
             until_action_handler: Rc::new(RefCell::new(None)),
@@ -382,7 +392,7 @@ impl Ui {
 
     pub fn set_gdb_capabilities(&self, capabilities: GdbCapabilities) {
         let summary = capabilities.compatibility_summary();
-        let tooltip = if capabilities.features_known {
+        let feature_detail = if capabilities.features_known {
             if capabilities.features.is_empty() {
                 String::from("GDB returned an empty MI feature list")
             } else {
@@ -391,9 +401,21 @@ impl Ui {
         } else {
             String::from("This GDB did not expose an MI feature list")
         };
+        let printer_detail = if !capabilities.pretty_printing {
+            "Dynamic pretty printing is unavailable in this GDB build"
+        } else if capabilities.rust_pretty_printing {
+            "The matching Rust toolchain pretty-printers are loaded"
+        } else {
+            "Dynamic pretty printing is enabled; no Rust toolchain printer is currently loaded"
+        };
+        let tooltip = format!("{printer_detail}. {feature_detail}");
         self.gdb_capabilities_label.set_text(&summary);
         self.gdb_capabilities_label.set_tooltip_text(Some(&tooltip));
         self.gdb_capabilities.replace(capabilities);
+    }
+
+    pub(crate) fn gdb_capabilities(&self) -> GdbCapabilities {
+        self.gdb_capabilities.borrow().clone()
     }
 
     pub fn clear_gdb_capabilities(&self) {
@@ -684,49 +706,6 @@ impl Ui {
             until_popover.popdown();
             if let Some(ui) = weak_ui.upgrade() {
                 ui.request_native_until(UntilAction::Expression(condition));
-            }
-        });
-        let symbol_client = Rc::clone(client);
-        let weak_ui = Rc::downgrade(self);
-        self.load_symbols_button.connect_clicked(move |_| {
-            let Some(ui) = weak_ui.upgrade() else {
-                return;
-            };
-            if !ui.stopped_inspection_available() {
-                return;
-            }
-            let command = crate::debugger::console_command("sharedlibrary");
-            let weak_ui_for_response = weak_ui.clone();
-            ui.set_status("Loading symbols", "Loading shared-library symbols…", None);
-            drop(ui);
-            if symbol_client
-                .request(&command, move |_, record| {
-                    if let Some(ui) = weak_ui_for_response.upgrade() {
-                        if record.is_done() {
-                            ui.set_status(
-                                "Paused",
-                                "Shared-library symbols are loaded",
-                                Some("status-ready"),
-                            );
-                        } else {
-                            ui.set_status(
-                                "Symbol load failed",
-                                record
-                                    .error_message()
-                                    .unwrap_or("GDB rejected sharedlibrary"),
-                                Some("status-error"),
-                            );
-                        }
-                    }
-                })
-                .is_err()
-                && let Some(ui) = weak_ui.upgrade()
-            {
-                ui.set_status(
-                    "Symbol load failed",
-                    "The MI channel is unavailable",
-                    Some("status-error"),
-                );
             }
         });
         for (button, signal, _) in &self.signal_buttons {
@@ -1262,7 +1241,8 @@ impl Ui {
                     mask | (u64::from(button.is_visible()) << index.min(63))
                 }),
             edit_local: can_inspect
-                && variable_at(&self.locals_selection, self.locals_selection.selected()).is_some(),
+                && variable_at(&self.locals_selection, self.locals_selection.selected())
+                    .is_some_and(|variable| variable.is_available()),
             manage_watches: can_manage_watches,
             add_watch: can_manage_watches
                 && self.expression_watches.borrow().len() < MAX_EXPRESSION_WATCHES
@@ -1368,7 +1348,6 @@ impl Ui {
         set_execution_sensitive(&self.memory_add_button, state.add_memory, state.busy);
         set_execution_sensitive(&self.watchpoint_add_button, state.inspect, state.busy);
         set_execution_sensitive(&self.watchpoint_mask, state.inspect, state.busy);
-        set_transient_execution_sensitive(&self.load_symbols_button, state.inspect, state.busy);
         // Keep the top-level session affordance visually stable during a
         // short execution transition. Its mutating actions remain genuinely
         // insensitive inside the popover until the debugger is ready again.

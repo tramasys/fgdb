@@ -333,7 +333,7 @@ fn refresh_persistent_variable_objects(
     if fallbacks.is_empty() {
         return;
     }
-    if !fallbacks.iter().any(Variable::needs_variable_object) {
+    if !target.requires_refresh(&fallbacks, &needs_update) {
         return;
     }
     let state = Rc::new(RefCell::new(VariableRefresh {
@@ -431,7 +431,9 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
             state.next_index = state.variables.len();
         }
         while state.next_index < state.variables.len()
-            && (!state.fallbacks[state.next_index].needs_variable_object()
+            && (!state
+                .target
+                .creates_missing_variable_object(&state.fallbacks[state.next_index])
                 || state.variables[state.next_index].varobj.is_some())
         {
             state.next_index += 1;
@@ -604,8 +606,9 @@ fn request_next_variable_update(client: &MiClient, state: Rc<RefCell<VariableRef
                         state.created_varobjs.remove(&varobj);
                         state.variables[index] = state.fallbacks[index].clone();
                         state.needs_update[index] = false;
-                        state.recreate_after_updates |=
-                            state.fallbacks[index].needs_variable_object();
+                        state.recreate_after_updates |= state
+                            .target
+                            .creates_missing_variable_object(&state.fallbacks[index]);
                     } else if let Some(update) = update {
                         if let Some(value) = update.value.as_ref() {
                             state.variables[index].value.clone_from(value);
@@ -651,6 +654,22 @@ fn variable_refresh_target_clone(target: &VariableRefreshTarget) -> VariableRefr
         VariableRefreshTarget::ExpressionWatches(expressions) => {
             VariableRefreshTarget::ExpressionWatches(expressions.clone())
         }
+    }
+}
+
+impl VariableRefreshTarget {
+    fn creates_missing_variable_object(&self, variable: &Variable) -> bool {
+        match self {
+            Self::Locals => variable.needs_eager_local_variable_object(),
+            Self::ExpressionWatches(_) => variable.needs_variable_object(),
+        }
+    }
+
+    fn requires_refresh(&self, fallbacks: &[Variable], needs_update: &[bool]) -> bool {
+        needs_update.iter().any(|needs_update| *needs_update)
+            || fallbacks
+                .iter()
+                .any(|variable| self.creates_missing_variable_object(variable))
     }
 }
 
@@ -743,24 +762,29 @@ pub(super) fn request_variable_children(
     from: usize,
 ) {
     let Some(varobj) = variable.varobj.clone() else {
+        request_lazy_local_variable_children(ui, client, variable, from);
         return;
     };
     // Dynamic varobjs may advertise available pretty-printed children only
     // through `has_more`; GDB documents `numchild` as unreliable for them.
     if variable.num_children > 0 || variable.has_more {
-        let to = from.saturating_add(VARIABLE_CHILD_PAGE_SIZE);
+        let Some(to) = variable_child_page_end(from) else {
+            if let Some(ui) = ui.upgrade() {
+                ui.show_variable_children_page(&variable, from, &[], false);
+            }
+            return;
+        };
         let command = format!(
             "-var-list-children --all-values {} {from} {to}",
             crate::debugger::quote(&varobj),
         );
         let ui_for_response = ui.clone();
         let ui_for_guard = ui.clone();
-        let varobj_for_response = varobj.clone();
         let varobj_for_guard = varobj.clone();
-        let variable_for_response = variable;
+        let variable_for_response = variable.clone();
         if let Err(error) = client.request_with_print_limit_when(
             &command,
-            AUTOMATIC_PRINT_ELEMENTS,
+            to,
             move || {
                 ui_for_guard
                     .upgrade()
@@ -771,7 +795,8 @@ pub(super) fn request_variable_children(
                     if record.is_done() {
                         let children = crate::debugger::variable_children(&record);
                         let next = from.saturating_add(children.len());
-                        let has_more = !children.is_empty()
+                        let has_more = next < MAX_VARIABLE_CHILDREN
+                            && !children.is_empty()
                             && (crate::debugger::variable_children_have_more(&record)
                                 || next < variable_for_response.num_children);
                         ui.show_variable_children_page(
@@ -781,8 +806,9 @@ pub(super) fn request_variable_children(
                             has_more,
                         );
                     } else {
-                        ui.show_variable_children_error(
-                            &varobj_for_response,
+                        ui.show_variable_children_page_error(
+                            &variable_for_response,
+                            from,
                             record
                                 .error_message()
                                 .unwrap_or("GDB could not expand this value"),
@@ -792,7 +818,7 @@ pub(super) fn request_variable_children(
             },
         ) && let Some(ui) = ui.upgrade()
         {
-            ui.show_variable_children_error(&varobj, &error.to_string());
+            ui.show_variable_children_page_error(&variable, from, &error.to_string());
         }
         return;
     }
@@ -901,6 +927,100 @@ pub(super) fn request_variable_children(
         && let Some(ui) = ui.upgrade()
     {
         ui.show_variable_children_error(&varobj, "The MI channel is unavailable");
+    }
+}
+
+fn variable_child_page_end(from: usize) -> Option<usize> {
+    (from < MAX_VARIABLE_CHILDREN).then(|| {
+        from.saturating_add(VARIABLE_CHILD_PAGE_SIZE)
+            .min(MAX_VARIABLE_CHILDREN)
+    })
+}
+
+fn request_lazy_local_variable_children(
+    ui: Weak<Ui>,
+    client: Rc<MiClient>,
+    variable: Variable,
+    from: usize,
+) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+    let generation = current_ui.current_stop_refresh_generation();
+    if from != 0 || !current_ui.claim_local_variable_object(generation, &variable) {
+        return;
+    }
+    drop(current_ui);
+
+    let varobj = next_variable_object_name();
+    let command = format!(
+        "-var-create {varobj} * {}",
+        crate::debugger::quote(&variable.name)
+    );
+    let ui_for_guard = ui.clone();
+    let variable_for_guard = variable.clone();
+    let ui_for_response = ui.clone();
+    let variable_for_response = variable.clone();
+    let client_for_response = Rc::clone(&client);
+    let varobj_for_response = varobj.clone();
+    if client
+        .request_with_print_limit_when(
+            &command,
+            AUTOMATIC_PRINT_ELEMENTS,
+            move || {
+                ui_for_guard.upgrade().is_some_and(|ui| {
+                    ui.is_stop_refresh_current(generation)
+                        && ui.has_local_variable_identity(&variable_for_guard)
+                })
+            },
+            move |client, record| {
+                if let Some(ui) = ui_for_response.upgrade() {
+                    ui.finish_local_variable_object(generation, &variable_for_response);
+                }
+                let created = record
+                    .is_done()
+                    .then(|| crate::debugger::variable_object(&record, &variable_for_response.name))
+                    .flatten()
+                    .map(|mut created| {
+                        created.argument = variable_for_response.argument;
+                        created
+                    });
+                let Some(created) = created else {
+                    delete_variable_object(client, &varobj_for_response);
+                    if let Some(ui) = ui_for_response.upgrade()
+                        && ui.is_stop_refresh_current(generation)
+                    {
+                        ui.show_lazy_variable_children_error(
+                            &variable_for_response,
+                            record
+                                .error_message()
+                                .unwrap_or("GDB could not inspect this pointer"),
+                        );
+                    }
+                    return;
+                };
+                let attached = ui_for_response.upgrade().is_some_and(|ui| {
+                    ui.attach_local_variable_object(generation, &variable_for_response, &created)
+                });
+                if attached {
+                    request_variable_children(
+                        ui_for_response.clone(),
+                        Rc::clone(&client_for_response),
+                        created,
+                        0,
+                    );
+                } else {
+                    delete_variable_object(client, &varobj_for_response);
+                }
+            },
+        )
+        .is_err()
+        && let Some(ui) = ui.upgrade()
+    {
+        ui.finish_local_variable_object(generation, &variable);
+        if ui.is_stop_refresh_current(generation) && ui.has_local_variable_identity(&variable) {
+            ui.show_lazy_variable_children_error(&variable, "The MI channel is unavailable");
+        }
     }
 }
 
@@ -1815,7 +1935,10 @@ pub(super) fn stack_pointer_expression(register: &str, offset: usize, depth: usi
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use super::{Variable, reuse_variable_objects, take_owned_variable_objects};
+    use super::{
+        Variable, VariableRefreshTarget, reuse_variable_objects, take_owned_variable_objects,
+        variable_child_page_end,
+    };
 
     fn variable(
         name: &str,
@@ -1852,6 +1975,37 @@ mod tests {
         assert_eq!(reused[1], fallbacks[1]);
         assert_eq!(needs_update, [true, false]);
         assert_eq!(stale, [String::from("var2")]);
+    }
+
+    #[test]
+    fn creates_local_pointer_objects_only_after_they_are_requested() {
+        let pointer = variable("pointer", "0x20", Some("Node *"), None);
+        let aggregate = variable("fixture", "<not available>", Some("struct Fixture"), None);
+
+        assert!(!VariableRefreshTarget::Locals.creates_missing_variable_object(&pointer));
+        assert!(VariableRefreshTarget::Locals.creates_missing_variable_object(&aggregate));
+        assert!(
+            VariableRefreshTarget::ExpressionWatches(Vec::new())
+                .creates_missing_variable_object(&pointer)
+        );
+    }
+
+    #[test]
+    fn bounds_dynamic_variable_pages_while_allowing_later_pages() {
+        assert_eq!(variable_child_page_end(0), Some(128));
+        assert_eq!(variable_child_page_end(128), Some(256));
+        assert_eq!(variable_child_page_end(4_000), Some(4_096));
+        assert_eq!(variable_child_page_end(4_096), None);
+        assert_eq!(variable_child_page_end(usize::MAX), None);
+    }
+
+    #[test]
+    fn refreshes_existing_lazy_local_objects_without_creating_new_ones() {
+        let pointer = variable("pointer", "0x20", Some("Node *"), None);
+        let target = VariableRefreshTarget::Locals;
+
+        assert!(!target.requires_refresh(std::slice::from_ref(&pointer), &[false]));
+        assert!(target.requires_refresh(std::slice::from_ref(&pointer), &[true]));
     }
 
     #[test]

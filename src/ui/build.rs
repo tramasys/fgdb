@@ -98,13 +98,12 @@ pub(super) fn build_topbar(
     open_source.add_css_class("toolbar-action");
     open_source.set_tooltip_text(Some("Open one or more source files in editor tabs"));
     leading.append(&open_source);
-    let load_symbols = gtk::Button::with_label("Load libs");
-    load_symbols.add_css_class("toolbar-action");
-    load_symbols.set_tooltip_text(Some(
-        "Load symbols for shared libraries (useful when auto-solib-add is off)",
+    let debug_data = gtk::Button::with_label("Debug data");
+    debug_data.add_css_class("toolbar-action");
+    debug_data.set_tooltip_text(Some(
+        "Inspect debugger features, symbols, sources, and pretty-printers",
     ));
-    load_symbols.set_sensitive(false);
-    leading.append(&load_symbols);
+    leading.append(&debug_data);
     let terminal_toggle = gtk::ToggleButton::with_label("Terminal");
     terminal_toggle.add_css_class("toolbar-toggle");
     terminal_toggle.add_css_class("terminal-pane-toggle");
@@ -263,7 +262,7 @@ pub(super) fn build_topbar(
         gdb_capabilities_label,
         target_label,
         open_source_button: open_source,
-        load_symbols_button: load_symbols,
+        debug_data_button: debug_data,
         terminal_toggle_button: terminal_toggle,
         run_button: run,
         pause_button: pause,
@@ -1275,6 +1274,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         .placeholder_text("Search stop points, groups, or tags")
         .hexpand(true)
         .build();
+    stop_point_search.add_css_class("stop-point-search");
     stop_point_search.set_tooltip_text(Some(
         "Search numbers, locations, conditions, commands, groups, and tags",
     ));

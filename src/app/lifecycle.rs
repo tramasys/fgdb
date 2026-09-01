@@ -51,6 +51,9 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ui.take_modules_dirty();
             refresh_modules(weak_ui, client);
         }
+        MiEvent::CapabilitiesChanged(capabilities) => {
+            ui.set_gdb_capabilities(capabilities);
+        }
         MiEvent::InferiorsChanged => {
             refresh_inferiors(weak_ui, client);
         }
@@ -758,6 +761,7 @@ pub(super) fn resynchronize_debugger_state(ui: &Weak<Ui>, client: &MiClient) {
     refresh_fork_policy(ui, client);
     refresh_thread_policy(ui, client);
     refresh_modules(ui, client);
+    client.refresh_pretty_printer_capabilities();
     detect_gef(ui, client);
     detect_target_abi(ui, client);
 }

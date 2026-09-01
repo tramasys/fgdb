@@ -1,6 +1,7 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MiEvent {
     Ready(GdbCapabilities),
+    CapabilitiesChanged(GdbCapabilities),
     InferiorsChanged,
     InferiorStarted {
         id: String,
@@ -51,6 +52,7 @@ pub struct GdbCapabilities {
     pub features: Vec<String>,
     pub mi_async: bool,
     pub pretty_printing: bool,
+    pub rust_pretty_printing: bool,
 }
 
 impl GdbCapabilities {
@@ -59,12 +61,15 @@ impl GdbCapabilities {
     }
 
     pub fn compatibility_summary(&self) -> String {
-        let mut available = Vec::with_capacity(3);
+        let mut available = Vec::with_capacity(4);
         if self.mi_async {
             available.push("MI async");
         }
         if self.pretty_printing {
             available.push("pretty printers");
+        }
+        if self.rust_pretty_printing {
+            available.push("Rust printers");
         }
         if self.features_known {
             available.push("feature list");

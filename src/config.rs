@@ -8,6 +8,8 @@ use std::{
 
 use clap::{Parser, error::ErrorKind};
 
+use crate::rust_toolchain::RustToolchain;
+
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
 const DEFAULT_CONFIG: &str = "# fgdb configuration\n# Environment variables override these values for one launch.\ngdb=gdb\ngdb_args=\nsource_path=\ngef_context=hide\nsafe_mode=false\n# working_directory=/path/to/project\n\n# Named profiles can contain these settings and a startup session.\n# [profile example]\n# executable=/path/to/program\n# arguments=--flag 'argument with spaces'\n# working_directory=/path/to/project\n";
 const DEFAULT_SECTION: &str = "<default>";
@@ -233,6 +235,7 @@ pub struct LaunchConfig {
     pub source_paths: Vec<PathBuf>,
     pub working_directory: PathBuf,
     pub safe_mode: bool,
+    rust_toolchain: Option<Arc<RustToolchain>>,
     initial_session: Option<DebugSession>,
     configuration_report: Arc<ConfigurationReport>,
 }
@@ -299,6 +302,11 @@ impl LaunchConfig {
         if self.safe_mode {
             arguments.push(String::from("--nx"));
         } else {
+            if !debugger_is_rust_gdb(&self.gdb_executable)
+                && let Some(toolchain) = self.rust_toolchain.as_deref()
+            {
+                arguments.extend(toolchain.gdb_printer_arguments());
+            }
             arguments.extend(self.gdb_startup_arguments.iter().cloned());
         }
         if let Some(DebugSession::Launch {
@@ -324,6 +332,10 @@ impl LaunchConfig {
         self.initial_session.clone()
     }
 
+    pub fn rust_sysroot(&self) -> Option<&Path> {
+        self.rust_toolchain.as_deref().map(RustToolchain::sysroot)
+    }
+
     pub fn needs_deferred_session_configuration(&self) -> bool {
         self.initial_session.is_some()
     }
@@ -331,6 +343,13 @@ impl LaunchConfig {
     pub fn configuration_report(&self) -> &ConfigurationReport {
         self.configuration_report.as_ref()
     }
+}
+
+fn debugger_is_rust_gdb(executable: &str) -> bool {
+    Path::new(executable)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "rust-gdb" || name.starts_with("rust-gdb-"))
 }
 
 #[derive(Debug)]
@@ -1022,6 +1041,9 @@ fn resolve_launch_config(
     let gdb_executable = settings
         .gdb_executable
         .unwrap_or_else(|| String::from("gdb"));
+    let rust_toolchain =
+        RustToolchain::discover(&working_directory, std::time::Duration::from_millis(250))
+            .map(Arc::new);
     let source_paths = settings.source_paths.unwrap_or_default();
     let configuration_report = Arc::new(ConfigurationReport {
         active_path: loaded.path.clone(),
@@ -1048,6 +1070,7 @@ fn resolve_launch_config(
         source_paths,
         working_directory,
         safe_mode,
+        rust_toolchain,
         initial_session,
         configuration_report,
     })
@@ -1348,7 +1371,7 @@ fn parse_boolean(value: &str) -> Option<bool> {
 mod tests {
     use super::{
         Cli, ConfigLayer, DebugSession, EnvironmentOverrides, FileConfig, LaunchConfig,
-        fallback_loaded_config, loaded_config_from_contents, parse_user_config,
+        RustToolchain, fallback_loaded_config, loaded_config_from_contents, parse_user_config,
         resolve_launch_config, validate_file_config,
     };
     use clap::Parser;
@@ -1369,13 +1392,17 @@ mod tests {
 
     #[test]
     fn assembles_special_gef_startup_before_launch_target() {
-        let configuration = LaunchConfig {
+        let mut configuration = LaunchConfig {
             gdb_executable: String::from("/usr/bin/gdb"),
             gdb_startup_arguments: vec![String::from("-ex"), String::from("init-gef-special")],
             gef_context_visible: false,
             source_paths: Vec::new(),
             working_directory: PathBuf::from("/tmp"),
             safe_mode: false,
+            rust_toolchain: Some(Arc::new(RustToolchain::with_printer_directory(
+                "/opt/rust",
+                "/opt/rust/lib/rustlib/etc",
+            ))),
             initial_session: Some(DebugSession::Launch {
                 executable: PathBuf::from("/tmp/debug target"),
                 arguments: vec![String::from("arg")],
@@ -1390,8 +1417,24 @@ mod tests {
             [
                 "/usr/bin/gdb",
                 "--quiet",
+                "--directory=/opt/rust/lib/rustlib/etc",
+                "-iex",
+                "add-auto-load-safe-path \"/opt/rust/lib/rustlib/etc\"",
                 "-ex",
                 "init-gef-special",
+                "--args",
+                "/tmp/debug target",
+                "arg",
+            ]
+        );
+
+        configuration.safe_mode = true;
+        assert_eq!(
+            configuration.gdb_arguments(),
+            [
+                "/usr/bin/gdb",
+                "--quiet",
+                "--nx",
                 "--args",
                 "/tmp/debug target",
                 "arg",

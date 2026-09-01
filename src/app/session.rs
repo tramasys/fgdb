@@ -218,6 +218,7 @@ impl SessionController {
         ui.set_session_pending(false);
         match completion {
             SequenceCompletion::Configure(session) => {
+                self.client.refresh_pretty_printer_capabilities();
                 let environment = match &session {
                     DebugSession::Launch { environment, .. } => {
                         environment.iter().map(|(name, _)| name.clone()).collect()

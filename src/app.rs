@@ -2,7 +2,7 @@ use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
     fmt::Write as _,
-    path::PathBuf,
+    path::{Path, PathBuf},
     rc::{Rc, Weak},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -12,8 +12,8 @@ use gtk::prelude::*;
 use crate::{
     config::{DebugSession, LaunchConfig},
     debugger::{
-        MemoryKind, MiClient, MiEvent, MiRecord, Register, SessionEvent, StackEntry, StackFrame,
-        TargetArchitecture, TargetEndian, ThreadInfo, Variable,
+        Breakpoint, MemoryKind, MiClient, MiEvent, MiRecord, Register, SessionEvent, StackEntry,
+        StackFrame, TargetArchitecture, TargetEndian, ThreadInfo, Variable,
         context::{
             MemoryRegion, annotate_memory_regions, build_stack_entries, is_pointer_register,
             looks_like_string_word, pointer_address, read_memory_regions,
@@ -36,6 +36,7 @@ use crate::{
 const MAX_POINTER_CHAIN_DEPTH: usize = 3;
 const AUTOMATIC_PRINT_ELEMENTS: usize = 128;
 const VARIABLE_CHILD_PAGE_SIZE: usize = 128;
+const MAX_VARIABLE_CHILDREN: usize = 4096;
 const STACK_WORD_COUNT: usize = 32;
 const POINTER_STRING_PREVIEW_ELEMENTS: usize = 256;
 const POINTER_ENRICHMENT_CONCURRENCY: usize = 4;
@@ -100,7 +101,9 @@ mod assignments;
 mod backend;
 mod breakpoints;
 mod build;
+mod debug_data;
 mod disassembly;
+use debug_data::handle_debug_data_action;
 mod inferiors;
 mod kernel;
 mod lifecycle;

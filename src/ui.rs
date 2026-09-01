@@ -7,7 +7,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -18,6 +18,8 @@ use vte4::prelude::*;
 
 mod actions;
 mod configuration;
+mod debug_data;
+pub(crate) use debug_data::DebugDataAction;
 mod debugger_state;
 mod layout;
 mod source_navigation;
@@ -41,6 +43,7 @@ use value::{
 use crate::{
     breakpoint_gutter::{BreakpointGutterRenderer, LineStyle},
     config::{ConfigurationReport, DebugSession, LaunchConfig},
+    debug_info::ModuleDebugMetadata,
     debugger::{
         Breakpoint, GdbCapabilities, InferiorInfo, InferiorState, Instruction, MemoryBlock,
         MemoryKind, MiClient, Register, SharedLibrary, SourceFile, SourceLocation, StackEntry,
@@ -237,6 +240,7 @@ type SourceJumpHandler = Rc<dyn Fn(PathBuf, u32)>;
 type SourceDiscoveryHandler = Rc<dyn Fn(SourceDiscoveryRequest)>;
 type SourceTreePathHandler = Rc<dyn Fn(PathBuf)>;
 type SourceTreeRefreshHandler = Rc<dyn Fn()>;
+type DebugDataActionHandler = Rc<dyn Fn(debug_data::DebugDataAction)>;
 type InferiorActionHandler = Rc<dyn Fn(InferiorAction)>;
 type ThreadActionHandler = Rc<dyn Fn(ThreadAction)>;
 type SignalCatchpointHandler = Rc<dyn Fn(String, Option<String>)>;
@@ -476,6 +480,7 @@ struct StopPointFilterRow {
     widgets: Vec<gtk::Widget>,
     number: String,
     searchable: String,
+    status: gtk::Label,
     hardware: bool,
     watchpoint: bool,
     catchpoint: bool,
@@ -564,7 +569,6 @@ struct VariableNode {
     children: gio::ListStore,
     children_loaded: Rc<Cell<bool>>,
     children_loading: Rc<Cell<bool>>,
-    expansion_observer_attached: Rc<Cell<bool>>,
     expanded: Rc<Cell<bool>>,
     changed: bool,
     load_more: Option<(Variable, usize)>,
@@ -578,7 +582,6 @@ impl VariableNode {
             children: gio::ListStore::new::<glib::BoxedAnyObject>(),
             children_loaded: Rc::new(Cell::new(false)),
             children_loading: Rc::new(Cell::new(false)),
-            expansion_observer_attached: Rc::new(Cell::new(false)),
             expanded: Rc::new(Cell::new(false)),
             changed: false,
             load_more: None,
@@ -600,7 +603,6 @@ impl VariableNode {
             children: gio::ListStore::new::<glib::BoxedAnyObject>(),
             children_loaded: Rc::new(Cell::new(true)),
             children_loading: Rc::new(Cell::new(false)),
-            expansion_observer_attached: Rc::new(Cell::new(true)),
             expanded: Rc::new(Cell::new(false)),
             changed: false,
             load_more: None,
@@ -631,12 +633,25 @@ impl VariableNode {
             children: gio::ListStore::new::<glib::BoxedAnyObject>(),
             children_loaded: Rc::new(Cell::new(true)),
             children_loading: Rc::new(Cell::new(false)),
-            expansion_observer_attached: Rc::new(Cell::new(true)),
             expanded: Rc::new(Cell::new(false)),
             changed: false,
             load_more: Some((parent, next)),
             placeholder: true,
         }
+    }
+
+    fn load_more_error(parent: Variable, next: usize, error: &str) -> Self {
+        let mut node = Self::load_more(parent, next);
+        node.variable.name = String::from("Retry loading more…");
+        node.variable.value = error.to_owned();
+        node
+    }
+
+    fn retry_expansion(parent: Variable, error: &str) -> Self {
+        let mut node = Self::load_more(parent, 0);
+        node.variable.name = String::from("Retry expansion…");
+        node.variable.value = error.to_owned();
+        node
     }
 
     fn updated(&self, variable: Variable, mark_changed: bool) -> Self {
@@ -666,7 +681,6 @@ impl VariableNode {
             } else {
                 Rc::new(Cell::new(false))
             },
-            expansion_observer_attached: Rc::new(Cell::new(false)),
             expanded: Rc::clone(&self.expanded),
             load_more: None,
             placeholder: false,
@@ -689,7 +703,6 @@ impl VariableNode {
             children: self.children.clone(),
             children_loaded: Rc::clone(&self.children_loaded),
             children_loading: Rc::clone(&self.children_loading),
-            expansion_observer_attached: Rc::new(Cell::new(false)),
             expanded: Rc::clone(&self.expanded),
             changed: false,
             load_more: self.load_more.clone(),
@@ -698,9 +711,7 @@ impl VariableNode {
     }
 
     fn rebound(&self) -> Self {
-        let mut node = self.clone();
-        node.expansion_observer_attached = Rc::new(Cell::new(false));
-        node
+        self.clone()
     }
 }
 
@@ -1357,7 +1368,7 @@ pub struct Ui {
     target_label: gtk::Label,
     terminal_toggle_button: gtk::ToggleButton,
     pub open_source_button: gtk::Button,
-    pub load_symbols_button: gtk::Button,
+    debug_data_button: gtk::Button,
     pub run_button: gtk::Button,
     pub pause_button: gtk::Button,
     pub next_button: gtk::Button,
@@ -1388,6 +1399,7 @@ pub struct Ui {
     source_palette_generation: Arc<AtomicU64>,
     source_loaded_generation: Arc<AtomicU64>,
     source_loaded_cache: Rc<RefCell<Option<Arc<Vec<PathBuf>>>>>,
+    loaded_source_files: Rc<RefCell<Vec<SourceFile>>>,
     source_tree_base_roots: Vec<PathBuf>,
     source_tree_roots: Rc<RefCell<Vec<PathBuf>>>,
     source_tree_cache: Rc<RefCell<Option<Arc<Vec<PathBuf>>>>>,
@@ -1414,6 +1426,10 @@ pub struct Ui {
     thread_policy_generation: Rc<Cell<u64>>,
     modules_list: gtk::Box,
     latest_modules: Rc<RefCell<Vec<SharedLibrary>>>,
+    module_debug_metadata: Rc<RefCell<HashMap<PathBuf, ModuleDebugMetadata>>>,
+    module_debug_generation: Arc<AtomicU64>,
+    module_debug_worker_active: Arc<AtomicBool>,
+    module_debug_force_pending: Arc<AtomicBool>,
     inferior_controls: InferiorControls,
     inferiors: Rc<RefCell<Vec<InferiorInfo>>>,
     thread_inferior_ids: Rc<RefCell<HashMap<String, String>>>,
@@ -1445,6 +1461,7 @@ pub struct Ui {
     expression_watches_empty: gtk::Label,
     expression_watches: Rc<RefCell<Vec<String>>>,
     deferred_variable_object_deletions: Rc<RefCell<HashSet<String>>>,
+    pending_local_variable_objects: Rc<RefCell<HashSet<(u64, String, bool)>>>,
     expression_watch_entry: gtk::Entry,
     expression_watch_add_button: gtk::Button,
     expression_watch_remove_button: gtk::Button,
@@ -1549,6 +1566,10 @@ pub struct Ui {
     gdb_recovery_available: Rc<Cell<bool>>,
     configuration_report: ConfigurationReport,
     configuration_dialog: Rc<RefCell<Option<gtk::Window>>>,
+    debug_data_view: Rc<RefCell<Option<debug_data::DebugDataView>>>,
+    debug_data_state: Rc<RefCell<debug_data::DebugDataState>>,
+    debug_data_generation: Rc<Cell<u64>>,
+    debug_data_action_handler: Rc<RefCell<Option<DebugDataActionHandler>>>,
     session_handler: Rc<RefCell<Option<DebugSessionHandler>>>,
     session_action_handler: Rc<RefCell<Option<SessionActionHandler>>>,
     until_action_handler: Rc<RefCell<Option<UntilActionHandler>>>,
@@ -1601,7 +1622,7 @@ struct Topbar {
     gdb_capabilities_label: gtk::Label,
     target_label: gtk::Label,
     open_source_button: gtk::Button,
-    load_symbols_button: gtk::Button,
+    debug_data_button: gtk::Button,
     terminal_toggle_button: gtk::ToggleButton,
     run_button: gtk::Button,
     pause_button: gtk::Button,
@@ -1806,9 +1827,9 @@ mod tests {
     use super::{
         DebugSession, EventCatchpoint, GEF_COMMAND_CAPABILITIES, IntegerFormat, IntegerRadix,
         RefreshGate, StringStorage, TargetConnection, TerminalClipboardAction, UntilAction,
-        VectorLaneFormat, breakpoint_command_number_at_address, breakpoint_command_numbers,
-        call_abi_phase, compact_function_name, compact_variable_type, conditional_branch_taken,
-        configured_target_can_start, event_catchpoint_command_number,
+        VariableNode, VectorLaneFormat, breakpoint_command_number_at_address,
+        breakpoint_command_numbers, call_abi_phase, compact_function_name, compact_variable_type,
+        conditional_branch_taken, configured_target_can_start, event_catchpoint_command_number,
         event_catchpoint_command_numbers, flags_markup, format_register_value,
         format_register_value_for_architecture, format_register_value_for_target, full_address,
         instruction_arguments_description, instruction_flow_description, instruction_flow_target,
@@ -1819,7 +1840,8 @@ mod tests {
         source_symbol_at_offset, source_tab_title, stop_reason_label, string_edit,
         terminal_clipboard_action, thread_os_id, variable_boolean_value, variable_character_format,
         variable_details, variable_integer_format, variable_is_address, variable_matches_filter,
-        variable_value_parts, vector_field_values, without_generic_arguments,
+        variable_node_matches_filter, variable_value_parts, vector_field_values,
+        without_generic_arguments,
     };
     use crate::debugger::{
         Breakpoint, Instruction, Register, SourceLocation, TargetArchitecture, TargetEndian,
@@ -2050,6 +2072,20 @@ mod tests {
         assert!(variable_matches_filter(&variable, "state payload"));
         assert!(variable_matches_filter(&variable, "option packet"));
         assert!(!variable_matches_filter(&variable, "vector"));
+        assert!(variable_matches_filter(&variable, "argument"));
+
+        let root = VariableNode::new(Variable {
+            name: String::from("fixture"),
+            value: String::from("{...}"),
+            type_name: Some(String::from("struct Fixture")),
+            argument: false,
+            varobj: Some(String::from("var1")),
+            num_children: 1,
+            has_more: false,
+        });
+        root.children
+            .append(&gtk::glib::BoxedAnyObject::new(VariableNode::new(variable)));
+        assert!(variable_node_matches_filter(&root, "packet payload"));
     }
 
     #[test]

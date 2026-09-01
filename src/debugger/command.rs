@@ -98,6 +98,25 @@ pub(crate) fn console_command(command: &str) -> String {
         .finish()
 }
 
+pub(crate) fn gdb_cli_string(value: &str) -> Result<String, &'static str> {
+    if value
+        .bytes()
+        .any(|byte| matches!(byte, b'\0' | b'\n' | b'\r'))
+    {
+        return Err("GDB CLI strings cannot contain NUL or line breaks");
+    }
+    let mut quoted = String::with_capacity(value.len().saturating_add(2));
+    quoted.push('"');
+    for character in value.chars() {
+        if matches!(character, '\\' | '"') {
+            quoted.push('\\');
+        }
+        quoted.push(character);
+    }
+    quoted.push('"');
+    Ok(quoted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

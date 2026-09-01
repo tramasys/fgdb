@@ -24,6 +24,7 @@ pub use protocol::{
 };
 
 type ResponseHandler = Box<dyn FnOnce(&MiClient, MiRecord)>;
+type ScopedResponseHandler = Box<dyn FnOnce(&MiClient, MiRecord, String)>;
 type EventHandler = Box<dyn Fn(&MiClient, MiEvent)>;
 
 const MAX_MI_RECORD_BYTES: usize = 8 * 1024 * 1024;
@@ -35,9 +36,11 @@ const MAX_QUEUED_MI_BYTES: usize = 8 * 1024 * 1024;
 const MAX_MI_WRITE_BATCH_BYTES: usize = 256 * 1024;
 const MAX_PENDING_REQUESTS: usize = 4096;
 const MAX_SCOPED_REQUESTS: usize = 1024;
+const MAX_CAPTURED_CONSOLE_BYTES: usize = 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_REQUEST_LIFETIME: Duration = Duration::from_secs(5 * 60);
 const REQUEST_TIMEOUT_POLL: Duration = Duration::from_millis(250);
+const RUST_PRINTER_PROBE: &str = "python import gdb; next(printer for holder in [*gdb.objfiles(), gdb.current_progspace()] for printer in getattr(holder, \"pretty_printers\", []) if getattr(printer, \"name\", \"\") == \"rust\")";
 
 struct PendingRequest {
     deadline: Instant,
@@ -51,9 +54,12 @@ struct ScopedMiRequest {
     token: u64,
     command: String,
     response: Option<MiRecord>,
+    output: String,
+    expect_nested_mi: bool,
     is_current: Box<dyn Fn() -> bool>,
-    handler: ResponseHandler,
+    handler: ScopedResponseHandler,
     deadline: Instant,
+    hard_deadline: Instant,
 }
 
 struct OutgoingCommand {
@@ -176,6 +182,7 @@ pub struct MiClient {
     incoming: RefCell<Vec<u8>>,
     next_token: Cell<u64>,
     response_progress_generation: Cell<u64>,
+    printer_probe_generation: Cell<u64>,
     ready: Cell<bool>,
     initializing: Cell<bool>,
     capabilities: RefCell<GdbCapabilities>,
@@ -229,6 +236,7 @@ impl MiClient {
             incoming: RefCell::new(Vec::new()),
             next_token: Cell::new(1),
             response_progress_generation: Cell::new(0),
+            printer_probe_generation: Cell::new(0),
             ready: Cell::new(false),
             initializing: Cell::new(false),
             capabilities: RefCell::new(GdbCapabilities::default()),
@@ -280,6 +288,8 @@ impl MiClient {
 
     pub fn reconnect(&self) -> io::Result<PathBuf> {
         self.advance_transport_epoch();
+        self.printer_probe_generation
+            .set(self.printer_probe_generation.get().wrapping_add(1));
         if self.connected.replace(false) {
             self.ready.set(false);
             self.initializing.set(false);
@@ -417,11 +427,49 @@ impl MiClient {
             token,
             command,
             response: None,
+            output: String::new(),
+            expect_nested_mi: true,
+            is_current: Box::new(is_current),
+            handler: Box::new(move |client, record, _| handler(client, record)),
+            deadline: Instant::now() + REQUEST_TIMEOUT,
+            hard_deadline: Instant::now() + MAX_REQUEST_LIFETIME,
+        };
+        self.queue_scoped_request(request)?;
+        Ok(token)
+    }
+
+    /// Run a CLI command without allowing its un-tokened stream records to
+    /// interleave with another captured command. The completion record remains
+    /// authoritative; `output` is diagnostic text only.
+    pub fn request_console(
+        &self,
+        command: &str,
+        handler: impl FnOnce(&MiClient, MiRecord, String) + 'static,
+    ) -> io::Result<u64> {
+        self.request_console_when(command, || true, handler)
+    }
+
+    pub fn request_console_when(
+        &self,
+        command: &str,
+        is_current: impl Fn() -> bool + 'static,
+        handler: impl FnOnce(&MiClient, MiRecord, String) + 'static,
+    ) -> io::Result<u64> {
+        validate_console_command(command)?;
+        let command = format!("-interpreter-exec console {}", quote(command));
+        validate_mi_command(&command)?;
+        let token = self.allocate_token();
+        self.queue_scoped_request(ScopedMiRequest {
+            token,
+            command,
+            response: None,
+            output: String::new(),
+            expect_nested_mi: false,
             is_current: Box::new(is_current),
             handler: Box::new(handler),
             deadline: Instant::now() + REQUEST_TIMEOUT,
-        };
-        self.queue_scoped_request(request)?;
+            hard_deadline: Instant::now() + MAX_REQUEST_LIFETIME,
+        })?;
         Ok(token)
     }
 
@@ -451,6 +499,7 @@ impl MiClient {
             (request.handler)(
                 self,
                 synthetic_error_record("superseded", "request superseded"),
+                String::new(),
             );
             return Ok(());
         }
@@ -469,7 +518,9 @@ impl MiClient {
         // Queueing latency and GDB response latency are separate concerns. A
         // request that waited behind another scoped query still receives the
         // full response window once it reaches the command channel.
-        request.deadline = Instant::now() + REQUEST_TIMEOUT;
+        let now = Instant::now();
+        request.deadline = now + REQUEST_TIMEOUT;
+        request.hard_deadline = now + MAX_REQUEST_LIFETIME;
         if let Err(error) = self.write_tokenized(request.token, &request.command) {
             return Err(Box::new((error, request)));
         }
@@ -489,17 +540,11 @@ impl MiClient {
             let Some(request) = request else {
                 return;
             };
-            if request.deadline <= Instant::now() {
-                (request.handler)(
-                    self,
-                    synthetic_error_record("timeout", "GDB request timed out"),
-                );
-                continue;
-            }
             if !(request.is_current)() {
                 (request.handler)(
                     self,
                     synthetic_error_record("superseded", "request superseded"),
+                    String::new(),
                 );
                 continue;
             }
@@ -508,6 +553,7 @@ impl MiClient {
                 (request.handler)(
                     self,
                     synthetic_error_record("unavailable", &error.to_string()),
+                    String::new(),
                 );
             } else {
                 return;
@@ -678,10 +724,18 @@ impl MiClient {
             (request.handler)(self, synthetic_error_record("unavailable", reason));
         }
         if let Some(request) = scoped {
-            (request.handler)(self, synthetic_error_record("unavailable", reason));
+            (request.handler)(
+                self,
+                synthetic_error_record("unavailable", reason),
+                request.output,
+            );
         }
         for request in queued {
-            (request.handler)(self, synthetic_error_record("unavailable", reason));
+            (request.handler)(
+                self,
+                synthetic_error_record("unavailable", reason),
+                request.output,
+            );
         }
     }
 
@@ -816,9 +870,11 @@ impl MiClient {
                 request.token,
                 !(request.is_current)(),
                 request.deadline <= now,
+                request.hard_deadline <= now,
             )
         });
-        if let Some((token, stale, timed_out)) = scoped_state {
+        if let Some((token, stale, idle_timed_out, lifetime_timed_out)) = scoped_state {
+            let timed_out = idle_timed_out || lifetime_timed_out;
             // A scoped request wraps nested MI in `interpreter-exec`. Once any
             // part of it has reached GDB, its un-tokened console response must
             // be drained before another scoped request starts. Removing a sent
@@ -831,17 +887,26 @@ impl MiClient {
                 let Some(request) = request else {
                     return;
                 };
-                let (class, reason) = if timed_out {
-                    ("timeout", "GDB request timed out")
+                let (class, reason) = if lifetime_timed_out {
+                    ("timeout", "GDB request exceeded its maximum lifetime")
+                } else if idle_timed_out {
+                    ("timeout", "GDB request stopped making progress")
                 } else {
                     ("superseded", "request superseded")
                 };
-                (request.handler)(self, synthetic_error_record(class, reason));
+                (request.handler)(self, synthetic_error_record(class, reason), request.output);
                 if timed_out && !cancelled_before_write {
-                    let message = format!(
-                        "GDB did not answer a command within {} seconds. The MI command stream can no longer be synchronized safely.",
-                        REQUEST_TIMEOUT.as_secs()
-                    );
+                    let message = if lifetime_timed_out {
+                        format!(
+                            "GDB retained one command for more than {} minutes. The MI command stream can no longer be synchronized safely.",
+                            MAX_REQUEST_LIFETIME.as_secs() / 60
+                        )
+                    } else {
+                        format!(
+                            "GDB stopped making command progress for {} seconds. The MI command stream can no longer be synchronized safely.",
+                            REQUEST_TIMEOUT.as_secs()
+                        )
+                    };
                     self.report_unusable(message);
                     return;
                 }
@@ -914,9 +979,31 @@ impl MiClient {
                             .borrow_mut()
                             .set_version_component(minor, true);
                     }
-                    client.configure_mi_async();
+                    if client.capabilities.borrow().version.is_some() {
+                        client.configure_mi_async();
+                    } else {
+                        client.detect_gdb_version_from_banner();
+                    }
                 },
             )
+            .is_err()
+            && let Some(client) = weak_client.upgrade()
+        {
+            client.detect_gdb_version_from_banner();
+        }
+    }
+
+    fn detect_gdb_version_from_banner(&self) {
+        let weak_client = self.self_weak.clone();
+        if self
+            .request_console("show version", move |client, record, output| {
+                if record.is_done()
+                    && let Some(version) = gdb_version_from_banner(&output)
+                {
+                    client.capabilities.borrow_mut().version = Some(version);
+                }
+                client.configure_mi_async();
+            })
             .is_err()
             && let Some(client) = weak_client.upgrade()
         {
@@ -960,13 +1047,88 @@ impl MiClient {
         let weak_client = self.self_weak.clone();
         if self
             .request("-enable-pretty-printing", move |client, record| {
-                client.capabilities.borrow_mut().pretty_printing = record.is_success();
-                client.finish_initialization();
+                let enabled = record.is_success();
+                client.capabilities.borrow_mut().pretty_printing = enabled;
+                if enabled {
+                    client.probe_rust_pretty_printing(true);
+                } else {
+                    client.finish_initialization();
+                }
             })
             .is_err()
             && let Some(client) = weak_client.upgrade()
         {
             client.finish_initialization();
+        }
+    }
+
+    pub fn refresh_pretty_printer_capabilities(&self) {
+        if self.is_ready() && self.capabilities.borrow().pretty_printing {
+            self.probe_rust_pretty_printing(false);
+        }
+    }
+
+    pub fn set_pretty_printing(
+        &self,
+        enabled: bool,
+        handler: impl FnOnce(&MiClient, MiRecord) + 'static,
+    ) -> io::Result<u64> {
+        let command = if enabled {
+            "-enable-pretty-printing"
+        } else {
+            "-disable-pretty-printing"
+        };
+        self.request(command, move |client, record| {
+            if record.is_success() {
+                {
+                    let mut capabilities = client.capabilities.borrow_mut();
+                    capabilities.pretty_printing = enabled;
+                    if !enabled {
+                        capabilities.rust_pretty_printing = false;
+                    }
+                }
+                (client.event_handler)(client, MiEvent::CapabilitiesChanged(client.capabilities()));
+                if enabled {
+                    client.probe_rust_pretty_printing(false);
+                }
+            }
+            handler(client, record);
+        })
+    }
+
+    fn probe_rust_pretty_printing(&self, initializing: bool) {
+        let generation = self.printer_probe_generation.get().wrapping_add(1);
+        self.printer_probe_generation.set(generation);
+        let command = format!("-interpreter-exec console {}", quote(RUST_PRINTER_PROBE));
+        let weak_client = self.self_weak.clone();
+        if self
+            .request(&command, move |client, record| {
+                if client.printer_probe_generation.get() != generation {
+                    return;
+                }
+                client.finish_rust_printer_probe(generation, record.is_success(), initializing);
+            })
+            .is_err()
+            && let Some(client) = weak_client.upgrade()
+        {
+            client.finish_rust_printer_probe(generation, false, initializing);
+        }
+    }
+
+    fn finish_rust_printer_probe(&self, generation: u64, loaded: bool, initializing: bool) {
+        if self.printer_probe_generation.get() != generation {
+            return;
+        }
+        let changed = {
+            let mut capabilities = self.capabilities.borrow_mut();
+            let changed = capabilities.rust_pretty_printing != loaded;
+            capabilities.rust_pretty_printing = loaded;
+            changed
+        };
+        if initializing {
+            self.finish_initialization();
+        } else if changed {
+            (self.event_handler)(self, MiEvent::CapabilitiesChanged(self.capabilities()));
         }
     }
 
@@ -1006,14 +1168,28 @@ impl MiClient {
             // while a scoped `interpreter-exec mi` request is waiting for its
             // nested result. Avoid decoding ignored console output, and avoid
             // constructing a parse error for every ordinary MI record.
-            if line.starts_with('~')
-                && self.scoped_request.borrow().is_some()
-                && let Some(output) = output
-                && let Ok(response) = parse_record(output.trim())
-                && response.kind == '^'
+            if let Some(output) = output
                 && let Some(request) = self.scoped_request.borrow_mut().as_mut()
             {
-                request.response = Some(response);
+                let command_output = matches!(line.as_bytes().first(), Some(b'~' | b'&'));
+                if command_output {
+                    let now = Instant::now();
+                    request.deadline = (now + REQUEST_TIMEOUT).min(request.hard_deadline);
+                    self.note_response_progress();
+                }
+                if request.expect_nested_mi {
+                    if line.starts_with('~')
+                        && let Ok(response) = parse_record(output.trim())
+                        && response.kind == '^'
+                    {
+                        request.response = Some(response);
+                    }
+                } else if command_output && request.output.len() < MAX_CAPTURED_CONSOLE_BYTES {
+                    let remaining = MAX_CAPTURED_CONSOLE_BYTES - request.output.len();
+                    request
+                        .output
+                        .push_str(&output[..output.floor_char_boundary(remaining)]);
+                }
             }
             return;
         }
@@ -1042,7 +1218,7 @@ impl MiClient {
                     self.note_response_progress();
                     let response = if !(request.is_current)() {
                         synthetic_error_record("superseded", "request superseded")
-                    } else {
+                    } else if request.expect_nested_mi {
                         request.response.unwrap_or_else(|| {
                             if record.is_done() {
                                 error_record("scoped MI command returned no result")
@@ -1050,8 +1226,10 @@ impl MiClient {
                                 record
                             }
                         })
+                    } else {
+                        record
                     };
-                    (request.handler)(self, response);
+                    (request.handler)(self, response, request.output);
                     self.start_next_scoped_request();
                     return;
                 }
@@ -1235,6 +1413,27 @@ fn listed_features(record: &MiRecord) -> Vec<String> {
     features
 }
 
+fn gdb_version_from_banner(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        if !line.to_ascii_lowercase().contains("gdb") {
+            return None;
+        }
+        line.split_whitespace().rev().find_map(|word| {
+            let version = word
+                .trim_matches(|character: char| !character.is_ascii_alphanumeric())
+                .chars()
+                .take_while(|character| character.is_ascii_digit() || *character == '.')
+                .collect::<String>();
+            let version = version.trim_end_matches('.');
+            (!version.is_empty()
+                && version.split('.').all(|component| {
+                    !component.is_empty() && component.bytes().all(|b| b.is_ascii_digit())
+                }))
+            .then(|| version.to_owned())
+        })
+    })
+}
+
 #[cfg(test)]
 fn parse_stream_output(input: &str) -> Result<String, String> {
     parse_stream_output_with_kinds(input, b"~")
@@ -1288,6 +1487,31 @@ fn scoped_mi_command(command: &str, elements: usize) -> String {
         quote(command)
     );
     format!("-interpreter-exec console {}", quote(&console_command))
+}
+
+fn validate_console_command(command: &str) -> io::Result<()> {
+    if command.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "GDB console command cannot be empty",
+        ));
+    }
+    if command.len() > MAX_MI_COMMAND_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "GDB console command exceeds the 1 MiB limit",
+        ));
+    }
+    if command
+        .bytes()
+        .any(|byte| matches!(byte, b'\0' | b'\n' | b'\r'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "GDB console command contains NUL or a line break",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_mi_command(command: &str) -> io::Result<()> {
@@ -1650,8 +1874,8 @@ pub fn quote(argument: &str) -> String {
 mod tests {
     use super::{
         GdbCapabilities, MiListItem, MiValue, OutgoingQueue, complete_input_end, drain_outgoing,
-        listed_features, parse_record, parse_stream_output, quote, result_field, scoped_mi_command,
-        validate_mi_command,
+        gdb_version_from_banner, listed_features, parse_record, parse_stream_output, quote,
+        result_field, scoped_mi_command, validate_mi_command,
     };
     use std::sync::Mutex;
 
@@ -1684,14 +1908,30 @@ mod tests {
             features: listed_features(&record),
             mi_async: true,
             pretty_printing: true,
+            rust_pretty_printing: true,
         };
         assert!(capabilities.supports("thread-info"));
         assert!(!capabilities.supports("data-read-memory-bytes"));
         assert_eq!(
             capabilities.compatibility_summary(),
-            "GDB 17.2 · MI async · pretty printers · feature list"
+            "GDB 17.2 · MI async · pretty printers · Rust printers · feature list"
         );
         assert!(GdbCapabilities::default().supports("future-mi-command"));
+    }
+
+    #[test]
+    fn extracts_versions_from_standard_and_packaged_gdb_banners() {
+        assert_eq!(
+            gdb_version_from_banner("GNU gdb (GDB) 17.2\nCopyright (C) 2025"),
+            Some(String::from("17.2"))
+        );
+        assert_eq!(
+            gdb_version_from_banner(
+                "GNU gdb (Ubuntu 15.0.50.20240403-0ubuntu1) 15.0.50.20240403-git"
+            ),
+            Some(String::from("15.0.50.20240403"))
+        );
+        assert_eq!(gdb_version_from_banner("unrecognized debugger"), None);
     }
 
     #[test]
@@ -1733,6 +1973,36 @@ mod tests {
     }
 
     #[test]
+    fn reconnect_does_not_publish_ready_from_an_old_printer_probe() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let events_for_client = Rc::clone(&events);
+                let client = super::MiClient::open(move |_, event| {
+                    events_for_client.borrow_mut().push(event);
+                })
+                .unwrap();
+                client.process_line("(gdb)");
+                client.process_line(r#"1^done,features=[]"#);
+                client.process_line(r#"2^done,value="17""#);
+                client.process_line(r#"3^done,value="2""#);
+                client.process_line("4^done");
+                client.process_line("5^done");
+                assert!(events.borrow().is_empty());
+
+                client.reconnect().unwrap();
+
+                assert!(events.borrow().is_empty());
+                assert!(!client.is_ready());
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn publishes_ready_only_after_capability_negotiation() {
         use std::{cell::RefCell, rc::Rc};
 
@@ -1755,6 +2025,7 @@ mod tests {
                 client.process_line(r#"3^done,value="2""#);
                 client.process_line("4^done");
                 client.process_line("5^done");
+                client.process_line("6^done");
                 let events = events.borrow();
                 let [super::MiEvent::Ready(capabilities)] = events.as_slice() else {
                     panic!("expected one negotiated ready event, got {events:?}");
@@ -1762,8 +2033,69 @@ mod tests {
                 assert_eq!(capabilities.version.as_deref(), Some("17.2"));
                 assert!(capabilities.mi_async);
                 assert!(capabilities.pretty_printing);
+                assert!(capabilities.rust_pretty_printing);
                 assert!(capabilities.supports("pending-breakpoints"));
                 assert!(!capabilities.supports("thread-info"));
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn remains_ready_when_rust_printer_probing_is_unavailable() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let events_for_client = Rc::clone(&events);
+                let client = super::MiClient::open(move |_, event| {
+                    events_for_client.borrow_mut().push(event);
+                })
+                .unwrap();
+                client.process_line("(gdb)");
+                client.process_line(r#"1^done,features=[]"#);
+                client.process_line(r#"2^done,value="17""#);
+                client.process_line(r#"3^done,value="2""#);
+                client.process_line("4^done");
+                client.process_line("5^done");
+                client.process_line(r#"6^error,msg="Python is unavailable""#);
+
+                let events = events.borrow();
+                let [super::MiEvent::Ready(capabilities)] = events.as_slice() else {
+                    panic!("expected a negotiated ready event, got {events:?}");
+                };
+                assert!(capabilities.pretty_printing);
+                assert!(!capabilities.rust_pretty_printing);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn publishes_when_rust_printer_availability_changes() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let events_for_client = Rc::clone(&events);
+                let client = super::MiClient::open(move |_, event| {
+                    events_for_client.borrow_mut().push(event);
+                })
+                .unwrap();
+                client.ready.set(true);
+                client.capabilities.borrow_mut().pretty_printing = true;
+                client.refresh_pretty_printer_capabilities();
+                client.process_line("1^done");
+
+                let events = events.borrow();
+                let [super::MiEvent::CapabilitiesChanged(capabilities)] = events.as_slice() else {
+                    panic!("expected one capability update, got {events:?}");
+                };
+                assert!(capabilities.rust_pretty_printing);
             })
             .unwrap();
     }
@@ -2096,6 +2428,49 @@ mod tests {
     }
 
     #[test]
+    fn serializes_console_commands_and_returns_their_stream_output() {
+        use std::{cell::RefCell, rc::Rc, time::Instant};
+
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let client = super::MiClient::open(|_, _| {}).unwrap();
+                client.ready.set(true);
+                let result = Rc::new(RefCell::new(None));
+                let result_for_request = Rc::clone(&result);
+                let token = client
+                    .request_console("show directories", move |_, record, output| {
+                        result_for_request.replace(Some((record.class, output)));
+                    })
+                    .unwrap();
+
+                let expired = Instant::now();
+                client
+                    .scoped_request
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .deadline = expired;
+                client.process_line(r#"~"Source directories: /src:$cwd\n""#);
+                client.process_line(r#"&"warning from GDB\n""#);
+                client.process_line(r#"@"inferior output\n""#);
+                assert!(client.scoped_request.borrow().as_ref().unwrap().deadline > expired);
+                assert!(result.borrow().is_none());
+                client.process_line(&format!("{token}^done"));
+
+                assert_eq!(
+                    result.borrow().as_ref(),
+                    Some(&(
+                        String::from("done"),
+                        String::from("Source directories: /src:$cwd\nwarning from GDB\n")
+                    ))
+                );
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn malformed_state_records_require_recovery_but_late_errors_do_not() {
         use std::{cell::RefCell, rc::Rc};
 
@@ -2301,6 +2676,7 @@ mod tests {
         assert!(validate_mi_command("").is_err());
         assert!(validate_mi_command("-exec-next\n99-gdb-exit").is_err());
         assert!(validate_mi_command(&"x".repeat(super::MAX_MI_COMMAND_BYTES + 1)).is_err());
+        assert!(super::validate_console_command("show directories\ngdb-exit").is_err());
     }
 
     #[test]

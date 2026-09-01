@@ -145,9 +145,7 @@ impl VariableViewerProvider for LinkedListViewerProvider {
 fn viewer_can_inspect(variable: &Variable) -> bool {
     let value = variable.value.trim();
     !variable.name.trim().is_empty()
-        && !value.starts_with("<optimized out")
-        && !value.starts_with("<out of scope")
-        && !value.starts_with("<error:")
+        && (variable.is_available() || value.starts_with("<not available"))
 }
 
 fn is_indexed_type(type_name: &str) -> bool {

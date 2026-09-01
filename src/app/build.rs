@@ -37,6 +37,12 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     ui.connect_source_actions();
     ui.connect_session_actions();
     ui.connect_configuration_actions();
+    ui.connect_debug_data_actions();
+    let weak_ui = Rc::downgrade(&ui);
+    let client = Rc::clone(&mi_client);
+    ui.set_debug_data_action_handler(move |action| {
+        handle_debug_data_action(weak_ui.clone(), Rc::clone(&client), action);
+    });
     let disassembly_controller =
         DisassemblyController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
     let controller = Rc::clone(&disassembly_controller);

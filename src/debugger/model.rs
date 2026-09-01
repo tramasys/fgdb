@@ -73,6 +73,19 @@ pub struct ValueTypeMetadata {
 }
 
 impl Variable {
+    pub fn is_available(&self) -> bool {
+        let value = self.value.trim();
+        ![
+            "<optimized out",
+            "<out of scope",
+            "<not available",
+            "<type changed",
+            "<error:",
+        ]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+    }
+
     pub fn is_pointer(&self) -> bool {
         self.type_name.as_deref().is_some_and(|type_name| {
             let type_name = type_name.trim();
@@ -82,7 +95,7 @@ impl Variable {
 
     pub fn can_expand(&self) -> bool {
         let value = self.value.trim();
-        self.varobj.is_some()
+        self.is_available()
             && (self.num_children > 0
                 || self.has_more
                 || (self.is_pointer() && !self.is_null_pointer() && !value.starts_with('<')))
@@ -105,7 +118,15 @@ impl Variable {
     /// already complete and can be assigned by expression. Reserve GDB
     /// variable objects for values that can actually benefit from expansion.
     pub fn needs_variable_object(&self) -> bool {
-        self.is_pointer() || self.value == "<not available>"
+        self.is_pointer() || self.needs_eager_local_variable_object()
+    }
+
+    /// Locals already carry scalar and pointer values from
+    /// `-stack-list-variables --simple-values`. Only values omitted by that
+    /// response need an eager variable object; pointers can create one lazily
+    /// if the user expands them.
+    pub fn needs_eager_local_variable_object(&self) -> bool {
+        self.value.trim().starts_with("<not available")
     }
 }
 
@@ -1379,6 +1400,10 @@ mod tests {
         .unwrap();
         assert!(reference.is_pointer());
         assert!(reference.needs_variable_object());
+        let mut lazy_reference = reference.clone();
+        lazy_reference.varobj = None;
+        assert!(lazy_reference.can_expand());
+        assert!(!lazy_reference.needs_eager_local_variable_object());
 
         let dynamic = variable_object(
             &parse_record(
@@ -1428,6 +1453,13 @@ mod tests {
             has_more: false,
         };
         assert!(!null_pointer.can_expand());
+
+        let unavailable = super::Variable {
+            value: String::from("<optimized out>"),
+            ..lazy_reference
+        };
+        assert!(!unavailable.is_available());
+        assert!(!unavailable.can_expand());
         for value in ["(Demo *) 0x0", "@0x0", "nullptr", "NULL"] {
             let mut null_pointer = null_pointer.clone();
             null_pointer.value = String::from(value);

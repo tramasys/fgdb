@@ -234,7 +234,7 @@ fn request_indexed_level(
     let owned_for_response = owned_root.clone();
     if let Err(error) = client.request_with_print_limit_when(
         &command,
-        AUTOMATIC_PRINT_ELEMENTS,
+        limit.max(AUTOMATIC_PRINT_ELEMENTS),
         move || viewer_is_current(&ui_for_guard, &session_for_guard, generation),
         move |_, record| {
             if !session_for_response.is_open() {

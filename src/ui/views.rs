@@ -57,7 +57,7 @@ pub(super) fn build_locals_view(
             };
             let node = item.borrow::<VariableNode>();
             (!changed_for_filter.get() || node.has_changes())
-                && variable_matches_filter(&node.variable, &query_for_filter.borrow())
+                && variable_node_matches_filter(&node, &query_for_filter.borrow())
         });
         let query_for_search = Rc::clone(&query);
         let filter_for_search = filter.clone();
@@ -121,16 +121,31 @@ pub(super) fn variable_matches_filter(variable: &Variable, query: &str) -> bool 
         return true;
     }
     let search_text = format!(
-        "{} {} {} {}",
+        "{} {} {} {} {}",
         variable.name,
         variable.type_name.as_deref().unwrap_or_default(),
         compact_variable_type(variable.type_name.as_deref().unwrap_or_default()),
         variable.value,
+        if variable.argument {
+            "argument arg"
+        } else {
+            "local"
+        },
     )
     .to_ascii_lowercase();
     query
         .split_whitespace()
         .all(|term| search_text.contains(term))
+}
+
+pub(super) fn variable_node_matches_filter(node: &VariableNode, query: &str) -> bool {
+    variable_matches_filter(&node.variable, query)
+        || (0..node.children.n_items()).any(|position| {
+            node.children
+                .item(position)
+                .and_downcast::<glib::BoxedAnyObject>()
+                .is_some_and(|item| variable_node_matches_filter(&item.borrow(), query))
+        })
 }
 
 pub(super) fn insight_label(placeholder: &str) -> gtk::Label {
@@ -290,26 +305,122 @@ fn local_name_column(
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
     let selection = variable_menu.selection.clone();
-    let children_handler = Rc::clone(children_handler);
-    let variable_menu = variable_menu.clone();
+    let children_handler_for_setup = Rc::clone(children_handler);
+    let variable_menu_for_setup = variable_menu.clone();
+    factory.connect_setup(move |_, object| {
+        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let content = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+        content.add_css_class("local-name-cell");
+        content.set_hexpand(true);
+        let disclosure = gtk::Label::new(None);
+        disclosure.add_css_class("local-disclosure");
+        disclosure.set_width_chars(1);
+        content.append(&disclosure);
+        let scope = gtk::Label::new(None);
+        scope.add_css_class("local-scope");
+        content.append(&scope);
+        let changed = gtk::Label::new(Some("●"));
+        changed.add_css_class("local-changed-marker");
+        changed.set_tooltip_text(Some("Value changed since the previous stop"));
+        content.append(&changed);
+        let label = gtk::Label::new(None);
+        label.add_css_class("debug-table-cell");
+        label.add_css_class("local-name");
+        label.set_halign(gtk::Align::Start);
+        label.set_xalign(0.0);
+        label.set_ellipsize(pango::EllipsizeMode::End);
+        label.set_hexpand(true);
+        content.append(&label);
+
+        let click = gtk::GestureClick::new();
+        click.set_button(gtk::gdk::BUTTON_PRIMARY);
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let selection_for_click = selection.clone();
+        let item_for_click = item.downgrade();
+        let disclosure_for_click = disclosure.clone();
+        let children_handler_for_click = Rc::clone(&children_handler_for_setup);
+        click.connect_pressed(move |gesture, presses, _, _| {
+            if presses != 1 {
+                return;
+            }
+            let Some(item) = item_for_click.upgrade() else {
+                return;
+            };
+            let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else {
+                return;
+            };
+            let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+                return;
+            };
+            let node = data.borrow::<VariableNode>().clone();
+            if !row.is_expandable() && node.load_more.is_none() {
+                return;
+            }
+            selection_for_click.set_selected(row.position());
+            if row.is_expandable() {
+                let expanded = !row.is_expanded();
+                node.expanded.set(expanded);
+                row.set_expanded(expanded);
+                disclosure_for_click.set_text(if expanded {
+                    DISCLOSURE_EXPANDED_ICON
+                } else {
+                    DISCLOSURE_COLLAPSED_ICON
+                });
+                if expanded {
+                    request_variable_children_if_needed(&node, &children_handler_for_click);
+                }
+            } else {
+                request_next_variable_page_if_needed(&node, &children_handler_for_click);
+            }
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+        });
+        content.add_controller(click);
+        connect_current_variable_context_menu(&content, item, &variable_menu_for_setup);
+
+        let expander = gtk::TreeExpander::new();
+        expander.set_hide_expander(true);
+        expander.set_indent_for_icon(false);
+        expander.set_child(Some(&content));
+        item.set_child(Some(&expander));
+    });
     factory.connect_bind(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
         };
-        let Some(row) = item.item().and_downcast::<gtk::TreeListRow>() else {
+        let (Some(expander), Some(row)) = (
+            item.child().and_downcast::<gtk::TreeExpander>(),
+            item.item().and_downcast::<gtk::TreeListRow>(),
+        ) else {
+            return;
+        };
+        let Some(content) = expander.child().and_downcast::<gtk::Box>() else {
+            return;
+        };
+        let Some(disclosure) = content.first_child().and_downcast::<gtk::Label>() else {
+            return;
+        };
+        let Some(scope) = disclosure.next_sibling().and_downcast::<gtk::Label>() else {
+            return;
+        };
+        let Some(changed) = scope.next_sibling().and_downcast::<gtk::Label>() else {
+            return;
+        };
+        let Some(label) = changed.next_sibling().and_downcast::<gtk::Label>() else {
             return;
         };
         let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
             return;
         };
-        let node = data.borrow::<VariableNode>().clone();
+        let node = data.borrow::<VariableNode>();
         let expandable = node.variable.can_expand();
         let load_more = node.load_more.is_some();
-
-        let content = gtk::Box::new(gtk::Orientation::Horizontal, 5);
-        content.add_css_class("local-name-cell");
-        content.set_hexpand(true);
-        let disclosure = gtk::Label::new(Some(if expandable {
+        expander.set_list_row(Some(&row));
+        if expandable && node.expanded.get() != row.is_expanded() {
+            row.set_expanded(node.expanded.get());
+        }
+        disclosure.set_text(if expandable {
             if row.is_expanded() {
                 DISCLOSURE_EXPANDED_ICON
             } else {
@@ -319,51 +430,21 @@ fn local_name_column(
             DISCLOSURE_COLLAPSED_ICON
         } else {
             ""
-        }));
-        disclosure.add_css_class("local-disclosure");
-        disclosure.set_width_chars(1);
-        if expandable {
-            row.bind_property("expanded", &disclosure, "label")
-                .transform_to(|_, expanded: bool| {
-                    Some(if expanded {
-                        DISCLOSURE_EXPANDED_ICON
-                    } else {
-                        DISCLOSURE_COLLAPSED_ICON
-                    })
-                })
-                .sync_create()
-                .build();
-        }
-        content.append(&disclosure);
-        let scope = gtk::Label::new((row.depth() == 0).then_some(if node.variable.argument {
+        });
+        scope.set_text(if node.variable.argument {
             "ARG"
         } else {
             "LOCAL"
-        }));
-        scope.add_css_class("local-scope");
+        });
         scope.set_visible(row.depth() == 0 && !node.placeholder);
-        content.append(&scope);
-        let changed = gtk::Label::new(Some("●"));
-        changed.add_css_class("local-changed-marker");
-        changed.set_tooltip_text(Some("Value changed since the previous stop"));
         changed.set_opacity(if node.changed { 1.0 } else { 0.0 });
         changed.set_visible(!node.placeholder);
-        content.append(&changed);
-        let label = gtk::Label::new(Some(&node.variable.name));
-        label.add_css_class("debug-table-cell");
+        label.set_text(&node.variable.name);
+        label.remove_css_class("local-load-more");
+        label.remove_css_class("muted");
         label.add_css_class("local-name");
-        label.set_halign(gtk::Align::Start);
-        label.set_xalign(0.0);
-        label.set_ellipsize(pango::EllipsizeMode::End);
-        label.set_hexpand(true);
-        content.append(&label);
-
-        let tooltip = if node.placeholder {
-            format!("{}\n{}", node.variable.name, node.variable.value)
-        } else {
-            variable_tooltip(&node.variable)
-        };
-        content.set_tooltip_text(Some(&tooltip));
+        content.remove_css_class("local-expandable");
+        content.set_cursor_from_name(None);
         if expandable || load_more {
             content.add_css_class("local-expandable");
             content.set_cursor_from_name(Some("pointer"));
@@ -375,57 +456,20 @@ fn local_name_column(
             label.remove_css_class("local-name");
             label.add_css_class("muted");
         }
-
-        let click = gtk::GestureClick::new();
-        click.set_button(gtk::gdk::BUTTON_PRIMARY);
-        click.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let selection_for_click = selection.clone();
-        let row_for_click = row.clone();
-        let node_for_click = node.clone();
-        let children_handler_for_click = Rc::clone(&children_handler);
-        click.connect_pressed(move |gesture, presses, _, _| {
-            if presses != 1 {
-                return;
-            }
-            if !row_for_click.is_expandable() && node_for_click.load_more.is_none() {
-                return;
-            }
-            selection_for_click.set_selected(row_for_click.position());
-            if row_for_click.is_expandable() {
-                row_for_click.set_expanded(!row_for_click.is_expanded());
-            } else {
-                request_next_variable_page_if_needed(&node_for_click, &children_handler_for_click);
-            }
-            gesture.set_state(gtk::EventSequenceState::Claimed);
-        });
-        content.add_controller(click);
-        if !node.placeholder {
-            connect_current_variable_context_menu(&content, item, &variable_menu);
-        }
-
-        if expandable && !node.expansion_observer_attached.replace(true) {
-            let node = node.clone();
-            let children_handler = Rc::clone(&children_handler);
-            row.connect_expanded_notify(move |row| {
-                node.expanded.set(row.is_expanded());
-                if row.is_expanded() {
-                    request_variable_children_if_needed(&node, &children_handler);
-                }
-            });
-        }
-        if expandable && node.expanded.get() && !row.is_expanded() {
-            row.set_expanded(true);
-        }
-        let expander = gtk::TreeExpander::new();
-        expander.set_list_row(Some(&row));
-        expander.set_hide_expander(true);
-        expander.set_indent_for_icon(false);
-        expander.set_child(Some(&content));
-        item.set_child(Some(&expander));
+        let tooltip = if node.placeholder {
+            format!("{}\n{}", node.variable.name, node.variable.value)
+        } else {
+            variable_tooltip(&node.variable)
+        };
+        content.set_tooltip_text(Some(&tooltip));
     });
     factory.connect_unbind(|_, object| {
-        if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
-            item.set_child(None::<&gtk::Widget>);
+        if let Some(expander) = object
+            .downcast_ref::<gtk::ListItem>()
+            .and_then(gtk::ListItem::child)
+            .and_downcast::<gtk::TreeExpander>()
+        {
+            expander.set_list_row(None::<&gtk::TreeListRow>);
         }
     });
     let column = gtk::ColumnViewColumn::new(Some("NAME / EXPRESSION"), Some(factory));
@@ -709,7 +753,7 @@ fn local_text_column(
                 let display =
                     variable_display_value(variable, value, details, target_pointer_bits.get());
                 label.set_text(&display);
-                if display.contains("<error:") {
+                if !variable.is_available() {
                     label.add_css_class("local-details-error");
                 } else if node.changed {
                     label.add_css_class("local-changed-value");
@@ -769,16 +813,29 @@ fn compact_pretty_value(variable: &Variable, value: &str) -> String {
 }
 
 pub(crate) fn compact_variable_type(type_name: &str) -> String {
-    let mut compact = type_name.trim().replace("std::__cxx11::", "std::");
+    let mut compact = type_name
+        .trim()
+        .replace("std::__cxx11::", "std::")
+        .replace("std::__1::", "std::")
+        .replace("std::__debug::", "std::");
     for (qualified, short) in [
         ("alloc::string::String", "String"),
         ("alloc::vec::Vec<", "Vec<"),
         ("alloc::boxed::Box<", "Box<"),
         ("alloc::rc::Rc<", "Rc<"),
         ("alloc::sync::Arc<", "Arc<"),
+        ("std::boxed::Box<", "Box<"),
+        ("std::rc::Rc<", "Rc<"),
+        ("std::sync::Arc<", "Arc<"),
+        ("std::vec::Vec<", "Vec<"),
         ("core::cell::RefCell<", "RefCell<"),
+        ("std::cell::RefCell<", "RefCell<"),
+        ("core::cell::Cell<", "Cell<"),
+        ("std::cell::Cell<", "Cell<"),
         ("core::option::Option<", "Option<"),
+        ("std::option::Option<", "Option<"),
         ("core::result::Result<", "Result<"),
+        ("std::result::Result<", "Result<"),
         ("alloc::collections::vec_deque::VecDeque<", "VecDeque<"),
         ("alloc::collections::btree::map::BTreeMap<", "BTreeMap<"),
         ("std::collections::hash::map::HashMap<", "HashMap<"),
@@ -787,6 +844,10 @@ pub(crate) fn compact_variable_type(type_name: &str) -> String {
     }
     compact = compact.replace(
         "std::basic_string<char, std::char_traits<char>, std::allocator<char> >",
+        "std::string",
+    );
+    compact = compact.replace(
+        "std::basic_string<char, std::char_traits<char>, std::allocator<char>>",
         "std::string",
     );
     compact = compact.replace(
@@ -841,7 +902,9 @@ pub(super) fn variable_details(
 }
 
 pub(super) fn variable_tooltip(variable: &Variable) -> String {
-    let interaction = if variable.can_expand() {
+    let interaction = if !variable.is_available() {
+        "This value is unavailable in the selected frame"
+    } else if variable.can_expand() {
         "Click the name or press Enter to expand. Use Edit to change the value"
     } else {
         "Double-click or press Enter to edit"

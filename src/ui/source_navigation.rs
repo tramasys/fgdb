@@ -852,15 +852,19 @@ impl Ui {
         });
     }
 
-    fn request_loaded_source_files(&self) {
+    pub(crate) fn request_loaded_source_files(&self) {
+        let handler = self.source_discovery_handler.borrow().clone();
+        let Some(handler) = handler else {
+            return;
+        };
+        if !self.begin_loaded_source_files_request() {
+            return;
+        }
         let generation = self
             .source_loaded_generation
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
-        let handler = self.source_discovery_handler.borrow().clone();
-        if let Some(handler) = handler {
-            handler(SourceDiscoveryRequest::LoadedFiles(generation));
-        }
+        handler(SourceDiscoveryRequest::LoadedFiles(generation));
     }
 
     pub(crate) fn show_loaded_source_files(
@@ -871,6 +875,7 @@ impl Ui {
         if self.source_loaded_generation.load(Ordering::Relaxed) != generation {
             return;
         }
+        self.cache_loaded_source_files(&files);
         let reported = files
             .into_iter()
             .take(MAX_SOURCE_TREE_FILES)

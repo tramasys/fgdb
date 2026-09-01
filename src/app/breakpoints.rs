@@ -105,24 +105,29 @@ fn normalize_syscall_filter(filter: &str) -> Result<String, &'static str> {
 }
 
 pub(super) fn insert_source_breakpoint(ui: Weak<Ui>, client: &MiClient, path: PathBuf, line: u32) {
-    resolve_executable_source_line(
-        ui,
-        client,
-        path,
-        line,
-        SourceLineOperation::Breakpoint,
-        |ui, client, source| {
-            request_exact_source_breakpoint(ui, client, source.path, source.line);
-        },
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+    if !client.is_ready() || !current_ui.stop_point_commands_available() {
+        current_ui.set_status(
+            "Breakpoint unavailable",
+            "Pause the inferior and wait for the current debugger command to finish.",
+            Some("status-error"),
+        );
+        return;
+    }
+    let location = format!("{}:{line}", path.display());
+    current_ui.set_command_pending(true);
+    current_ui.set_status(
+        "Adding breakpoint",
+        &format!("Requesting an exact breakpoint at {location}"),
+        None,
     );
+    drop(current_ui);
+    request_exact_source_breakpoint(ui, client, path, line);
 }
 
-pub(super) fn request_exact_source_breakpoint(
-    ui: Weak<Ui>,
-    client: &MiClient,
-    path: PathBuf,
-    line: u32,
-) {
+fn request_exact_source_breakpoint(ui: Weak<Ui>, client: &MiClient, path: PathBuf, line: u32) {
     let location = format!("{}:{line}", path.display());
     let command = format!("-break-insert {}", crate::debugger::quote(&location));
     let ui_for_response = ui.clone();
@@ -144,12 +149,7 @@ pub(super) fn request_exact_source_breakpoint(
         }
 
         let inserted = crate::debugger::inserted_breakpoints(&record);
-        let exact = inserted.iter().any(|breakpoint| {
-            breakpoint.line == Some(line)
-                && breakpoint.source_path().is_some_and(|reported| {
-                    crate::source::paths_match(&path_for_response, reported)
-                })
-        });
+        let exact = source_breakpoint_is_exact(&inserted, &path_for_response, line);
         if exact {
             if let Some(ui) = ui_for_response.upgrade() {
                 ui.set_command_pending(false);
@@ -161,7 +161,13 @@ pub(super) fn request_exact_source_breakpoint(
             }
             refresh_breakpoints(&ui_for_response, client);
         } else {
-            remove_relocated_source_breakpoint(ui_for_response.clone(), client, inserted, location);
+            remove_relocated_source_breakpoint(
+                ui_for_response.clone(),
+                client,
+                inserted,
+                path_for_response,
+                line,
+            );
         }
     }) && let Some(ui) = ui.upgrade()
     {
@@ -174,12 +180,15 @@ pub(super) fn request_exact_source_breakpoint(
     }
 }
 
-pub(super) fn remove_relocated_source_breakpoint(
+fn remove_relocated_source_breakpoint(
     ui: Weak<Ui>,
     client: &MiClient,
     inserted: Vec<crate::debugger::Breakpoint>,
-    requested_location: String,
+    requested_path: PathBuf,
+    requested_line: u32,
 ) {
+    let requested_location = format!("{}:{requested_line}", requested_path.display());
+    let relocation = relocated_source_breakpoint_summary(&inserted);
     let mut numbers = inserted
         .iter()
         .map(|breakpoint| breakpoint.command_number().to_owned())
@@ -205,11 +214,17 @@ pub(super) fn remove_relocated_source_breakpoint(
         if let Some(ui) = ui_for_response.upgrade() {
             ui.set_command_pending(false);
             if record.is_done() {
+                let detail = relocation.as_deref().map_or_else(
+                    || format!(
+                        "{requested_location} has no exact executable instruction. GDB's relocated breakpoint was removed"
+                    ),
+                    |relocation| format!(
+                        "{requested_location} has no exact executable instruction. GDB resolved it to {relocation}, so that breakpoint was removed"
+                    ),
+                );
                 ui.set_status(
                     "No breakpoint added",
-                    &format!(
-                        "{requested_location} did not resolve exactly. GDB's relocated breakpoint was removed"
-                    ),
+                    &detail,
                     None,
                 );
             } else {
@@ -231,6 +246,39 @@ pub(super) fn remove_relocated_source_breakpoint(
             &error.to_string(),
             Some("status-error"),
         );
+    }
+}
+
+fn source_breakpoint_is_exact(breakpoints: &[Breakpoint], path: &Path, line: u32) -> bool {
+    breakpoints.iter().any(|breakpoint| {
+        breakpoint.line == Some(line)
+            && breakpoint
+                .source_path()
+                .is_some_and(|reported| crate::source::paths_match(path, reported))
+    })
+}
+
+fn relocated_source_breakpoint_summary(breakpoints: &[Breakpoint]) -> Option<String> {
+    let mut locations = breakpoints
+        .iter()
+        .filter_map(|breakpoint| {
+            Some(format!(
+                "{}:{}",
+                breakpoint.source_path()?,
+                breakpoint.line?
+            ))
+        })
+        .collect::<Vec<_>>();
+    locations.sort();
+    locations.dedup();
+    match locations.as_slice() {
+        [] => None,
+        [location] => Some(location.clone()),
+        _ => Some(format!(
+            "{} locations ({})",
+            locations.len(),
+            locations.join(", ")
+        )),
     }
 }
 
@@ -728,7 +776,10 @@ pub(super) fn refresh_modules(ui: &Weak<Ui>, client: &MiClient) {
                 return;
             };
             if record.is_done() && ui.selected_inferior_id() == inferior_id {
-                ui.show_modules(&crate::debugger::shared_libraries(&record));
+                let modules = crate::debugger::shared_libraries(&record);
+                if ui.show_modules(&modules) {
+                    ui.refresh_module_debug_metadata(false);
+                }
             }
             let refresh_again = ui.finish_module_refresh();
             drop(ui);
@@ -870,8 +921,10 @@ fn infer_existing_stopped_thread(ui: &Weak<Ui>, client: &MiClient) {
 mod tests {
     use super::{
         breakpoint_commands_command, breakpoint_insert_command, canonical_breakpoint_location,
-        filtered_catchpoint_command, watchpoint_command,
+        filtered_catchpoint_command, relocated_source_breakpoint_summary,
+        source_breakpoint_is_exact, watchpoint_command,
     };
+    use crate::debugger::Breakpoint;
     use crate::ui::{
         BreakpointSpec, FilteredCatchpointKind, FilteredCatchpointRequest, WatchpointAccess,
         WatchpointRequest,
@@ -892,6 +945,53 @@ mod tests {
             commands: Vec::new(),
             logpoint: false,
         }
+    }
+
+    fn source_breakpoint(path: &str, line: u32) -> Breakpoint {
+        Breakpoint {
+            number: String::from("1"),
+            kind: String::from("breakpoint"),
+            enabled: true,
+            condition: None,
+            address: Some(String::from("0x1000")),
+            function: Some(String::from("main")),
+            file: Some(String::from("main.rs")),
+            fullname: Some(path.to_owned()),
+            line: Some(line),
+            original_location: Some(format!("{path}:{line}")),
+            catch_type: None,
+            disposition: Some(String::from("keep")),
+            hit_count: 0,
+            ignore_count: 0,
+            thread: None,
+            inferior: None,
+            pending: None,
+            commands: Vec::new(),
+            parent_number: None,
+            location_count: 0,
+        }
+    }
+
+    #[test]
+    fn accepts_only_the_exact_source_location_reported_by_gdb() {
+        let requested = std::path::Path::new("/workspace/project/src/main.rs");
+        let exact = source_breakpoint("/workspace/project/src/main.rs", 99);
+        let relocated = source_breakpoint("/workspace/project/src/main.rs", 101);
+
+        assert!(source_breakpoint_is_exact(
+            std::slice::from_ref(&exact),
+            requested,
+            99
+        ));
+        assert!(!source_breakpoint_is_exact(
+            std::slice::from_ref(&relocated),
+            requested,
+            99
+        ));
+        assert_eq!(
+            relocated_source_breakpoint_summary(&[relocated]),
+            Some(String::from("/workspace/project/src/main.rs:101"))
+        );
     }
 
     #[test]

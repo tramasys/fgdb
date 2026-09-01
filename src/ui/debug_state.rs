@@ -63,6 +63,101 @@ fn locals_summary_text(locals: usize, arguments: usize, changed: usize) -> Strin
     summary
 }
 
+fn apply_variable_children_page_error(
+    node: &VariableNode,
+    parent: &Variable,
+    from: usize,
+    error: &str,
+) {
+    if from == 0 {
+        node.children.splice(
+            0,
+            node.children.n_items(),
+            &[glib::BoxedAnyObject::new(VariableNode::retry_expansion(
+                parent.clone(),
+                error,
+            ))],
+        );
+    } else {
+        remove_load_more_rows(&node.children);
+        node.children
+            .append(&glib::BoxedAnyObject::new(VariableNode::load_more_error(
+                parent.clone(),
+                from,
+                error,
+            )));
+    }
+    node.children_loading.set(false);
+    node.children_loaded.set(true);
+}
+
+fn breakpoint_layout_matches(current: &[Breakpoint], incoming: &[Breakpoint]) -> bool {
+    current.len() == incoming.len()
+        && current.iter().zip(incoming).all(|(current, incoming)| {
+            let mut current = current.clone();
+            let mut incoming = incoming.clone();
+            current.hit_count = 0;
+            current.ignore_count = 0;
+            incoming.hit_count = 0;
+            incoming.ignore_count = 0;
+            current == incoming
+        })
+}
+
+fn breakpoint_status_text(breakpoint: &Breakpoint) -> String {
+    let mut status = Vec::new();
+    if breakpoint.hit_count > 0 {
+        status.push(format!(
+            "{} HIT{}",
+            breakpoint.hit_count,
+            if breakpoint.hit_count == 1 { "" } else { "S" }
+        ));
+    }
+    if let Some(thread) = breakpoint.thread.as_deref() {
+        status.push(format!("THREAD {thread}"));
+    }
+    if let Some(inferior) = breakpoint.inferior.as_deref() {
+        status.push(format!("INFERIOR {inferior}"));
+    }
+    if breakpoint.ignore_count > 0 {
+        status.push(format!(
+            "STOP ON HIT {}",
+            breakpoint.ignore_count.saturating_add(1)
+        ));
+    }
+    if breakpoint.disposition.as_deref() == Some("del") {
+        status.push(String::from("TEMPORARY"));
+    }
+    if breakpoint.pending.is_some() {
+        status.push(String::from("PENDING"));
+    }
+    if breakpoint.location_count > 0 {
+        status.push(format!(
+            "{} LOCATION{}",
+            breakpoint.location_count,
+            if breakpoint.location_count == 1 {
+                ""
+            } else {
+                "S"
+            }
+        ));
+    }
+    if breakpoint.is_logpoint() {
+        status.push(String::from("AUTO-CONTINUE"));
+    } else if !breakpoint.commands.is_empty() {
+        status.push(format!(
+            "{} COMMAND{}",
+            breakpoint.commands.len(),
+            if breakpoint.commands.len() == 1 {
+                ""
+            } else {
+                "S"
+            }
+        ));
+    }
+    status.join("  ·  ")
+}
+
 impl Ui {
     pub(crate) fn current_thread_id(&self) -> Option<String> {
         self.selected_thread_id.borrow().clone()
@@ -193,7 +288,8 @@ impl Ui {
                 self.locals_selection.set_selected(selected);
             }
             self.locals_edit_button.set_sensitive(
-                variable_at(&self.locals_selection, self.locals_selection.selected()).is_some(),
+                variable_at(&self.locals_selection, self.locals_selection.selected())
+                    .is_some_and(|variable| variable.is_available()),
             );
         }
     }
@@ -287,16 +383,66 @@ impl Ui {
         let Some(node) = self.find_variable_node(parent) else {
             return;
         };
-        node.children.splice(
-            0,
-            node.children.n_items(),
-            &[glib::BoxedAnyObject::new(VariableNode::placeholder(
-                "unavailable",
-                error,
-            ))],
-        );
-        node.children_loading.set(false);
-        node.children_loaded.set(true);
+        apply_variable_children_page_error(&node, &node.variable, 0, error);
+    }
+
+    pub fn show_variable_children_page_error(&self, parent: &Variable, from: usize, error: &str) {
+        let Some(parent_name) = parent.varobj.as_deref() else {
+            return;
+        };
+        let Some(node) = self.find_variable_node(parent_name) else {
+            return;
+        };
+        apply_variable_children_page_error(&node, parent, from, error);
+    }
+
+    pub(crate) fn show_lazy_variable_children_error(&self, variable: &Variable, error: &str) {
+        let Some((_, node)) = self.local_variable_node(variable) else {
+            return;
+        };
+        apply_variable_children_page_error(&node, variable, 0, error);
+    }
+
+    pub(crate) fn has_local_variable_identity(&self, variable: &Variable) -> bool {
+        self.local_variable_node(variable).is_some()
+    }
+
+    pub(crate) fn claim_local_variable_object(&self, generation: u64, variable: &Variable) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self.has_local_variable_identity(variable)
+            && self.pending_local_variable_objects.borrow_mut().insert((
+                generation,
+                variable.name.clone(),
+                variable.argument,
+            ))
+    }
+
+    pub(crate) fn finish_local_variable_object(&self, generation: u64, variable: &Variable) {
+        self.pending_local_variable_objects.borrow_mut().remove(&(
+            generation,
+            variable.name.clone(),
+            variable.argument,
+        ));
+    }
+
+    pub(crate) fn attach_local_variable_object(
+        &self,
+        generation: u64,
+        original: &Variable,
+        variable: &Variable,
+    ) -> bool {
+        if !self.is_stop_refresh_current(generation) {
+            return false;
+        }
+        let Some((position, _)) = self.local_variable_node(original) else {
+            return false;
+        };
+        replace_variable_root(
+            &self.locals_store,
+            usize::try_from(position).unwrap_or(usize::MAX),
+            variable,
+            false,
+        )
     }
 
     pub fn local_variable_objects(&self) -> Vec<Variable> {
@@ -306,6 +452,21 @@ impl Ui {
     fn find_variable_node(&self, varobj: &str) -> Option<VariableNode> {
         find_variable_node(&self.locals_store, varobj)
             .or_else(|| find_variable_node(&self.expression_watches_store, varobj))
+    }
+
+    fn local_variable_node(&self, variable: &Variable) -> Option<(u32, VariableNode)> {
+        (0..self.locals_store.n_items()).find_map(|position| {
+            let item = self
+                .locals_store
+                .item(position)
+                .and_downcast::<glib::BoxedAnyObject>()?;
+            let node = item.borrow::<VariableNode>().clone();
+            (!node.placeholder
+                && node.variable.name == variable.name
+                && node.variable.argument == variable.argument
+                && node.variable.varobj == variable.varobj)
+                .then_some((position, node))
+        })
     }
 
     pub(super) fn connect_local_activation(&self) {
@@ -339,9 +500,17 @@ impl Ui {
                 request_next_variable_page_if_needed(&node, &children_handler);
             } else if !node.placeholder {
                 if row.is_expandable() {
-                    row.set_expanded(!row.is_expanded());
+                    let expanded = !row.is_expanded();
+                    node.expanded.set(expanded);
+                    row.set_expanded(expanded);
+                    if expanded {
+                        request_variable_children_if_needed(&node, &children_handler);
+                    }
                 } else {
                     let variable = node.variable;
+                    if !variable.is_available() {
+                        return;
+                    }
                     let editor_handler = editor_handler.borrow().clone();
                     if let Some(editor_handler) = editor_handler {
                         editor_handler(variable);
@@ -374,7 +543,9 @@ impl Ui {
         let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
         self.locals_edit_button.connect_clicked(move |_| {
-            if let Some(variable) = variable_at(&selection, selection.selected()) {
+            if let Some(variable) = variable_at(&selection, selection.selected())
+                && variable.is_available()
+            {
                 let editor_handler = editor_handler.borrow().clone();
                 if let Some(editor_handler) = editor_handler {
                     editor_handler(variable);
@@ -407,7 +578,8 @@ impl Ui {
                         && debugger_state.get().inferior_started()
                         && !debugger_state.get().inferior_running()
                         && !pending.get()
-                        && variable_at(selection, selection.selected()).is_some(),
+                        && variable_at(selection, selection.selected())
+                            .is_some_and(|variable| variable.is_available()),
                 );
             });
     }
@@ -618,16 +790,22 @@ impl Ui {
         self.update_thread_control_sensitivity();
     }
 
-    pub fn show_modules(&self, modules: &[SharedLibrary]) {
+    pub fn show_modules(&self, modules: &[SharedLibrary]) -> bool {
         if self.latest_modules.borrow().as_slice() == modules {
-            return;
+            return false;
         }
         self.latest_modules.replace(modules.to_vec());
+        self.reset_debug_data_module_paging();
+        if modules.is_empty() {
+            self.module_debug_metadata.borrow_mut().clear();
+        }
+        self.render_debug_data_overview();
+        self.render_debug_data_modules();
         clear_box(&self.modules_list);
         if modules.is_empty() {
             self.modules_list
                 .append(&empty_label("No shared libraries loaded"));
-            return;
+            return true;
         }
 
         for module in modules {
@@ -680,6 +858,7 @@ impl Ui {
             row.append(&path_label);
             self.modules_list.append(&row);
         }
+        true
     }
 
     pub fn start_thread_refresh(&self) -> u64 {
@@ -1292,6 +1471,7 @@ impl Ui {
     }
 
     pub fn start_stop_refresh(&self) -> u64 {
+        self.pending_local_variable_objects.borrow_mut().clear();
         clear_variable_change_markers(&self.locals_store);
         clear_variable_change_markers(&self.expression_watches_store);
         let roots = root_variables(&self.locals_store);
@@ -1798,6 +1978,7 @@ impl Ui {
         if self.breakpoints.borrow().as_slice() == breakpoints {
             return;
         }
+        let status_only = breakpoint_layout_matches(&self.breakpoints.borrow(), &breakpoints);
         self.breakpoints.replace(breakpoints);
         let active_numbers = self
             .breakpoints
@@ -1809,6 +1990,30 @@ impl Ui {
         self.stop_point_metadata
             .borrow_mut()
             .retain(|number, _| active_numbers.contains(number));
+        if status_only {
+            let breakpoints = self.breakpoints.borrow();
+            let rows = self.stop_point_filter_rows.borrow();
+            let parents = breakpoints
+                .iter()
+                .filter(|breakpoint| !breakpoint.is_location())
+                .collect::<Vec<_>>();
+            if rows.len() == parents.len()
+                && rows
+                    .iter()
+                    .zip(&parents)
+                    .all(|(row, breakpoint)| row.number == breakpoint.command_number())
+            {
+                for (row, breakpoint) in rows.iter().zip(parents) {
+                    let status = breakpoint_status_text(breakpoint);
+                    set_label_text(&row.status, &status);
+                    row.status.set_visible(!status.is_empty());
+                }
+                drop(rows);
+                drop(breakpoints);
+                self.update_control_sensitivity();
+                return;
+            }
+        }
         clear_box(&self.breakpoints_list);
         self.stop_point_filter_rows.borrow_mut().clear();
         let breakpoints = self.breakpoints.borrow();
@@ -1980,63 +2185,13 @@ impl Ui {
                 organization.set_text(&organization_text);
                 organization.set_visible(!organization_text.is_empty());
                 row.append(&organization);
-                let mut metadata = Vec::new();
-                if breakpoint.hit_count > 0 {
-                    metadata.push(format!(
-                        "{} HIT{}",
-                        breakpoint.hit_count,
-                        if breakpoint.hit_count == 1 { "" } else { "S" }
-                    ));
-                }
-                if let Some(thread) = breakpoint.thread.as_deref() {
-                    metadata.push(format!("THREAD {thread}"));
-                }
-                if let Some(inferior) = breakpoint.inferior.as_deref() {
-                    metadata.push(format!("INFERIOR {inferior}"));
-                }
-                if breakpoint.ignore_count > 0 {
-                    metadata.push(format!(
-                        "STOP ON HIT {}",
-                        breakpoint.ignore_count.saturating_add(1)
-                    ));
-                }
-                if breakpoint.disposition.as_deref() == Some("del") {
-                    metadata.push(String::from("TEMPORARY"));
-                }
-                if breakpoint.pending.is_some() {
-                    metadata.push(String::from("PENDING"));
-                }
-                if breakpoint.location_count > 0 {
-                    metadata.push(format!(
-                        "{} LOCATION{}",
-                        breakpoint.location_count,
-                        if breakpoint.location_count == 1 {
-                            ""
-                        } else {
-                            "S"
-                        }
-                    ));
-                }
-                if breakpoint.is_logpoint() {
-                    metadata.push(String::from("AUTO-CONTINUE"));
-                } else if !breakpoint.commands.is_empty() {
-                    metadata.push(format!(
-                        "{} COMMAND{}",
-                        breakpoint.commands.len(),
-                        if breakpoint.commands.len() == 1 {
-                            ""
-                        } else {
-                            "S"
-                        }
-                    ));
-                }
-                if !metadata.is_empty() {
-                    let metadata = gtk::Label::new(Some(&metadata.join("  ·  ")));
-                    metadata.add_css_class("breakpoint-metadata");
-                    metadata.set_halign(gtk::Align::Start);
-                    enable_stable_text_selection(&metadata);
-                    row.append(&metadata);
-                }
+                let status_text = breakpoint_status_text(breakpoint);
+                let status = gtk::Label::new(Some(&status_text));
+                status.add_css_class("breakpoint-metadata");
+                status.set_halign(gtk::Align::Start);
+                status.set_visible(!status_text.is_empty());
+                enable_stable_text_selection(&status);
+                row.append(&status);
                 if let Some(condition) = breakpoint.condition.as_deref() {
                     let condition = gtk::Label::new(Some(&format!("WHEN  {condition}")));
                     condition.add_css_class("breakpoint-condition");
@@ -2207,6 +2362,7 @@ impl Ui {
                         widgets: filter_widgets,
                         number: breakpoint.command_number().to_owned(),
                         searchable: stop_point_search_text(breakpoint),
+                        status,
                         hardware: breakpoint.is_hardware_breakpoint(),
                         watchpoint: breakpoint.is_watchpoint(),
                         catchpoint: breakpoint.is_catchpoint(),
@@ -2416,6 +2572,31 @@ fn update_thread_button(button: &gtk::Button, thread: &ThreadInfo, stop_reason: 
 mod render_tests {
     use super::*;
 
+    fn breakpoint(number: &str) -> Breakpoint {
+        Breakpoint {
+            number: number.to_owned(),
+            kind: String::from("breakpoint"),
+            enabled: true,
+            condition: None,
+            address: Some(String::from("0x1000")),
+            function: Some(String::from("main")),
+            file: Some(String::from("main.c")),
+            fullname: Some(String::from("/tmp/main.c")),
+            line: Some(12),
+            original_location: Some(String::from("main")),
+            catch_type: None,
+            disposition: Some(String::from("keep")),
+            hit_count: 0,
+            ignore_count: 0,
+            thread: None,
+            inferior: None,
+            pending: None,
+            commands: Vec::new(),
+            parent_number: None,
+            location_count: 0,
+        }
+    }
+
     fn stack_entry(value: &str, chain: &[&str], region: Option<&str>) -> StackEntry {
         StackEntry {
             address: 0x1000,
@@ -2454,5 +2635,95 @@ mod render_tests {
         let mut changed_region = vec![stack_entry("0x2000", &[], Some("unmapped"))];
         preserve_stack_render_details(&mut changed_region, &[previous]);
         assert!(changed_region[0].pointer_chain.is_empty());
+    }
+
+    #[test]
+    fn breakpoint_counter_changes_do_not_require_row_reconstruction() {
+        let current = breakpoint("1");
+        let mut updated = current.clone();
+        updated.hit_count = 2;
+        updated.ignore_count = 3;
+
+        assert!(breakpoint_layout_matches(
+            std::slice::from_ref(&current),
+            std::slice::from_ref(&updated)
+        ));
+        assert_eq!(breakpoint_status_text(&updated), "2 HITS  ·  STOP ON HIT 4");
+
+        updated.enabled = false;
+        assert!(!breakpoint_layout_matches(&[current], &[updated]));
+    }
+
+    #[test]
+    fn page_errors_preserve_loaded_children_and_offer_a_retry() {
+        let parent = Variable {
+            name: String::from("items"),
+            value: String::from("{...}"),
+            type_name: Some(String::from("Item [256]")),
+            argument: false,
+            varobj: Some(String::from("var1")),
+            num_children: 256,
+            has_more: true,
+        };
+        let node = VariableNode::new(parent.clone());
+        node.children
+            .append(&glib::BoxedAnyObject::new(VariableNode::new(Variable {
+                name: String::from("[0]"),
+                value: String::from("1"),
+                type_name: Some(String::from("int")),
+                argument: false,
+                varobj: Some(String::from("var1.0")),
+                num_children: 0,
+                has_more: false,
+            })));
+        node.children
+            .append(&glib::BoxedAnyObject::new(VariableNode::load_more(
+                parent.clone(),
+                128,
+            )));
+
+        apply_variable_children_page_error(&node, &parent, 128, "temporary failure");
+
+        assert_eq!(node.children.n_items(), 2);
+        let first = node
+            .children
+            .item(0)
+            .and_downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+        assert_eq!(first.borrow::<VariableNode>().variable.name, "[0]");
+        let retry = node
+            .children
+            .item(1)
+            .and_downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+        let retry = retry.borrow::<VariableNode>();
+        assert_eq!(retry.variable.name, "Retry loading more…");
+        assert_eq!(retry.load_more.as_ref().map(|(_, from)| *from), Some(128));
+    }
+
+    #[test]
+    fn initial_expansion_errors_can_be_retried() {
+        let parent = Variable {
+            name: String::from("head"),
+            value: String::from("0x20"),
+            type_name: Some(String::from("Node *")),
+            argument: false,
+            varobj: Some(String::from("var1")),
+            num_children: 1,
+            has_more: false,
+        };
+        let node = VariableNode::new(parent.clone());
+
+        apply_variable_children_page_error(&node, &parent, 0, "temporary failure");
+
+        assert_eq!(node.children.n_items(), 1);
+        let retry = node
+            .children
+            .item(0)
+            .and_downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+        let retry = retry.borrow::<VariableNode>();
+        assert_eq!(retry.variable.name, "Retry expansion…");
+        assert_eq!(retry.load_more.as_ref().map(|(_, from)| *from), Some(0));
     }
 }

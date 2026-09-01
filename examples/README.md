@@ -31,6 +31,7 @@ cargo run -- target/debug-fixtures/c-page-target
 | `cpp-object-target` | `cpp_objects_checkpoint` | Virtual dispatch, multiple inheritance, templates, smart pointers, variants, lambdas and nested exceptions |
 | `cpp-variable-viewer-target` | `variable_viewer_checkpoint` | Locals/arguments context actions, native and standard arrays, STL sequences, null-terminated lists and cyclic lists |
 | `rust-debug-target` | `rust_debugger_checkpoint` | Rust enums, `Option`, `Result`, collections, trait objects, `Rc` cycles, primitives, Unicode and a named worker thread |
+| `rust-variable-viewer-target` | `rust_types_ready` (then caller frame #1) | Rust locals and arguments containing `Vec`, `VecDeque`, linked lists, maps, sets, strings, slices, smart pointers, enums and nested user types |
 | `cpp-debug-target-o2` | `debugger_checkpoint` | Optimized C++ stepping, inlined/optimized-out values and less direct source mappings |
 | `rust-debug-target-o2` | `rust_debugger_checkpoint` | Optimized Rust DWARF, monomorphized frames and optimized-out values |
 
@@ -80,6 +81,17 @@ Right-click these entries in Locals / Arguments:
 - `words` tests STL pretty-printer integration and the missing-printer fallback.
 - `linear_head` tests a four-node list ending in null.
 - `cycle_head` tests a three-node cycle and cycle detection.
+
+For the equivalent Rust locals/arguments matrix, launch:
+
+```bash
+cargo run -- target/debug-fixtures/rust-variable-viewer-target
+```
+
+Set `break rust_types_ready`, run, then select caller frame `#1`. The caller
+keeps every argument and local live after the marker, including `vector_arg`,
+`deque_arg`, `local_vector`, `local_deque`, maps, sets, strings, slices,
+`Option`, `Result`, `Box`, `Rc`, `Arc`, arrays, tuples and nested user types.
 
 ## Thread-local storage fixture
 
