@@ -42,10 +42,10 @@ fn create_viewer_root(
     );
     let ui_for_guard = ui.clone();
     let session_for_guard = Rc::clone(&session);
-    let ui_for_response = ui.clone();
+    let ui_for_response = ui;
     let session_for_response = Rc::clone(&session);
     let client_for_response = Rc::clone(&client);
-    let varobj_for_response = varobj_name.clone();
+    let varobj_for_response = varobj_name;
     if let Err(error) = client.request_with_print_limit_when(
         &command,
         AUTOMATIC_PRINT_ELEMENTS,

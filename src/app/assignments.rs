@@ -98,7 +98,7 @@ fn assign_rust_string(
             ui_for_response,
             client_for_response,
             variable.name.clone(),
-            bytes.clone(),
+            bytes,
         );
     }) {
         show_string_assignment_error(&ui, &error.to_string());
@@ -148,7 +148,7 @@ fn resolve_rust_string_buffer(ui: Weak<Ui>, client: Rc<MiClient>, name: String, 
                     client_for_address,
                     name_for_address.clone(),
                     address,
-                    bytes_for_address.clone(),
+                    bytes_for_address,
                     false,
                 );
             },
@@ -258,7 +258,7 @@ fn resolve_string_address(
             client_for_response,
             variable.name.clone(),
             address,
-            bytes.clone(),
+            bytes,
             true,
         );
     }) {
@@ -277,10 +277,12 @@ fn write_string_bytes(
     if nul_terminate {
         bytes.push(0);
     }
-    let encoded = bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
     let command = format!("-data-write-memory-bytes 0x{address:x} {encoded}");
     let ui_for_response = ui.clone();
     if let Err(error) = client.request(&command, move |client, record| {

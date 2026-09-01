@@ -1001,7 +1001,7 @@ pub(super) fn build_register_group_table() -> (gtk::ColumnView, gio::ListStore) 
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection.clone()));
+    let view = gtk::ColumnView::new(Some(selection));
     view.add_css_class("debug-table");
     view.add_css_class("register-table");
     view.set_hexpand(true);
@@ -1812,13 +1812,17 @@ pub(super) fn build_source_tree_view() -> SourceTreeControls {
         let node = item.borrow::<SourceTreeNode>();
         if node.data.directory {
             row.set_expanded(!row.is_expanded());
-        } else if let Some(handler) = open_for_activate.borrow().clone() {
-            handler(node.data.path.clone());
+        } else {
+            let handler = open_for_activate.borrow().clone();
+            if let Some(handler) = handler {
+                handler(node.data.path.clone());
+            }
         }
     });
     let refresh_for_click = Rc::clone(&refresh_handler);
     refresh.connect_clicked(move |_| {
-        if let Some(handler) = refresh_for_click.borrow().clone() {
+        let handler = refresh_for_click.borrow().clone();
+        if let Some(handler) = handler {
             handler();
         }
     });
@@ -1869,7 +1873,8 @@ fn connect_source_tree_context_menu(
     let open_handler = Rc::clone(open_handler);
     let popover_for_open = popover.clone();
     open.connect_clicked(move |_| {
-        if let Some(handler) = open_handler.borrow().clone() {
+        let handler = open_handler.borrow().clone();
+        if let Some(handler) = handler {
             handler(path.clone());
         }
         popover_for_open.popdown();
@@ -1883,9 +1888,8 @@ fn connect_source_tree_context_menu(
     let search_handler = Rc::clone(search_handler);
     let popover_for_search = popover.clone();
     search.connect_clicked(move |_| {
-        if let (Some(directory), Some(handler)) =
-            (directory.as_ref(), search_handler.borrow().clone())
-        {
+        let handler = search_handler.borrow().clone();
+        if let (Some(directory), Some(handler)) = (directory.as_ref(), handler) {
             handler(directory.clone());
         }
         popover_for_search.popdown();
@@ -1909,7 +1913,8 @@ fn connect_source_tree_context_menu(
     let refresh_handler = Rc::clone(refresh_handler);
     let popover_for_refresh = popover.clone();
     refresh.connect_clicked(move |_| {
-        if let Some(handler) = refresh_handler.borrow().clone() {
+        let handler = refresh_handler.borrow().clone();
+        if let Some(handler) = handler {
             handler();
         }
         popover_for_refresh.popdown();

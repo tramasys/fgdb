@@ -221,7 +221,8 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
             let Some(preference_key) = kernel_overview_preference_key(section) else {
                 return;
             };
-            if let Some(handler) = section_handler.borrow().as_ref() {
+            let handler = section_handler.borrow().clone();
+            if let Some(handler) = handler {
                 handler(preference_key, expanded);
             }
         })
@@ -310,10 +311,11 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
             // execution stop. Preserve the existing Changes comparison when
             // a current procfs snapshot is already on screen.
             metadata_only_for_page.set(!needs_refresh_for_page.replace(true));
-            if active_for_page.get()
-                && let Some(handler) = refresh_for_page.borrow().as_ref()
-            {
-                handler();
+            if active_for_page.get() {
+                let handler = refresh_for_page.borrow().clone();
+                if let Some(handler) = handler {
+                    handler();
+                }
             }
         }
         update_kernel_page_navigation(pages, &previous_for_page, &next_for_page, &scroll_for_page);
@@ -400,11 +402,11 @@ pub(super) fn connect_kernel_tab_visibility(
     notebook.connect_switch_page(move |_, _, page| {
         let now_active = page == kernel_page;
         active.set(now_active);
-        if now_active
-            && needs_refresh.get()
-            && let Some(handler) = handler.borrow().as_ref()
-        {
-            handler();
+        if now_active && needs_refresh.get() {
+            let handler = handler.borrow().clone();
+            if let Some(handler) = handler {
+                handler();
+            }
         }
     });
 }
@@ -518,9 +520,9 @@ fn build_compact_subtab_navigation(
     previous.connect_clicked(move |_| select_relative_subtab(&pages_for_previous, page_specs, -1));
     let pages_for_next = pages.clone();
     next.connect_clicked(move |_| select_relative_subtab(&pages_for_next, page_specs, 1));
-    let selector_for_page = selector.clone();
-    let previous_for_page = previous.clone();
-    let next_for_page = next.clone();
+    let selector_for_page = selector;
+    let previous_for_page = previous;
+    let next_for_page = next;
     let update = move |pages: &gtk::Stack| {
         let index = selected_subtab_index(pages, page_specs);
         selector_for_page.set_selected(index as u32);
@@ -646,7 +648,7 @@ fn build_overview(
     let fact_key_group = gtk::SizeGroup::new(gtk::SizeGroupMode::Horizontal);
     let collapsed_for_setup = Rc::clone(&collapsed);
     let section_handler_for_setup = section_handler.clone();
-    let fact_key_group_for_setup = fact_key_group.clone();
+    let fact_key_group_for_setup = fact_key_group;
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
@@ -3423,9 +3425,11 @@ impl Ui {
         if self.kernel_view.active.get()
             && self.kernel_view.needs_refresh.get()
             && self.kernel_refresh_allowed()
-            && let Some(handler) = self.kernel_refresh_handler.borrow().as_ref()
         {
-            handler();
+            let handler = self.kernel_refresh_handler.borrow().clone();
+            if let Some(handler) = handler {
+                handler();
+            }
         }
     }
 

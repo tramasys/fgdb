@@ -604,9 +604,11 @@ pub(super) fn canonical_gdb_integer(
 ) -> String {
     let formatted = format_integer_value(raw, format, radix);
     if radix == IntegerRadix::Octal {
-        formatted
-            .strip_prefix("0o")
-            .map_or(formatted.clone(), |digits| format!("0{digits}"))
+        if let Some(digits) = formatted.strip_prefix("0o") {
+            format!("0{digits}")
+        } else {
+            formatted
+        }
     } else {
         formatted
     }

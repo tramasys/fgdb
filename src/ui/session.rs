@@ -38,10 +38,11 @@ impl Ui {
         self.current_session.replace(Some(session));
         self.update_session_display();
         self.update_control_sensitivity();
-        if self.source_tree_initialized.get()
-            && let Some(refresh) = self.source_tree.refresh_handler.borrow().clone()
-        {
-            refresh();
+        if self.source_tree_initialized.get() {
+            let refresh = self.source_tree.refresh_handler.borrow().clone();
+            if let Some(refresh) = refresh {
+                refresh();
+            }
         }
     }
 
@@ -89,7 +90,8 @@ impl Ui {
     }
 
     fn emit_session_action(&self, action: SessionAction) {
-        if let Some(handler) = self.session_action_handler.borrow().clone() {
+        let handler = self.session_action_handler.borrow().clone();
+        if let Some(handler) = handler {
             handler(action);
         }
     }
@@ -122,10 +124,11 @@ impl Ui {
         let window = self.window.clone();
         let handler = Rc::clone(&self.session_action_handler);
         glib::spawn_future_local(async move {
-            if dialog.choose_future(Some(&window)).await == Ok(1)
-                && let Some(handler) = handler.borrow().clone()
-            {
-                handler(action);
+            if dialog.choose_future(Some(&window)).await == Ok(1) {
+                let handler = handler.borrow().clone();
+                if let Some(handler) = handler {
+                    handler(action);
+                }
             }
         });
     }
@@ -431,7 +434,7 @@ impl Ui {
 
         let handler = Rc::clone(&self.session_handler);
         let editor_for_remote = editor.clone();
-        let validation_for_remote = validation.clone();
+        let validation_for_remote = validation;
         connect_remote.connect_clicked(move |_| {
             submit_session(
                 build_remote_session(
@@ -503,7 +506,8 @@ fn submit_session(
     match session {
         Ok(session) => {
             validation.set_visible(false);
-            if let Some(handler) = handler.borrow().clone() {
+            let handler = handler.borrow().clone();
+            if let Some(handler) = handler {
                 handler(session);
                 editor.close();
             } else {

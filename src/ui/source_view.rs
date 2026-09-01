@@ -462,7 +462,7 @@ pub(super) fn open_source_document(
     tab.append(&close);
 
     let document = SourceDocument {
-        path: path.clone(),
+        path,
         buffer,
         view,
         page,
@@ -599,12 +599,14 @@ pub(super) fn build_breakpoint_gutter(
                 .cloned();
             match (button, existing) {
                 (1, Some(breakpoint)) => {
-                    if let Some(handler) = delete_handler.borrow().as_ref() {
+                    let handler = delete_handler.borrow().clone();
+                    if let Some(handler) = handler {
                         handler(breakpoint.command_number().to_owned());
                     }
                 }
                 (1, None) => {
-                    if let (Some(line), Some(handler)) = (line, insert_handler.borrow().as_ref()) {
+                    let handler = insert_handler.borrow().clone();
+                    if let (Some(line), Some(handler)) = (line, handler) {
                         handler(path.clone(), line);
                     }
                 }
@@ -695,7 +697,8 @@ fn open_source_gutter_menu(
     let jump_handler = Rc::clone(&handlers.jump);
     let popover_for_jump = popover.clone();
     jump.connect_clicked(move |_| {
-        if let Some(handler) = jump_handler.borrow().as_ref() {
+        let handler = jump_handler.borrow().clone();
+        if let Some(handler) = handler {
             handler(path.clone(), line);
         }
         popover_for_jump.popdown();
@@ -723,7 +726,8 @@ fn open_source_gutter_menu(
         let popover_for_toggle = popover.clone();
         let enabled_handler = Rc::clone(&handlers.enabled);
         toggle.connect_clicked(move |_| {
-            if let Some(handler) = enabled_handler.borrow().as_ref() {
+            let handler = enabled_handler.borrow().clone();
+            if let Some(handler) = handler {
                 handler(number.clone(), enable);
             }
             popover_for_toggle.popdown();
@@ -732,7 +736,8 @@ fn open_source_gutter_menu(
         let popover_for_delete = popover.clone();
         let delete_handler = Rc::clone(&handlers.delete);
         delete.connect_clicked(move |_| {
-            if let Some(handler) = delete_handler.borrow().as_ref() {
+            let handler = delete_handler.borrow().clone();
+            if let Some(handler) = handler {
                 handler(number.clone());
             }
             popover_for_delete.popdown();
@@ -864,7 +869,8 @@ pub(super) fn connect_source_symbol_navigation(
             return;
         };
         gesture.set_state(gtk::EventSequenceState::Claimed);
-        if let Some(handler) = symbol_handler.borrow().as_ref() {
+        let handler = symbol_handler.borrow().clone();
+        if let Some(handler) = handler {
             handler(symbol);
         }
     });

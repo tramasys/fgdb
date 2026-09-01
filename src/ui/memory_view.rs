@@ -143,10 +143,10 @@ pub(super) fn add_memory_watch(
 
     let watch = MemoryWatchView {
         id,
-        expression: expression.clone(),
+        expression,
         byte_count,
         format,
-        page: page.clone(),
+        page,
         page_offset: Rc::new(Cell::new(0)),
         status,
         range,
@@ -374,7 +374,8 @@ pub(super) fn request_memory_watch(
     handler: &Rc<RefCell<Option<MemoryWatchHandler>>>,
 ) {
     set_memory_watch_reading(watch);
-    if let Some(handler) = handler.borrow().as_ref() {
+    let handler = handler.borrow().clone();
+    if let Some(handler) = handler {
         handler(
             watch.id,
             memory_watch_request_expression(watch),

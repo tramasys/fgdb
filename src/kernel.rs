@@ -10,6 +10,8 @@ mod process;
 mod resources;
 mod startup;
 
+const MAX_PROC_TEXT_BYTES: usize = 2 * 1024 * 1024;
+
 pub(crate) use startup::{
     ProcessArgument, ProcessEnvironment, ProcessStartupSnapshot, read_process_startup,
 };

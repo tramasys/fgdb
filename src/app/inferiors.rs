@@ -229,7 +229,7 @@ fn select_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String) {
         crate::debugger::quote(&format!("inferior {number}"))
     );
     let weak_ui = ui.clone();
-    let weak_ui_for_error = ui.clone();
+    let weak_ui_for_error = ui;
     if client
         .request(&command, move |client, record| {
             let Some(ui) = weak_ui.upgrade() else {
@@ -376,7 +376,7 @@ fn set_fork_setting(
     drop(current_ui);
     let command = format!("-gdb-set {setting} {value}");
     let weak_ui = ui.clone();
-    let weak_ui_for_error = ui.clone();
+    let weak_ui_for_error = ui;
     if client
         .request(&command, move |_, record| {
             let Some(ui) = weak_ui.upgrade() else {

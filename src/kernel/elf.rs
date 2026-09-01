@@ -254,6 +254,7 @@ fn cached_tls_analysis(
             last_used: TLS_CACHE_CLOCK.fetch_add(1, Ordering::Relaxed),
         },
     );
+    drop(cache);
     Ok(parsed)
 }
 

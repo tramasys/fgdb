@@ -341,7 +341,8 @@ pub(super) fn request_signal_catchpoint_toggle(ui: &Ui, signal: &str) {
         format!("Adding a {signal} catchpoint…")
     };
     ui.set_status("Updating signals", &progress, None);
-    if let Some(handler) = ui.signal_catchpoint_handler.borrow().as_ref() {
+    let handler = ui.signal_catchpoint_handler.borrow().clone();
+    if let Some(handler) = handler {
         handler(signal, existing);
     } else {
         ui.set_status(

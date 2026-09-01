@@ -1449,12 +1449,14 @@ fn allocator_snapshot(
     if split_core_bindings {
         evidence.push(format!(
             "malloc resolves to {} but free resolves to {}",
-            malloc_mapping.map_or("an unknown mapping".to_owned(), |mapping| {
-                mapping_display_name(&mapping.path)
-            }),
-            free_mapping.map_or("an unknown mapping".to_owned(), |mapping| {
-                mapping_display_name(&mapping.path)
-            })
+            malloc_mapping.map_or_else(
+                || "an unknown mapping".to_owned(),
+                |mapping| mapping_display_name(&mapping.path),
+            ),
+            free_mapping.map_or_else(
+                || "an unknown mapping".to_owned(),
+                |mapping| mapping_display_name(&mapping.path),
+            )
         ));
     } else if allocator_probe.complete && allocator_probe.dispatch_failures == 0 {
         match (malloc_mapping, free_mapping) {

@@ -16,14 +16,14 @@ pub fn launch_gdb(
     terminal: &Terminal,
     configuration: &LaunchConfig,
     mi_client: &MiClient,
-    on_event: impl Fn(SessionEvent) + Clone + 'static,
+    on_event: impl Fn(SessionEvent) + 'static,
 ) {
     let arguments = configuration.gdb_arguments();
     let argument_refs: Vec<&str> = arguments.iter().map(String::as_str).collect();
     let working_directory = configuration.working_directory.to_string_lossy();
     let mi_path = mi_client.slave_path().to_string_lossy().into_owned();
     let terminal_for_callback = terminal.clone();
-    let spawn_event = on_event.clone();
+    let spawn_event = on_event;
 
     terminal.spawn_async(
         PtyFlags::DEFAULT,

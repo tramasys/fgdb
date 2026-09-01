@@ -1,5 +1,7 @@
 use super::*;
 
+const EXECUTION_CONTEXT_VISUAL_DELAY: Duration = Duration::from_millis(300);
+
 impl Ui {
     pub(crate) fn set_inferior_action_handler(&self, handler: impl Fn(InferiorAction) + 'static) {
         self.inferior_controls
@@ -41,7 +43,12 @@ impl Ui {
                     return;
                 };
                 if !ui.inferior_controls.selector_updating.get() {
-                    ui.emit_inferior_action(InferiorAction::SetFollowFork(ForkFollowMode::Parent));
+                    let dispatched = ui.emit_inferior_action(InferiorAction::SetFollowFork(
+                        ForkFollowMode::Parent,
+                    ));
+                    if !dispatched {
+                        ui.render_inferior_policy();
+                    }
                 }
             });
         let weak_ui = Rc::downgrade(self);
@@ -55,7 +62,11 @@ impl Ui {
                     return;
                 };
                 if !ui.inferior_controls.selector_updating.get() {
-                    ui.emit_inferior_action(InferiorAction::SetFollowFork(ForkFollowMode::Child));
+                    let dispatched = ui
+                        .emit_inferior_action(InferiorAction::SetFollowFork(ForkFollowMode::Child));
+                    if !dispatched {
+                        ui.render_inferior_policy();
+                    }
                 }
             });
         let weak_ui = Rc::downgrade(self);
@@ -66,7 +77,11 @@ impl Ui {
                     return;
                 };
                 if !ui.inferior_controls.selector_updating.get() {
-                    ui.emit_inferior_action(InferiorAction::SetDetachOnFork(button.is_active()));
+                    let dispatched = ui
+                        .emit_inferior_action(InferiorAction::SetDetachOnFork(button.is_active()));
+                    if !dispatched {
+                        ui.render_inferior_policy();
+                    }
                 }
             });
 
@@ -106,12 +121,16 @@ impl Ui {
         });
     }
 
-    fn emit_inferior_action(&self, action: InferiorAction) {
+    fn emit_inferior_action(&self, action: InferiorAction) -> bool {
         if !self.inferior_action_is_current(&action) {
-            return;
+            return false;
         }
-        if let Some(handler) = self.inferior_controls.action_handler.borrow().clone() {
+        let handler = self.inferior_controls.action_handler.borrow().clone();
+        if let Some(handler) = handler {
             handler(action);
+            true
+        } else {
+            false
         }
     }
 
@@ -221,18 +240,24 @@ impl Ui {
         let Some(thread_id) = thread_id else {
             return;
         };
+        let selection_changed = self.current_thread_id().as_deref() != Some(thread_id);
         self.set_current_thread_id(Some(thread_id));
         let mut found = false;
+        let mut thread_rows_changed = false;
         for inferior in self.inferiors.borrow_mut().iter_mut() {
             for thread in &mut inferior.threads {
-                thread.current = thread.id == thread_id;
-                found |= thread.current;
+                let current = thread.id == thread_id;
+                found |= current;
+                thread_rows_changed |= thread.current != current;
+                thread.current = current;
             }
         }
-        if found {
+        if found && (selection_changed || thread_rows_changed) {
             self.latest_threads.borrow_mut().take();
             self.apply_selected_inferior_state();
             self.render_inferior_controls();
+        } else if found {
+            self.update_thread_control_sensitivity();
         }
     }
 
@@ -482,14 +507,57 @@ impl Ui {
             self.stop_owner_inferior_id.borrow_mut().take();
             self.stop_owner_thread_id.borrow_mut().take();
         }
-        if selected_affected {
-            self.apply_selected_inferior_state();
+        let selected_threads = {
+            let selected = self.selected_inferior_id.borrow();
+            self.inferiors
+                .borrow()
+                .iter()
+                .find(|inferior| Some(inferior.id.as_str()) == selected.as_deref())
+                .map(|inferior| inferior.threads.clone())
+        };
+        if let Some(threads) = selected_threads {
+            self.stage_threads_for_execution(&threads);
         }
-        self.render_inferior_controls();
         (selected_affected, pending_affected)
     }
 
+    /// Defer the running presentation long enough to avoid flashing it during
+    /// a normal step. The process and thread models have already changed, so
+    /// command validation remains immediate and only painting is delayed.
+    pub(crate) fn schedule_running_context_render(self: &Rc<Self>) {
+        if self.execution_context_visual_pending.replace(true) {
+            return;
+        }
+        let generation = self
+            .execution_context_visual_generation
+            .get()
+            .wrapping_add(1);
+        self.execution_context_visual_generation.set(generation);
+        let weak_ui = Rc::downgrade(self);
+        gtk::glib::timeout_add_local_once(EXECUTION_CONTEXT_VISUAL_DELAY, move || {
+            let Some(ui) = weak_ui.upgrade() else {
+                return;
+            };
+            if ui.execution_context_visual_generation.get() != generation {
+                return;
+            }
+            ui.execution_context_visual_pending.set(false);
+            ui.apply_selected_inferior_state();
+            ui.render_inferior_controls();
+        });
+    }
+
+    pub(super) fn cancel_running_context_render(&self) {
+        self.execution_context_visual_generation.set(
+            self.execution_context_visual_generation
+                .get()
+                .wrapping_add(1),
+        );
+        self.execution_context_visual_pending.set(false);
+    }
+
     pub(crate) fn mark_inferior_stopped(&self, thread_id: Option<&str>, all_stopped: bool) -> bool {
+        self.cancel_running_context_render();
         let pending_group = self.pending_execution_inferior.borrow().clone();
         let group = thread_id
             .and_then(|thread| self.inferior_for_thread(thread))
@@ -571,6 +639,7 @@ impl Ui {
     }
 
     pub(crate) fn record_inferior_exited(&self, id: &str) {
+        self.cancel_running_context_render();
         self.thread_inferior_ids
             .borrow_mut()
             .retain(|_, group| group != id);
@@ -593,6 +662,7 @@ impl Ui {
     }
 
     pub(crate) fn clear_inferiors(&self) {
+        self.cancel_running_context_render();
         self.start_inferior_refresh();
         self.inferiors.borrow_mut().clear();
         self.thread_inferior_ids.borrow_mut().clear();
@@ -693,7 +763,10 @@ impl Ui {
             .iter()
             .find(|inferior| inferior.id == group)
             .and_then(|inferior| inferior.pid);
-        Some(pid.map_or(group.clone(), |pid| format!("{group} PID {pid}")))
+        Some(match pid {
+            Some(pid) => format!("{group} PID {pid}"),
+            None => group,
+        })
     }
 
     fn first_inferior_child(&self, parent: &str) -> Option<String> {
@@ -750,26 +823,37 @@ impl Ui {
             controls.detach_on_fork.set_active(detach_on_fork);
         }
         controls.selector_updating.set(false);
-        let available = self.debugger_ready.get()
-            && !self.command_pending.get()
-            && !self.execution_transition_pending.get()
-            && !self.session_pending.get()
-            && !self.native_until_active.get()
-            && !self.resynchronization_pending.get()
-            && !self.debug_state_stale.get()
-            && self.inferior_action_pending.get().is_none();
-        controls
-            .follow_parent
-            .set_sensitive(available && self.fork_follow_mode.get().is_some());
-        controls
-            .follow_child
-            .set_sensitive(available && self.fork_follow_mode.get().is_some());
-        controls
-            .detach_on_fork
-            .set_sensitive(available && self.detach_on_fork.get().is_some());
+        let busy = self.inferior_running.get()
+            || self.debug_state_stale.get()
+            || self.command_pending.get()
+            || self.execution_transition_pending.get()
+            || self.session_pending.get()
+            || self.native_until_active.get()
+            || self.resynchronization_pending.get()
+            || self.inferior_action_pending.get().is_some();
+        let available = self.debugger_ready.get() && !busy;
+        let visual_transition = self.execution_visual_transition_pending();
+        set_transient_execution_sensitive(
+            &controls.follow_parent,
+            available && self.fork_follow_mode.get().is_some(),
+            visual_transition,
+        );
+        set_transient_execution_sensitive(
+            &controls.follow_child,
+            available && self.fork_follow_mode.get().is_some(),
+            visual_transition,
+        );
+        set_transient_execution_sensitive(
+            &controls.detach_on_fork,
+            available && self.detach_on_fork.get().is_some(),
+            visual_transition,
+        );
     }
 
     pub(super) fn render_inferior_controls(&self) {
+        if self.execution_context_visual_pending.get() {
+            return;
+        }
         let controls = &self.inferior_controls;
         let inferiors = self.inferiors.borrow();
         let selected = self.selected_inferior_id.borrow().clone();
@@ -807,17 +891,24 @@ impl Ui {
             controls.selector.set_selected(selected_index);
         }
         controls.selector_updating.set(false);
-        let process_controls_available = self.debugger_ready.get()
-            && !self.command_pending.get()
-            && !self.execution_transition_pending.get()
-            && !self.session_pending.get()
-            && !self.native_until_active.get()
-            && !self.resynchronization_pending.get()
-            && self.inferior_action_pending.get().is_none();
-        controls
-            .selector
-            .set_sensitive(!inferiors.is_empty() && process_controls_available);
-        controls.refresh.set_sensitive(process_controls_available);
+        let busy = self.command_pending.get()
+            || self.execution_transition_pending.get()
+            || self.session_pending.get()
+            || self.native_until_active.get()
+            || self.resynchronization_pending.get()
+            || self.inferior_action_pending.get().is_some();
+        let process_controls_available = self.debugger_ready.get() && !busy;
+        let visual_busy = busy || self.inferior_running.get() || self.debug_state_stale.get();
+        set_transient_execution_sensitive(
+            &controls.selector,
+            !inferiors.is_empty() && process_controls_available,
+            visual_busy,
+        );
+        set_transient_execution_sensitive(
+            &controls.refresh,
+            process_controls_available,
+            visual_busy,
+        );
         let selected_inferior = inferiors
             .iter()
             .find(|inferior| Some(inferior.id.as_str()) == selected.as_deref());
@@ -859,12 +950,8 @@ impl Ui {
         let available = process_controls_available
             && !self.debug_state_stale.get()
             && self.inferior_action_pending.get().is_none();
-        controls
-            .switch_parent
-            .set_sensitive(available && parent.is_some());
-        controls
-            .switch_child
-            .set_sensitive(available && child.is_some());
+        set_execution_sensitive(&controls.switch_parent, available && parent.is_some(), busy);
+        set_execution_sensitive(&controls.switch_child, available && child.is_some(), busy);
         if inferiors.is_empty() {
             clear_box(&controls.list);
             controls.cards.borrow_mut().clear();
@@ -942,7 +1029,8 @@ impl Ui {
         let id = inferior_id.to_owned();
         let handler = Rc::clone(&self.inferior_controls.action_handler);
         select.connect_clicked(move |_| {
-            if let Some(handler) = handler.borrow().clone() {
+            let handler = handler.borrow().clone();
+            if let Some(handler) = handler {
                 handler(InferiorAction::Select(id.clone()));
             }
         });
@@ -1000,15 +1088,16 @@ impl Ui {
         } else {
             card.relationship.set_visible(false);
         }
-        let available = self.debugger_ready.get()
-            && !self.command_pending.get()
-            && !self.execution_transition_pending.get()
-            && !self.session_pending.get()
-            && !self.native_until_active.get()
-            && !self.resynchronization_pending.get()
-            && self.inferior_action_pending.get().is_none();
+        let busy = self.command_pending.get()
+            || self.execution_transition_pending.get()
+            || self.session_pending.get()
+            || self.native_until_active.get()
+            || self.resynchronization_pending.get()
+            || self.inferior_action_pending.get().is_some();
+        let available = self.debugger_ready.get() && !busy;
+        let visual_busy = busy || self.inferior_running.get() || self.debug_state_stale.get();
         set_button_label(&card.select, if selected { "Selected" } else { "Switch" });
-        card.select.set_sensitive(!selected && available);
+        set_transient_execution_sensitive(&card.select, !selected && available, visual_busy);
         let execution = match inferior.state {
             InferiorState::Running => {
                 Some(("Freeze", InferiorAction::Interrupt(inferior.id.clone())))
@@ -1022,8 +1111,11 @@ impl Ui {
                 .as_ref()
                 .map_or("Unavailable", |(label, _)| *label),
         );
-        card.execution
-            .set_sensitive(execution.is_some() && available);
+        set_transient_execution_sensitive(
+            &card.execution,
+            execution.is_some() && available,
+            visual_busy,
+        );
         card.execution_action
             .replace(execution.map(|(_, action)| action));
     }
@@ -1056,23 +1148,9 @@ fn inferior_selector_label(inferior: &InferiorInfo) -> String {
     )
 }
 
-fn set_label_text(label: &gtk::Label, text: &str) {
-    if label.text().as_str() != text {
-        label.set_text(text);
-    }
-}
-
 fn set_button_label(button: &gtk::Button, text: &str) {
     if button.label().as_deref() != Some(text) {
         button.set_label(text);
-    }
-}
-
-fn set_css_class(widget: &impl IsA<gtk::Widget>, class: &str, enabled: bool) {
-    if enabled && !widget.has_css_class(class) {
-        widget.add_css_class(class);
-    } else if !enabled && widget.has_css_class(class) {
-        widget.remove_css_class(class);
     }
 }
 

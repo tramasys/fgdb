@@ -50,8 +50,8 @@ pub(super) fn assign_float_bytes(
     );
     let ui_for_response = ui.clone();
     let client_for_response = Rc::clone(&client);
-    let variable_for_response = variable.clone();
-    let raw_for_response = raw_bytes.clone();
+    let variable_for_response = variable;
+    let raw_for_response = raw_bytes;
     if client
         .request(&command, move |_, record| {
             let Some(expression) = crate::debugger::variable_path_expression(&record) else {

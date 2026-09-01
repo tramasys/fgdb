@@ -14,11 +14,11 @@ pub(super) fn populate_constraints(snapshot: &mut KernelSnapshot, root: &Path) {
         ("oom_score_adj", "OOM score adjustment"),
         ("autogroup", "Scheduler autogroup"),
     ] {
-        if let Ok(value) = fs::read_to_string(root.join(entry)) {
+        if let Ok(value) = crate::bounded::read_string(&root.join(entry), MAX_PROC_TEXT_BYTES) {
             snapshot.constraints.push(fact(label, value.trim()));
         }
     }
-    let Ok(cgroups) = fs::read_to_string(root.join("cgroup")) else {
+    let Ok(cgroups) = crate::bounded::read_string(&root.join("cgroup"), MAX_PROC_TEXT_BYTES) else {
         return;
     };
     let Some(path) = cgroups.lines().find_map(|line| line.strip_prefix("0::")) else {
@@ -51,7 +51,9 @@ pub(super) fn populate_constraints(snapshot: &mut KernelSnapshot, root: &Path) {
         ("pids.current", "Processes current", false),
         ("pids.max", "Processes maximum", false),
     ] {
-        if let Ok(value) = fs::read_to_string(cgroup_root.join(entry)) {
+        if let Ok(value) =
+            crate::bounded::read_string(&cgroup_root.join(entry), MAX_PROC_TEXT_BYTES)
+        {
             let value = value.trim();
             if entry == "memory.current" {
                 memory_current = value.parse::<u64>().ok();
@@ -92,7 +94,9 @@ pub(super) fn populate_constraints(snapshot: &mut KernelSnapshot, root: &Path) {
         ("cpu.stat", "CPU control accounting"),
         ("io.stat", "Cgroup I/O accounting"),
     ] {
-        if let Ok(value) = fs::read_to_string(cgroup_root.join(entry)) {
+        if let Ok(value) =
+            crate::bounded::read_string(&cgroup_root.join(entry), MAX_PROC_TEXT_BYTES)
+        {
             snapshot
                 .constraints
                 .push(fact(label, compact_lines(&value)));
@@ -112,7 +116,9 @@ pub(super) fn populate_constraints(snapshot: &mut KernelSnapshot, root: &Path) {
             }
         }
     }
-    if let Ok(value) = fs::read_to_string(cgroup_root.join("memory.stat")) {
+    if let Ok(value) =
+        crate::bounded::read_string(&cgroup_root.join("memory.stat"), MAX_PROC_TEXT_BYTES)
+    {
         let memory = parse_flat_counters(&value);
         snapshot.metrics.cgroup_pgfault = counter(&memory, "pgfault");
         snapshot.metrics.cgroup_pgmajfault = counter(&memory, "pgmajfault");
@@ -157,7 +163,9 @@ pub(super) fn populate_constraints(snapshot: &mut KernelSnapshot, root: &Path) {
         ("memory.pressure", "Memory pressure"),
         ("io.pressure", "I/O pressure"),
     ] {
-        if let Ok(value) = fs::read_to_string(cgroup_root.join(entry)) {
+        if let Ok(value) =
+            crate::bounded::read_string(&cgroup_root.join(entry), MAX_PROC_TEXT_BYTES)
+        {
             snapshot.constraints.push(fact(label, compact_psi(&value)));
             let total = psi_total(&value, "some").unwrap_or(0);
             match entry {
@@ -174,7 +182,10 @@ pub(super) fn populate_constraints(snapshot: &mut KernelSnapshot, root: &Path) {
         ("memory", "System memory pressure"),
         ("io", "System I/O pressure"),
     ] {
-        if let Ok(value) = fs::read_to_string(proc_root.join("pressure").join(entry)) {
+        if let Ok(value) = crate::bounded::read_string(
+            &proc_root.join("pressure").join(entry),
+            MAX_PROC_TEXT_BYTES,
+        ) {
             snapshot.constraints.push(fact(label, compact_psi(&value)));
         }
     }
@@ -197,7 +208,7 @@ pub(super) fn populate_descriptors(snapshot: &mut KernelSnapshot, root: &Path) {
 }
 
 pub(super) fn populate_limits(snapshot: &mut KernelSnapshot, root: &Path) {
-    match fs::read_to_string(root.join("limits")) {
+    match crate::bounded::read_string(&root.join("limits"), MAX_PROC_TEXT_BYTES) {
         Ok(limits) => snapshot.limits = parse_limits(&limits),
         Err(error) => snapshot
             .warnings
@@ -207,7 +218,10 @@ pub(super) fn populate_limits(snapshot: &mut KernelSnapshot, root: &Path) {
 
 pub(super) fn populate_kernel_policy(snapshot: &mut KernelSnapshot, root: &Path) {
     let proc_root = root.parent().unwrap_or(root);
-    if let Ok(value) = fs::read_to_string(proc_root.join("sys/kernel/kptr_restrict")) {
+    if let Ok(value) = crate::bounded::read_string(
+        &proc_root.join("sys/kernel/kptr_restrict"),
+        MAX_PROC_TEXT_BYTES,
+    ) {
         snapshot
             .advanced
             .push(fact("Kernel-pointer visibility", value.trim()));

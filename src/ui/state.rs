@@ -172,6 +172,8 @@ impl Ui {
             inferior_parents: Rc::new(RefCell::new(HashMap::new())),
             pending_fork_parents: Rc::new(RefCell::new(HashMap::new())),
             inferior_refresh_generation: Rc::new(Cell::new(0)),
+            execution_context_visual_generation: Rc::new(Cell::new(0)),
+            execution_context_visual_pending: Rc::new(Cell::new(false)),
             fork_policy_generation: Rc::new(Cell::new(0)),
             fork_follow_mode: Rc::new(Cell::new(None)),
             detach_on_fork: Rc::new(Cell::new(None)),
@@ -896,6 +898,7 @@ impl Ui {
         }
         let changed = self.debugger_ready.replace(ready) != ready;
         if !ready {
+            self.cancel_running_context_render();
             self.inferior_running.set(false);
             self.command_pending.set(false);
             self.execution_transition_pending.set(false);
@@ -932,6 +935,14 @@ impl Ui {
 
     pub fn inferior_is_running(&self) -> bool {
         self.inferior_running.get()
+    }
+
+    pub(super) fn execution_visual_transition_pending(&self) -> bool {
+        self.command_pending.get()
+            || self.execution_transition_pending.get()
+            || self.execution_context_visual_pending.get()
+            || self.inferior_action_pending.get() == Some(InferiorActionPending::Execution)
+            || self.thread_controls.action_pending.get() == Some(ThreadActionPending::Execution)
     }
 
     pub fn inferior_has_started(&self) -> bool {
@@ -1486,7 +1497,8 @@ impl Ui {
     }
 
     pub(crate) fn request_disassembly_for_stop(&self, pc: String, architecture: Option<String>) {
-        if let Some(handler) = self.disassembly_handler.borrow().as_ref() {
+        let handler = self.disassembly_handler.borrow().clone();
+        if let Some(handler) = handler {
             handler(DisassemblyRequest::Stopped { pc, architecture });
         }
     }

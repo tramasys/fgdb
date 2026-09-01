@@ -854,33 +854,63 @@ pub(super) fn thread_detail(thread: &ThreadInfo, stop_reason: Option<&str>) -> S
 
 pub(super) fn thread_detail_widget(thread: &ThreadInfo, stop_reason: Option<&str>) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    if let Some(frame) = thread.frame.as_ref() {
-        let location = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        let state = gtk::Label::new(Some(&format!("{} at ", thread.state)));
-        state.add_css_class("thread-detail");
-        let address = gtk::Label::new(Some(&frame.address));
-        address.add_css_class("thread-detail");
-        address.add_css_class("memory-code");
-        location.append(&state);
-        location.append(&address);
-        root.append(&location);
-    } else {
-        let state = gtk::Label::new(Some(&thread.state));
-        state.add_css_class("thread-detail");
-        state.set_halign(gtk::Align::Start);
-        root.append(&state);
-    }
-
-    let metadata = thread_metadata(thread, stop_reason);
-    if !metadata.is_empty() {
-        let metadata = gtk::Label::new(Some(&metadata));
-        metadata.add_css_class("thread-detail");
-        metadata.set_halign(gtk::Align::Start);
-        metadata.set_wrap(true);
-        metadata.set_wrap_mode(pango::WrapMode::WordChar);
-        root.append(&metadata);
-    }
+    let location = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let state = gtk::Label::new(None);
+    state.add_css_class("thread-detail");
+    state.set_halign(gtk::Align::Start);
+    let address = gtk::Label::new(None);
+    address.add_css_class("thread-detail");
+    address.add_css_class("memory-code");
+    location.append(&state);
+    location.append(&address);
+    root.append(&location);
+    let metadata = gtk::Label::new(None);
+    metadata.add_css_class("thread-detail");
+    metadata.set_halign(gtk::Align::Start);
+    metadata.set_wrap(true);
+    metadata.set_wrap_mode(pango::WrapMode::WordChar);
+    root.append(&metadata);
+    update_thread_detail_widget(&root, thread, stop_reason);
     root
+}
+
+pub(super) fn update_thread_detail_widget(
+    root: &gtk::Box,
+    thread: &ThreadInfo,
+    stop_reason: Option<&str>,
+) -> bool {
+    let Some(location) = root.first_child().and_downcast::<gtk::Box>() else {
+        return false;
+    };
+    let Some(state) = location.first_child().and_downcast::<gtk::Label>() else {
+        return false;
+    };
+    let Some(address) = location.last_child().and_downcast::<gtk::Label>() else {
+        return false;
+    };
+    let Some(metadata) = root.last_child().and_downcast::<gtk::Label>() else {
+        return false;
+    };
+    if let Some(frame) = thread.frame.as_ref() {
+        set_label_text(&state, &format!("{} at ", thread.state));
+        set_label_text(&address, &frame.address);
+        if !address.is_visible() {
+            address.set_visible(true);
+        }
+    } else {
+        set_label_text(&state, &thread.state);
+        set_label_text(&address, "");
+        if address.is_visible() {
+            address.set_visible(false);
+        }
+    }
+    let metadata_text = thread_metadata(thread, stop_reason);
+    set_label_text(&metadata, &metadata_text);
+    let metadata_visible = !metadata_text.is_empty();
+    if metadata.is_visible() != metadata_visible {
+        metadata.set_visible(metadata_visible);
+    }
+    true
 }
 
 pub(super) fn thread_metadata(thread: &ThreadInfo, stop_reason: Option<&str>) -> String {

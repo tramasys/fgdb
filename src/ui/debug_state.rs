@@ -145,7 +145,8 @@ impl Ui {
             let level = frame.level;
             let handler = Rc::clone(&self.frame_selection_handler);
             button.connect_clicked(move |_| {
-                if let Some(handler) = handler.borrow().as_ref() {
+                let handler = handler.borrow().clone();
+                if let Some(handler) = handler {
                     handler(level);
                 }
             });
@@ -274,7 +275,7 @@ impl Ui {
         let Some(node) = self.find_variable_node(parent) else {
             return false;
         };
-        let parent = node.variable.clone();
+        let parent = node.variable;
         self.show_variable_children_page(&parent, 0, variables, false)
     }
 
@@ -342,7 +343,8 @@ impl Ui {
                     row.set_expanded(!row.is_expanded());
                 } else {
                     let variable = node.variable;
-                    if let Some(editor_handler) = editor_handler.borrow().as_ref() {
+                    let editor_handler = editor_handler.borrow().clone();
+                    if let Some(editor_handler) = editor_handler {
                         editor_handler(variable);
                     } else {
                         open_variable_editor(
@@ -374,7 +376,8 @@ impl Ui {
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
         self.locals_edit_button.connect_clicked(move |_| {
             if let Some(variable) = variable_at(&selection, selection.selected()) {
-                if let Some(editor_handler) = editor_handler.borrow().as_ref() {
+                let editor_handler = editor_handler.borrow().clone();
+                if let Some(editor_handler) = editor_handler {
                     editor_handler(variable);
                 } else {
                     open_variable_editor(
@@ -475,11 +478,28 @@ impl Ui {
     }
 
     pub fn show_threads(&self, threads: &[ThreadInfo]) {
+        let explicit_current = threads.iter().find(|thread| thread.current);
+        let retained_current = if explicit_current.is_none() {
+            self.current_thread_id()
+                .filter(|selected| threads.iter().any(|thread| thread.id == selected.as_str()))
+        } else {
+            None
+        };
+        let normalized_threads = retained_current.as_ref().map(|selected| {
+            let mut normalized = threads.to_vec();
+            if let Some(thread) = normalized
+                .iter_mut()
+                .find(|thread| thread.id == selected.as_str())
+            {
+                thread.current = true;
+            }
+            normalized
+        });
+        let threads = normalized_threads.as_deref().unwrap_or(threads);
         self.set_current_thread_id(
-            threads
-                .iter()
-                .find(|thread| thread.current)
-                .map(|thread| thread.id.as_str()),
+            explicit_current
+                .map(|thread| thread.id.as_str())
+                .or(retained_current.as_deref()),
         );
         let executable_name = self
             .current_session
@@ -490,9 +510,9 @@ impl Ui {
             .and_then(std::ffi::OsStr::to_str)
             .map(str::to_owned);
         let stop_reason = self.thread_stop_reason.borrow().clone();
-        let rendered_threads = self.filtered_sorted_threads(threads);
-        let visible_thread_count = rendered_threads.len();
         let (query, state_filter, sort) = self.current_thread_filter_state();
+        let rendered_threads = Self::filtered_sorted_threads(threads, &query, state_filter, sort);
+        let visible_thread_count = rendered_threads.len();
         if self.latest_threads.borrow().as_ref().is_some_and(|state| {
             state.source_threads == threads
                 && state.rendered_threads == rendered_threads
@@ -521,9 +541,9 @@ impl Ui {
             });
         if can_update_in_place {
             let latest = self.latest_threads.borrow();
-            let previous = latest
-                .as_ref()
-                .expect("in-place thread update requires prior state");
+            let Some(previous) = latest.as_ref() else {
+                return;
+            };
             for (((_, button), old_thread), thread) in self
                 .thread_buttons
                 .borrow()
@@ -588,7 +608,8 @@ impl Ui {
             let id = thread.id.clone();
             let handler = Rc::clone(&self.thread_selection_handler);
             button.connect_clicked(move |_| {
-                if let Some(handler) = handler.borrow().as_ref() {
+                let handler = handler.borrow().clone();
+                if let Some(handler) = handler {
                     handler(id.clone());
                 }
             });
@@ -922,7 +943,8 @@ impl Ui {
         self.instruction_memory
             .set_text(&format!("MEMORY  {expression} · reading…"));
         self.instruction_memory.set_visible(true);
-        if let Some(handler) = self.instruction_memory_handler.borrow().as_ref() {
+        let handler = self.instruction_memory_handler.borrow().clone();
+        if let Some(handler) = handler {
             handler(expression);
         }
     }
@@ -969,7 +991,8 @@ impl Ui {
                 .instruction
                 .address
                 .clone();
-            if let Some(handler) = handler.borrow().as_ref() {
+            let handler = handler.borrow().clone();
+            if let Some(handler) = handler {
                 handler(address);
             }
         });
@@ -983,8 +1006,9 @@ impl Ui {
         let location = self.disassembly_controls.location.clone();
         self.disassembly_controls.go.connect_clicked(move |_| {
             let expression = location.text().trim().to_owned();
+            let handler = handler.borrow().clone();
             if !expression.is_empty()
-                && let Some(handler) = handler.borrow().as_ref()
+                && let Some(handler) = handler
             {
                 handler(DisassemblyRequest::Navigate(expression));
             }
@@ -1018,7 +1042,8 @@ impl Ui {
         ] {
             let handler = Rc::clone(&self.disassembly_handler);
             button.connect_clicked(move |_| {
-                if let Some(handler) = handler.borrow().as_ref() {
+                let handler = handler.borrow().clone();
+                if let Some(handler) = handler {
                     handler(request.clone());
                 }
             });
@@ -1027,7 +1052,8 @@ impl Ui {
         self.disassembly_controls
             .mixed
             .connect_toggled(move |button| {
-                if let Some(handler) = handler.borrow().as_ref() {
+                let handler = handler.borrow().clone();
+                if let Some(handler) = handler {
                     handler(DisassemblyRequest::Mixed(button.is_active()));
                 }
             });
@@ -1047,7 +1073,8 @@ impl Ui {
                 if setting_syntax.get() || !button.is_active() {
                     return;
                 }
-                if let Some(handler) = handler.borrow().as_ref() {
+                let handler = handler.borrow().clone();
+                if let Some(handler) = handler {
                     handler(DisassemblyRequest::Syntax(syntax));
                 }
             });
@@ -1061,7 +1088,8 @@ impl Ui {
             else {
                 return;
             };
-            if let Some(handler) = ui.disassembly_handler.borrow().as_ref() {
+            let handler = ui.disassembly_handler.borrow().clone();
+            if let Some(handler) = handler {
                 handler(DisassemblyRequest::Navigate(target));
             }
         });
@@ -1525,7 +1553,8 @@ impl Ui {
                 2 => WatchpointAccess::Access,
                 _ => WatchpointAccess::Write,
             };
-            if let Some(handler) = handler.borrow().as_ref() {
+            let handler = handler.borrow().clone();
+            if let Some(handler) = handler {
                 handler(expression, access);
             }
         });
@@ -1547,8 +1576,9 @@ impl Ui {
         self.delete_all_breakpoints_button
             .connect_clicked(move |_| {
                 let numbers = breakpoint_command_numbers(&breakpoints.borrow(), false);
+                let handler = handler.borrow().clone();
                 if !numbers.is_empty()
-                    && let Some(handler) = handler.borrow().as_ref()
+                    && let Some(handler) = handler
                 {
                     handler(numbers);
                 }
@@ -1558,8 +1588,9 @@ impl Ui {
         self.delete_all_watchpoints_button
             .connect_clicked(move |_| {
                 let numbers = breakpoint_command_numbers(&breakpoints.borrow(), true);
+                let handler = handler.borrow().clone();
                 if !numbers.is_empty()
-                    && let Some(handler) = handler.borrow().as_ref()
+                    && let Some(handler) = handler
                 {
                     handler(numbers);
                 }
@@ -1569,8 +1600,9 @@ impl Ui {
         self.delete_all_catchpoints_button
             .connect_clicked(move |_| {
                 let numbers = event_catchpoint_command_numbers(&breakpoints.borrow());
+                let handler = handler.borrow().clone();
                 if !numbers.is_empty()
-                    && let Some(handler) = handler.borrow().as_ref()
+                    && let Some(handler) = handler
                 {
                     handler(numbers);
                 }
@@ -1593,8 +1625,9 @@ impl Ui {
                     return;
                 }
                 let numbers = signal_catchpoint_command_numbers(&breakpoints.borrow());
+                let handler = handler.borrow().clone();
                 if !numbers.is_empty()
-                    && let Some(handler) = handler.borrow().as_ref()
+                    && let Some(handler) = handler
                 {
                     handler(numbers);
                 }
@@ -1608,7 +1641,8 @@ impl Ui {
             let handler = Rc::clone(&self.event_catchpoint_handler);
             button.connect_clicked(move |_| {
                 let existing = event_catchpoint_command_number(&breakpoints.borrow(), event);
-                if let Some(handler) = handler.borrow().as_ref() {
+                let handler = handler.borrow().clone();
+                if let Some(handler) = handler {
                     handler(event, existing);
                 }
             });
@@ -1634,7 +1668,8 @@ impl Ui {
                 })
                 .collect::<Vec<_>>()
         };
-        if let Some(handler) = self.memory_watch_handler.borrow().as_ref() {
+        let handler = self.memory_watch_handler.borrow().clone();
+        if let Some(handler) = handler {
             for (id, expression, byte_count) in requests {
                 handler(id, expression, byte_count);
             }
@@ -1938,14 +1973,16 @@ impl Ui {
                 let enable = !breakpoint.enabled;
                 let enabled_handler = Rc::clone(&self.breakpoint_enabled_handler);
                 badge.connect_clicked(move |_| {
-                    if let Some(handler) = enabled_handler.borrow().as_ref() {
+                    let handler = enabled_handler.borrow().clone();
+                    if let Some(handler) = handler {
                         handler(number.clone(), enable);
                     }
                 });
                 let number = breakpoint.command_number().to_owned();
                 let delete_handler = Rc::clone(&self.breakpoint_delete_handler);
                 delete_button.connect_clicked(move |_| {
-                    if let Some(handler) = delete_handler.borrow().as_ref() {
+                    let handler = delete_handler.borrow().clone();
+                    if let Some(handler) = handler {
                         handler(number.clone());
                     }
                 });
@@ -2006,7 +2043,8 @@ impl Ui {
                     let enable = !location.enabled;
                     let enabled_handler = Rc::clone(&self.breakpoint_enabled_handler);
                     badge.connect_clicked(move |_| {
-                        if let Some(handler) = enabled_handler.borrow().as_ref() {
+                        let handler = enabled_handler.borrow().clone();
+                        if let Some(handler) = handler {
                             handler(number.clone(), enable);
                         }
                     });
@@ -2171,12 +2209,39 @@ fn thread_button_content(thread: &ThreadInfo, stop_reason: Option<&str>) -> gtk:
 }
 
 fn update_thread_button(button: &gtk::Button, thread: &ThreadInfo, stop_reason: Option<&str>) {
-    button.set_child(Some(&thread_button_content(thread, stop_reason)));
-    if thread.current {
-        button.add_css_class("current-debug-item");
-    } else {
-        button.remove_css_class("current-debug-item");
+    let Some(row) = button.child().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    let Some(heading) = row.first_child().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    let Some(name) = heading.next_sibling().and_downcast::<gtk::Label>() else {
+        return;
+    };
+    let Some(detail_widget) = row.last_child().and_downcast::<gtk::Box>() else {
+        return;
+    };
+    let marker = if thread.current { "*" } else { " " };
+    let tid = thread_os_id(&thread.target_id).unwrap_or_else(|| String::from("?"));
+    let thread_name = thread.name.as_deref().unwrap_or("<unnamed>");
+    set_label_text(
+        &heading,
+        &format!("[{marker}Thread Id:{}, tid:{tid}]", thread.id),
+    );
+    set_label_text(&name, &format!("Name: \"{thread_name}\""));
+    if !update_thread_detail_widget(&detail_widget, thread, stop_reason) {
+        return;
     }
+    let detail = thread_detail(thread, stop_reason);
+    let full_symbol = thread.frame.as_ref().map(|frame| frame.function.as_str());
+    detail_widget.set_tooltip_text(Some(&match full_symbol {
+        Some(symbol) => format!(
+            "{detail}\nFull symbol: {symbol}\nGDB target: {}",
+            thread.target_id
+        ),
+        None => format!("{detail}\nGDB target: {}", thread.target_id),
+    }));
+    set_css_class(button, "current-debug-item", thread.current);
 }
 
 #[cfg(test)]

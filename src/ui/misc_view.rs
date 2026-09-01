@@ -1685,11 +1685,11 @@ pub(super) fn connect_misc_tab_visibility(
         {
             needs_refresh.set(true);
         }
-        if now_active
-            && needs_refresh.get()
-            && let Some(handler) = handler.borrow().as_ref()
-        {
-            handler();
+        if now_active && needs_refresh.get() {
+            let handler = handler.borrow().clone();
+            if let Some(handler) = handler {
+                handler();
+            }
         }
     });
 
@@ -1711,11 +1711,11 @@ pub(super) fn connect_misc_tab_visibility(
         };
         if newly_requested {
             needs_refresh.set(true);
-            if active.get()
-                && !in_flight.get()
-                && let Some(handler) = handler.borrow().as_ref()
-            {
-                handler();
+            if active.get() && !in_flight.get() {
+                let handler = handler.borrow().clone();
+                if let Some(handler) = handler {
+                    handler();
+                }
             }
         }
     });
@@ -2398,9 +2398,11 @@ impl Ui {
         if self.misc_view.active.get()
             && self.misc_view.needs_refresh.get()
             && self.misc_refresh_allowed()
-            && let Some(handler) = self.misc_refresh_handler.borrow().as_ref()
         {
-            handler();
+            let handler = self.misc_refresh_handler.borrow().clone();
+            if let Some(handler) = handler {
+                handler();
+            }
         }
     }
 

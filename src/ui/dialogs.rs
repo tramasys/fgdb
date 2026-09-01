@@ -519,7 +519,8 @@ pub(super) fn open_variable_editor(
             }
             value
         };
-        if let Some(handler) = handler.borrow().as_ref() {
+        let handler = handler.borrow().clone();
+        if let Some(handler) = handler {
             handler(variable_for_submit.clone(), value);
         }
         editor_for_submit.close();
@@ -553,8 +554,8 @@ pub(super) fn open_variable_editor(
             );
         });
         let entry_for_notation = entry.clone();
-        let validation_for_notation = validation.clone();
-        let apply_for_notation = apply.clone();
+        let validation_for_notation = validation;
+        let apply_for_notation = apply;
         dropdown.connect_selected_notify(move |dropdown| {
             let selected = dropdown.selected();
             let previous = active.replace(selected);
@@ -706,7 +707,7 @@ fn open_float_editor(
         );
     });
     let representation_for_entry = representation.clone();
-    let validation_for_entry = validation.clone();
+    let validation_for_entry = validation;
     let apply_for_entry = apply.clone();
     entry.connect_changed(move |entry| {
         update_float_validation(
@@ -720,7 +721,7 @@ fn open_float_editor(
 
     let editor_for_apply = editor.clone();
     let entry_for_apply = entry.clone();
-    let representation_for_apply = representation.clone();
+    let representation_for_apply = representation;
     let original_raw = float.raw_bytes;
     apply.connect_clicked(move |_| {
         let representation = FloatRepresentation::from_index(representation_for_apply.selected());
@@ -729,16 +730,20 @@ fn open_float_editor(
         };
         if raw != original_raw {
             if representation == FloatRepresentation::RawBits {
-                if let Some(handler) = raw_handler.borrow().as_ref() {
+                let handler = raw_handler.borrow().clone();
+                if let Some(handler) = handler {
                     handler(variable.clone(), raw);
                 }
-            } else if let Some(handler) = handler.borrow().as_ref() {
-                handler(variable.clone(), canonical_gdb_float(&raw, float.bits));
+            } else {
+                let handler = handler.borrow().clone();
+                if let Some(handler) = handler {
+                    handler(variable.clone(), canonical_gdb_float(&raw, float.bits));
+                }
             }
         }
         editor_for_apply.close();
     });
-    let apply_for_activate = apply.clone();
+    let apply_for_activate = apply;
     entry.connect_activate(move |_| {
         if apply_for_activate.is_sensitive() {
             apply_for_activate.emit_clicked();
@@ -849,7 +854,7 @@ fn open_enum_editor(
     let metadata = metadata.clone();
     let metadata_for_selection = metadata.clone();
     let custom_for_selection = custom.clone();
-    let detail_for_selection = detail.clone();
+    let detail_for_selection = detail;
     variants.connect_selected_notify(move |variants| {
         let selected = variants.selected();
         custom_for_selection
@@ -862,9 +867,9 @@ fn open_enum_editor(
     });
 
     let editor_for_apply = editor.clone();
-    let variants_for_apply = variants.clone();
+    let variants_for_apply = variants;
     let custom_for_apply = custom.clone();
-    let enum_variants = metadata.enum_variants.clone();
+    let enum_variants = metadata.enum_variants;
     apply.connect_clicked(move |_| {
         let value = enum_variants
             .get(variants_for_apply.selected() as usize)
@@ -872,15 +877,15 @@ fn open_enum_editor(
                 || custom_for_apply.text().trim().to_owned(),
                 |variant| variant.name.clone(),
             );
-        if !value.is_empty()
-            && !enum_value_matches(&original, &value)
-            && let Some(handler) = handler.borrow().as_ref()
-        {
-            handler(variable.clone(), value);
+        if !value.is_empty() && !enum_value_matches(&original, &value) {
+            let handler = handler.borrow().clone();
+            if let Some(handler) = handler {
+                handler(variable.clone(), value);
+            }
         }
         editor_for_apply.close();
     });
-    let apply_for_entry = apply.clone();
+    let apply_for_entry = apply;
     custom.connect_activate(move |_| apply_for_entry.emit_clicked());
     let editor_for_cancel = editor.clone();
     cancel.connect_clicked(move |_| editor_for_cancel.close());
@@ -966,13 +971,14 @@ fn open_boolean_editor(
     let editor_for_apply = editor.clone();
     apply.connect_clicked(move |_| {
         let selected = value.selected() == 1;
-        if selected != original
-            && let Some(handler) = handler.borrow().as_ref()
-        {
-            handler(
-                variable.clone(),
-                if selected { "1" } else { "0" }.to_owned(),
-            );
+        if selected != original {
+            let handler = handler.borrow().clone();
+            if let Some(handler) = handler {
+                handler(
+                    variable.clone(),
+                    if selected { "1" } else { "0" }.to_owned(),
+                );
+            }
         }
         editor_for_apply.close();
     });
@@ -1127,11 +1133,11 @@ fn open_string_editor(
     });
     if let Some(mode) = &mode {
         let entry_for_mode = entry.clone();
-        let detail_for_mode = detail.clone();
-        let validation_for_mode = validation.clone();
+        let detail_for_mode = detail;
+        let validation_for_mode = validation;
         let apply_for_mode = apply.clone();
         let string_for_mode = string.clone();
-        let original_text_for_mode = original_text.clone();
+        let original_text_for_mode = original_text;
         let original_address_for_mode = original_address.clone();
         mode.connect_selected_notify(move |mode| {
             let address_mode = mode.selected() == 1;
@@ -1161,11 +1167,11 @@ fn open_string_editor(
             .is_some_and(|mode| mode.selected() == 1);
         if address_mode {
             let address = entry_for_apply.text().trim().to_owned();
-            if !address.is_empty()
-                && address != original_address
-                && let Some(handler) = assignment_handler.borrow().as_ref()
-            {
-                handler(variable_for_apply.clone(), address);
+            if !address.is_empty() && address != original_address {
+                let handler = assignment_handler.borrow().clone();
+                if let Some(handler) = handler {
+                    handler(variable_for_apply.clone(), address);
+                }
             }
         } else {
             let Ok(bytes) = parse_string_input(&entry_for_apply.text()) else {
@@ -1180,15 +1186,16 @@ fn open_string_editor(
             ) {
                 return;
             }
-            if bytes != string.bytes
-                && let Some(handler) = string_handler.borrow().as_ref()
-            {
-                handler(variable_for_apply.clone(), bytes, string.assignment_kind());
+            if bytes != string.bytes {
+                let handler = string_handler.borrow().clone();
+                if let Some(handler) = handler {
+                    handler(variable_for_apply.clone(), bytes, string.assignment_kind());
+                }
             }
         }
         editor_for_apply.close();
     });
-    let apply_for_entry = apply.clone();
+    let apply_for_entry = apply;
     entry.connect_activate(move |_| {
         if apply_for_entry.is_sensitive() {
             apply_for_entry.emit_clicked();
@@ -1460,7 +1467,7 @@ pub(super) fn open_vector_editor(
             IntegerRadix::from_index(radix_for_format.selected()),
         );
     });
-    let grid_for_radix = grid.clone();
+    let grid_for_radix = grid;
     let entries_for_radix = Rc::clone(&entries);
     let originals_for_radix = Rc::clone(&original_values);
     let register_value_for_radix = register.value.clone();
@@ -1524,10 +1531,11 @@ pub(super) fn open_vector_editor(
         };
         validation_for_apply.set_visible(false);
         let changes = changes.into_iter().flatten().collect::<Vec<_>>();
-        if !changes.is_empty()
-            && let Some(handler) = handler.borrow().as_ref()
-        {
-            handler(register_name.clone(), format.field(register_bytes), changes);
+        if !changes.is_empty() {
+            let handler = handler.borrow().clone();
+            if let Some(handler) = handler {
+                handler(register_name.clone(), format.field(register_bytes), changes);
+            }
         }
         editor_for_apply.close();
     });
@@ -1653,10 +1661,11 @@ pub(super) fn open_flag_editor(
                 value &= !(1_u64 << bit);
             }
         }
-        if value != original
-            && let Some(handler) = handler.borrow().as_ref()
-        {
-            handler(variable.clone(), format!("0x{value:x}"));
+        if value != original {
+            let handler = handler.borrow().clone();
+            if let Some(handler) = handler {
+                handler(variable.clone(), format!("0x{value:x}"));
+            }
         }
         editor_for_apply.close();
     });
@@ -1725,10 +1734,11 @@ pub(super) fn open_breakpoint_condition_editor(
     let original_condition = breakpoint.condition;
     let editor_for_submit = editor.clone();
     let submit = Rc::new(move |condition: Option<String>| {
-        if condition != original_condition
-            && let Some(handler) = handler.borrow().as_ref()
-        {
-            handler(number.clone(), condition);
+        if condition != original_condition {
+            let handler = handler.borrow().clone();
+            if let Some(handler) = handler {
+                handler(number.clone(), condition);
+            }
         }
         editor_for_submit.close();
     });
@@ -1987,7 +1997,8 @@ pub(super) fn open_breakpoint_editor(
                 logpoint: logpoint.is_active(),
             },
         };
-        if let Some(handler) = handler.borrow().as_ref() {
+        let handler = handler.borrow().clone();
+        if let Some(handler) = handler {
             handler(request);
         }
         editor_for_apply.close();

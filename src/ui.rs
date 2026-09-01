@@ -66,13 +66,17 @@ const DISCLOSURE_COLLAPSED_ICON: &str = "›";
 fn set_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive: bool, busy: bool) {
     let widget = widget.upcast_ref::<gtk::Widget>();
     if !busy || sensitive {
-        widget.remove_css_class("execution-interlocked");
-    } else if widget.is_sensitive() {
+        if widget.has_css_class("execution-interlocked") {
+            widget.remove_css_class("execution-interlocked");
+        }
+    } else if widget.is_sensitive() && !widget.has_css_class("execution-interlocked") {
         // Preserve the appearance only when this execution transition is what
         // made an otherwise available control insensitive.
         widget.add_css_class("execution-interlocked");
     }
-    widget.set_sensitive(sensitive);
+    if widget.is_sensitive() != sensitive {
+        widget.set_sensitive(sensitive);
+    }
 }
 
 /// Keep a previously available action visually stable while a short execution
@@ -81,9 +85,25 @@ fn set_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive: bool, bus
 /// remain insensitive.
 fn set_transient_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive: bool, busy: bool) {
     let widget = widget.upcast_ref::<gtk::Widget>();
-    widget.remove_css_class("execution-interlocked");
-    if !busy || sensitive || !widget.is_sensitive() {
+    if widget.has_css_class("execution-interlocked") {
+        widget.remove_css_class("execution-interlocked");
+    }
+    if (!busy || sensitive || !widget.is_sensitive()) && widget.is_sensitive() != sensitive {
         widget.set_sensitive(sensitive);
+    }
+}
+
+fn set_label_text(label: &gtk::Label, text: &str) {
+    if label.text().as_str() != text {
+        label.set_text(text);
+    }
+}
+
+fn set_css_class(widget: &impl IsA<gtk::Widget>, class: &str, enabled: bool) {
+    if enabled && !widget.has_css_class(class) {
+        widget.add_css_class(class);
+    } else if !enabled && widget.has_css_class(class) {
+        widget.remove_css_class(class);
     }
 }
 
@@ -1539,6 +1559,8 @@ pub struct Ui {
     inferior_parents: Rc<RefCell<HashMap<String, String>>>,
     pending_fork_parents: Rc<RefCell<HashMap<u32, String>>>,
     inferior_refresh_generation: Rc<Cell<u64>>,
+    execution_context_visual_generation: Rc<Cell<u64>>,
+    execution_context_visual_pending: Rc<Cell<bool>>,
     fork_policy_generation: Rc<Cell<u64>>,
     fork_follow_mode: Rc<Cell<Option<ForkFollowMode>>>,
     detach_on_fork: Rc<Cell<Option<bool>>>,

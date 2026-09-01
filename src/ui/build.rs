@@ -1600,9 +1600,9 @@ fn build_compact_inspector_navigation(notebook: &gtk::Notebook) -> gtk::Box {
         let page = notebook_for_next.current_page().unwrap_or(0);
         notebook_for_next.set_current_page(Some((page + 1).min(PAGES.len() as u32 - 1)));
     });
-    let selector_for_page = selector.clone();
-    let previous_for_page = previous.clone();
-    let next_for_page = next.clone();
+    let selector_for_page = selector;
+    let previous_for_page = previous;
+    let next_for_page = next;
     let update = move |page: u32| {
         selector_for_page.set_selected(page);
         previous_for_page.set_sensitive(page > 0);

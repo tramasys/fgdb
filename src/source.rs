@@ -10,7 +10,7 @@ use std::{
 use crate::config::LaunchConfig;
 
 const MAX_SOURCE_TREE_DIRECTORIES: usize = 25_000;
-const MAX_SEARCHABLE_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_SEARCHABLE_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceTreeMatch {
@@ -281,10 +281,10 @@ pub fn search_source_files(
         let Ok(metadata) = std::fs::metadata(path) else {
             continue;
         };
-        if metadata.len() > MAX_SEARCHABLE_SOURCE_BYTES {
+        if metadata.len() > MAX_SEARCHABLE_SOURCE_BYTES as u64 {
             continue;
         }
-        let Ok(bytes) = std::fs::read(path) else {
+        let Ok(bytes) = crate::bounded::read_bytes(path, MAX_SEARCHABLE_SOURCE_BYTES) else {
             continue;
         };
         let contents = String::from_utf8_lossy(&bytes);

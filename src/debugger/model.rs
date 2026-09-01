@@ -618,8 +618,7 @@ pub fn memory_block(record: &MiRecord) -> Option<MemoryBlock> {
         .field("memory")
         .and_then(MiValue::as_list)?
         .iter()
-        .filter_map(tuple_from_item)
-        .next()?;
+        .find_map(tuple_from_item)?;
     let begin = parse_hex(constant(tuple, "begin")?)?;
     let contents = constant(tuple, "contents")?;
     let (pairs, remainder) = contents.as_bytes().as_chunks::<2>();

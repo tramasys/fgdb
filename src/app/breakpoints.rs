@@ -22,7 +22,7 @@ pub(super) fn request_exact_source_breakpoint(
     let location = format!("{}:{line}", path.display());
     let command = format!("-break-insert {}", crate::debugger::quote(&location));
     let ui_for_response = ui.clone();
-    let path_for_response = path.clone();
+    let path_for_response = path;
     if let Err(error) = client.request(&command, move |client, record| {
         if !record.is_done() {
             if let Some(ui) = ui_for_response.upgrade() {

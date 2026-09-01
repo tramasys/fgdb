@@ -115,6 +115,16 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 ui.thread_execution_transition_matches(thread_id.as_deref(), false);
             let (selected_affected, inferior_transition_affected) =
                 ui.mark_inferior_running(thread_id.as_deref());
+            ui.schedule_running_context_render();
+            // A response queued for the previous stop must not overwrite the
+            // authoritative running model while its paint is being deferred.
+            ui.start_inferior_refresh();
+            if selected_affected {
+                // Set the durable running interlock before completing the
+                // short command transition, so controls never pass through a
+                // briefly enabled state between the two.
+                ui.set_controls_running(true);
+            }
             if inferior_transition_affected {
                 ui.finish_inferior_execution_action();
             }
@@ -133,10 +143,6 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             if !selected_affected {
                 return;
             }
-            // Preserve the disabled state across the pending -> running
-            // transition. Clearing `pending` first briefly made every stop-only
-            // control sensitive before `running` disabled it again.
-            ui.set_controls_running(true);
             if ui.native_until_active() {
                 return;
             }

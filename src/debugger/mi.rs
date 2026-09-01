@@ -93,9 +93,11 @@ impl GdbCapabilities {
         } else {
             available.join(" · ")
         };
-        self.version.as_ref().map_or(support.clone(), |version| {
+        if let Some(version) = self.version.as_ref() {
             format!("GDB {version} · {support}")
-        })
+        } else {
+            support
+        }
     }
 
     fn set_version_component(&mut self, component: &str, minor: bool) {

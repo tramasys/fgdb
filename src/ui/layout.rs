@@ -72,14 +72,13 @@ impl Persistence {
         let remembered = crate::bounded::read_string(&path, MAX_LAYOUT_BYTES)
             .map(|contents| parse_layout(&contents))
             .unwrap_or_default();
-        let normal_window_size =
-            remembered
-                .window
-                .map(|geometry| geometry.size)
-                .unwrap_or(WindowSize {
-                    width: window.default_width(),
-                    height: window.default_height(),
-                });
+        let normal_window_size = remembered
+            .window
+            .map(|geometry| geometry.size)
+            .unwrap_or_else(|| WindowSize {
+                width: window.default_width(),
+                height: window.default_height(),
+            });
         if let Some(geometry) = remembered.window {
             window.set_default_size(geometry.size.width, geometry.size.height);
             if geometry.maximized {

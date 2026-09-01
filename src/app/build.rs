@@ -9,13 +9,16 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     ui.connect_inferior_controls();
     ui.connect_thread_controls();
 
-    let ready_hook = Rc::new(RefCell::new(None::<Box<dyn Fn()>>));
+    let ready_hook = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
     let ready_hook_for_event = Rc::clone(&ready_hook);
     let weak_ui = Rc::downgrade(&ui);
     let mi_client = match MiClient::open(move |client, event| {
         let became_ready = matches!(&event, MiEvent::Ready(_));
         handle_mi_event(&weak_ui, client, event);
-        if became_ready && let Some(handler) = ready_hook_for_event.borrow().as_ref() {
+        let ready_handler = became_ready
+            .then(|| ready_hook_for_event.borrow().as_ref().cloned())
+            .flatten();
+        if let Some(handler) = ready_handler {
             handler();
         }
     }) {
@@ -608,7 +611,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             "-data-evaluate-expression {}",
             crate::debugger::quote(&expression)
         );
-        let register_for_response = register.clone();
+        let register_for_response = register;
         let weak_ui_for_response = weak_ui.clone();
         if let Err(error) = client.request(&command, move |client, record| {
             let Some(ui) = weak_ui_for_response.upgrade() else {
@@ -686,7 +689,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         launch_config,
     );
     let weak_backend = Rc::downgrade(&backend);
-    ready_hook.replace(Some(Box::new(move || {
+    ready_hook.replace(Some(Rc::new(move || {
         if let Some(backend) = weak_backend.upgrade() {
             backend.on_ready();
         }

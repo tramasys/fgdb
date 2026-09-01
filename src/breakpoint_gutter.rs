@@ -121,7 +121,8 @@ impl BreakpointGutterRenderer {
     }
 
     pub(crate) fn activate_at(&self, iter: &gtk::TextIter, area: &gdk::Rectangle, button: u32) {
-        if let Some(handler) = self.imp().activate_handler.borrow().as_ref() {
+        let handler = self.imp().activate_handler.borrow().clone();
+        if let Some(handler) = handler {
             handler(self, iter, area, button);
         }
     }

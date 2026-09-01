@@ -60,7 +60,7 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
         ) {
             ui.show_execution_location(&frame);
             let pc = frame.address.clone();
-            let architecture = frame.architecture.clone();
+            let architecture = frame.architecture;
             ui.request_disassembly_for_stop(pc, architecture);
         } else if let Some(ui) = weak_ui.upgrade() {
             ui.clear_execution_location();
@@ -459,7 +459,7 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
     );
     let state_for_response = Rc::clone(&state);
     let state_for_guard = Rc::clone(&state);
-    let varobj_for_response = varobj_name.clone();
+    let varobj_for_response = varobj_name;
     if client
         .request_with_print_limit_when(
             &command,
@@ -529,23 +529,18 @@ fn request_next_variable_update(client: &MiClient, state: Rc<RefCell<VariableRef
     }
     let next = {
         let mut state = state.borrow_mut();
-        while state.update_index < state.variables.len()
-            && (state.variables[state.update_index].varobj.is_none()
-                || !state.needs_update[state.update_index])
-        {
-            state.update_index += 1;
-        }
-        (state.update_index < state.variables.len()).then(|| {
+        loop {
             let index = state.update_index;
+            let Some(variable) = state.variables.get(index) else {
+                break None;
+            };
+            let varobj = variable.varobj.clone();
+            let needs_update = state.needs_update.get(index).copied().unwrap_or(false);
             state.update_index += 1;
-            (
-                index,
-                state.variables[index]
-                    .varobj
-                    .clone()
-                    .expect("variable update requires a varobj"),
-            )
-        })
+            if needs_update && let Some(varobj) = varobj {
+                break Some((index, varobj));
+            }
+        }
     };
     let Some((index, varobj)) = next else {
         let recreate = state.borrow().recreate_after_updates;
@@ -762,7 +757,7 @@ pub(super) fn request_variable_children(
         let ui_for_guard = ui.clone();
         let varobj_for_response = varobj.clone();
         let varobj_for_guard = varobj.clone();
-        let variable_for_response = variable.clone();
+        let variable_for_response = variable;
         if let Err(error) = client.request_with_print_limit_when(
             &command,
             AUTOMATIC_PRINT_ELEMENTS,
@@ -845,7 +840,7 @@ pub(super) fn request_variable_children(
             let varobj_for_guard = varobj_for_path.clone();
             let ui_for_request_error = ui_for_path.clone();
             let varobj_for_request_error = varobj_for_path.clone();
-            let dereference_varobj_for_response = dereference_varobj.clone();
+            let dereference_varobj_for_response = dereference_varobj;
             if client_for_path
                 .request_with_print_limit_when(
                     &command,

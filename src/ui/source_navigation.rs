@@ -356,7 +356,7 @@ impl Ui {
         let line_count = u32::try_from(document.buffer.line_count()).unwrap_or(u32::MAX);
         let dialog_for_go = dialog.clone();
         let entry_for_go = entry.clone();
-        let validation_for_go = validation.clone();
+        let validation_for_go = validation;
         go.connect_clicked(move |_| {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
@@ -690,7 +690,8 @@ impl Ui {
                     if ui.source_palette_generation.load(Ordering::Relaxed) != generation {
                         return;
                     }
-                    if let Some(handler) = ui.source_discovery_handler.borrow().clone() {
+                    let handler = ui.source_discovery_handler.borrow().clone();
+                    if let Some(handler) = handler {
                         handler(SourceDiscoveryRequest::Symbols { query, generation });
                     }
                 });
@@ -856,7 +857,8 @@ impl Ui {
             .source_loaded_generation
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
-        if let Some(handler) = self.source_discovery_handler.borrow().clone() {
+        let handler = self.source_discovery_handler.borrow().clone();
+        if let Some(handler) = handler {
             handler(SourceDiscoveryRequest::LoadedFiles(generation));
         }
     }

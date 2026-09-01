@@ -68,7 +68,7 @@ pub(super) fn populate_process(
             snapshot.process.push(fact("Command line", joined));
         }
     }
-    if let Ok(syscall) = fs::read_to_string(root.join("syscall")) {
+    if let Ok(syscall) = crate::bounded::read_string(&root.join("syscall"), MAX_PROC_TEXT_BYTES) {
         snapshot.process.push(fact(
             "Kernel syscall state",
             decode_syscall(syscall.trim(), executable_architecture(root)),
@@ -82,7 +82,7 @@ pub(super) fn populate_scheduler(
     status: &HashMap<String, String>,
     stat: Option<&ProcStat>,
 ) {
-    if let Ok(input) = fs::read_to_string(root.join("schedstat"))
+    if let Ok(input) = crate::bounded::read_string(&root.join("schedstat"), MAX_PROC_TEXT_BYTES)
         && let Some((runtime_ns, wait_ns, timeslices)) = parse_schedstat(&input)
     {
         snapshot.metrics.sched_runtime_ns = runtime_ns;
@@ -144,7 +144,7 @@ pub(super) fn populate_scheduler(
             ));
         }
     }
-    if let Ok(wchan) = fs::read_to_string(root.join("wchan")) {
+    if let Ok(wchan) = crate::bounded::read_string(&root.join("wchan"), MAX_PROC_TEXT_BYTES) {
         let wchan = wchan.trim();
         if !wchan.is_empty() && wchan != "0" {
             snapshot.scheduler.push(fact("Kernel wait channel", wchan));
@@ -210,7 +210,9 @@ pub(super) fn populate_security(
     ] {
         push_status(&mut snapshot.security, status, source, label);
     }
-    if let Ok(context) = fs::read_to_string(root.join("attr/current")) {
+    if let Ok(context) =
+        crate::bounded::read_string(&root.join("attr/current"), MAX_PROC_TEXT_BYTES)
+    {
         let context = context.trim();
         if !context.is_empty() {
             snapshot.security.push(fact("LSM context", context));
@@ -283,7 +285,7 @@ pub(super) fn populate_isolation(
                 .map(|(name, target)| fact(format!("{name} namespace"), target)),
         );
     }
-    if let Ok(cgroups) = fs::read_to_string(root.join("cgroup")) {
+    if let Ok(cgroups) = crate::bounded::read_string(&root.join("cgroup"), MAX_PROC_TEXT_BYTES) {
         snapshot.isolation.extend(
             cgroups
                 .lines()
@@ -310,10 +312,12 @@ pub(super) fn populate_runtime(snapshot: &mut KernelSnapshot, root: &Path) {
             },
         ));
     }
-    if let Ok(value) = fs::read_to_string(
-        root.parent()
+    if let Ok(value) = crate::bounded::read_string(
+        &root
+            .parent()
             .unwrap_or(root)
             .join("sys/kernel/randomize_va_space"),
+        MAX_PROC_TEXT_BYTES,
     ) {
         let description = match value.trim() {
             "0" => "disabled",
@@ -326,7 +330,9 @@ pub(super) fn populate_runtime(snapshot: &mut KernelSnapshot, root: &Path) {
             format!("{description} ({})", value.trim()),
         ));
     }
-    if let Ok(personality) = fs::read_to_string(root.join("personality")) {
+    if let Ok(personality) =
+        crate::bounded::read_string(&root.join("personality"), MAX_PROC_TEXT_BYTES)
+    {
         snapshot.runtime.push(fact(
             "Personality",
             format!("0x{}", personality.trim().trim_start_matches("0x")),
@@ -393,16 +399,19 @@ pub(super) fn populate_threads_and_signals(
         accumulate_signal_mask(&mut thread_blocked, status.blocked);
         let stat = read_proc_stat(&thread_root.join("stat"));
         let policy = read_thread_policy(&thread_root.join("sched"));
-        let wait_channel = fs::read_to_string(thread_root.join("wchan"))
-            .unwrap_or_default()
-            .trim()
-            .to_owned();
-        let syscall = fs::read_to_string(thread_root.join("syscall"))
-            .map(|value| decode_syscall(value.trim(), architecture))
-            .unwrap_or_default();
-        let schedstat = fs::read_to_string(thread_root.join("schedstat"))
-            .ok()
-            .and_then(|value| parse_schedstat(&value));
+        let wait_channel =
+            crate::bounded::read_string(&thread_root.join("wchan"), MAX_PROC_TEXT_BYTES)
+                .unwrap_or_default()
+                .trim()
+                .to_owned();
+        let syscall =
+            crate::bounded::read_string(&thread_root.join("syscall"), MAX_PROC_TEXT_BYTES)
+                .map(|value| decode_syscall(value.trim(), architecture))
+                .unwrap_or_default();
+        let schedstat =
+            crate::bounded::read_string(&thread_root.join("schedstat"), MAX_PROC_TEXT_BYTES)
+                .ok()
+                .and_then(|value| parse_schedstat(&value));
         threads.push(KernelThread {
             tid,
             name: status.name,

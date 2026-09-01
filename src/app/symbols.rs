@@ -115,7 +115,7 @@ pub(super) fn request_source_symbol(
     }
     let ui_for_response = ui.clone();
     let client_for_response = Rc::clone(&client);
-    let symbol_for_response = symbol.clone();
+    let symbol_for_response = symbol;
     if let Err(error) = client.request(&command, move |_, record| {
         let locations = record
             .is_done()
@@ -172,7 +172,7 @@ pub(super) fn load_library_symbols_for_source(ui: Weak<Ui>, client: Rc<MiClient>
     );
     let ui_for_response = ui.clone();
     let client_for_response = Rc::clone(&client);
-    let symbol_for_response = symbol.clone();
+    let symbol_for_response = symbol;
     if let Err(error) = client.request(&command, move |_, record| {
         if record.is_done() {
             request_source_symbol(

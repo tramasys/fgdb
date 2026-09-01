@@ -1081,9 +1081,11 @@ impl Inspector<'_> {
                         .map(|address| format_address(*address))
                         .collect::<Vec<_>>()
                         .join(" → ");
-                    bin.warning.as_ref().map_or(addresses.clone(), |warning| {
+                    if let Some(warning) = bin.warning.as_ref() {
                         format!("{addresses}  ·  {warning}")
-                    })
+                    } else {
+                        addresses
+                    }
                 };
                 self.push_inspectable_row(
                     name,

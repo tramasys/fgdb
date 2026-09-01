@@ -165,7 +165,7 @@ fn set_scheduler_locking(
     drop(current_ui);
     let command = format!("-gdb-set scheduler-locking {}", mode.gdb_value());
     let weak_ui = ui.clone();
-    let weak_ui_for_error = ui.clone();
+    let weak_ui_for_error = ui;
     let client_for_response = Rc::clone(&client);
     if client
         .request(&command, move |_, record| {
@@ -232,7 +232,7 @@ fn set_non_stop(ui: Weak<Ui>, client: Rc<MiClient>, enabled: bool) {
     drop(current_ui);
     let command = format!("-gdb-set non-stop {}", if enabled { "on" } else { "off" });
     let weak_ui = ui.clone();
-    let weak_ui_for_error = ui.clone();
+    let weak_ui_for_error = ui;
     if client
         .request(&command, move |_, record| {
             let Some(ui) = weak_ui.upgrade() else {
@@ -294,7 +294,7 @@ fn run_only(ui: Weak<Ui>, client: Rc<MiClient>, id: String) {
         return;
     }
     drop(current_ui);
-    let thread_for_resume = thread.clone();
+    let thread_for_resume = thread;
     set_scheduler_locking(
         ui,
         client,
@@ -388,7 +388,7 @@ fn request_all_backtraces(ui: Weak<Ui>, client: Rc<MiClient>, generation: u64) {
     current_ui.set_thread_action_pending(Some(ThreadActionPending::Analysis));
     drop(current_ui);
     let collection = Rc::new(RefCell::new(BacktraceCollection {
-        ui: ui.clone(),
+        ui,
         generation,
         remaining: threads.len(),
         traces: Vec::with_capacity(threads.len()),
@@ -505,7 +505,7 @@ fn request_thread_comparison(
     }
     drop(current_ui);
     let weak_ui = ui.clone();
-    let weak_ui_for_error = ui.clone();
+    let weak_ui_for_error = ui;
     let client_for_response = Rc::clone(&client);
     if client
         .request("-data-list-register-names", move |_, record| {
@@ -714,31 +714,30 @@ fn finish_comparison_if_ready(collection: &Rc<RefCell<ComparisonCollection>>) {
             std::mem::take(&mut collection.results),
         )
     };
+    let ComparisonResults {
+        left_frames: Some(left_frames),
+        right_frames: Some(right_frames),
+        left_registers: Some(left_registers),
+        right_registers: Some(right_registers),
+    } = results
+    else {
+        if let Some(ui) = ui
+            .upgrade()
+            .filter(|ui| ui.finish_thread_analysis_action(generation))
+        {
+            ui.show_thread_analysis_error(
+                generation,
+                "Thread comparison completed with an incomplete result",
+            );
+        }
+        return;
+    };
     let mut warnings = Vec::new();
-    let left_frames = unwrap_comparison_result(
-        results.left_frames.expect("comparison readiness checked"),
-        "Left stack",
-        &mut warnings,
-    );
-    let right_frames = unwrap_comparison_result(
-        results.right_frames.expect("comparison readiness checked"),
-        "Right stack",
-        &mut warnings,
-    );
-    let left_registers = unwrap_comparison_result(
-        results
-            .left_registers
-            .expect("comparison readiness checked"),
-        "Left registers",
-        &mut warnings,
-    );
-    let right_registers = unwrap_comparison_result(
-        results
-            .right_registers
-            .expect("comparison readiness checked"),
-        "Right registers",
-        &mut warnings,
-    );
+    let left_frames = unwrap_comparison_result(left_frames, "Left stack", &mut warnings);
+    let right_frames = unwrap_comparison_result(right_frames, "Right stack", &mut warnings);
+    let left_registers = unwrap_comparison_result(left_registers, "Left registers", &mut warnings);
+    let right_registers =
+        unwrap_comparison_result(right_registers, "Right registers", &mut warnings);
     let comparison = ThreadComparison {
         left,
         right,
@@ -839,7 +838,7 @@ fn select_thread_frame(ui: Weak<Ui>, client: Rc<MiClient>, thread: String, frame
     current_ui.set_thread_action_pending(Some(ThreadActionPending::Setting));
     drop(current_ui);
     let weak_ui = ui.clone();
-    let weak_ui_for_error = ui.clone();
+    let weak_ui_for_error = ui;
     if client
         .request(
             &format!("-thread-select {thread}"),

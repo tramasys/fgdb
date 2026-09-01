@@ -251,7 +251,8 @@ impl Ui {
         self.reset_thread_analysis();
         self.clear_thread_action_pending();
         self.defer_displayed_variable_object_deletions();
-        if let Some(handler) = self.disassembly_handler.borrow().as_ref() {
+        let disassembly_handler = self.disassembly_handler.borrow().clone();
+        if let Some(handler) = disassembly_handler {
             handler(DisassemblyRequest::Clear);
         }
         self.start_stop_refresh();

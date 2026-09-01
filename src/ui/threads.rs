@@ -199,7 +199,9 @@ impl Ui {
                     3 => SchedulerLockingMode::Replay,
                     _ => return,
                 };
-                ui.emit_thread_action(ThreadAction::SetSchedulerLocking(mode));
+                if !ui.emit_thread_action(ThreadAction::SetSchedulerLocking(mode)) {
+                    ui.restore_thread_policy_controls();
+                }
             });
         let weak_ui = Rc::downgrade(self);
         self.thread_controls
@@ -208,8 +210,10 @@ impl Ui {
                 let Some(ui) = weak_ui.upgrade() else {
                     return;
                 };
-                if !ui.thread_controls.scheduler_updating.get() {
-                    ui.emit_thread_action(ThreadAction::SetNonStop(button.is_active()));
+                if !ui.thread_controls.scheduler_updating.get()
+                    && !ui.emit_thread_action(ThreadAction::SetNonStop(button.is_active()))
+                {
+                    ui.restore_thread_policy_controls();
                 }
             });
 
@@ -310,12 +314,16 @@ impl Ui {
         self.update_thread_control_sensitivity();
     }
 
-    fn emit_thread_action(&self, action: ThreadAction) {
+    fn emit_thread_action(&self, action: ThreadAction) -> bool {
         if !self.thread_action_can_dispatch(&action) {
-            return;
+            return false;
         }
-        if let Some(handler) = self.thread_controls.action_handler.borrow().clone() {
+        let handler = self.thread_controls.action_handler.borrow().clone();
+        if let Some(handler) = handler {
             handler(action);
+            true
+        } else {
+            false
         }
     }
 
@@ -475,22 +483,34 @@ impl Ui {
     ) {
         self.scheduler_locking.set(scheduler);
         self.non_stop_mode.set(non_stop);
-        self.thread_controls.scheduler_updating.set(true);
-        self.thread_controls.scheduler_locking.set_selected(
-            scheduler.map_or(gtk::INVALID_LIST_POSITION, SchedulerLockingMode::index),
-        );
-        self.thread_controls
-            .non_stop
-            .set_active(non_stop.unwrap_or(false));
-        self.thread_controls.scheduler_updating.set(false);
-        self.thread_controls.mode_note.set_text(match non_stop {
+        self.restore_thread_policy_controls();
+        let mode_note = match non_stop {
             Some(true) => "Non-stop mode: individual threads can be frozen and thawed",
             Some(false) => {
                 "All-stop mode: Run only uses scheduler locking. Freeze and thaw require a new non-stop session"
             }
             None => "GDB did not report its thread-control mode",
-        });
+        };
+        set_label_text(&self.thread_controls.mode_note, mode_note);
         self.update_thread_control_sensitivity();
+    }
+
+    fn restore_thread_policy_controls(&self) {
+        self.thread_controls.scheduler_updating.set(true);
+        let scheduler = self
+            .scheduler_locking
+            .get()
+            .map_or(gtk::INVALID_LIST_POSITION, SchedulerLockingMode::index);
+        if self.thread_controls.scheduler_locking.selected() != scheduler {
+            self.thread_controls
+                .scheduler_locking
+                .set_selected(scheduler);
+        }
+        let non_stop = self.non_stop_mode.get().unwrap_or(false);
+        if self.thread_controls.non_stop.is_active() != non_stop {
+            self.thread_controls.non_stop.set_active(non_stop);
+        }
+        self.thread_controls.scheduler_updating.set(false);
     }
 
     pub(crate) fn scheduler_locking_mode(&self) -> Option<SchedulerLockingMode> {
@@ -517,6 +537,21 @@ impl Ui {
             .as_ref()
             .map(|state| state.source_threads.clone())
             .unwrap_or_default()
+    }
+
+    /// Update the authoritative thread state without repainting the rows.
+    /// A short step can pass through running and stopped faster than GTK can
+    /// present either state usefully, but command validation must still see
+    /// the running state immediately.
+    pub(super) fn stage_threads_for_execution(&self, threads: &[ThreadInfo]) {
+        {
+            let mut latest = self.latest_threads.borrow_mut();
+            let Some(latest) = latest.as_mut() else {
+                return;
+            };
+            latest.source_threads = threads.to_vec();
+        }
+        self.update_thread_control_sensitivity();
     }
 
     pub(crate) fn thread_is_stopped(&self, id: &str) -> bool {
@@ -552,14 +587,12 @@ impl Ui {
         self.show_threads(&threads);
     }
 
-    pub(super) fn filtered_sorted_threads(&self, threads: &[ThreadInfo]) -> Vec<ThreadInfo> {
-        let query = self
-            .thread_controls
-            .search
-            .text()
-            .trim()
-            .to_ascii_lowercase();
-        let state_filter = self.thread_controls.state_filter.selected();
+    pub(super) fn filtered_sorted_threads(
+        threads: &[ThreadInfo],
+        query: &str,
+        state_filter: u32,
+        sort: u32,
+    ) -> Vec<ThreadInfo> {
         let mut visible = threads
             .iter()
             .filter(|thread| match state_filter {
@@ -567,10 +600,10 @@ impl Ui {
                 2 => thread.state.eq_ignore_ascii_case("running"),
                 _ => true,
             })
-            .filter(|thread| thread_matches_query(thread, &query))
+            .filter(|thread| thread_matches_query(thread, query))
             .cloned()
             .collect::<Vec<_>>();
-        match self.thread_controls.sort.selected() {
+        match sort {
             1 => visible.sort_by(thread_id_order),
             2 => visible.sort_by(|left, right| {
                 thread_name(left)
@@ -610,11 +643,10 @@ impl Ui {
     }
 
     pub(super) fn sync_thread_controls(&self, threads: &[ThreadInfo], visible: usize) {
-        self.thread_controls.summary.set_text(&format!(
-            "{} visible of {} threads",
-            visible,
-            threads.len()
-        ));
+        set_label_text(
+            &self.thread_controls.summary,
+            &format!("{} visible of {} threads", visible, threads.len()),
+        );
         let labels = threads
             .iter()
             .map(|thread| {
@@ -682,6 +714,7 @@ impl Ui {
     pub(super) fn update_thread_control_sensitivity(&self) {
         let pending = self.thread_controls.action_pending.get().is_some();
         let ready = self.debugger_ready.get();
+        let visual_transition = self.execution_visual_transition_pending();
         let selection_available = ready
             && !self.command_pending.get()
             && !self.execution_transition_pending.get()
@@ -692,8 +725,10 @@ impl Ui {
             && !pending;
         let current_thread = self.current_thread_id();
         for (id, button) in self.thread_buttons.borrow().iter() {
-            button.set_sensitive(
+            set_transient_execution_sensitive(
+                button,
                 selection_available && current_thread.as_deref() != Some(id.as_str()),
+                visual_transition,
             );
         }
         let debugger_available = ready
@@ -704,11 +739,13 @@ impl Ui {
             && !self.resynchronization_pending.get();
         let stopped_inspection_available = debugger_available && !self.debug_state_stale.get();
         for (level, button) in self.frame_buttons.borrow().iter() {
-            button.set_sensitive(
+            set_transient_execution_sensitive(
+                button,
                 stopped_inspection_available
                     && self.inferior_action_pending.get().is_none()
                     && !pending
                     && self.selected_frame_level.get() != *level,
+                visual_transition,
             );
         }
         let latest = self.latest_threads.borrow();
@@ -727,28 +764,42 @@ impl Ui {
             .is_some_and(|thread| thread.state == "running");
         let non_stop = self.non_stop_mode.get() == Some(true);
         let all_threads_stopped = threads.iter().all(|thread| thread.state != "running");
-        self.thread_controls
-            .refresh
-            .set_sensitive(debugger_available && !pending);
-        self.thread_controls
-            .scheduler_locking
-            .set_sensitive(debugger_available && !pending);
-        self.thread_controls
-            .non_stop
-            .set_sensitive(debugger_available && !pending && !self.inferior_has_started());
-        self.thread_controls.run_only.set_sensitive(
-            debugger_available && !pending && selected_stopped && all_threads_stopped,
+        set_transient_execution_sensitive(
+            &self.thread_controls.refresh,
+            debugger_available && !pending,
+            visual_transition,
         );
-        self.thread_controls
-            .freeze
-            .set_sensitive(debugger_available && !pending && non_stop && selected_running);
-        self.thread_controls
-            .thaw
-            .set_sensitive(debugger_available && !pending && non_stop && selected_stopped);
-        self.thread_controls.backtraces.set_sensitive(
+        set_transient_execution_sensitive(
+            &self.thread_controls.scheduler_locking,
+            debugger_available && !pending,
+            visual_transition,
+        );
+        set_transient_execution_sensitive(
+            &self.thread_controls.non_stop,
+            debugger_available && !pending && !self.inferior_has_started(),
+            visual_transition,
+        );
+        set_transient_execution_sensitive(
+            &self.thread_controls.run_only,
+            debugger_available && !pending && selected_stopped && all_threads_stopped,
+            visual_transition || self.inferior_running.get(),
+        );
+        set_transient_execution_sensitive(
+            &self.thread_controls.freeze,
+            debugger_available && !pending && non_stop && selected_running,
+            visual_transition,
+        );
+        set_transient_execution_sensitive(
+            &self.thread_controls.thaw,
+            debugger_available && !pending && non_stop && selected_stopped,
+            visual_transition,
+        );
+        set_transient_execution_sensitive(
+            &self.thread_controls.backtraces,
             debugger_available
                 && !pending
                 && threads.iter().any(|thread| thread.state == "stopped"),
+            visual_transition,
         );
         let ids = self.thread_controls.compare_ids.borrow();
         let left = ids.get(self.thread_controls.compare_left.selected() as usize);
@@ -763,9 +814,11 @@ impl Ui {
                     .count()
                     == 2
         });
-        self.thread_controls
-            .compare
-            .set_sensitive(debugger_available && !pending && comparable);
+        set_transient_execution_sensitive(
+            &self.thread_controls.compare,
+            debugger_available && !pending && comparable,
+            visual_transition,
+        );
     }
 
     fn begin_thread_analysis(self: &Rc<Self>, title: &str, detail: &str) -> u64 {

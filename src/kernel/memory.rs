@@ -70,7 +70,7 @@ pub(super) fn populate_memory(
             .get("VmPin")
             .and_then(|value| parse_proc_quantity(value))
             .unwrap_or(0);
-        if let Ok(statm) = fs::read_to_string(root.join("statm"))
+        if let Ok(statm) = crate::bounded::read_string(&root.join("statm"), MAX_PROC_TEXT_BYTES)
             && let Some((virtual_bytes, rss)) = parse_statm(&statm, accounting.page_size)
         {
             accounting.statm_virtual_bytes = Some(virtual_bytes);

@@ -120,7 +120,8 @@ impl Ui {
             }
             expressions.borrow_mut().push(expression);
             entry.set_text("");
-            if let Some(refresh) = refresh.borrow().as_ref() {
+            let refresh = refresh.borrow().clone();
+            if let Some(refresh) = refresh {
                 refresh();
             }
         });
@@ -150,7 +151,8 @@ impl Ui {
                 expressions
                     .borrow_mut()
                     .retain(|expression| expression != &variable.name);
-                if let Some(refresh) = refresh.borrow().as_ref() {
+                let refresh = refresh.borrow().clone();
+                if let Some(refresh) = refresh {
                     refresh();
                 }
             });
@@ -190,7 +192,8 @@ impl Ui {
                         row.set_expanded(!row.is_expanded());
                     } else {
                         let variable = node.variable;
-                        if let Some(editor_handler) = editor_handler.borrow().as_ref() {
+                        let editor_handler = editor_handler.borrow().clone();
+                        if let Some(editor_handler) = editor_handler {
                             editor_handler(variable);
                         } else {
                             open_variable_editor(
