@@ -1,17 +1,17 @@
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    time::{Instant, SystemTime, UNIX_EPOCH},
-};
+use std::collections::HashMap;
 
 mod elf;
 mod memory;
 mod process;
+mod procfs;
 mod resources;
+mod snapshot;
 mod startup;
 
 const MAX_PROC_TEXT_BYTES: usize = 2 * 1024 * 1024;
 
+pub(crate) use procfs::{read_local_parent_pid, read_local_target_abi, verified_proc_root};
+pub(crate) use snapshot::read_snapshot;
 pub(crate) use startup::{
     ProcessArgument, ProcessEnvironment, ProcessStartupSnapshot, read_process_startup,
 };
@@ -392,179 +392,6 @@ struct KernelMetrics {
     cgroup_memory_pressure_us: u64,
     cgroup_io_pressure_us: u64,
     cgroup_metrics_available: bool,
-}
-
-pub(crate) fn verified_proc_root(pid: u32, debugger_pid: u32) -> Result<PathBuf, String> {
-    let root = PathBuf::from(format!("/proc/{pid}"));
-    verified_proc_identity(&root, pid, debugger_pid)?;
-    Ok(root)
-}
-
-fn verified_proc_identity(root: &Path, pid: u32, debugger_pid: u32) -> Result<u64, String> {
-    let before = process::read_proc_stat(&root.join("stat"))
-        .ok_or_else(|| format!("Cannot establish the identity of process {pid}"))?;
-    let status = crate::bounded::read_string(&root.join("status"), 1024 * 1024)
-        .map_err(|error| format!("Cannot inspect /proc/{pid}/status: {error}"))?;
-    verify_tracer(pid, debugger_pid, &status)?;
-    let after = process::read_proc_stat(&root.join("stat"))
-        .ok_or_else(|| format!("Process {pid} disappeared while its identity was checked"))?;
-    if before.start_time != after.start_time {
-        return Err(format!(
-            "Process {pid} changed while its identity was checked"
-        ));
-    }
-    Ok(before.start_time)
-}
-
-fn read_verified_local_proc<T>(
-    pid: u32,
-    debugger_pid: u32,
-    read: impl FnOnce(&Path) -> Result<T, String>,
-) -> Result<T, String> {
-    let root = PathBuf::from(format!("/proc/{pid}"));
-    let before = process::read_proc_stat(&root.join("stat"))
-        .ok_or_else(|| format!("Cannot establish the identity of process {pid}"))?;
-    let before_status = crate::bounded::read_string(&root.join("status"), 1024 * 1024)
-        .map_err(|error| format!("Cannot inspect /proc/{pid}/status: {error}"))?;
-    verify_tracer(pid, debugger_pid, &before_status)?;
-    let value = read(&root)?;
-    let after_status = crate::bounded::read_string(&root.join("status"), 1024 * 1024)
-        .map_err(|error| format!("Cannot revalidate /proc/{pid}/status: {error}"))?;
-    verify_tracer(pid, debugger_pid, &after_status)?;
-    let after = process::read_proc_stat(&root.join("stat"))
-        .ok_or_else(|| format!("Process {pid} disappeared while its data was being read"))?;
-    if before.start_time != after.start_time {
-        return Err(format!(
-            "Process {pid} changed while its procfs data was being read"
-        ));
-    }
-    Ok(value)
-}
-
-/// Returns the ABI encoded by the traced process' executable.
-///
-/// GDB often reports its architecture and byte order as `auto`, especially
-/// before the inferior has stopped. Reading the already-verified `/proc` entry
-/// gives local sessions an authoritative fallback without trusting an
-/// arbitrary PID supplied by debugger output.
-pub(crate) fn read_local_target_abi(
-    pid: u32,
-    debugger_pid: u32,
-) -> Option<(
-    crate::debugger::TargetArchitecture,
-    crate::debugger::TargetEndian,
-    u32,
-)> {
-    read_verified_local_proc(pid, debugger_pid, |root| {
-        let bytes = crate::bounded::read_prefix(&root.join("exe"), 40)
-            .map_err(|error| format!("Cannot inspect /proc/{pid}/exe: {error}"))?;
-        crate::debugger::TargetArchitecture::from_elf_ident(&bytes)
-            .ok_or_else(|| format!("Cannot identify the executable ABI for process {pid}"))
-    })
-    .ok()
-}
-
-pub(crate) fn read_local_parent_pid(pid: u32, debugger_pid: u32) -> Option<u32> {
-    read_verified_local_proc(pid, debugger_pid, |root| {
-        let status = crate::bounded::read_string(&root.join("status"), 1024 * 1024)
-            .map_err(|error| format!("Cannot inspect /proc/{pid}/status: {error}"))?;
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix("PPid:"))
-            .and_then(|value| value.trim().parse().ok())
-            .ok_or_else(|| format!("/proc/{pid}/status did not expose PPid"))
-    })
-    .ok()
-}
-
-fn verify_tracer(pid: u32, debugger_pid: u32, status: &str) -> Result<(), String> {
-    let tracer = status
-        .lines()
-        .find_map(|line| line.strip_prefix("TracerPid:"))
-        .and_then(|value| value.trim().parse::<u32>().ok())
-        .ok_or_else(|| format!("/proc/{pid}/status did not expose TracerPid"))?;
-    if tracer != debugger_pid {
-        return Err(format!(
-            "PID {pid} is not a local inferior traced by this GDB process (expected tracer {debugger_pid}, found {tracer})"
-        ));
-    }
-    Ok(())
-}
-
-pub(crate) fn read_snapshot(
-    pid: u32,
-    debugger_pid: u32,
-    include_tls_metadata: bool,
-) -> Result<KernelSnapshot, String> {
-    let root = verified_proc_root(pid, debugger_pid)?;
-    let snapshot = read_snapshot_from(&root, pid, include_tls_metadata)?;
-    // Revalidate ownership after the potentially expensive reads. This closes
-    // the window where GDB detaches (or the PID is recycled) during collection.
-    verified_proc_root(pid, debugger_pid)?;
-    Ok(snapshot)
-}
-
-fn read_snapshot_from(
-    root: &Path,
-    pid: u32,
-    include_tls_metadata: bool,
-) -> Result<KernelSnapshot, String> {
-    let started = Instant::now();
-    let status = process::read_key_values(&root.join("status"))
-        .map_err(|error| format!("Cannot inspect /proc/{pid}/status: {error}"))?;
-    let stat = process::read_proc_stat(&root.join("stat"))
-        .ok_or_else(|| format!("Cannot establish the identity of process {pid}"))?;
-    let identity = Some(stat.start_time);
-    let mut snapshot = KernelSnapshot {
-        pid,
-        identity,
-        ..KernelSnapshot::default()
-    };
-
-    process::populate_process(&mut snapshot, root, &status);
-    memory::populate_mappings(&mut snapshot, root);
-    memory::populate_memory(&mut snapshot, root, &status);
-    memory::populate_numa(&mut snapshot, root);
-    memory::populate_page_samples(&mut snapshot, root);
-    if include_tls_metadata {
-        elf::populate_tls_metadata(&mut snapshot, root);
-        snapshot.tls_metadata_scanned = true;
-    }
-    process::populate_scheduler(&mut snapshot, root, &status, Some(&stat));
-    process::populate_security(&mut snapshot, root, &status);
-    process::populate_io(&mut snapshot, root);
-    process::populate_isolation(&mut snapshot, root, &status);
-    process::populate_runtime(&mut snapshot, root);
-    process::populate_threads_and_signals(&mut snapshot, root, &status);
-    process::populate_hierarchy(&mut snapshot, root, &status);
-    resources::populate_constraints(&mut snapshot, root);
-    resources::populate_descriptors(&mut snapshot, root);
-    resources::populate_limits(&mut snapshot, root);
-    resources::populate_kernel_policy(&mut snapshot, root);
-    populate_diagnostics(&mut snapshot);
-
-    snapshot.metrics.minor_faults = stat.minor_faults;
-    snapshot.metrics.major_faults = stat.major_faults;
-    snapshot.metrics.user_ticks = stat.user_ticks;
-    snapshot.metrics.system_ticks = stat.system_ticks;
-    snapshot.metrics.mappings = snapshot.mappings.len() as u64;
-    snapshot.metrics.descriptors = snapshot.file_descriptors.len() as u64;
-
-    let after = process::read_proc_stat(&root.join("stat"))
-        .ok_or_else(|| format!("Process {pid} disappeared while its snapshot was being read"))?;
-    if stat.start_time != after.start_time {
-        return Err(String::from(
-            "The inferior changed while its procfs snapshot was being read",
-        ));
-    }
-    snapshot.captured_at_millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| {
-            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
-        });
-    snapshot.capture_duration_micros =
-        u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
-    Ok(snapshot)
 }
 
 impl KernelSnapshot {
@@ -1308,17 +1135,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rejects_procfs_data_not_traced_by_this_debugger() {
-        let status = "Name:\tdemo\nTracerPid:\t42\nThreads:\t1\n";
-        assert!(verify_tracer(7, 42, status).is_ok());
-        assert!(
-            verify_tracer(7, 41, status)
-                .unwrap_err()
-                .contains("found 42")
-        );
-    }
-
-    #[test]
     fn computes_signed_snapshot_deltas() {
         let mut old = KernelSnapshot {
             pid: 4,
@@ -1475,8 +1291,8 @@ mod tests {
     #[test]
     fn reads_a_live_procfs_snapshot() {
         let pid = std::process::id();
-        let snapshot =
-            read_snapshot_from(&PathBuf::from(format!("/proc/{pid}")), pid, true).unwrap();
+        let root = std::path::PathBuf::from(format!("/proc/{pid}"));
+        let snapshot = snapshot::read_snapshot_for_test(&root, pid, true).unwrap();
         assert_eq!(snapshot.pid, std::process::id());
         assert!(!snapshot.process.is_empty());
         assert!(!snapshot.mappings.is_empty());

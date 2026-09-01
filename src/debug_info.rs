@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::OnceLock,
     time::SystemTime,
@@ -19,6 +19,8 @@ const MAX_ELF_SECTIONS: usize = 100_000;
 const MAX_SECTION_HEADER_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SECTION_NAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_METADATA_SECTION_BYTES: usize = 1024 * 1024;
+const DEBUGLINK_CRC_BUFFER_BYTES: usize = 64 * 1024;
+const GNU_DEBUGLINK_CRC_TABLE: [u32; 256] = gnu_debuglink_crc_table();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModuleDebugMetadata {
@@ -335,6 +337,7 @@ pub(crate) fn refresh_module_debug_file(mut metadata: ModuleDebugMetadata) -> Mo
     metadata.separate_debug_file = find_separate_debug_file(
         &metadata.path,
         metadata.debuglink.as_deref(),
+        metadata.debuglink_crc,
         metadata.build_id.as_deref(),
     );
     metadata.suggestion = (!metadata.embedded_debug_info && metadata.separate_debug_file.is_none())
@@ -398,31 +401,33 @@ fn align_up(value: usize, alignment: usize) -> Option<usize> {
 fn find_separate_debug_file(
     module: &Path,
     debuglink: Option<&str>,
+    debuglink_crc: Option<u32>,
     build_id: Option<&str>,
 ) -> Option<PathBuf> {
-    let mut candidates = Vec::new();
+    let mut debuglink_candidates = Vec::new();
     if let Some(debuglink) = debuglink.filter(|debuglink| valid_debuglink(debuglink)) {
         let parent = module.parent().unwrap_or_else(|| Path::new("."));
-        candidates.push(parent.join(debuglink));
-        candidates.push(parent.join(".debug").join(debuglink));
+        debuglink_candidates.push(parent.join(debuglink));
+        debuglink_candidates.push(parent.join(".debug").join(debuglink));
         if module.is_absolute() {
             let relative_parent = parent.strip_prefix("/").unwrap_or(parent);
-            candidates.push(
+            debuglink_candidates.push(
                 Path::new("/usr/lib/debug")
                     .join(relative_parent)
                     .join(debuglink),
             );
         }
     }
+    let mut build_id_candidates = Vec::new();
     if let Some(build_id) = build_id.filter(|build_id| build_id.len() > 2) {
         let (prefix, suffix) = build_id.split_at(2);
-        candidates.push(
+        build_id_candidates.push(
             Path::new("/usr/lib/debug/.build-id")
                 .join(prefix)
                 .join(format!("{suffix}.debug")),
         );
         if let Some(cache) = std::env::var_os("HOME") {
-            candidates.push(
+            build_id_candidates.push(
                 PathBuf::from(cache)
                     .join(".cache/debuginfod_client")
                     .join(build_id)
@@ -430,7 +435,68 @@ fn find_separate_debug_file(
             );
         }
     }
-    candidates.into_iter().find(|candidate| candidate.is_file())
+    select_separate_debug_file(debuglink_candidates, debuglink_crc, build_id_candidates)
+}
+
+fn select_separate_debug_file(
+    debuglink_candidates: impl IntoIterator<Item = PathBuf>,
+    debuglink_crc: Option<u32>,
+    build_id_candidates: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+    if let Some(expected_crc) = debuglink_crc {
+        for candidate in debuglink_candidates {
+            if candidate.is_file()
+                && gnu_debuglink_crc(&candidate).is_ok_and(|crc| crc == expected_crc)
+            {
+                return Some(candidate);
+            }
+        }
+    }
+    build_id_candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
+fn gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
+    let mut file = File::open(path)?;
+    let mut buffer = [0_u8; DEBUGLINK_CRC_BUFFER_BYTES];
+    let mut crc = u32::MAX;
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        crc = update_gnu_debuglink_crc(crc, &buffer[..read]);
+    }
+    Ok(!crc)
+}
+
+fn update_gnu_debuglink_crc(mut crc: u32, bytes: &[u8]) -> u32 {
+    for byte in bytes {
+        let index = ((crc ^ u32::from(*byte)) & 0xff) as usize;
+        crc = GNU_DEBUGLINK_CRC_TABLE[index] ^ (crc >> 8);
+    }
+    crc
+}
+
+const fn gnu_debuglink_crc_table() -> [u32; 256] {
+    let mut table = [0_u32; 256];
+    let mut index = 0_usize;
+    while index < table.len() {
+        let mut value = index as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            value = if value & 1 != 0 {
+                0xedb8_8320 ^ (value >> 1)
+            } else {
+                value >> 1
+            };
+            bit += 1;
+        }
+        table[index] = value;
+        index += 1;
+    }
+    table
 }
 
 fn valid_debuglink(debuglink: &str) -> bool {
@@ -492,6 +558,39 @@ fn hexadecimal(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "fgdb-{label}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&path).expect("create test directory");
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn crc_bytes(chunks: &[&[u8]]) -> u32 {
+        let crc = chunks
+            .iter()
+            .fold(u32::MAX, |crc, bytes| update_gnu_debuglink_crc(crc, bytes));
+        !crc
+    }
 
     #[test]
     fn reads_build_id_and_debug_sections_from_the_current_executable() {
@@ -546,6 +645,88 @@ mod tests {
         assert_eq!(
             gnu_debuglink(&big, false),
             Some((Some(String::from("sample.debug")), Some(0x1234_5678)))
+        );
+
+        let mut truncated = b"sample.debug\0".to_vec();
+        truncated.resize(align_up(truncated.len(), 4).unwrap(), 0);
+        assert_eq!(
+            gnu_debuglink(&truncated, true),
+            Some((Some(String::from("sample.debug")), None))
+        );
+    }
+
+    #[test]
+    fn computes_the_gnu_debuglink_crc_incrementally() {
+        assert_eq!(crc_bytes(&[b""]), 0);
+        assert_eq!(crc_bytes(&[b"123456789"]), 0xcbf4_3926);
+        assert_eq!(
+            crc_bytes(&[b"123", b"456", b"789"]),
+            0xcbf4_3926,
+            "chunk boundaries must not affect the GNU CRC"
+        );
+    }
+
+    #[test]
+    fn accepts_only_debuglink_candidates_with_matching_contents() {
+        let directory = TestDirectory::new("debuglink-match");
+        let candidate = directory.path().join("sample.debug");
+        std::fs::write(&candidate, b"matching debug information").unwrap();
+        let expected = gnu_debuglink_crc(&candidate).unwrap();
+
+        assert_eq!(
+            select_separate_debug_file([candidate.clone()], Some(expected), []),
+            Some(candidate.clone())
+        );
+        assert_eq!(
+            select_separate_debug_file([candidate], Some(expected ^ 1), []),
+            None
+        );
+    }
+
+    #[test]
+    fn continues_after_a_debuglink_crc_mismatch() {
+        let directory = TestDirectory::new("debuglink-fallback");
+        let first = directory.path().join("first.debug");
+        let second = directory.path().join("second.debug");
+        std::fs::write(&first, b"stale debug information").unwrap();
+        std::fs::write(&second, b"matching debug information").unwrap();
+        let expected = gnu_debuglink_crc(&second).unwrap();
+
+        assert_eq!(
+            select_separate_debug_file([first, second.clone()], Some(expected), []),
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn missing_or_malformed_debuglinks_do_not_produce_false_matches() {
+        let directory = TestDirectory::new("debuglink-malformed");
+        let missing = directory.path().join("missing.debug");
+        let existing = directory.path().join("existing.debug");
+        std::fs::write(&existing, b"unvalidated debug information").unwrap();
+
+        assert_eq!(
+            select_separate_debug_file([missing], Some(0x1234_5678), []),
+            None
+        );
+        assert_eq!(
+            select_separate_debug_file([existing], None, []),
+            None,
+            "a truncated debuglink CRC must not weaken candidate validation"
+        );
+    }
+
+    #[test]
+    fn build_id_candidates_do_not_use_the_debuglink_crc() {
+        let directory = TestDirectory::new("build-id-candidate");
+        let stale_debuglink = directory.path().join("stale.debug");
+        let build_id = directory.path().join("build-id.debug");
+        std::fs::write(&stale_debuglink, b"stale").unwrap();
+        std::fs::write(&build_id, b"build-id selected file").unwrap();
+
+        assert_eq!(
+            select_separate_debug_file([stale_debuglink], Some(0x1234_5678), [build_id.clone()]),
+            Some(build_id)
         );
     }
 }

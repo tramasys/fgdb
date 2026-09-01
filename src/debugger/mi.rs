@@ -1,181 +1,45 @@
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, VecDeque},
-    fs::File,
-    io::{self, Read, Write},
-    os::fd::{AsRawFd, OwnedFd},
+    io::{self, Read},
+    os::fd::AsRawFd,
     path::PathBuf,
     rc::{Rc, Weak},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use gtk::glib;
-use nix::{
-    fcntl::{FcntlArg, OFlag, fcntl},
-    pty::openpty,
-    sys::termios::{SetArg, cfmakeraw, tcgetattr, tcsetattr},
-    unistd::ttyname,
-};
 
+mod parser;
 mod protocol;
+mod requests;
+mod transport;
 
+pub use parser::{parse_record, quote};
 pub use protocol::{
     GdbCapabilities, MiEvent, MiListItem, MiRecord, MiResult, MiValue, result_field,
 };
 
-type ResponseHandler = Box<dyn FnOnce(&MiClient, MiRecord)>;
-type ScopedResponseHandler = Box<dyn FnOnce(&MiClient, MiRecord, String)>;
+#[cfg(test)]
+use parser::{MAX_MI_NESTING, parse_stream_output};
+use parser::{MAX_MI_RECORD_BYTES, parse_any_stream_output};
+#[cfg(test)]
+use requests::MAX_MI_COMMAND_BYTES;
+use requests::{
+    MAX_CAPTURED_CONSOLE_BYTES, MAX_PENDING_REQUESTS, MAX_REQUEST_LIFETIME, MAX_SCOPED_REQUESTS,
+    PendingRequest, REQUEST_TIMEOUT, REQUEST_TIMEOUT_POLL, ResponseHandler, ScopedMiRequest,
+    error_record, scoped_mi_command, synthetic_error_record, validate_console_command,
+    validate_mi_command,
+};
+use transport::{
+    IoSource, MAX_MI_WRITE_BATCH_BYTES, MAX_QUEUED_MI_BYTES, MiTransport, OutgoingQueue,
+    complete_input_end, drain_outgoing, open_transport,
+};
+
 type EventHandler = Box<dyn Fn(&MiClient, MiEvent)>;
 
-const MAX_MI_RECORD_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RETAINED_MI_INPUT_BYTES: usize = 256 * 1024;
-const MAX_MI_NESTING: usize = 64;
-const MAX_MI_ITEMS: usize = 100_000;
-const MAX_MI_COMMAND_BYTES: usize = 1024 * 1024;
-const MAX_QUEUED_MI_BYTES: usize = 8 * 1024 * 1024;
-const MAX_MI_WRITE_BATCH_BYTES: usize = 256 * 1024;
-const MAX_PENDING_REQUESTS: usize = 4096;
-const MAX_SCOPED_REQUESTS: usize = 1024;
-const MAX_CAPTURED_CONSOLE_BYTES: usize = 1024 * 1024;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_REQUEST_LIFETIME: Duration = Duration::from_secs(5 * 60);
-const REQUEST_TIMEOUT_POLL: Duration = Duration::from_millis(250);
 const RUST_PRINTER_PROBE: &str = "python import gdb; next(printer for holder in [*gdb.objfiles(), gdb.current_progspace()] for printer in getattr(holder, \"pretty_printers\", []) if getattr(printer, \"name\", \"\") == \"rust\")";
-
-struct PendingRequest {
-    deadline: Instant,
-    hard_deadline: Instant,
-    progress_generation: u64,
-    is_current: Option<Box<dyn Fn() -> bool>>,
-    handler: ResponseHandler,
-}
-
-struct ScopedMiRequest {
-    token: u64,
-    command: String,
-    response: Option<MiRecord>,
-    output: String,
-    expect_nested_mi: bool,
-    is_current: Box<dyn Fn() -> bool>,
-    handler: ScopedResponseHandler,
-    deadline: Instant,
-    hard_deadline: Instant,
-}
-
-struct OutgoingCommand {
-    token: u64,
-    bytes: Vec<u8>,
-    written: usize,
-}
-
-#[derive(Default)]
-struct OutgoingQueue {
-    commands: VecDeque<OutgoingCommand>,
-    remaining_bytes: usize,
-}
-
-impl OutgoingQueue {
-    fn enqueue(&mut self, token: u64, command: &str) -> io::Result<()> {
-        let capacity = command
-            .len()
-            .checked_add(21)
-            .ok_or_else(|| io::Error::other("GDB/MI command size overflow"))?;
-        let mut bytes = Vec::with_capacity(capacity);
-        writeln!(&mut bytes, "{token}{command}")?;
-        let new_size = self
-            .remaining_bytes
-            .checked_add(bytes.len())
-            .ok_or_else(|| io::Error::other("GDB/MI output queue size overflow"))?;
-        if new_size > MAX_QUEUED_MI_BYTES {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "GDB/MI output queue exceeds the 8 MiB limit",
-            ));
-        }
-        self.remaining_bytes = new_size;
-        self.commands.push_back(OutgoingCommand {
-            token,
-            bytes,
-            written: 0,
-        });
-        Ok(())
-    }
-
-    fn advance(&mut self, count: usize) {
-        let Some(command) = self.commands.front_mut() else {
-            return;
-        };
-        let count = count.min(command.bytes.len().saturating_sub(command.written));
-        command.written += count;
-        self.remaining_bytes = self.remaining_bytes.saturating_sub(count);
-        if command.written == command.bytes.len() {
-            self.commands.pop_front();
-        }
-    }
-
-    fn cancel_unstarted(&mut self, token: u64) -> bool {
-        let Some(index) = self
-            .commands
-            .iter()
-            .position(|command| command.token == token && command.written == 0)
-        else {
-            return false;
-        };
-        if let Some(command) = self.commands.remove(index) {
-            self.remaining_bytes = self.remaining_bytes.saturating_sub(command.bytes.len());
-        }
-        true
-    }
-
-    fn is_empty(&self) -> bool {
-        self.commands.is_empty()
-    }
-
-    fn clear(&mut self) {
-        self.commands.clear();
-        self.remaining_bytes = 0;
-    }
-}
-
-fn drain_outgoing(
-    writer: &mut impl Write,
-    outgoing: &mut OutgoingQueue,
-    byte_budget: usize,
-) -> io::Result<bool> {
-    let mut written_this_batch = 0_usize;
-    while written_this_batch < byte_budget {
-        let write_result = {
-            let Some(command) = outgoing.commands.front() else {
-                return Ok(true);
-            };
-            let remaining_budget = byte_budget - written_this_batch;
-            let remaining = &command.bytes[command.written..];
-            writer.write(&remaining[..remaining.len().min(remaining_budget)])
-        };
-        match write_result {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "could not write a GDB/MI command",
-                ));
-            }
-            Ok(count) => {
-                outgoing.advance(count);
-                written_this_batch += count;
-            }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(false),
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(outgoing.is_empty())
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum IoSource {
-    Read,
-    Write,
-}
 
 pub struct MiClient {
     transport: RefCell<MiTransport>,
@@ -201,31 +65,6 @@ pub struct MiClient {
     discarding_oversized_line: Cell<bool>,
     thread_exit_since_prompt: Cell<bool>,
     unusable_reported: Cell<bool>,
-}
-
-struct MiTransport {
-    master: File,
-    _slave: OwnedFd,
-    slave_path: PathBuf,
-}
-
-fn open_transport() -> io::Result<MiTransport> {
-    let pty = openpty(None, None).map_err(io::Error::other)?;
-    let slave_path = ttyname(&pty.slave).map_err(io::Error::other)?;
-
-    let mut terminal_settings = tcgetattr(&pty.slave).map_err(io::Error::other)?;
-    cfmakeraw(&mut terminal_settings);
-    tcsetattr(&pty.slave, SetArg::TCSANOW, &terminal_settings).map_err(io::Error::other)?;
-
-    let master = File::from(pty.master);
-    let flags = fcntl(&master, FcntlArg::F_GETFL).map_err(io::Error::other)?;
-    let flags = OFlag::from_bits_truncate(flags) | OFlag::O_NONBLOCK;
-    fcntl(&master, FcntlArg::F_SETFL(flags)).map_err(io::Error::other)?;
-    Ok(MiTransport {
-        master,
-        _slave: pty.slave,
-        slave_path,
-    })
 }
 
 impl MiClient {
@@ -1434,27 +1273,6 @@ fn gdb_version_from_banner(output: &str) -> Option<String> {
     })
 }
 
-#[cfg(test)]
-fn parse_stream_output(input: &str) -> Result<String, String> {
-    parse_stream_output_with_kinds(input, b"~")
-}
-
-fn parse_any_stream_output(input: &str) -> Result<String, String> {
-    parse_stream_output_with_kinds(input, b"~&@")
-}
-
-fn parse_stream_output_with_kinds(input: &str, kinds: &[u8]) -> Result<String, String> {
-    let mut parser = Parser::new(input);
-    if !parser.next().is_some_and(|kind| kinds.contains(&kind)) {
-        return Err(String::from("not a supported stream record"));
-    }
-    let output = parser.c_string()?;
-    if parser.position != parser.input.len() {
-        return Err(String::from("trailing console stream data"));
-    }
-    Ok(output)
-}
-
 fn gdb_reports_unusable_target(output: &str) -> bool {
     output.contains("Further execution is probably impossible")
         || output.contains("further execution is probably impossible")
@@ -1463,84 +1281,6 @@ fn gdb_reports_unusable_target(output: &str) -> bool {
 fn looks_like_mi_record(line: &str) -> bool {
     let marker = line.bytes().find(|byte| !byte.is_ascii_digit());
     matches!(marker, Some(b'^' | b'*' | b'+' | b'='))
-}
-
-fn error_record(message: &str) -> MiRecord {
-    synthetic_error_record("error", message)
-}
-
-fn synthetic_error_record(class: &str, message: &str) -> MiRecord {
-    MiRecord {
-        token: None,
-        kind: '^',
-        class: class.to_owned(),
-        results: vec![MiResult {
-            name: String::from("msg"),
-            value: MiValue::Const(message.to_owned()),
-        }],
-    }
-}
-
-fn scoped_mi_command(command: &str, elements: usize) -> String {
-    let console_command = format!(
-        "with print elements {elements} -- interpreter-exec mi {}",
-        quote(command)
-    );
-    format!("-interpreter-exec console {}", quote(&console_command))
-}
-
-fn validate_console_command(command: &str) -> io::Result<()> {
-    if command.trim().is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "GDB console command cannot be empty",
-        ));
-    }
-    if command.len() > MAX_MI_COMMAND_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "GDB console command exceeds the 1 MiB limit",
-        ));
-    }
-    if command
-        .bytes()
-        .any(|byte| matches!(byte, b'\0' | b'\n' | b'\r'))
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "GDB console command contains NUL or a line break",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_mi_command(command: &str) -> io::Result<()> {
-    if command.is_empty() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "GDB/MI command cannot be empty",
-        ));
-    }
-    if command.len() > MAX_MI_COMMAND_BYTES {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "GDB/MI command exceeds the 1 MiB limit",
-        ));
-    }
-    if command.bytes().any(|byte| matches!(byte, b'\n' | b'\r')) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "GDB/MI command contains a line break",
-        ));
-    }
-    Ok(())
-}
-
-fn complete_input_end(incoming: &[u8]) -> Option<usize> {
-    incoming
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map(|end| end + 1)
 }
 
 impl Drop for MiClient {
@@ -1555,319 +1295,6 @@ impl Drop for MiClient {
             source.remove();
         }
     }
-}
-
-pub fn parse_record(input: &str) -> Result<MiRecord, String> {
-    if input.len() > MAX_MI_RECORD_BYTES {
-        return Err(String::from("MI record exceeds the parser byte limit"));
-    }
-    Parser::new(input).record()
-}
-
-struct Parser<'a> {
-    input: &'a [u8],
-    position: usize,
-    depth: usize,
-    items: usize,
-}
-
-impl<'a> Parser<'a> {
-    fn new(input: &'a str) -> Self {
-        Self {
-            input: input.as_bytes(),
-            position: 0,
-            depth: 0,
-            items: 0,
-        }
-    }
-
-    fn record(mut self) -> Result<MiRecord, String> {
-        let token_start = self.position;
-        while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
-            self.position += 1;
-        }
-        let token = if self.position == token_start {
-            None
-        } else {
-            let digits = std::str::from_utf8(&self.input[token_start..self.position])
-                .map_err(|error| error.to_string())?;
-            Some(
-                digits
-                    .parse()
-                    .map_err(|_| String::from("MI token exceeds the supported integer range"))?,
-            )
-        };
-
-        let kind = self.next().ok_or_else(|| String::from("empty MI record"))? as char;
-        if !matches!(kind, '^' | '*' | '+' | '=') {
-            return Err(format!("unsupported MI record kind {kind:?}"));
-        }
-        let class = self.identifier()?;
-        let mut results = Vec::new();
-        while self.consume(b',') {
-            results.push(self.result()?);
-        }
-        if self.position != self.input.len() {
-            return Err(String::from("trailing data in MI record"));
-        }
-        Ok(MiRecord {
-            token,
-            kind,
-            class,
-            results,
-        })
-    }
-
-    fn result(&mut self) -> Result<MiResult, String> {
-        self.bump_item()?;
-        let name = self.identifier()?;
-        self.expect(b'=')?;
-        let value = self.value()?;
-        Ok(MiResult { name, value })
-    }
-
-    fn value(&mut self) -> Result<MiValue, String> {
-        match self.peek() {
-            Some(b'"') => self.c_string().map(MiValue::Const),
-            Some(b'{') => self.tuple(),
-            Some(b'[') => self.list(),
-            other => Err(format!("invalid MI value start {other:?}")),
-        }
-    }
-
-    fn tuple(&mut self) -> Result<MiValue, String> {
-        self.enter_container()?;
-        let result = self.tuple_inner();
-        self.depth -= 1;
-        result
-    }
-
-    fn tuple_inner(&mut self) -> Result<MiValue, String> {
-        self.expect(b'{')?;
-        // GDB renders breakpoint command lists as `script={"silent",...}`.
-        // That is a braced value list rather than the result tuple required by
-        // the published MI grammar, but frontends still need to accept GDB's
-        // own output. Keep ordinary `{name=value}` tuples unchanged.
-        if self.peek() == Some(b'"') {
-            let mut items = Vec::new();
-            loop {
-                self.bump_item()?;
-                items.push(MiListItem::Value(self.value()?));
-                if self.consume(b'}') {
-                    break;
-                }
-                self.expect(b',')?;
-            }
-            return Ok(MiValue::List(items));
-        }
-        let mut results = Vec::new();
-        if !self.consume(b'}') {
-            loop {
-                results.push(self.result()?);
-                if self.consume(b'}') {
-                    break;
-                }
-                self.expect(b',')?;
-            }
-        }
-        Ok(MiValue::Tuple(results))
-    }
-
-    fn list(&mut self) -> Result<MiValue, String> {
-        self.enter_container()?;
-        let result = self.list_inner();
-        self.depth -= 1;
-        result
-    }
-
-    fn list_inner(&mut self) -> Result<MiValue, String> {
-        self.expect(b'[')?;
-        let mut items = Vec::new();
-        if !self.consume(b']') {
-            loop {
-                let item = if self.next_item_is_result() {
-                    MiListItem::Result(self.result()?)
-                } else {
-                    self.bump_item()?;
-                    MiListItem::Value(self.value()?)
-                };
-                items.push(item);
-                if self.consume(b']') {
-                    break;
-                }
-                self.expect(b',')?;
-            }
-        }
-        Ok(MiValue::List(items))
-    }
-
-    fn enter_container(&mut self) -> Result<(), String> {
-        if self.depth >= MAX_MI_NESTING {
-            return Err(String::from("MI value exceeds the nesting limit"));
-        }
-        self.depth += 1;
-        Ok(())
-    }
-
-    fn bump_item(&mut self) -> Result<(), String> {
-        self.items = self.items.saturating_add(1);
-        if self.items > MAX_MI_ITEMS {
-            Err(String::from("MI record exceeds the item limit"))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn next_item_is_result(&self) -> bool {
-        let mut position = self.position;
-        while self
-            .input
-            .get(position)
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            position += 1;
-        }
-        position > self.position && self.input.get(position) == Some(&b'=')
-    }
-
-    fn c_string(&mut self) -> Result<String, String> {
-        self.expect(b'"')?;
-        let start = self.position;
-        while let Some(byte) = self.peek() {
-            match byte {
-                b'"' => {
-                    let end = self.position;
-                    self.position += 1;
-                    return Ok(std::str::from_utf8(&self.input[start..end])
-                        .expect("MI parser input originates from a Rust string")
-                        .to_owned());
-                }
-                b'\\' => break,
-                _ => self.position += 1,
-            }
-        }
-        if self.peek().is_none() {
-            return Err(String::from("unterminated MI string"));
-        }
-        let mut bytes = Vec::with_capacity(self.position.saturating_sub(start).saturating_add(16));
-        bytes.extend_from_slice(&self.input[start..self.position]);
-        loop {
-            match self.next() {
-                Some(b'"') => break,
-                Some(b'\\') => self.escape(&mut bytes)?,
-                Some(byte) => bytes.push(byte),
-                None => return Err(String::from("unterminated MI string")),
-            }
-        }
-        Ok(String::from_utf8(bytes)
-            .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned()))
-    }
-
-    fn escape(&mut self, output: &mut Vec<u8>) -> Result<(), String> {
-        let escaped = self
-            .next()
-            .ok_or_else(|| String::from("unterminated MI escape"))?;
-        match escaped {
-            b'n' => output.push(b'\n'),
-            b'r' => output.push(b'\r'),
-            b't' => output.push(b'\t'),
-            b'b' => output.push(8),
-            b'f' => output.push(12),
-            b'v' => output.push(11),
-            b'a' => output.push(7),
-            // GDB console streams can use the common `\e` extension for the
-            // ESC byte even though it is not part of ISO C. Preserve it as an
-            // actual terminal escape so downstream ANSI sanitizers can remove
-            // the complete control sequence instead of exposing `e[31m`.
-            b'e' => output.push(0x1b),
-            b'"' => output.push(b'"'),
-            b'\\' => output.push(b'\\'),
-            b'x' => {
-                let start = self.position;
-                while self.peek().is_some_and(|byte| byte.is_ascii_hexdigit()) {
-                    self.position += 1;
-                }
-                if start == self.position {
-                    return Err(String::from("empty hexadecimal MI escape"));
-                }
-                let digits = std::str::from_utf8(&self.input[start..self.position])
-                    .map_err(|error| error.to_string())?;
-                let value = u32::from_str_radix(digits, 16).map_err(|error| error.to_string())?;
-                output.push(value as u8);
-            }
-            b'0'..=b'7' => {
-                let mut value = u32::from(escaped - b'0');
-                for _ in 0..2 {
-                    let Some(next) = self.peek().filter(|byte| matches!(byte, b'0'..=b'7')) else {
-                        break;
-                    };
-                    self.position += 1;
-                    value = value * 8 + u32::from(next - b'0');
-                }
-                output.push(value as u8);
-            }
-            other => output.push(other),
-        }
-        Ok(())
-    }
-
-    fn identifier(&mut self) -> Result<String, String> {
-        let start = self.position;
-        while self
-            .peek()
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        {
-            self.position += 1;
-        }
-        if start == self.position {
-            return Err(String::from("expected MI identifier"));
-        }
-        Ok(String::from_utf8_lossy(&self.input[start..self.position]).into_owned())
-    }
-
-    fn expect(&mut self, expected: u8) -> Result<(), String> {
-        if self.consume(expected) {
-            Ok(())
-        } else {
-            Err(format!("expected {:?}", expected as char))
-        }
-    }
-
-    fn consume(&mut self, expected: u8) -> bool {
-        if self.peek() == Some(expected) {
-            self.position += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.input.get(self.position).copied()
-    }
-
-    fn next(&mut self) -> Option<u8> {
-        let byte = self.peek()?;
-        self.position += 1;
-        Some(byte)
-    }
-}
-
-pub fn quote(argument: &str) -> String {
-    let mut quoted = String::with_capacity(argument.len() + 2);
-    quoted.push('"');
-    for character in argument.chars() {
-        match character {
-            '\\' => quoted.push_str("\\\\"),
-            '"' => quoted.push_str("\\\""),
-            '\n' => quoted.push_str("\\n"),
-            '\r' => quoted.push_str("\\r"),
-            '\t' => quoted.push_str("\\t"),
-            other => quoted.push(other),
-        }
-    }
-    quoted.push('"');
-    quoted
 }
 
 #[cfg(test)]

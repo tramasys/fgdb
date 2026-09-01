@@ -2328,6 +2328,11 @@ window.value-editor entry {{
 
 window.value-editor entry:focus {{ border-color: @app_accent; }}
 
+window.value-editor entry selection {{
+    color: @app_fg;
+    background: alpha(@app_fg, 0.22);
+}}
+
 window.breakpoint-editor textview {{
     border: 1px solid @app_border;
 }}
