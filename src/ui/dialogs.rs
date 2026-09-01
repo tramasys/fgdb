@@ -1774,6 +1774,7 @@ pub(super) fn open_breakpoint_editor(
         || BreakpointSpec {
             location: String::new(),
             regex: false,
+            hardware: false,
             enabled: true,
             temporary: false,
             allow_pending: false,
@@ -1826,6 +1827,11 @@ pub(super) fn open_breakpoint_editor(
     let regex = gtk::CheckButton::with_label("Function regex");
     regex.set_active(spec.regex);
     regex.set_sensitive(breakpoint.is_none());
+    let hardware = gtk::CheckButton::with_label("Hardware");
+    hardware.set_active(spec.hardware);
+    hardware.set_tooltip_text(Some(
+        "Use a hardware instruction breakpoint. Availability and slot limits depend on the target",
+    ));
     let enabled = gtk::CheckButton::with_label("Enabled");
     enabled.set_active(spec.enabled);
     let temporary = gtk::CheckButton::with_label("Temporary");
@@ -1840,6 +1846,7 @@ pub(super) fn open_breakpoint_editor(
     }
     let options = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     options.append(&regex);
+    options.append(&hardware);
     options.append(&enabled);
     options.append(&temporary);
     options.append(&pending);
@@ -1930,11 +1937,16 @@ pub(super) fn open_breakpoint_editor(
         let pending = pending.clone();
         let thread = thread.clone();
         let inferior = inferior.clone();
+        let hardware = hardware.clone();
         move || {
             let restricted = regex.is_active();
             pending.set_sensitive(pending_supported && !restricted);
             thread.set_sensitive(!restricted);
             inferior.set_sensitive(!restricted);
+            hardware.set_sensitive(!restricted);
+            if restricted {
+                hardware.set_active(false);
+            }
         }
     };
     update_regex_controls();
@@ -1986,6 +1998,7 @@ pub(super) fn open_breakpoint_editor(
             spec: BreakpointSpec {
                 location: location_text,
                 regex: regex_active,
+                hardware: !regex_active && hardware.is_active(),
                 enabled: enabled.is_active(),
                 temporary: temporary.is_active(),
                 allow_pending: !regex_active && pending.is_active(),
@@ -2011,6 +2024,82 @@ pub(super) fn open_breakpoint_editor(
     if breakpoint.is_none() {
         location.select_region(0, -1);
     }
+}
+
+pub(super) fn open_stop_point_metadata_editor(
+    parent: &gtk::ApplicationWindow,
+    number: &str,
+    metadata: &StopPointMetadata,
+    on_apply: Rc<dyn Fn(StopPointMetadata)>,
+) {
+    let editor = gtk::Window::builder()
+        .title(format!("Organize stop point #{number}"))
+        .transient_for(parent)
+        .modal(true)
+        .default_width(430)
+        .resizable(false)
+        .build();
+    editor.add_css_class("value-editor");
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
+    content.set_margin_top(10);
+    content.set_margin_bottom(10);
+    content.set_margin_start(10);
+    content.set_margin_end(10);
+
+    let title = gtk::Label::new(Some("GROUPS / TAGS"));
+    title.add_css_class("section-title");
+    title.set_halign(gtk::Align::Start);
+    content.append(&title);
+    let hint = gtk::Label::new(Some(
+        "Groups and tags are kept for this debugger session and are included in stop-point search.",
+    ));
+    hint.add_css_class("muted");
+    hint.set_halign(gtk::Align::Start);
+    hint.set_wrap(true);
+    content.append(&hint);
+
+    let group = gtk::Entry::builder()
+        .placeholder_text("optional group, e.g. networking")
+        .build();
+    group.set_text(metadata.group.as_deref().unwrap_or_default());
+    let tags = gtk::Entry::builder()
+        .placeholder_text("comma-separated tags, e.g. startup, flaky")
+        .build();
+    tags.set_text(&metadata.tags.join(", "));
+    content.append(&group);
+    content.append(&tags);
+
+    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let apply = gtk::Button::with_label("Apply");
+    apply.add_css_class("primary-control");
+    actions.append(&cancel);
+    actions.append(&apply);
+    content.append(&actions);
+    editor.set_child(Some(&content));
+    connect_escape_to_close(&editor);
+
+    let editor_for_apply = editor.clone();
+    let group_for_apply = group.clone();
+    let tags_for_apply = tags.clone();
+    let apply_metadata = Rc::clone(&on_apply);
+    apply.connect_clicked(move |_| {
+        apply_metadata(normalized_stop_point_metadata(
+            group_for_apply.text().as_str(),
+            tags_for_apply.text().as_str(),
+        ));
+        editor_for_apply.close();
+    });
+    let apply_for_group = apply.clone();
+    group.connect_activate(move |_| apply_for_group.emit_clicked());
+    tags.connect_activate(move |_| apply.emit_clicked());
+    let editor_for_cancel = editor.clone();
+    cancel.connect_clicked(move |_| editor_for_cancel.close());
+
+    editor.present();
+    group.grab_focus();
+    group.select_region(0, -1);
 }
 
 pub(super) fn connect_escape_to_close(window: &gtk::Window) {

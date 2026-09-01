@@ -230,6 +230,7 @@ impl Ui {
             stack_details_generation: Rc::new(Cell::new(None)),
             stack_empty: workspace.stack_empty,
             breakpoints_list: workspace.breakpoints_list,
+            stop_point_filter: workspace.stop_point_filter,
             add_breakpoint_button: workspace.add_breakpoint_button,
             delete_all_breakpoints_button: workspace.delete_all_breakpoints_button,
             delete_all_watchpoints_button: workspace.delete_all_watchpoints_button,
@@ -237,7 +238,9 @@ impl Ui {
             event_catchpoint_buttons: workspace.event_catchpoint_buttons,
             watchpoint_expression: workspace.watchpoint_expression,
             watchpoint_access: workspace.watchpoint_access,
+            watchpoint_mask: workspace.watchpoint_mask,
             watchpoint_add_button: workspace.watchpoint_add_button,
+            filtered_catchpoint: workspace.filtered_catchpoint,
             signal_detail: workspace.signal_detail,
             signal_buttons: workspace.signal_buttons,
             signal_entry: workspace.signal_entry,
@@ -267,6 +270,8 @@ impl Ui {
             inferior_pid: Rc::new(Cell::new(None)),
             layout,
             breakpoints,
+            stop_point_filter_rows: Rc::new(RefCell::new(Vec::new())),
+            stop_point_metadata: Rc::new(RefCell::new(HashMap::new())),
             previous_registers: Rc::new(RefCell::new(HashMap::new())),
             cached_register_names: Rc::new(RefCell::new(None)),
             stop_refresh_generation: Rc::new(Cell::new(0)),
@@ -321,6 +326,7 @@ impl Ui {
             breakpoint_bulk_delete_handler: Rc::new(RefCell::new(None)),
             signal_catchpoint_handler: Rc::new(RefCell::new(None)),
             event_catchpoint_handler: Rc::new(RefCell::new(None)),
+            filtered_catchpoint_handler: Rc::new(RefCell::new(None)),
             watchpoint_insert_handler: Rc::new(RefCell::new(None)),
             source_symbol_handler: Rc::new(RefCell::new(None)),
             source_discovery_handler: Rc::new(RefCell::new(None)),
@@ -336,6 +342,7 @@ impl Ui {
         ui.connect_watchpoint_controls();
         ui.connect_breakpoint_bulk_controls();
         ui.connect_event_catchpoint_controls();
+        ui.connect_filtered_catchpoint_controls();
         ui.connect_keyboard_shortcuts();
         ui.update_session_display();
         ui
@@ -1298,9 +1305,8 @@ impl Ui {
                 && breakpoints.iter().any(Breakpoint::is_signal_catchpoint),
             delete_event_catchpoints: can_edit_stop_points
                 && breakpoints.iter().any(|breakpoint| {
-                    EventCatchpoint::ALL
-                        .iter()
-                        .any(|(event, _, _)| event.matches(breakpoint))
+                    (breakpoint.is_catchpoint() && !breakpoint.is_signal_catchpoint())
+                        || EventCatchpoint::RustPanic.matches(breakpoint)
                 }),
             delete_breakpoints: can_edit_stop_points
                 && breakpoints
@@ -1361,6 +1367,7 @@ impl Ui {
         );
         set_execution_sensitive(&self.memory_add_button, state.add_memory, state.busy);
         set_execution_sensitive(&self.watchpoint_add_button, state.inspect, state.busy);
+        set_execution_sensitive(&self.watchpoint_mask, state.inspect, state.busy);
         set_transient_execution_sensitive(&self.load_symbols_button, state.inspect, state.busy);
         // Keep the top-level session affordance visually stable during a
         // short execution transition. Its mutating actions remain genuinely
@@ -1391,6 +1398,21 @@ impl Ui {
         for (button, _) in &self.event_catchpoint_buttons {
             set_execution_sensitive(button, state.edit_stop_points, state.busy);
         }
+        set_execution_sensitive(
+            &self.filtered_catchpoint.kind,
+            state.edit_stop_points,
+            state.busy,
+        );
+        set_execution_sensitive(
+            &self.filtered_catchpoint.filter,
+            state.edit_stop_points,
+            state.busy,
+        );
+        set_execution_sensitive(
+            &self.filtered_catchpoint.add,
+            state.edit_stop_points,
+            state.busy,
+        );
         set_execution_sensitive(&self.signal_entry, state.edit_stop_points, state.busy);
         set_transient_execution_sensitive(&self.signal_add_button, state.add_signal, state.busy);
         set_transient_execution_sensitive(
@@ -1665,6 +1687,14 @@ impl Ui {
             .replace(Some(Rc::new(handler)));
     }
 
+    pub fn set_filtered_catchpoint_handler(
+        &self,
+        handler: impl Fn(FilteredCatchpointRequest) + 'static,
+    ) {
+        self.filtered_catchpoint_handler
+            .replace(Some(Rc::new(handler)));
+    }
+
     pub fn set_signal_catchpoint_handler(
         &self,
         handler: impl Fn(String, Option<String>) + 'static,
@@ -1673,12 +1703,21 @@ impl Ui {
             .replace(Some(Rc::new(handler)));
     }
 
-    pub fn set_watchpoint_insert_handler(
-        &self,
-        handler: impl Fn(String, WatchpointAccess) + 'static,
-    ) {
+    pub fn set_watchpoint_insert_handler(&self, handler: impl Fn(WatchpointRequest) + 'static) {
         self.watchpoint_insert_handler
             .replace(Some(Rc::new(handler)));
+    }
+
+    pub(crate) fn move_stop_point_metadata(&self, from: &str, to: &str) {
+        if from == to {
+            return;
+        }
+        let metadata = self.stop_point_metadata.borrow_mut().remove(from);
+        if let Some(metadata) = metadata {
+            self.stop_point_metadata
+                .borrow_mut()
+                .insert(to.to_owned(), metadata);
+        }
     }
 
     pub fn set_source_symbol_handler(&self, handler: impl Fn(String) + 'static) {

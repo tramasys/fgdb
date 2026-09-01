@@ -692,6 +692,7 @@ pub(super) fn build_workspace(
         stack_store: inspector.stack_store,
         stack_empty: inspector.stack_empty,
         breakpoints_list: inspector.breakpoints_list,
+        stop_point_filter: inspector.stop_point_filter,
         add_breakpoint_button: inspector.add_breakpoint_button,
         delete_all_breakpoints_button: inspector.delete_all_breakpoints_button,
         delete_all_watchpoints_button: inspector.delete_all_watchpoints_button,
@@ -699,7 +700,9 @@ pub(super) fn build_workspace(
         event_catchpoint_buttons: inspector.event_catchpoint_buttons,
         watchpoint_expression: inspector.watchpoint_expression,
         watchpoint_access: inspector.watchpoint_access,
+        watchpoint_mask: inspector.watchpoint_mask,
         watchpoint_add_button: inspector.watchpoint_add_button,
+        filtered_catchpoint: inspector.filtered_catchpoint,
         signal_detail: inspector.signal_detail,
         signal_buttons: inspector.signal_buttons,
         signal_entry: inspector.signal_entry,
@@ -1267,6 +1270,34 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     hint.set_halign(gtk::Align::Start);
     hint.set_wrap(true);
     breakpoints_page.append(&hint);
+    let stop_point_filter_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    let stop_point_search = gtk::SearchEntry::builder()
+        .placeholder_text("Search stop points, groups, or tags")
+        .hexpand(true)
+        .build();
+    stop_point_search.set_tooltip_text(Some(
+        "Search numbers, locations, conditions, commands, groups, and tags",
+    ));
+    let stop_point_kind = gtk::DropDown::from_strings(&[
+        "All kinds",
+        "Breakpoints",
+        "Hardware",
+        "Watchpoints",
+        "Catchpoints",
+        "Disabled",
+    ]);
+    stop_point_kind.set_selected(0);
+    stop_point_kind.set_tooltip_text(Some("Filter the stop-point list by kind or state"));
+    stop_point_filter_row.append(&stop_point_search);
+    stop_point_filter_row.append(&stop_point_kind);
+    breakpoints_page.append(&stop_point_filter_row);
+    let stop_point_filter_empty = empty_label("No stop points match this filter");
+    stop_point_filter_empty.set_visible(false);
+    let stop_point_filter = StopPointFilterControls {
+        search: stop_point_search,
+        kind: stop_point_kind,
+        empty: stop_point_filter_empty,
+    };
     let breakpoints_list = dynamic_list("No breakpoints, catchpoints, or watchpoints set");
     let breakpoints_scrolled = gtk::ScrolledWindow::builder()
         .child(&breakpoints_list)
@@ -1320,12 +1351,21 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         .hexpand(true)
         .build();
     watchpoint_expression.set_tooltip_text(Some("Examples: counter, *pointer, *(int*)0x404040"));
-    let watchpoint_access = gtk::DropDown::from_strings(&["Write", "Read", "Access"]);
+    let watchpoint_access =
+        gtk::DropDown::from_strings(&["Write", "Read", "Access", "Masked write"]);
     watchpoint_access.add_css_class("watchpoint-access");
     watchpoint_access.set_selected(0);
     watchpoint_access.set_tooltip_text(Some(
-        "Stop on writes, reads, or either kind of memory access",
+        "Stop on writes, reads, either kind of access, or a target-supported masked write",
     ));
+    let watchpoint_mask = gtk::Entry::builder()
+        .placeholder_text("mask, e.g. 0xffffff00")
+        .width_chars(18)
+        .build();
+    watchpoint_mask.set_tooltip_text(Some(
+        "Target-dependent hardware address mask. GDB will report when the target does not support masked watchpoints",
+    ));
+    watchpoint_mask.set_visible(false);
     let watchpoint_add_button = gtk::Button::with_label("Add");
     watchpoint_add_button.add_css_class("inline-action");
     watchpoint_add_button.add_css_class("watchpoint-add-action");
@@ -1333,6 +1373,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     watchpoint_add_button.set_sensitive(false);
     watchpoint_controls.append(&watchpoint_expression);
     watchpoint_controls.append(&watchpoint_access);
+    watchpoint_controls.append(&watchpoint_mask);
     watchpoint_controls.append(&watchpoint_add_button);
     watchpoint_section.append(&watchpoint_controls);
     breakpoints_page.append(&watchpoint_section);
@@ -1359,6 +1400,31 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         })
         .collect::<Vec<_>>();
     catchpoint_section.append(&event_catchpoint_grid);
+    let filtered_catchpoint_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    let filtered_catchpoint_kind =
+        gtk::DropDown::from_strings(&["Syscalls", "Library load", "Library unload"]);
+    filtered_catchpoint_kind.set_selected(0);
+    filtered_catchpoint_kind.set_tooltip_text(Some("Choose the filtered event to catch"));
+    let filtered_catchpoint_filter = gtk::Entry::builder()
+        .placeholder_text("syscall names or numbers")
+        .hexpand(true)
+        .build();
+    filtered_catchpoint_filter.set_tooltip_text(Some(
+        "Comma- or space-separated syscall names/numbers, or a GDB shared-library regular expression",
+    ));
+    let filtered_catchpoint_add = gtk::Button::with_label("Add filtered");
+    filtered_catchpoint_add.add_css_class("inline-action");
+    filtered_catchpoint_add.set_tooltip_text(Some("Add this filtered catchpoint"));
+    filtered_catchpoint_add.set_sensitive(false);
+    filtered_catchpoint_row.append(&filtered_catchpoint_kind);
+    filtered_catchpoint_row.append(&filtered_catchpoint_filter);
+    filtered_catchpoint_row.append(&filtered_catchpoint_add);
+    catchpoint_section.append(&filtered_catchpoint_row);
+    let filtered_catchpoint = FilteredCatchpointControls {
+        kind: filtered_catchpoint_kind,
+        filter: filtered_catchpoint_filter,
+        add: filtered_catchpoint_add,
+    };
     breakpoints_page.append(&catchpoint_section);
 
     let signals_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -1506,6 +1572,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         stack_store,
         stack_empty,
         breakpoints_list,
+        stop_point_filter,
         add_breakpoint_button,
         delete_all_breakpoints_button,
         delete_all_watchpoints_button,
@@ -1513,7 +1580,9 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         event_catchpoint_buttons,
         watchpoint_expression,
         watchpoint_access,
+        watchpoint_mask,
         watchpoint_add_button,
+        filtered_catchpoint,
         signal_detail,
         signal_buttons,
         signal_entry,

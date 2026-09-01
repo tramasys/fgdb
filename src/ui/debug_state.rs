@@ -1538,28 +1538,77 @@ impl Ui {
     pub(super) fn connect_watchpoint_controls(&self) {
         let expression = self.watchpoint_expression.clone();
         let access = self.watchpoint_access.clone();
+        let mask = self.watchpoint_mask.clone();
         let handler = Rc::clone(&self.watchpoint_insert_handler);
         self.watchpoint_add_button.connect_clicked(move |_| {
             let expression = expression.text().trim().to_owned();
             if expression.is_empty() {
                 return;
             }
-            let access = match access.selected() {
-                1 => WatchpointAccess::Read,
-                2 => WatchpointAccess::Access,
-                _ => WatchpointAccess::Write,
+            let request = match access.selected() {
+                1 => WatchpointRequest::Standard {
+                    expression,
+                    access: WatchpointAccess::Read,
+                },
+                2 => WatchpointRequest::Standard {
+                    expression,
+                    access: WatchpointAccess::Access,
+                },
+                3 => WatchpointRequest::Masked {
+                    expression,
+                    mask: mask.text().trim().to_owned(),
+                },
+                _ => WatchpointRequest::Standard {
+                    expression,
+                    access: WatchpointAccess::Write,
+                },
             };
             let handler = handler.borrow().clone();
             if let Some(handler) = handler {
-                handler(expression, access);
+                handler(request);
             }
         });
+        let mask = self.watchpoint_mask.clone();
+        self.watchpoint_access
+            .connect_selected_notify(move |access| {
+                mask.set_visible(access.selected() == 3);
+            });
         let button = self.watchpoint_add_button.clone();
         self.watchpoint_expression
+            .connect_activate(move |_| button.emit_clicked());
+        let button = self.watchpoint_add_button.clone();
+        self.watchpoint_mask
             .connect_activate(move |_| button.emit_clicked());
     }
 
     pub(super) fn connect_breakpoint_bulk_controls(&self) {
+        let rows = Rc::clone(&self.stop_point_filter_rows);
+        let metadata = Rc::clone(&self.stop_point_metadata);
+        let search = self.stop_point_filter.search.clone();
+        let kind = self.stop_point_filter.kind.clone();
+        let rows_for_search = Rc::clone(&rows);
+        let metadata_for_search = Rc::clone(&metadata);
+        let controls_for_search = self.stop_point_filter.clone();
+        search.connect_search_changed(move |search| {
+            let _ = search;
+            apply_stop_point_filter(
+                &rows_for_search.borrow(),
+                &metadata_for_search.borrow(),
+                &controls_for_search,
+            );
+        });
+        let rows_for_kind = rows;
+        let metadata_for_kind = metadata;
+        let controls_for_kind = self.stop_point_filter.clone();
+        kind.connect_selected_notify(move |kind| {
+            let _ = kind;
+            apply_stop_point_filter(
+                &rows_for_kind.borrow(),
+                &metadata_for_kind.borrow(),
+                &controls_for_kind,
+            );
+        });
+
         let parent = self.window.clone();
         let handler = Rc::clone(&self.breakpoint_editor_handler);
         let capabilities = Rc::clone(&self.gdb_capabilities);
@@ -1645,6 +1694,43 @@ impl Ui {
         }
     }
 
+    pub(super) fn connect_filtered_catchpoint_controls(&self) {
+        let filter = self.filtered_catchpoint.filter.clone();
+        let kind = self.filtered_catchpoint.kind.clone();
+        let handler = Rc::clone(&self.filtered_catchpoint_handler);
+        self.filtered_catchpoint.add.connect_clicked(move |_| {
+            let filter_text = filter.text().trim().to_owned();
+            if filter_text.is_empty() {
+                return;
+            }
+            let kind = match kind.selected() {
+                1 => FilteredCatchpointKind::LibraryLoad,
+                2 => FilteredCatchpointKind::LibraryUnload,
+                _ => FilteredCatchpointKind::Syscall,
+            };
+            if let Some(handler) = handler.borrow().clone() {
+                handler(FilteredCatchpointRequest {
+                    kind,
+                    filter: filter_text,
+                });
+            }
+        });
+        let button = self.filtered_catchpoint.add.clone();
+        self.filtered_catchpoint
+            .filter
+            .connect_activate(move |_| button.emit_clicked());
+        let filter = self.filtered_catchpoint.filter.clone();
+        self.filtered_catchpoint
+            .kind
+            .connect_selected_notify(move |kind| {
+                filter.set_placeholder_text(Some(if kind.selected() == 0 {
+                    "syscall names or numbers"
+                } else {
+                    "shared-library regular expression"
+                }));
+            });
+    }
+
     pub fn refresh_memory_watches(&self) {
         let requests = {
             let watches = self.memory_watches.borrow();
@@ -1713,7 +1799,18 @@ impl Ui {
             return;
         }
         self.breakpoints.replace(breakpoints);
+        let active_numbers = self
+            .breakpoints
+            .borrow()
+            .iter()
+            .filter(|breakpoint| !breakpoint.is_location())
+            .map(|breakpoint| breakpoint.command_number().to_owned())
+            .collect::<HashSet<_>>();
+        self.stop_point_metadata
+            .borrow_mut()
+            .retain(|number, _| active_numbers.contains(number));
         clear_box(&self.breakpoints_list);
+        self.stop_point_filter_rows.borrow_mut().clear();
         let breakpoints = self.breakpoints.borrow();
         let pending_supported = self
             .gdb_capabilities
@@ -1802,6 +1899,8 @@ impl Ui {
                 let heading_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
                 let kind = if breakpoint.is_logpoint() {
                     String::from("LOGPOINT")
+                } else if breakpoint.is_hardware_breakpoint() {
+                    String::from("HARDWARE BREAKPOINT")
                 } else if breakpoint.is_watchpoint() || breakpoint.is_catchpoint() {
                     breakpoint.kind.to_ascii_uppercase()
                 } else {
@@ -1845,6 +1944,11 @@ impl Ui {
                         "Edit location, behavior, restrictions, commands, or logpoint settings"
                     },
                 ));
+                let organize_button = gtk::Button::with_label("Organize");
+                organize_button.add_css_class("inline-action");
+                organize_button.set_tooltip_text(Some(
+                    "Assign this stop point to a group and add searchable tags",
+                ));
                 let delete_button = gtk::Button::with_label("Delete");
                 delete_button.add_css_class("inline-action");
                 delete_button.add_css_class("danger-action");
@@ -1852,6 +1956,7 @@ impl Ui {
                 heading_row.append(&badge);
                 heading_row.append(&heading);
                 heading_row.append(&condition_button);
+                heading_row.append(&organize_button);
                 heading_row.append(&delete_button);
                 let location_text = location;
                 let location = gtk::Label::new(Some(&location_text));
@@ -1862,6 +1967,19 @@ impl Ui {
                 location.set_tooltip_text(Some(&location_text));
                 row.append(&heading_row);
                 row.append(&location);
+                let organization = gtk::Label::new(None);
+                organization.add_css_class("breakpoint-metadata");
+                organization.set_halign(gtk::Align::Start);
+                let current_metadata = self
+                    .stop_point_metadata
+                    .borrow()
+                    .get(breakpoint.command_number())
+                    .cloned()
+                    .unwrap_or_default();
+                let organization_text = stop_point_metadata_text(&current_metadata);
+                organization.set_text(&organization_text);
+                organization.set_visible(!organization_text.is_empty());
+                row.append(&organization);
                 let mut metadata = Vec::new();
                 if breakpoint.hit_count > 0 {
                     metadata.push(format!(
@@ -1965,6 +2083,41 @@ impl Ui {
                         );
                     }
                 });
+                let parent = self.window.clone();
+                let number = breakpoint.command_number().to_owned();
+                let metadata = Rc::clone(&self.stop_point_metadata);
+                let filter_rows = Rc::clone(&self.stop_point_filter_rows);
+                let filter_controls = self.stop_point_filter.clone();
+                organize_button.connect_clicked(move |_| {
+                    let current = metadata.borrow().get(&number).cloned().unwrap_or_default();
+                    let metadata_for_apply = Rc::clone(&metadata);
+                    let rows_for_apply = Rc::clone(&filter_rows);
+                    let controls_for_apply = filter_controls.clone();
+                    let organization = organization.clone();
+                    let number_for_apply = number.clone();
+                    open_stop_point_metadata_editor(
+                        &parent,
+                        &number,
+                        &current,
+                        Rc::new(move |updated| {
+                            let text = stop_point_metadata_text(&updated);
+                            organization.set_text(&text);
+                            organization.set_visible(!text.is_empty());
+                            if updated == StopPointMetadata::default() {
+                                metadata_for_apply.borrow_mut().remove(&number_for_apply);
+                            } else {
+                                metadata_for_apply
+                                    .borrow_mut()
+                                    .insert(number_for_apply.clone(), updated);
+                            }
+                            apply_stop_point_filter(
+                                &rows_for_apply.borrow(),
+                                &metadata_for_apply.borrow(),
+                                &controls_for_apply,
+                            );
+                        }),
+                    );
+                });
                 let number = breakpoint.command_number().to_owned();
                 let enable = !breakpoint.enabled;
                 let enabled_handler = Rc::clone(&self.breakpoint_enabled_handler);
@@ -1983,6 +2136,7 @@ impl Ui {
                     }
                 });
                 self.breakpoints_list.append(&row);
+                let mut filter_widgets = vec![row.clone().upcast::<gtk::Widget>()];
 
                 for location in locations_by_parent
                     .get(breakpoint.number.as_str())
@@ -2045,9 +2199,27 @@ impl Ui {
                         }
                     });
                     self.breakpoints_list.append(&location_row);
+                    filter_widgets.push(location_row.upcast::<gtk::Widget>());
                 }
+                self.stop_point_filter_rows
+                    .borrow_mut()
+                    .push(StopPointFilterRow {
+                        widgets: filter_widgets,
+                        number: breakpoint.command_number().to_owned(),
+                        searchable: stop_point_search_text(breakpoint),
+                        hardware: breakpoint.is_hardware_breakpoint(),
+                        watchpoint: breakpoint.is_watchpoint(),
+                        catchpoint: breakpoint.is_catchpoint(),
+                        enabled: breakpoint.enabled,
+                    });
             }
         }
+        self.breakpoints_list.append(&self.stop_point_filter.empty);
+        apply_stop_point_filter(
+            &self.stop_point_filter_rows.borrow(),
+            &self.stop_point_metadata.borrow(),
+            &self.stop_point_filter,
+        );
         for (button, signal, description) in &self.signal_buttons {
             if let Some(number) = signal_catchpoint_command_number(&breakpoints, signal) {
                 button.add_css_class("signal-caught");

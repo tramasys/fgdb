@@ -44,9 +44,8 @@ pub(super) fn event_catchpoint_command_numbers(breakpoints: &[Breakpoint]) -> Ve
     let mut numbers = Vec::new();
     let mut seen = HashSet::new();
     for breakpoint in breakpoints.iter().filter(|breakpoint| {
-        EventCatchpoint::ALL
-            .iter()
-            .any(|(event, _, _)| event.matches(breakpoint))
+        (breakpoint.is_catchpoint() && !breakpoint.is_signal_catchpoint())
+            || EventCatchpoint::RustPanic.matches(breakpoint)
     }) {
         let number = breakpoint.command_number();
         if seen.insert(number) {
@@ -54,6 +53,94 @@ pub(super) fn event_catchpoint_command_numbers(breakpoints: &[Breakpoint]) -> Ve
         }
     }
     numbers
+}
+
+pub(super) fn apply_stop_point_filter(
+    rows: &[StopPointFilterRow],
+    metadata: &HashMap<String, StopPointMetadata>,
+    controls: &StopPointFilterControls,
+) {
+    let query = controls.search.text().trim().to_ascii_lowercase();
+    let terms = query.split_whitespace().collect::<Vec<_>>();
+    let mut visible_count = 0;
+    for row in rows {
+        let kind_matches = match controls.kind.selected() {
+            1 => !row.watchpoint && !row.catchpoint,
+            2 => row.hardware,
+            3 => row.watchpoint,
+            4 => row.catchpoint,
+            5 => !row.enabled,
+            _ => true,
+        };
+        let metadata = metadata.get(&row.number);
+        let mut metadata_matches = true;
+        if let Some(metadata) = metadata {
+            let metadata_text = stop_point_metadata_text(metadata).to_ascii_lowercase();
+            metadata_matches = terms
+                .iter()
+                .all(|term| row.searchable.contains(term) || metadata_text.contains(term));
+        }
+        let visible = kind_matches
+            && if metadata.is_some() {
+                metadata_matches
+            } else {
+                terms.iter().all(|term| row.searchable.contains(term))
+            };
+        visible_count += usize::from(visible);
+        for widget in &row.widgets {
+            widget.set_visible(visible);
+        }
+    }
+    controls
+        .empty
+        .set_visible(!rows.is_empty() && visible_count == 0);
+}
+
+pub(super) fn stop_point_search_text(breakpoint: &Breakpoint) -> String {
+    format!(
+        "{} {} {} {} {} {} {} {} {}",
+        breakpoint.number,
+        breakpoint.kind,
+        breakpoint.original_location.as_deref().unwrap_or_default(),
+        breakpoint.function.as_deref().unwrap_or_default(),
+        breakpoint.source_path().unwrap_or_default(),
+        breakpoint.condition.as_deref().unwrap_or_default(),
+        breakpoint.catch_type.as_deref().unwrap_or_default(),
+        breakpoint.commands.join(" "),
+        if breakpoint.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+    )
+    .to_ascii_lowercase()
+}
+
+pub(super) fn normalized_stop_point_metadata(group: &str, tags: &str) -> StopPointMetadata {
+    let group = group.trim();
+    let group = (!group.is_empty()).then(|| group.to_owned());
+    let mut normalized_tags = Vec::new();
+    for tag in tags.split(',').map(str::trim).filter(|tag| !tag.is_empty()) {
+        if !normalized_tags
+            .iter()
+            .any(|existing: &String| existing.eq_ignore_ascii_case(tag))
+        {
+            normalized_tags.push(tag.to_owned());
+        }
+    }
+    StopPointMetadata {
+        group,
+        tags: normalized_tags,
+    }
+}
+
+pub(super) fn stop_point_metadata_text(metadata: &StopPointMetadata) -> String {
+    let mut parts = Vec::new();
+    if let Some(group) = metadata.group.as_deref() {
+        parts.push(format!("GROUP {group}"));
+    }
+    parts.extend(metadata.tags.iter().map(|tag| format!("#{tag}")));
+    parts.join("  ·  ")
 }
 
 pub(super) fn event_catchpoint_command_number(

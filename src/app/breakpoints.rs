@@ -1,5 +1,109 @@
 use super::*;
 
+pub(super) fn watchpoint_command(
+    request: &WatchpointRequest,
+) -> Result<(String, String), &'static str> {
+    match request {
+        WatchpointRequest::Standard { expression, access } => {
+            let expression = expression.trim();
+            if expression.is_empty() {
+                return Err("Enter a variable or address expression");
+            }
+            let option = access.mi_option();
+            let command = if option.is_empty() {
+                format!("-break-watch {}", crate::debugger::quote(expression))
+            } else {
+                format!(
+                    "-break-watch {option} {}",
+                    crate::debugger::quote(expression)
+                )
+            };
+            let kind = match access {
+                WatchpointAccess::Write => "write",
+                WatchpointAccess::Read => "read",
+                WatchpointAccess::Access => "access",
+            };
+            Ok((command, format!("Added {kind} watchpoint for {expression}")))
+        }
+        WatchpointRequest::Masked { expression, mask } => {
+            let expression = expression.trim();
+            if expression.is_empty() {
+                return Err("Enter a variable or address expression");
+            }
+            let mask = normalized_watchpoint_mask(mask)
+                .ok_or("The mask must be a decimal or hexadecimal integer")?;
+            let tail = format!("{expression} mask {mask}");
+            let command = crate::debugger::CliCommandBuilder::new("watch")
+                .verbatim_tail(&tail)?
+                .finish();
+            Ok((
+                command,
+                format!("Added masked watchpoint for {expression} with mask {mask}"),
+            ))
+        }
+    }
+}
+
+fn normalized_watchpoint_mask(mask: &str) -> Option<&str> {
+    let mask = mask.trim();
+    let valid = mask
+        .strip_prefix("0x")
+        .or_else(|| mask.strip_prefix("0X"))
+        .map_or_else(
+            || !mask.is_empty() && mask.bytes().all(|byte| byte.is_ascii_digit()),
+            |digits| !digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        );
+    valid.then_some(mask)
+}
+
+pub(super) fn filtered_catchpoint_command(
+    request: &FilteredCatchpointRequest,
+) -> Result<String, &'static str> {
+    let filter = request.filter.trim();
+    if filter.is_empty() {
+        return Err("Enter at least one syscall or a shared-library pattern");
+    }
+    let filter = match request.kind {
+        FilteredCatchpointKind::Syscall => normalize_syscall_filter(filter)?,
+        FilteredCatchpointKind::LibraryLoad | FilteredCatchpointKind::LibraryUnload => {
+            filter.to_owned()
+        }
+    };
+    let builder = crate::debugger::CliCommandBuilder::new("catch").keyword(match request.kind {
+        FilteredCatchpointKind::Syscall => "syscall",
+        FilteredCatchpointKind::LibraryLoad => "load",
+        FilteredCatchpointKind::LibraryUnload => "unload",
+    });
+    builder
+        .verbatim_tail(&filter)
+        .map(crate::debugger::CliCommandBuilder::finish)
+}
+
+fn normalize_syscall_filter(filter: &str) -> Result<String, &'static str> {
+    let filters = filter
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if filters.is_empty() || filters.len() > 64 {
+        return Err("Enter between 1 and 64 syscall names or numbers");
+    }
+    if filters.iter().any(|filter| {
+        let mut bytes = filter.bytes();
+        let Some(first) = bytes.next() else {
+            return true;
+        };
+        if first.is_ascii_digit() {
+            !bytes.all(|byte| byte.is_ascii_digit())
+        } else {
+            !(first.is_ascii_alphabetic() || first == b'_')
+                || !bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        }
+    }) {
+        return Err("Syscalls must be names such as openat or decimal syscall numbers");
+    }
+    Ok(filters.join(" "))
+}
+
 pub(super) fn insert_source_breakpoint(ui: Weak<Ui>, client: &MiClient, path: PathBuf, line: u32) {
     resolve_executable_source_line(
         ui,
@@ -253,6 +357,11 @@ fn create_standard_breakpoint(ui: Weak<Ui>, client: &MiClient, request: Breakpoi
             refresh_breakpoints(&ui_for_response, client);
             return;
         };
+        if let (Some(current_ui), Some(old_number)) =
+            (ui_for_response.upgrade(), old_number.as_deref())
+        {
+            current_ui.move_stop_point_metadata(old_number, &number);
+        }
         let mut follow_up = VecDeque::new();
         if !commands.is_empty() {
             follow_up.push_back(breakpoint_commands_command(&number, &commands));
@@ -440,6 +549,9 @@ fn breakpoint_failure(ui: &Weak<Ui>, title: &str, detail: &str) {
 
 fn breakpoint_insert_command(spec: &BreakpointSpec) -> String {
     let mut command = String::from("-break-insert");
+    if spec.hardware {
+        command.push_str(" -h");
+    }
     if spec.temporary {
         command.push_str(" -t");
     }
@@ -500,6 +612,7 @@ fn breakpoint_needs_recreation(
         .unwrap_or_default();
     canonical_breakpoint_location(current_location) != canonical_breakpoint_location(&spec.location)
         || (original.disposition.as_deref() == Some("del")) != spec.temporary
+        || original.is_hardware_breakpoint() != spec.hardware
         || original.pending.is_some() != spec.allow_pending
         || original.thread != spec.thread
         || original.inferior != spec.inferior
@@ -757,13 +870,18 @@ fn infer_existing_stopped_thread(ui: &Weak<Ui>, client: &MiClient) {
 mod tests {
     use super::{
         breakpoint_commands_command, breakpoint_insert_command, canonical_breakpoint_location,
+        filtered_catchpoint_command, watchpoint_command,
     };
-    use crate::ui::BreakpointSpec;
+    use crate::ui::{
+        BreakpointSpec, FilteredCatchpointKind, FilteredCatchpointRequest, WatchpointAccess,
+        WatchpointRequest,
+    };
 
     fn breakpoint_spec(location: &str) -> BreakpointSpec {
         BreakpointSpec {
             location: location.to_owned(),
             regex: false,
+            hardware: false,
             enabled: true,
             temporary: false,
             allow_pending: false,
@@ -780,6 +898,7 @@ mod tests {
     fn builds_complete_breakpoint_insert_commands() {
         let mut spec = breakpoint_spec("0x401120");
         spec.enabled = false;
+        spec.hardware = true;
         spec.temporary = true;
         spec.allow_pending = true;
         spec.condition = Some(String::from("count == 4"));
@@ -788,7 +907,7 @@ mod tests {
         spec.inferior = Some(String::from("3"));
         assert_eq!(
             breakpoint_insert_command(&spec),
-            "-break-insert -t -f -d -c \"count == 4\" -i 4 -p \"2\" -g \"i3\" \"*0x401120\""
+            "-break-insert -h -t -f -d -c \"count == 4\" -i 4 -p \"2\" -g \"i3\" \"*0x401120\""
         );
         assert_eq!(canonical_breakpoint_location("main"), "main");
         assert_eq!(canonical_breakpoint_location("*0x10"), "*0x10");
@@ -807,5 +926,61 @@ mod tests {
             "-break-commands 7 \"silent\" \"printf \\\"count=%d\\\\n\\\", count\" \"continue\""
         );
         assert_eq!(breakpoint_commands_command("7", &[]), "-break-commands 7");
+    }
+
+    #[test]
+    fn builds_standard_and_masked_watchpoint_commands() {
+        assert_eq!(
+            watchpoint_command(&WatchpointRequest::Standard {
+                expression: String::from("counter"),
+                access: WatchpointAccess::Read,
+            })
+            .unwrap()
+            .0,
+            "-break-watch -r \"counter\""
+        );
+        assert_eq!(
+            watchpoint_command(&WatchpointRequest::Masked {
+                expression: String::from("*0x4000"),
+                mask: String::from("0xffffff00"),
+            })
+            .unwrap()
+            .0,
+            "-interpreter-exec console \"watch *0x4000 mask 0xffffff00\""
+        );
+        assert!(
+            watchpoint_command(&WatchpointRequest::Masked {
+                expression: String::from("counter"),
+                mask: String::from("0xff; quit"),
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn validates_and_builds_filtered_catchpoints() {
+        assert_eq!(
+            filtered_catchpoint_command(&FilteredCatchpointRequest {
+                kind: FilteredCatchpointKind::Syscall,
+                filter: String::from("openat, read 257"),
+            })
+            .unwrap(),
+            "-interpreter-exec console \"catch syscall openat read 257\""
+        );
+        assert_eq!(
+            filtered_catchpoint_command(&FilteredCatchpointRequest {
+                kind: FilteredCatchpointKind::LibraryLoad,
+                filter: String::from("lib(ssl|crypto)\\.so"),
+            })
+            .unwrap(),
+            "-interpreter-exec console \"catch load lib(ssl|crypto)\\\\.so\""
+        );
+        assert!(
+            filtered_catchpoint_command(&FilteredCatchpointRequest {
+                kind: FilteredCatchpointKind::Syscall,
+                filter: String::from("openat; quit"),
+            })
+            .is_err()
+        );
     }
 }

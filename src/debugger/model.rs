@@ -265,6 +265,11 @@ impl Breakpoint {
         self.kind.contains("watchpoint")
     }
 
+    pub fn is_hardware_breakpoint(&self) -> bool {
+        !self.is_watchpoint()
+            && (self.kind.contains("hw breakpoint") || self.kind.contains("hardware breakpoint"))
+    }
+
     pub fn is_catchpoint(&self) -> bool {
         self.kind.contains("catchpoint")
     }
@@ -1301,8 +1306,12 @@ mod tests {
 
         let watchpoints = breakpoints(&parse_record(r#"6^done,BreakpointTable={nr_rows="1",body=[bkpt={number="2",type="hw watchpoint",disp="keep",enabled="y",what="counter",cond="counter > 3"}]}"#).unwrap());
         assert!(watchpoints[0].is_watchpoint());
+        assert!(!watchpoints[0].is_hardware_breakpoint());
         assert_eq!(watchpoints[0].original_location.as_deref(), Some("counter"));
         assert_eq!(watchpoints[0].condition.as_deref(), Some("counter > 3"));
+
+        let hardware = breakpoints(&parse_record(r#"6^done,BreakpointTable={nr_rows="1",body=[bkpt={number="2",type="hw breakpoint",disp="keep",enabled="y",what="main"}]}"#).unwrap());
+        assert!(hardware[0].is_hardware_breakpoint());
 
         let catchpoints = breakpoints(&parse_record(r#"7^done,BreakpointTable={body=[bkpt={number="3",type="catchpoint",enabled="y",what="exception throw",catch-type="throw"},bkpt={number="4",type="catchpoint",enabled="y",what="SIGSEGV",catch-type="signal"}]}"#).unwrap());
         assert_eq!(catchpoints[0].catch_type.as_deref(), Some("throw"));

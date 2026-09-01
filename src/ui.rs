@@ -241,7 +241,8 @@ type InferiorActionHandler = Rc<dyn Fn(InferiorAction)>;
 type ThreadActionHandler = Rc<dyn Fn(ThreadAction)>;
 type SignalCatchpointHandler = Rc<dyn Fn(String, Option<String>)>;
 type EventCatchpointHandler = Rc<dyn Fn(EventCatchpoint, Option<String>)>;
-type WatchpointInsertHandler = Rc<dyn Fn(String, WatchpointAccess)>;
+type WatchpointInsertHandler = Rc<dyn Fn(WatchpointRequest)>;
+type FilteredCatchpointHandler = Rc<dyn Fn(FilteredCatchpointRequest)>;
 type MemoryWatchHandler = Rc<dyn Fn(u64, String, usize)>;
 type InstructionMemoryHandler = Rc<dyn Fn(String)>;
 type DisassemblyHandler = Rc<dyn Fn(DisassemblyRequest)>;
@@ -315,14 +316,18 @@ impl RefreshGate {
 pub(crate) enum EventCatchpoint {
     CxxThrow,
     CxxCatch,
+    CxxRethrow,
     RustPanic,
     Exec,
     Fork,
+    Vfork,
     Syscall,
+    LibraryLoad,
+    LibraryUnload,
 }
 
 impl EventCatchpoint {
-    const ALL: [(Self, &'static str, &'static str); 6] = [
+    const ALL: [(Self, &'static str, &'static str); 10] = [
         (
             Self::CxxThrow,
             "C++ throw",
@@ -334,16 +339,32 @@ impl EventCatchpoint {
             "Stop when a C++ exception is caught",
         ),
         (
+            Self::CxxRethrow,
+            "C++ rethrow",
+            "Stop when a C++ exception is rethrown",
+        ),
+        (
             Self::RustPanic,
             "Rust panic",
             "Stop at Rust's panic runtime entry point",
         ),
         (Self::Exec, "exec", "Stop when the inferior calls exec"),
         (Self::Fork, "fork", "Stop when the inferior forks"),
+        (Self::Vfork, "vfork", "Stop when the inferior calls vfork"),
         (
             Self::Syscall,
             "syscall",
             "Stop at every system call. This can trigger very frequently",
+        ),
+        (
+            Self::LibraryLoad,
+            "library load",
+            "Stop when any shared library is loaded",
+        ),
+        (
+            Self::LibraryUnload,
+            "library unload",
+            "Stop when any shared library is unloaded",
         ),
     ];
 
@@ -351,10 +372,14 @@ impl EventCatchpoint {
         match self {
             Self::CxxThrow => "catch throw",
             Self::CxxCatch => "catch catch",
+            Self::CxxRethrow => "catch rethrow",
             Self::RustPanic => "break rust_panic",
             Self::Exec => "catch exec",
             Self::Fork => "catch fork",
+            Self::Vfork => "catch vfork",
             Self::Syscall => "catch syscall",
+            Self::LibraryLoad => "catch load",
+            Self::LibraryUnload => "catch unload",
         }
     }
 
@@ -362,10 +387,14 @@ impl EventCatchpoint {
         match self {
             Self::CxxThrow => "C++ throw",
             Self::CxxCatch => "C++ catch",
+            Self::CxxRethrow => "C++ rethrow",
             Self::RustPanic => "Rust panic",
             Self::Exec => "exec",
             Self::Fork => "fork",
+            Self::Vfork => "vfork",
             Self::Syscall => "syscall",
+            Self::LibraryLoad => "library load",
+            Self::LibraryUnload => "library unload",
         }
     }
 
@@ -373,6 +402,7 @@ impl EventCatchpoint {
         match self {
             Self::CxxThrow => breakpoint.catch_type.as_deref() == Some("throw"),
             Self::CxxCatch => breakpoint.catch_type.as_deref() == Some("catch"),
+            Self::CxxRethrow => breakpoint.catch_type.as_deref() == Some("rethrow"),
             Self::RustPanic => {
                 !breakpoint.is_catchpoint()
                     && breakpoint
@@ -383,9 +413,87 @@ impl EventCatchpoint {
             }
             Self::Exec => breakpoint.catch_type.as_deref() == Some("exec"),
             Self::Fork => breakpoint.catch_type.as_deref() == Some("fork"),
-            Self::Syscall => breakpoint.catch_type.as_deref() == Some("syscall"),
+            Self::Vfork => breakpoint.catch_type.as_deref() == Some("vfork"),
+            Self::Syscall => {
+                breakpoint.catch_type.as_deref() == Some("syscall")
+                    && breakpoint.original_location.as_deref() == Some("<any syscall>")
+            }
+            Self::LibraryLoad => {
+                breakpoint.catch_type.as_deref() == Some("load")
+                    && breakpoint.original_location.as_deref() == Some("load of library")
+            }
+            Self::LibraryUnload => {
+                breakpoint.catch_type.as_deref() == Some("unload")
+                    && breakpoint.original_location.as_deref() == Some("unload of library")
+            }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FilteredCatchpointKind {
+    Syscall,
+    LibraryLoad,
+    LibraryUnload,
+}
+
+impl FilteredCatchpointKind {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Syscall => "syscall",
+            Self::LibraryLoad => "library load",
+            Self::LibraryUnload => "library unload",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FilteredCatchpointRequest {
+    pub kind: FilteredCatchpointKind,
+    pub filter: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum WatchpointRequest {
+    Standard {
+        expression: String,
+        access: WatchpointAccess,
+    },
+    Masked {
+        expression: String,
+        mask: String,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct StopPointMetadata {
+    group: Option<String>,
+    tags: Vec<String>,
+}
+
+#[derive(Clone)]
+struct StopPointFilterRow {
+    widgets: Vec<gtk::Widget>,
+    number: String,
+    searchable: String,
+    hardware: bool,
+    watchpoint: bool,
+    catchpoint: bool,
+    enabled: bool,
+}
+
+#[derive(Clone)]
+struct StopPointFilterControls {
+    search: gtk::SearchEntry,
+    kind: gtk::DropDown,
+    empty: gtk::Label,
+}
+
+#[derive(Clone)]
+struct FilteredCatchpointControls {
+    kind: gtk::DropDown,
+    filter: gtk::Entry,
+    add: gtk::Button,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1373,6 +1481,7 @@ pub struct Ui {
     stack_details_generation: Rc<Cell<Option<u64>>>,
     stack_empty: gtk::Label,
     breakpoints_list: gtk::Box,
+    stop_point_filter: StopPointFilterControls,
     add_breakpoint_button: gtk::Button,
     delete_all_breakpoints_button: gtk::Button,
     delete_all_watchpoints_button: gtk::Button,
@@ -1380,7 +1489,9 @@ pub struct Ui {
     event_catchpoint_buttons: Vec<(gtk::Button, EventCatchpoint)>,
     watchpoint_expression: gtk::Entry,
     watchpoint_access: gtk::DropDown,
+    watchpoint_mask: gtk::Entry,
     watchpoint_add_button: gtk::Button,
+    filtered_catchpoint: FilteredCatchpointControls,
     signal_detail: gtk::Label,
     signal_buttons: Vec<(gtk::Button, &'static str, &'static str)>,
     signal_entry: gtk::Entry,
@@ -1410,6 +1521,8 @@ pub struct Ui {
     inferior_pid: Rc<Cell<Option<u32>>>,
     layout: layout::Persistence,
     breakpoints: Rc<RefCell<Vec<Breakpoint>>>,
+    stop_point_filter_rows: Rc<RefCell<Vec<StopPointFilterRow>>>,
+    stop_point_metadata: Rc<RefCell<HashMap<String, StopPointMetadata>>>,
     previous_registers: Rc<RefCell<HashMap<String, String>>>,
     cached_register_names: Rc<RefCell<Option<Rc<Vec<String>>>>>,
     stop_refresh_generation: Rc<Cell<u64>>,
@@ -1464,6 +1577,7 @@ pub struct Ui {
     breakpoint_bulk_delete_handler: Rc<RefCell<Option<BreakpointBulkDeleteHandler>>>,
     signal_catchpoint_handler: Rc<RefCell<Option<SignalCatchpointHandler>>>,
     event_catchpoint_handler: Rc<RefCell<Option<EventCatchpointHandler>>>,
+    filtered_catchpoint_handler: Rc<RefCell<Option<FilteredCatchpointHandler>>>,
     watchpoint_insert_handler: Rc<RefCell<Option<WatchpointInsertHandler>>>,
     source_symbol_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
     source_discovery_handler: Rc<RefCell<Option<SourceDiscoveryHandler>>>,
@@ -1549,6 +1663,7 @@ struct Workspace {
     stack_store: gio::ListStore,
     stack_empty: gtk::Label,
     breakpoints_list: gtk::Box,
+    stop_point_filter: StopPointFilterControls,
     add_breakpoint_button: gtk::Button,
     delete_all_breakpoints_button: gtk::Button,
     delete_all_watchpoints_button: gtk::Button,
@@ -1556,7 +1671,9 @@ struct Workspace {
     event_catchpoint_buttons: Vec<(gtk::Button, EventCatchpoint)>,
     watchpoint_expression: gtk::Entry,
     watchpoint_access: gtk::DropDown,
+    watchpoint_mask: gtk::Entry,
     watchpoint_add_button: gtk::Button,
+    filtered_catchpoint: FilteredCatchpointControls,
     signal_detail: gtk::Label,
     signal_buttons: Vec<(gtk::Button, &'static str, &'static str)>,
     signal_entry: gtk::Entry,
@@ -1607,6 +1724,7 @@ struct Inspector {
     stack_store: gio::ListStore,
     stack_empty: gtk::Label,
     breakpoints_list: gtk::Box,
+    stop_point_filter: StopPointFilterControls,
     add_breakpoint_button: gtk::Button,
     delete_all_breakpoints_button: gtk::Button,
     delete_all_watchpoints_button: gtk::Button,
@@ -1614,7 +1732,9 @@ struct Inspector {
     event_catchpoint_buttons: Vec<(gtk::Button, EventCatchpoint)>,
     watchpoint_expression: gtk::Entry,
     watchpoint_access: gtk::DropDown,
+    watchpoint_mask: gtk::Entry,
     watchpoint_add_button: gtk::Button,
+    filtered_catchpoint: FilteredCatchpointControls,
     signal_detail: gtk::Label,
     signal_buttons: Vec<(gtk::Button, &'static str, &'static str)>,
     signal_entry: gtk::Entry,
@@ -2741,11 +2861,24 @@ mod tests {
                 original_location: Some(String::from("rust_panic")),
                 ..stop_point("5", "breakpoint")
             },
+            Breakpoint {
+                catch_type: Some(String::from("syscall")),
+                original_location: Some(String::from("openat, read")),
+                ..stop_point("6", "catchpoint")
+            },
+            Breakpoint {
+                catch_type: Some(String::from("syscall")),
+                original_location: Some(String::from("<any syscall>")),
+                ..stop_point("7", "catchpoint")
+            },
         ];
         assert_eq!(breakpoint_command_numbers(&stop_points, false), ["1"]);
         assert_eq!(breakpoint_command_numbers(&stop_points, true), ["2"]);
         assert_eq!(signal_catchpoint_command_numbers(&stop_points), ["3"]);
-        assert_eq!(event_catchpoint_command_numbers(&stop_points), ["4", "5"]);
+        assert_eq!(
+            event_catchpoint_command_numbers(&stop_points),
+            ["4", "5", "6", "7"]
+        );
         assert_eq!(
             event_catchpoint_command_number(&stop_points, EventCatchpoint::CxxThrow).as_deref(),
             Some("4")
@@ -2753,6 +2886,10 @@ mod tests {
         assert_eq!(
             event_catchpoint_command_number(&stop_points, EventCatchpoint::RustPanic).as_deref(),
             Some("5")
+        );
+        assert_eq!(
+            event_catchpoint_command_number(&stop_points, EventCatchpoint::Syscall).as_deref(),
+            Some("7")
         );
         assert_eq!(
             signal_catchpoint_command_number(&stop_points, "segv").as_deref(),

@@ -195,6 +195,7 @@ pub(crate) enum DisassemblyRequest {
 pub(crate) struct BreakpointSpec {
     pub location: String,
     pub regex: bool,
+    pub hardware: bool,
     pub enabled: bool,
     pub temporary: bool,
     pub allow_pending: bool,
@@ -228,6 +229,7 @@ impl BreakpointSpec {
                 .or_else(|| breakpoint.address.clone())
                 .unwrap_or_default(),
             regex: false,
+            hardware: breakpoint.is_hardware_breakpoint(),
             enabled: breakpoint.enabled,
             temporary: breakpoint.disposition.as_deref() == Some("del"),
             allow_pending: breakpoint.pending.is_some(),

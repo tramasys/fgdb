@@ -474,30 +474,38 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
-    ui.set_watchpoint_insert_handler(move |expression, access| {
+    ui.set_watchpoint_insert_handler(move |request| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
-        let option = access.mi_option();
-        let command = if option.is_empty() {
-            format!("-break-watch {}", crate::debugger::quote(&expression))
-        } else {
-            format!(
-                "-break-watch {option} {}",
-                crate::debugger::quote(&expression)
-            )
+        let (command, detail) = match watchpoint_command(&request) {
+            Ok(command) => command,
+            Err(error) => {
+                if let Some(ui) = weak_ui.upgrade() {
+                    ui.set_status("Watchpoint not added", error, Some("status-error"));
+                }
+                return;
+            }
         };
-        let kind = match access {
-            WatchpointAccess::Write => "write",
-            WatchpointAccess::Read => "read",
-            WatchpointAccess::Access => "access",
+        mutate_breakpoint(weak_ui.clone(), &client, command, detail);
+    });
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
+    ui.set_filtered_catchpoint_handler(move |request| {
+        let Some(client) = weak_client.upgrade() else {
+            return;
         };
-        mutate_breakpoint(
-            weak_ui.clone(),
-            &client,
-            command,
-            format!("Added {kind} watchpoint for {expression}"),
-        );
+        let command = match filtered_catchpoint_command(&request) {
+            Ok(command) => command,
+            Err(error) => {
+                if let Some(ui) = weak_ui.upgrade() {
+                    ui.set_status("Catchpoint not added", error, Some("status-error"));
+                }
+                return;
+            }
+        };
+        let detail = format!("Added filtered {} catchpoint", request.kind.label());
+        mutate_breakpoint(weak_ui.clone(), &client, command, detail);
     });
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
