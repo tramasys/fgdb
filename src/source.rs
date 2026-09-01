@@ -6,6 +6,8 @@ use std::{
 
 use crate::config::LaunchConfig;
 
+mod cache;
+
 const MAX_SOURCE_TREE_DIRECTORIES: usize = 25_000;
 const MAX_SEARCHABLE_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 
@@ -275,11 +277,10 @@ pub fn search_source_files(
         if scope.is_some_and(|scope| !path.starts_with(scope)) {
             continue;
         }
-        let Ok(bytes) = crate::bounded::read_bytes(path, MAX_SEARCHABLE_SOURCE_BYTES) else {
+        let Some(source) = cache::searchable_source(path) else {
             continue;
         };
-        let contents = String::from_utf8_lossy(&bytes);
-        for (line_index, line) in contents.lines().enumerate() {
+        for (line_index, line) in source.lines().enumerate() {
             if line_index % 256 == 0 && !should_continue() {
                 return matches;
             }
@@ -301,6 +302,17 @@ pub fn search_source_files(
 }
 
 fn case_insensitive_match_column(line: &str, query_lower: &str) -> Option<usize> {
+    if query_lower.is_empty() {
+        return Some(1);
+    }
+    if line.is_ascii() && query_lower.is_ascii() {
+        let query = query_lower.as_bytes();
+        let byte_offset = line
+            .as_bytes()
+            .windows(query.len())
+            .position(|window| window.eq_ignore_ascii_case(query))?;
+        return Some(byte_offset + 1);
+    }
     let line_lower = line.to_lowercase();
     let byte_offset = line_lower.find(query_lower)?;
     let lowered_character_offset = line_lower.get(..byte_offset)?.chars().count();
@@ -537,6 +549,14 @@ mod tests {
 
     #[test]
     fn reports_source_columns_in_original_unicode_characters() {
+        assert_eq!(
+            case_insensitive_match_column("Alpha TARGET", "alpha"),
+            Some(1)
+        );
+        assert_eq!(
+            case_insensitive_match_column("Alpha TARGET", "target"),
+            Some(7)
+        );
         assert_eq!(
             case_insensitive_match_column("alpha target", "target"),
             Some(7)

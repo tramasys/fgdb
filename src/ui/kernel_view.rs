@@ -341,6 +341,7 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
         root,
         wide_subtabs: navigation.root,
         compact_subtabs: navigation.compact_root,
+        pages,
         active,
         in_flight,
         needs_refresh,

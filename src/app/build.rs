@@ -678,7 +678,8 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         };
         let generation = ui.current_stop_refresh_generation();
         drop(ui);
-        refresh_expression_watches(weak_ui.clone(), &client, generation);
+        let update_batch = variable_update_batch(&weak_ui, generation, 1);
+        refresh_expression_watches(weak_ui.clone(), &client, generation, update_batch);
     });
 
     let weak_ui = Rc::downgrade(&ui);

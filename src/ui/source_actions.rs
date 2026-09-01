@@ -271,6 +271,7 @@ impl Ui {
         self.show_signal(None, None);
         self.memory_region_store.remove_all();
         self.memory_regions.borrow_mut().clear();
+        self.memory_regions_generation.set(None);
         self.memory_regions_empty.set_visible(true);
         self.clear_kernel_snapshot();
         self.clear_misc_snapshot();
@@ -314,7 +315,7 @@ impl Ui {
 
     pub(super) fn connect_open_source(self: &Rc<Self>) {
         let weak_ui = Rc::downgrade(self);
-        self.open_source_button.connect_clicked(move |_| {
+        self.source_navigation.open_file.connect_clicked(move |_| {
             let dialog = gtk::FileDialog::builder()
                 .title("Open source files")
                 .modal(true)

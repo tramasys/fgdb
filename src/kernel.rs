@@ -10,7 +10,10 @@ mod startup;
 
 const MAX_PROC_TEXT_BYTES: usize = 2 * 1024 * 1024;
 
-pub(crate) use procfs::{read_local_parent_pid, read_local_target_abi, verified_proc_root};
+pub(crate) use procfs::{
+    invalidate_local_target_abi_cache, read_local_parent_pid, read_local_target_abi,
+    verified_proc_root,
+};
 pub(crate) use snapshot::read_snapshot;
 pub(crate) use startup::{
     ProcessArgument, ProcessEnvironment, ProcessStartupSnapshot, read_process_startup,

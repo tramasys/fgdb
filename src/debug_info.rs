@@ -1,10 +1,14 @@
 use std::{
+    collections::VecDeque,
     fs::File,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{Mutex, OnceLock},
     time::SystemTime,
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use goblin::{
     container::Ctx,
@@ -20,6 +24,7 @@ const MAX_SECTION_HEADER_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SECTION_NAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_METADATA_SECTION_BYTES: usize = 1024 * 1024;
 const DEBUGLINK_CRC_BUFFER_BYTES: usize = 64 * 1024;
+const MAX_DEBUGLINK_CRC_CACHE_ENTRIES: usize = 32;
 const GNU_DEBUGLINK_CRC_TABLE: [u32; 256] = gnu_debuglink_crc_table();
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -446,7 +451,7 @@ fn select_separate_debug_file(
     if let Some(expected_crc) = debuglink_crc {
         for candidate in debuglink_candidates {
             if candidate.is_file()
-                && gnu_debuglink_crc(&candidate).is_ok_and(|crc| crc == expected_crc)
+                && cached_gnu_debuglink_crc(&candidate).is_ok_and(|crc| crc == expected_crc)
             {
                 return Some(candidate);
             }
@@ -458,6 +463,8 @@ fn select_separate_debug_file(
 }
 
 fn gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
+    #[cfg(test)]
+    record_debuglink_crc_calculation(path);
     let mut file = File::open(path)?;
     let mut buffer = [0_u8; DEBUGLINK_CRC_BUFFER_BYTES];
     let mut crc = u32::MAX;
@@ -469,6 +476,128 @@ fn gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
         crc = update_gnu_debuglink_crc(crc, &buffer[..read]);
     }
     Ok(!crc)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DebuglinkFileIdentity {
+    path: PathBuf,
+    size: u64,
+    modified: SystemTime,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
+impl DebuglinkFileIdentity {
+    fn read(path: &Path) -> io::Result<Self> {
+        let metadata = std::fs::metadata(path)?;
+        Ok(Self {
+            path: path.to_owned(),
+            size: metadata.len(),
+            modified: metadata.modified()?,
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+        })
+    }
+}
+
+struct DebuglinkCrcCache {
+    entries: VecDeque<(DebuglinkFileIdentity, u32)>,
+    capacity: usize,
+}
+
+impl DebuglinkCrcCache {
+    fn new(capacity: usize) -> Self {
+        Self {
+            entries: VecDeque::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    fn get(&mut self, identity: &DebuglinkFileIdentity) -> Option<u32> {
+        let index = self
+            .entries
+            .iter()
+            .position(|(cached, _)| cached == identity)?;
+        let entry = self.entries.remove(index)?;
+        let crc = entry.1;
+        self.entries.push_back(entry);
+        Some(crc)
+    }
+
+    fn insert(&mut self, identity: DebuglinkFileIdentity, crc: u32) {
+        if self.capacity == 0 {
+            return;
+        }
+        if let Some(index) = self
+            .entries
+            .iter()
+            .position(|(cached, _)| cached == &identity)
+        {
+            self.entries.remove(index);
+        }
+        self.entries.push_back((identity, crc));
+        while self.entries.len() > self.capacity {
+            self.entries.pop_front();
+        }
+    }
+}
+
+fn debuglink_crc_cache() -> &'static Mutex<DebuglinkCrcCache> {
+    static CACHE: OnceLock<Mutex<DebuglinkCrcCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(DebuglinkCrcCache::new(MAX_DEBUGLINK_CRC_CACHE_ENTRIES)))
+}
+
+fn cached_gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
+    let before = DebuglinkFileIdentity::read(path)?;
+    if let Some(crc) = debuglink_crc_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&before)
+    {
+        return Ok(crc);
+    }
+    let crc = gnu_debuglink_crc(path)?;
+    let after = DebuglinkFileIdentity::read(path)?;
+    if before != after {
+        return Err(io::Error::other(
+            "debug file changed while its GNU debuglink CRC was calculated",
+        ));
+    }
+    debuglink_crc_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(before, crc);
+    Ok(crc)
+}
+
+#[cfg(test)]
+fn debuglink_crc_calculations_by_path() -> &'static Mutex<std::collections::HashMap<PathBuf, usize>>
+{
+    static CALCULATIONS: OnceLock<Mutex<std::collections::HashMap<PathBuf, usize>>> =
+        OnceLock::new();
+    CALCULATIONS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn record_debuglink_crc_calculation(path: &Path) {
+    let mut calculations = debuglink_crc_calculations_by_path()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *calculations.entry(path.to_owned()).or_default() += 1;
+}
+
+#[cfg(test)]
+fn debuglink_crc_calculations(path: &Path) -> usize {
+    debuglink_crc_calculations_by_path()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(path)
+        .copied()
+        .unwrap_or(0)
 }
 
 fn update_gnu_debuglink_crc(mut crc: u32, bytes: &[u8]) -> u32 {
@@ -728,5 +857,84 @@ mod tests {
             select_separate_debug_file([stale_debuglink], Some(0x1234_5678), [build_id.clone()]),
             Some(build_id)
         );
+    }
+
+    #[test]
+    fn caches_crc_for_an_unchanged_debug_file_and_reloads_changes() {
+        let directory = TestDirectory::new("debuglink-cache");
+        let candidate = directory.path().join("cached.debug");
+        std::fs::write(&candidate, b"first debug contents").unwrap();
+        let calculations = debuglink_crc_calculations(&candidate);
+
+        let first = cached_gnu_debuglink_crc(&candidate).unwrap();
+        assert_eq!(cached_gnu_debuglink_crc(&candidate).unwrap(), first);
+        assert_eq!(debuglink_crc_calculations(&candidate), calculations + 1);
+
+        std::fs::write(&candidate, b"different debug contents with a new size").unwrap();
+        let second = cached_gnu_debuglink_crc(&candidate).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(debuglink_crc_calculations(&candidate), calculations + 2);
+    }
+
+    #[test]
+    fn crc_read_failures_do_not_poison_the_cache() {
+        let directory = TestDirectory::new("debuglink-cache-failure");
+        let candidate = directory.path().join("later.debug");
+        assert!(cached_gnu_debuglink_crc(&candidate).is_err());
+        std::fs::write(&candidate, b"now available").unwrap();
+        assert_eq!(
+            cached_gnu_debuglink_crc(&candidate).unwrap(),
+            gnu_debuglink_crc(&candidate).unwrap()
+        );
+    }
+
+    #[test]
+    fn crc_cache_is_bounded_and_evicts_the_oldest_identity() {
+        let identity = |inode| DebuglinkFileIdentity {
+            path: PathBuf::from(format!("/debug/{inode}")),
+            size: inode,
+            modified: SystemTime::UNIX_EPOCH,
+            #[cfg(unix)]
+            device: 1,
+            #[cfg(unix)]
+            inode,
+        };
+        let mut cache = DebuglinkCrcCache::new(2);
+        cache.insert(identity(1), 1);
+        cache.insert(identity(2), 2);
+        cache.insert(identity(3), 3);
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.get(&identity(1)), None);
+        assert_eq!(cache.get(&identity(2)), Some(2));
+        assert_eq!(cache.get(&identity(3)), Some(3));
+    }
+
+    #[test]
+    fn crc_cache_misses_when_strong_file_identity_changes() {
+        let original = DebuglinkFileIdentity {
+            path: PathBuf::from("/debug/module.debug"),
+            size: 10,
+            modified: SystemTime::UNIX_EPOCH,
+            #[cfg(unix)]
+            device: 1,
+            #[cfg(unix)]
+            inode: 2,
+        };
+        let mut changed_time = original.clone();
+        changed_time.modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        let mut changed_inode = original.clone();
+        #[cfg(unix)]
+        {
+            changed_inode.inode += 1;
+        }
+        #[cfg(not(unix))]
+        {
+            changed_inode.size += 1;
+        }
+        let mut cache = DebuglinkCrcCache::new(4);
+        cache.insert(original, 42);
+
+        assert_eq!(cache.get(&changed_time), None);
+        assert_eq!(cache.get(&changed_inode), None);
     }
 }

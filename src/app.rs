@@ -87,14 +87,21 @@ struct VariableRefresh {
     next_index: usize,
     created: usize,
     created_varobjs: HashSet<String>,
-    updates_requested: bool,
-    update_index: usize,
-    recreate_after_updates: bool,
+    update_batch: Option<Rc<VariableUpdateBatch>>,
+    bulk_completed: bool,
 }
 
 enum VariableRefreshTarget {
     Locals,
     ExpressionWatches(Vec<String>),
+}
+
+struct VariableUpdateBatch {
+    ui: Weak<Ui>,
+    generation: u64,
+    remaining_preparations: Cell<usize>,
+    states: RefCell<Vec<Rc<RefCell<VariableRefresh>>>>,
+    requested: Cell<bool>,
 }
 
 mod assignments;

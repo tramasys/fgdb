@@ -94,10 +94,6 @@ pub(super) fn build_topbar(
         "Launch a program, attach to a process, inspect a core, connect remotely, restart, kill, or detach",
     ));
     leading.append(&session_button);
-    let open_source = gtk::Button::with_label("Open source");
-    open_source.add_css_class("toolbar-action");
-    open_source.set_tooltip_text(Some("Open one or more source files in editor tabs"));
-    leading.append(&open_source);
     let debug_data = gtk::Button::with_label("Debug data");
     debug_data.add_css_class("toolbar-action");
     debug_data.set_tooltip_text(Some(
@@ -204,6 +200,7 @@ pub(super) fn build_topbar(
     until_popover.set_child(Some(&until_menu));
     let until = header_popup_button("Until", &until_popover);
     until.add_css_class("debug-control");
+    until.add_css_class("until-control");
     until.set_tooltip_text(Some("Run until a selected control-flow or memory event"));
     until.set_sensitive(false);
     controls.append(&run);
@@ -261,7 +258,6 @@ pub(super) fn build_topbar(
         configuration_button,
         gdb_capabilities_label,
         target_label,
-        open_source_button: open_source,
         debug_data_button: debug_data,
         terminal_toggle_button: terminal_toggle,
         run_button: run,

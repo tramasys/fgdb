@@ -105,7 +105,6 @@ impl Ui {
             gdb_capabilities_label: topbar.gdb_capabilities_label,
             target_label: topbar.target_label,
             terminal_toggle_button: topbar.terminal_toggle_button,
-            open_source_button: topbar.open_source_button,
             debug_data_button: topbar.debug_data_button,
             run_button: topbar.run_button,
             pause_button: topbar.pause_button,
@@ -153,6 +152,7 @@ impl Ui {
             call_stack_list: workspace.call_stack_list,
             frame_buttons: Rc::new(RefCell::new(Vec::new())),
             latest_frames: Rc::new(RefCell::new(Vec::new())),
+            latest_frames_generation: Rc::new(Cell::new(None)),
             selected_frame_level: Rc::new(Cell::new(0)),
             threads_list: workspace.threads_list,
             thread_controls: workspace.thread_controls,
@@ -233,6 +233,7 @@ impl Ui {
             latest_stack: Rc::new(RefCell::new(Vec::new())),
             displayed_stack: Rc::new(RefCell::new(Vec::new())),
             latest_stack_generation: Rc::new(Cell::new(None)),
+            stack_memory_refresh_generation: Rc::new(Cell::new(None)),
             stack_details_generation: Rc::new(Cell::new(None)),
             stack_empty: workspace.stack_empty,
             breakpoints_list: workspace.breakpoints_list,
@@ -259,6 +260,9 @@ impl Ui {
             memory_regions_view: workspace.memory_regions_view,
             memory_regions_empty: workspace.memory_regions_empty,
             memory_regions: Rc::new(RefCell::new(Vec::new())),
+            memory_regions_generation: Rc::new(Cell::new(None)),
+            memory_watches_refresh_generation: Rc::new(Cell::new(None)),
+            tls_runtime_refresh_generation: Rc::new(Cell::new(None)),
             memory_watches: Rc::new(RefCell::new(Vec::new())),
             memory_watch_container: workspace.memory_watch_container,
             memory_address_entry: workspace.memory_address_entry,
@@ -517,6 +521,7 @@ impl Ui {
     }
 
     pub fn reset_target_abi(&self) {
+        crate::kernel::invalidate_local_target_abi_cache();
         self.target_architecture.set(TargetArchitecture::Unknown);
         self.target_endian.set(None);
         self.target_pointer_bits.set(usize::BITS);
@@ -533,12 +538,21 @@ impl Ui {
         self.inspector_notebook.current_page() == Some(3)
     }
 
+    pub fn memory_details_visible(&self) -> bool {
+        self.inspector_notebook.current_page() == Some(4)
+    }
+
+    pub fn tls_details_visible(&self) -> bool {
+        self.kernel_view.active.get()
+            && self.kernel_view.pages.visible_child_name().as_deref() == Some("tls")
+    }
+
     pub fn connect_debug_controls(self: &Rc<Self>, client: &Rc<MiClient>) {
         let weak_ui = Rc::downgrade(self);
         let client_for_inspector = Rc::clone(client);
         self.inspector_notebook
             .connect_switch_page(move |_, _, page| {
-                if !matches!(page, 2 | 3) {
+                if !matches!(page, 2 | 3 | 4 | 7) {
                     return;
                 }
                 // GTK can emit `switch-page` before `current_page()` exposes
@@ -558,6 +572,26 @@ impl Ui {
                             &Rc::downgrade(&ui),
                             &client,
                             page,
+                        );
+                    }
+                });
+            });
+        let weak_ui = Rc::downgrade(self);
+        let client_for_tls = Rc::clone(client);
+        self.kernel_view
+            .pages
+            .connect_visible_child_name_notify(move |_| {
+                let weak_ui = weak_ui.clone();
+                let client = Rc::clone(&client_for_tls);
+                glib::idle_add_local_once(move || {
+                    let Some(ui) = weak_ui.upgrade() else {
+                        return;
+                    };
+                    if ui.tls_details_visible() && ui.stopped_inspection_available() {
+                        crate::app::refresh_cached_inspector_details(
+                            &Rc::downgrade(&ui),
+                            &client,
+                            7,
                         );
                     }
                 });
@@ -764,6 +798,7 @@ impl Ui {
         let source_back = self.source_navigation.back.clone();
         let source_forward = self.source_navigation.forward.clone();
         let source_quick_open = self.source_navigation.quick_open.clone();
+        let source_open_file = self.source_navigation.open_file.clone();
         let source_find = self.source_navigation.find.clone();
         let source_go_to_line = self.source_navigation.go_to_line.clone();
         let source_symbols = self.source_navigation.symbols.clone();
@@ -785,6 +820,9 @@ impl Ui {
                 (gtk::gdk::Key::Right, false, false, true) => Some(&source_forward),
                 (gtk::gdk::Key::p | gtk::gdk::Key::P, true, false, false) => {
                     Some(&source_quick_open)
+                }
+                (gtk::gdk::Key::o | gtk::gdk::Key::O, true, false, false) => {
+                    Some(&source_open_file)
                 }
                 (gtk::gdk::Key::f | gtk::gdk::Key::F, true, false, false) => Some(&source_find),
                 (gtk::gdk::Key::g | gtk::gdk::Key::G, true, false, false) => {

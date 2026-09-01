@@ -1501,7 +1501,11 @@ pub(super) fn build_editor_panel(notebook: &gtk::Notebook) -> SourceEditorPanel 
     forward.set_sensitive(false);
     let quick_open = gtk::Button::with_label("Quick open");
     quick_open.set_tooltip_text(Some("Find a loaded or project source file · Ctrl+P"));
-    for button in [&back, &forward, &quick_open] {
+    let open_file = gtk::Button::with_label("Open file…");
+    open_file.set_tooltip_text(Some(
+        "Open one or more source files from disk in editor tabs · Ctrl+O",
+    ));
+    for button in [&back, &forward, &quick_open, &open_file] {
         button.add_css_class("source-navigation-action");
         toolbar.append(button);
     }
@@ -1567,6 +1571,7 @@ pub(super) fn build_editor_panel(notebook: &gtk::Notebook) -> SourceEditorPanel 
             back,
             forward,
             quick_open,
+            open_file,
             find,
             go_to_line,
             symbols,

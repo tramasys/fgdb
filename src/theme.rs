@@ -2093,6 +2093,39 @@ button.primary-control:focus-visible {{
     background: alpha(@app_accent, 0.20);
 }}
 
+button.until-control {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.055);
+    box-shadow: inset 0 -1px alpha(@app_accent, 0.42);
+}}
+
+button.until-control:hover,
+button.until-control:focus,
+button.until-control:focus-visible {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.12);
+    box-shadow: inset 0 -1px alpha(@app_accent, 0.7);
+}}
+
+button.until-control:active,
+button.until-control:checked {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.17);
+    box-shadow: inset 0 -2px @app_accent;
+}}
+
+button.until-control:disabled {{
+    color: alpha(@app_accent_hover, 0.42);
+    background: alpha(@app_accent, 0.025);
+    box-shadow: inset 0 -1px alpha(@app_accent, 0.16);
+}}
+
+button.until-control.execution-interlocked:disabled {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.055);
+    box-shadow: inset 0 -1px alpha(@app_accent, 0.42);
+}}
+
 button.toolbar-action {{
     padding-left: 8px;
     padding-right: 8px;

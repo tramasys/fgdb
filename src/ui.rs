@@ -762,6 +762,7 @@ struct SourceNavigationControls {
     back: gtk::Button,
     forward: gtk::Button,
     quick_open: gtk::Button,
+    open_file: gtk::Button,
     find: gtk::Button,
     go_to_line: gtk::Button,
     symbols: gtk::Button,
@@ -965,6 +966,7 @@ struct KernelView {
     root: gtk::Box,
     wide_subtabs: gtk::Box,
     compact_subtabs: gtk::Box,
+    pages: gtk::Stack,
     active: Rc<Cell<bool>>,
     in_flight: Rc<Cell<bool>>,
     needs_refresh: Rc<Cell<bool>>,
@@ -1333,15 +1335,16 @@ struct GefToolsMenu {
 const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 //
 // Source opens automatically at the first source-backed stop.
-// You can also use “Open source” to keep several files in tabs.
+// Use “Open file…” in the source toolbar to keep several files in tabs.
 //
 // F5        run / continue       F6        pause
 // F10       step over            F11       step into
 // Ctrl+F10  next instruction     Ctrl+F11  step instruction
 // Shift+F11 finish function
 //
-// Ctrl+P    quick open source    Ctrl+F     find in source
-// Ctrl+G    go to source line    Ctrl+Shift+O search symbols
+// Ctrl+P    quick open source    Ctrl+O     open files from disk
+// Ctrl+F    find in source       Ctrl+G     go to source line
+// Ctrl+Shift+O search symbols
 // Ctrl+Shift+F search source tree
 // Alt+Left / Alt+Right navigate source history
 //
@@ -1367,7 +1370,6 @@ pub struct Ui {
     gdb_capabilities_label: gtk::Label,
     target_label: gtk::Label,
     terminal_toggle_button: gtk::ToggleButton,
-    pub open_source_button: gtk::Button,
     debug_data_button: gtk::Button,
     pub run_button: gtk::Button,
     pub pause_button: gtk::Button,
@@ -1415,6 +1417,7 @@ pub struct Ui {
     call_stack_list: gtk::Box,
     frame_buttons: Rc<RefCell<Vec<(u32, gtk::Button)>>>,
     latest_frames: Rc<RefCell<Vec<StackFrame>>>,
+    latest_frames_generation: Rc<Cell<Option<u64>>>,
     selected_frame_level: Rc<Cell<u32>>,
     threads_list: gtk::Box,
     thread_controls: ThreadControls,
@@ -1495,6 +1498,7 @@ pub struct Ui {
     latest_stack: Rc<RefCell<Vec<StackEntry>>>,
     displayed_stack: Rc<RefCell<Vec<StackEntry>>>,
     latest_stack_generation: Rc<Cell<Option<u64>>>,
+    stack_memory_refresh_generation: Rc<Cell<Option<u64>>>,
     stack_details_generation: Rc<Cell<Option<u64>>>,
     stack_empty: gtk::Label,
     breakpoints_list: gtk::Box,
@@ -1521,6 +1525,9 @@ pub struct Ui {
     memory_regions_view: gtk::ColumnView,
     memory_regions_empty: gtk::Label,
     memory_regions: Rc<RefCell<Vec<MemoryRegion>>>,
+    memory_regions_generation: Rc<Cell<Option<u64>>>,
+    memory_watches_refresh_generation: Rc<Cell<Option<u64>>>,
+    tls_runtime_refresh_generation: Rc<Cell<Option<u64>>>,
     memory_watches: Rc<RefCell<Vec<MemoryWatchView>>>,
     memory_watch_container: MemoryWatchContainer,
     memory_address_entry: gtk::Entry,
@@ -1621,7 +1628,6 @@ struct Topbar {
     configuration_button: gtk::Button,
     gdb_capabilities_label: gtk::Label,
     target_label: gtk::Label,
-    open_source_button: gtk::Button,
     debug_data_button: gtk::Button,
     terminal_toggle_button: gtk::ToggleButton,
     run_button: gtk::Button,

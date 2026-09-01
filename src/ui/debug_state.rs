@@ -171,6 +171,7 @@ impl Ui {
     }
 
     pub fn show_frames(&self, frames: &[StackFrame]) {
+        self.latest_frames_generation.set(None);
         if self.latest_frames.borrow().as_slice() == frames {
             return;
         }
@@ -292,6 +293,18 @@ impl Ui {
                     .is_some_and(|variable| variable.is_available()),
             );
         }
+    }
+
+    pub fn show_frames_for_refresh(&self, generation: u64, frames: &[StackFrame]) {
+        if self.is_stop_refresh_current(generation) {
+            self.show_frames(frames);
+            self.latest_frames_generation.set(Some(generation));
+        }
+    }
+
+    pub(crate) fn frames_for_details(&self, generation: u64) -> Option<Vec<StackFrame>> {
+        (self.latest_frames_generation.get() == Some(generation))
+            .then(|| self.latest_frames.borrow().clone())
     }
 
     pub fn show_locals_for_refresh(&self, generation: u64, variables: &[Variable]) {
@@ -1585,6 +1598,14 @@ impl Ui {
             && self.stack_details_generation.replace(Some(generation)) != Some(generation)
     }
 
+    pub(crate) fn claim_stack_memory_refresh(&self, generation: u64) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self
+                .stack_memory_refresh_generation
+                .replace(Some(generation))
+                != Some(generation)
+    }
+
     pub fn show_stack_unavailable_for_refresh(&self, generation: u64, reason: &str) {
         if !self.is_stop_refresh_current(generation) {
             return;
@@ -1606,6 +1627,28 @@ impl Ui {
             self.memory_regions.replace(regions.to_vec());
         }
         self.memory_regions_empty.set_visible(regions.is_empty());
+        self.memory_regions_generation.set(Some(generation));
+    }
+
+    pub(crate) fn memory_regions_for_details(&self, generation: u64) -> Option<Vec<MemoryRegion>> {
+        (self.memory_regions_generation.get() == Some(generation))
+            .then(|| self.memory_regions.borrow().clone())
+    }
+
+    pub(crate) fn claim_memory_watches_refresh(&self, generation: u64) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self
+                .memory_watches_refresh_generation
+                .replace(Some(generation))
+                != Some(generation)
+    }
+
+    pub(crate) fn claim_tls_runtime_refresh(&self, generation: u64) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self
+                .tls_runtime_refresh_generation
+                .replace(Some(generation))
+                != Some(generation)
     }
 
     pub(super) fn connect_memory_controls(&self) {
