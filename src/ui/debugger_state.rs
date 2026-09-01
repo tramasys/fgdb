@@ -16,6 +16,98 @@ enum InferiorExecution {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum InferiorStateChange {
+    #[default]
+    Unchanged,
+    Clear,
+    Stopped,
+    Running,
+}
+
+/// An atomic debugger-state consequence of one successful GDB command.
+///
+/// A configured session is deliberately absent here: it describes what the
+/// user wants to debug, while this delta records only what GDB has already
+/// made true. In particular, selecting an extended-remote target does not
+/// imply that an inferior exists.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DebuggerStateDelta {
+    connection: Option<TargetConnection>,
+    inferior: InferiorStateChange,
+}
+
+impl DebuggerStateDelta {
+    /// Select a target whose inferior state must be discovered separately.
+    pub(crate) const fn establish_connection(connection: TargetConnection) -> Self {
+        Self {
+            connection: Some(connection),
+            inferior: InferiorStateChange::Unchanged,
+        }
+    }
+
+    /// Select a target that is known to expose a stopped inferior.
+    pub(crate) const fn establish_stopped_target(connection: TargetConnection) -> Self {
+        Self {
+            connection: Some(connection),
+            inferior: InferiorStateChange::Stopped,
+        }
+    }
+
+    /// Select a target definition without creating an inferior.
+    pub(crate) const fn replace_target_without_inferior(connection: TargetConnection) -> Self {
+        Self {
+            connection: Some(connection),
+            inferior: InferiorStateChange::Clear,
+        }
+    }
+
+    /// Remove the current target and any inferior owned by it.
+    pub(crate) const fn clear_target() -> Self {
+        Self {
+            connection: Some(TargetConnection::None),
+            inferior: InferiorStateChange::Clear,
+        }
+    }
+
+    /// Remove an inferior while retaining its reusable target definition.
+    pub(crate) const fn clear_inferior() -> Self {
+        Self {
+            connection: None,
+            inferior: InferiorStateChange::Clear,
+        }
+    }
+
+    /// Record an observed stopped inferior without changing its target.
+    pub(crate) const fn inferior_stopped() -> Self {
+        Self {
+            connection: None,
+            inferior: InferiorStateChange::Stopped,
+        }
+    }
+
+    /// Record an observed running inferior without changing its target.
+    pub(crate) const fn inferior_running() -> Self {
+        Self {
+            connection: None,
+            inferior: InferiorStateChange::Running,
+        }
+    }
+
+    pub(crate) const fn clears_inferior(self) -> bool {
+        matches!(self.inferior, InferiorStateChange::Clear)
+    }
+
+    pub(crate) const fn changes_target(self) -> bool {
+        self.connection.is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn connection_change(self) -> Option<TargetConnection> {
+        self.connection
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum ExecutionTransition {
     #[default]
     Stable,
@@ -37,7 +129,7 @@ enum DebugStateFreshness {
 /// go through the transition methods below so states such as running without
 /// an inferior cannot be represented.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) struct DebuggerState {
+pub(crate) struct DebuggerState {
     connection: TargetConnection,
     inferior: InferiorExecution,
     transition: ExecutionTransition,
@@ -45,20 +137,36 @@ pub(super) struct DebuggerState {
 }
 
 impl DebuggerState {
-    pub(super) fn target_connection(self) -> TargetConnection {
+    pub(crate) fn target_connection(self) -> TargetConnection {
         self.connection
     }
 
+    #[cfg(test)]
     pub(super) fn with_target_connection(mut self, connection: TargetConnection) -> Self {
         self.connection = connection;
         self
     }
 
-    pub(super) fn inferior_started(self) -> bool {
+    pub(crate) fn applying(mut self, delta: DebuggerStateDelta) -> Self {
+        if let Some(connection) = delta.connection {
+            self.connection = connection;
+        }
+        self.inferior = match delta.inferior {
+            InferiorStateChange::Unchanged => self.inferior,
+            InferiorStateChange::Clear => InferiorExecution::None,
+            InferiorStateChange::Stopped => InferiorExecution::Stopped,
+            InferiorStateChange::Running => InferiorExecution::Running,
+        };
+        self.transition = ExecutionTransition::Stable;
+        self.freshness = DebugStateFreshness::Stale;
+        self
+    }
+
+    pub(crate) fn inferior_started(self) -> bool {
         self.inferior != InferiorExecution::None
     }
 
-    pub(super) fn inferior_running(self) -> bool {
+    pub(crate) fn inferior_running(self) -> bool {
         self.inferior == InferiorExecution::Running
     }
 
@@ -99,7 +207,7 @@ impl DebuggerState {
         self
     }
 
-    pub(super) fn state_stale(self) -> bool {
+    pub(crate) fn state_stale(self) -> bool {
         self.freshness != DebugStateFreshness::Fresh
     }
 
@@ -159,6 +267,41 @@ mod tests {
         let connected = DebuggerState::default()
             .with_target_connection(TargetConnection::Remote)
             .with_inferior_started(false);
+        assert_eq!(connected.target_connection(), TargetConnection::Remote);
+        assert!(!connected.inferior_started());
+    }
+
+    #[test]
+    fn disconnect_clears_both_connection_and_inferior_atomically() {
+        let disconnected = DebuggerState::default()
+            .with_target_connection(TargetConnection::Remote)
+            .with_inferior_started(true)
+            .applying(DebuggerStateDelta::clear_target());
+
+        assert_eq!(disconnected.target_connection(), TargetConnection::None);
+        assert!(!disconnected.inferior_started());
+        assert!(!disconnected.inferior_running());
+        assert!(disconnected.state_stale());
+    }
+
+    #[test]
+    fn clearing_an_inferior_preserves_a_reusable_local_target() {
+        let killed = DebuggerState::default()
+            .with_target_connection(TargetConnection::Local)
+            .with_inferior_running(true)
+            .applying(DebuggerStateDelta::clear_inferior());
+
+        assert_eq!(killed.target_connection(), TargetConnection::Local);
+        assert!(!killed.inferior_started());
+        assert!(!killed.inferior_running());
+    }
+
+    #[test]
+    fn remote_connection_does_not_invent_an_inferior() {
+        let connected = DebuggerState::default().applying(
+            DebuggerStateDelta::establish_connection(TargetConnection::Remote),
+        );
+
         assert_eq!(connected.target_connection(), TargetConnection::Remote);
         assert!(!connected.inferior_started());
     }

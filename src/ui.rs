@@ -24,8 +24,7 @@ mod source_navigation;
 mod value;
 
 pub use actions::*;
-use debugger_state::DebuggerState;
-pub(crate) use debugger_state::TargetConnection;
+pub(crate) use debugger_state::{DebuggerState, DebuggerStateDelta, TargetConnection};
 
 #[cfg(test)]
 use value::IntegerFormat;
@@ -110,6 +109,26 @@ fn set_css_class(widget: &impl IsA<gtk::Widget>, class: &str, enabled: bool) {
         widget.add_css_class(class);
     } else if !enabled && widget.has_css_class(class) {
         widget.remove_css_class(class);
+    }
+}
+
+fn configured_target_can_start(
+    session: Option<&DebugSession>,
+    connection: TargetConnection,
+) -> bool {
+    match session {
+        None => true,
+        Some(DebugSession::Launch { .. }) => connection == TargetConnection::Local,
+        Some(DebugSession::Remote {
+            extended: true,
+            remote_executable: Some(_),
+            ..
+        }) => connection == TargetConnection::Remote,
+        Some(
+            DebugSession::Attach { .. }
+            | DebugSession::CoreDump { .. }
+            | DebugSession::Remote { .. },
+        ) => false,
     }
 }
 
@@ -1665,17 +1684,17 @@ mod tests {
     use std::{collections::HashSet, path::Path};
 
     use super::{
-        EventCatchpoint, GEF_COMMAND_CAPABILITIES, IntegerFormat, IntegerRadix, RefreshGate,
-        StringStorage, TerminalClipboardAction, UntilAction, VectorLaneFormat,
-        breakpoint_command_number_at_address, breakpoint_command_numbers, call_abi_phase,
-        compact_function_name, compact_variable_type, conditional_branch_taken,
-        event_catchpoint_command_number, event_catchpoint_command_numbers, flags_markup,
-        format_register_value, format_register_value_for_architecture,
-        format_register_value_for_target, full_address, instruction_arguments_description,
-        instruction_flow_description, instruction_flow_target, instruction_matches_until,
-        instruction_memory_expression, integer_decimal_value, normalized_signal_name,
-        parse_character_input, parse_integer_input, parse_string_input, register_details,
-        register_integer_format, register_value_css, set_breakpoint_enabled,
+        DebugSession, EventCatchpoint, GEF_COMMAND_CAPABILITIES, IntegerFormat, IntegerRadix,
+        RefreshGate, StringStorage, TargetConnection, TerminalClipboardAction, UntilAction,
+        VectorLaneFormat, breakpoint_command_number_at_address, breakpoint_command_numbers,
+        call_abi_phase, compact_function_name, compact_variable_type, conditional_branch_taken,
+        configured_target_can_start, event_catchpoint_command_number,
+        event_catchpoint_command_numbers, flags_markup, format_register_value,
+        format_register_value_for_architecture, format_register_value_for_target, full_address,
+        instruction_arguments_description, instruction_flow_description, instruction_flow_target,
+        instruction_matches_until, instruction_memory_expression, integer_decimal_value,
+        normalized_signal_name, parse_character_input, parse_integer_input, parse_string_input,
+        register_details, register_integer_format, register_value_css, set_breakpoint_enabled,
         signal_catchpoint_command_number, signal_catchpoint_command_numbers, source_location_score,
         source_symbol_at_offset, source_tab_title, stop_reason_label, string_edit,
         terminal_clipboard_action, thread_os_id, variable_boolean_value, variable_character_format,
@@ -1695,6 +1714,25 @@ mod tests {
             .copied()
             .collect::<HashSet<_>>();
         assert_eq!(unique.len(), GEF_COMMAND_CAPABILITIES.len());
+    }
+
+    #[test]
+    fn configured_remote_session_cannot_start_without_a_live_connection() {
+        let session = DebugSession::Remote {
+            endpoint: String::from("host:1234"),
+            executable: None,
+            extended: true,
+            remote_executable: Some(String::from("/srv/app")),
+        };
+
+        assert!(!configured_target_can_start(
+            Some(&session),
+            TargetConnection::None
+        ));
+        assert!(configured_target_can_start(
+            Some(&session),
+            TargetConnection::Remote
+        ));
     }
 
     #[test]

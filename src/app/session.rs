@@ -1,6 +1,6 @@
 use super::*;
 use crate::debugger::{CliCommandBuilder, MiCommandBuilder, console_command};
-use crate::ui::TargetConnection;
+use crate::ui::{DebuggerStateDelta, TargetConnection};
 
 use std::cell::Cell;
 
@@ -26,21 +26,21 @@ struct CommandSequence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct SessionCommand {
     text: String,
-    connection_after: Option<TargetConnection>,
+    state_after: Option<DebuggerStateDelta>,
 }
 
 impl SessionCommand {
     fn new(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
-            connection_after: None,
+            state_after: None,
         }
     }
 
-    fn with_connection(text: impl Into<String>, connection: TargetConnection) -> Self {
+    fn with_state(text: impl Into<String>, state_after: DebuggerStateDelta) -> Self {
         Self {
             text: text.into(),
-            connection_after: Some(connection),
+            state_after: Some(state_after),
         }
     }
 }
@@ -148,16 +148,25 @@ impl SessionController {
         }
         let (commands, completion, title, detail) = match action {
             SessionAction::Kill => (
-                vec![SessionCommand::new(console_command("kill"))],
+                vec![SessionCommand::with_state(
+                    console_command("kill"),
+                    DebuggerStateDelta::clear_inferior(),
+                )],
                 SequenceCompletion::Kill,
                 "Killing inferior",
                 "Terminating the inferior without closing GDB…",
             ),
             SessionAction::Detach => (
                 vec![if ui.target_connection() == TargetConnection::Remote {
-                    SessionCommand::with_connection("-target-disconnect", TargetConnection::None)
+                    SessionCommand::with_state(
+                        "-target-disconnect",
+                        DebuggerStateDelta::clear_target(),
+                    )
                 } else {
-                    SessionCommand::new("-target-detach")
+                    SessionCommand::with_state(
+                        "-target-detach",
+                        DebuggerStateDelta::clear_inferior(),
+                    )
                 }],
                 SequenceCompletion::Detach,
                 "Detaching",
@@ -218,18 +227,16 @@ impl SessionController {
                     | DebugSession::Remote { .. } => HashSet::new(),
                 };
                 self.configured_environment.replace(environment);
-                ui.set_controls_running(false);
-                ui.set_inferior_started(false);
-                ui.reset_target_abi();
-                ui.clear_inferiors();
-                ui.clear_debugger_state();
                 ui.set_current_session(session.clone());
                 match session {
-                    DebugSession::Launch { .. } => ui.set_status(
-                        "Ready to launch",
-                        "The executable, arguments, environment, and working directory are configured.",
-                        Some("status-ready"),
-                    ),
+                    DebugSession::Launch { .. } => {
+                        ui.set_debug_state_stale(false);
+                        ui.set_status(
+                            "Ready to launch",
+                            "The executable, arguments, environment, and working directory are configured.",
+                            Some("status-ready"),
+                        );
+                    }
                     DebugSession::Attach { .. }
                     | DebugSession::CoreDump { .. }
                     | DebugSession::Remote { .. } => {
@@ -249,10 +256,7 @@ impl SessionController {
                 }
             }
             SequenceCompletion::Kill => {
-                ui.set_controls_running(false);
-                ui.set_inferior_started(false);
-                ui.set_thread_stop_reason(None);
-                ui.clear_debugger_state();
+                ui.set_debug_state_stale(false);
                 refresh_inferiors(&self.ui, &self.client);
                 ui.set_status(
                     "Inferior terminated",
@@ -261,10 +265,7 @@ impl SessionController {
                 );
             }
             SequenceCompletion::Detach => {
-                ui.set_controls_running(false);
-                ui.set_inferior_started(false);
-                ui.set_thread_stop_reason(None);
-                ui.clear_debugger_state();
+                ui.set_debug_state_stale(false);
                 refresh_inferiors(&self.ui, &self.client);
                 ui.set_status(
                     "Detached",
@@ -280,20 +281,44 @@ fn establish_session_target(ui: &Weak<Ui>, client: &MiClient, kind: &'static str
     let weak_ui = ui.clone();
     if client
         .request("-thread-info", move |client, record| {
-            let stopped = record.is_done()
-                && crate::debugger::threads(&record)
-                    .iter()
-                    .any(|thread| thread.state == "stopped");
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
-            ui.set_controls_running(false);
-            ui.set_inferior_started(stopped);
+            if !record.is_done() {
+                ui.set_status(
+                    "Session refresh failed",
+                    record
+                        .error_message()
+                        .unwrap_or("Could not query the target threads"),
+                    Some("status-error"),
+                );
+                return;
+            }
+            let threads = crate::debugger::threads(&record);
+            let stopped = threads.iter().any(|thread| thread.state == "stopped");
+            let running = !threads.is_empty() && !stopped;
+            ui.apply_debugger_state_delta(if stopped {
+                DebuggerStateDelta::inferior_stopped()
+            } else if running {
+                DebuggerStateDelta::inferior_running()
+            } else {
+                DebuggerStateDelta::clear_inferior()
+            });
+            if !running {
+                ui.set_debug_state_stale(false);
+            }
             if stopped {
                 ui.set_thread_stop_reason(Some("stopped"));
                 ui.set_status(
                     kind,
                     "The target is stopped and ready for inspection.",
+                    Some("status-ready"),
+                );
+            } else if running {
+                ui.set_thread_stop_reason(None);
+                ui.set_status(
+                    kind,
+                    "The target is running. Pause it to inspect debugger state.",
                     Some("status-ready"),
                 );
             } else {
@@ -325,16 +350,16 @@ fn run_next(sequence: Rc<CommandSequence>) {
         return;
     };
     let sequence_for_response = Rc::clone(&sequence);
-    let connection_after = command.connection_after;
+    let state_after = command.state_after;
     if let Err(error) = sequence
         .controller
         .client
         .request(&command.text, move |client, record| {
             if record.is_success() {
-                if let Some(connection) = connection_after
+                if let Some(delta) = state_after
                     && let Some(ui) = sequence_for_response.controller.ui.upgrade()
                 {
-                    ui.set_target_connection(connection);
+                    ui.apply_debugger_state_delta(delta);
                 }
                 run_next(sequence_for_response);
             } else if record.class == "timeout" {
@@ -363,13 +388,24 @@ fn cleanup_commands(
     inferior_started: bool,
 ) -> Vec<SessionCommand> {
     let command = match connection {
-        TargetConnection::Remote => Some(String::from("-target-disconnect")),
-        TargetConnection::Core => Some(console_command("core-file")),
+        TargetConnection::Remote => Some(SessionCommand::with_state(
+            "-target-disconnect",
+            DebuggerStateDelta::clear_target(),
+        )),
+        TargetConnection::Core => Some(SessionCommand::with_state(
+            console_command("core-file"),
+            DebuggerStateDelta::clear_target(),
+        )),
         TargetConnection::Local => match session {
-            Some(DebugSession::Launch { .. }) if inferior_started => Some(console_command("kill")),
-            Some(DebugSession::Attach { .. }) if inferior_started => {
-                Some(String::from("-target-detach"))
+            Some(DebugSession::Launch { .. }) if inferior_started => {
+                Some(SessionCommand::with_state(
+                    console_command("kill"),
+                    DebuggerStateDelta::clear_inferior(),
+                ))
             }
+            Some(DebugSession::Attach { .. }) if inferior_started => Some(
+                SessionCommand::with_state("-target-detach", DebuggerStateDelta::clear_inferior()),
+            ),
             Some(DebugSession::Launch { .. })
             | Some(DebugSession::Attach { .. })
             | Some(DebugSession::CoreDump { .. })
@@ -378,12 +414,7 @@ fn cleanup_commands(
         },
         TargetConnection::None => None,
     };
-    command.map_or_else(Vec::new, |command| {
-        vec![SessionCommand::with_connection(
-            command,
-            TargetConnection::None,
-        )]
-    })
+    command.map_or_else(Vec::new, |command| vec![command])
 }
 
 pub(super) fn shutdown_cleanup_command(
@@ -433,9 +464,9 @@ fn session_commands(
                     .argument(&working_directory.to_string_lossy())
                     .finish(),
             ));
-            commands.push(SessionCommand::with_connection(
+            commands.push(SessionCommand::with_state(
                 file_command(Some(executable)),
-                TargetConnection::Local,
+                DebuggerStateDelta::replace_target_without_inferior(TargetConnection::Local),
             ));
             let argument_command = arguments
                 .iter()
@@ -462,9 +493,9 @@ fn session_commands(
         }
         DebugSession::Attach { pid, executable } => {
             commands.push(SessionCommand::new(file_command(executable.as_deref())));
-            commands.push(SessionCommand::with_connection(
+            commands.push(SessionCommand::with_state(
                 MiCommandBuilder::new("-target-attach").number(pid).finish(),
-                TargetConnection::Local,
+                DebuggerStateDelta::establish_stopped_target(TargetConnection::Local),
             ));
         }
         DebugSession::CoreDump {
@@ -472,12 +503,12 @@ fn session_commands(
             core_dump,
         } => {
             commands.push(SessionCommand::new(file_command(Some(executable))));
-            commands.push(SessionCommand::with_connection(
+            commands.push(SessionCommand::with_state(
                 MiCommandBuilder::new("-target-select")
                     .keyword("core")
                     .argument(&core_dump.to_string_lossy())
                     .finish(),
-                TargetConnection::Core,
+                DebuggerStateDelta::establish_stopped_target(TargetConnection::Core),
             ));
         }
         DebugSession::Remote {
@@ -496,7 +527,7 @@ fn session_commands(
                         .finish(),
                 ));
             }
-            commands.push(SessionCommand::with_connection(
+            commands.push(SessionCommand::with_state(
                 MiCommandBuilder::new("-target-select")
                     .keyword(if *extended {
                         "extended-remote"
@@ -505,7 +536,7 @@ fn session_commands(
                     })
                     .argument(endpoint)
                     .finish(),
-                TargetConnection::Remote,
+                DebuggerStateDelta::establish_connection(TargetConnection::Remote),
             ));
         }
     }
@@ -527,11 +558,21 @@ fn file_command(path: Option<&std::path::Path>) -> String {
 mod tests {
     use super::{SessionCommand, cleanup_commands, session_commands, shutdown_cleanup_command};
     use crate::config::DebugSession;
-    use crate::ui::TargetConnection;
+    use crate::ui::{DebuggerState, DebuggerStateDelta, TargetConnection};
     use std::{collections::HashSet, path::PathBuf};
 
     fn command_texts(commands: Vec<SessionCommand>) -> Vec<String> {
         commands.into_iter().map(|command| command.text).collect()
+    }
+
+    fn apply_success(state: DebuggerState, command: &SessionCommand) -> DebuggerState {
+        command
+            .state_after
+            .map_or(state, |delta| state.applying(delta))
+    }
+
+    fn stopped_target(connection: TargetConnection) -> DebuggerState {
+        DebuggerState::default().applying(DebuggerStateDelta::establish_stopped_target(connection))
     }
 
     #[test]
@@ -658,6 +699,143 @@ mod tests {
             )),
             ["-target-disconnect"]
         );
+    }
+
+    #[test]
+    fn successful_remote_disconnect_survives_a_later_setup_failure() {
+        let remote = DebugSession::Remote {
+            endpoint: String::from("old-host:1"),
+            executable: None,
+            extended: true,
+            remote_executable: None,
+        };
+        let cleanup = cleanup_commands(Some(&remote), TargetConnection::Remote, true);
+        let disconnected = apply_success(stopped_target(TargetConnection::Remote), &cleanup[0]);
+
+        // A later setup command is rejected, so its delta and every remaining
+        // delta are intentionally not applied.
+        assert_eq!(disconnected.target_connection(), TargetConnection::None);
+        assert!(!disconnected.inferior_started());
+        assert!(!disconnected.inferior_running());
+        assert!(disconnected.state_stale());
+    }
+
+    #[test]
+    fn successful_attach_detach_survives_a_later_setup_failure() {
+        let attach = DebugSession::Attach {
+            pid: 42,
+            executable: None,
+        };
+        let cleanup = cleanup_commands(Some(&attach), TargetConnection::Local, true);
+        let detached = apply_success(stopped_target(TargetConnection::Local), &cleanup[0]);
+
+        assert_eq!(detached.target_connection(), TargetConnection::Local);
+        assert!(!detached.inferior_started());
+        assert!(!detached.inferior_running());
+        assert!(detached.state_stale());
+    }
+
+    #[test]
+    fn successful_launch_kill_survives_a_later_setup_failure() {
+        let launch = DebugSession::Launch {
+            executable: PathBuf::from("/tmp/old-app"),
+            arguments: Vec::new(),
+            environment: Vec::new(),
+            working_directory: PathBuf::from("/tmp"),
+        };
+        let cleanup = cleanup_commands(Some(&launch), TargetConnection::Local, true);
+        let killed = apply_success(stopped_target(TargetConnection::Local), &cleanup[0]);
+
+        assert_eq!(killed.target_connection(), TargetConnection::Local);
+        assert!(!killed.inferior_started());
+        assert!(!killed.inferior_running());
+        assert!(killed.state_stale());
+    }
+
+    #[test]
+    fn failed_remote_target_select_never_marks_the_prep_commands_connected() {
+        let remote = DebugSession::Remote {
+            endpoint: String::from("new-host:1"),
+            executable: Some(PathBuf::from("/tmp/app")),
+            extended: true,
+            remote_executable: Some(String::from("/srv/app")),
+        };
+        let commands = session_commands(&remote, &HashSet::new()).unwrap();
+        let target_select = commands.last().unwrap();
+        assert!(target_select.text.starts_with("-target-select "));
+
+        let after_prep = commands[..commands.len() - 1]
+            .iter()
+            .fold(DebuggerState::default(), apply_success);
+        assert_eq!(after_prep.target_connection(), TargetConnection::None);
+        assert!(!after_prep.inferior_started());
+        assert!(after_prep.state_stale());
+        assert!(
+            commands[..commands.len() - 1]
+                .iter()
+                .all(|command| command.state_after.is_none())
+        );
+
+        // Applying the last delta models success. On failure run_next does not
+        // call this path, leaving after_prep disconnected.
+        let connected = apply_success(after_prep, target_select);
+        assert_eq!(connected.target_connection(), TargetConnection::Remote);
+        assert!(!connected.inferior_started());
+        assert_eq!(
+            target_select.state_after.unwrap().connection_change(),
+            Some(TargetConnection::Remote)
+        );
+    }
+
+    #[test]
+    fn successful_attach_core_and_launch_commands_apply_only_their_known_state() {
+        let attach = DebugSession::Attach {
+            pid: 42,
+            executable: Some(PathBuf::from("/tmp/app")),
+        };
+        let attach_commands = session_commands(&attach, &HashSet::new()).unwrap();
+        assert!(attach_commands[0].state_after.is_none());
+        let attached = apply_success(DebuggerState::default(), &attach_commands[1]);
+        assert_eq!(attached.target_connection(), TargetConnection::Local);
+        assert!(attached.inferior_started());
+        assert!(!attached.inferior_running());
+
+        let core = DebugSession::CoreDump {
+            executable: PathBuf::from("/tmp/app"),
+            core_dump: PathBuf::from("/tmp/core"),
+        };
+        let core_commands = session_commands(&core, &HashSet::new()).unwrap();
+        assert!(core_commands[0].state_after.is_none());
+        let opened_core = apply_success(DebuggerState::default(), &core_commands[1]);
+        assert_eq!(opened_core.target_connection(), TargetConnection::Core);
+        assert!(opened_core.inferior_started());
+        assert!(!opened_core.inferior_running());
+
+        let launch = DebugSession::Launch {
+            executable: PathBuf::from("/tmp/app"),
+            arguments: Vec::new(),
+            environment: Vec::new(),
+            working_directory: PathBuf::from("/tmp"),
+        };
+        let launch_commands = session_commands(&launch, &HashSet::new()).unwrap();
+        assert!(launch_commands[0].state_after.is_none());
+        let selected_exec = apply_success(DebuggerState::default(), &launch_commands[1]);
+        assert_eq!(selected_exec.target_connection(), TargetConnection::Local);
+        assert!(!selected_exec.inferior_started());
+    }
+
+    #[test]
+    fn successful_core_cleanup_clears_the_core_target_immediately() {
+        let core = DebugSession::CoreDump {
+            executable: PathBuf::from("/tmp/app"),
+            core_dump: PathBuf::from("/tmp/core"),
+        };
+        let cleanup = cleanup_commands(Some(&core), TargetConnection::Core, true);
+        let closed = apply_success(stopped_target(TargetConnection::Core), &cleanup[0]);
+
+        assert_eq!(closed.target_connection(), TargetConnection::None);
+        assert!(!closed.inferior_started());
+        assert!(closed.state_stale());
     }
 
     #[test]

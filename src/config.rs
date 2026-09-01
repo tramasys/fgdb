@@ -325,9 +325,7 @@ impl LaunchConfig {
     }
 
     pub fn needs_deferred_session_configuration(&self) -> bool {
-        self.initial_session
-            .as_ref()
-            .is_some_and(|session| !matches!(session, DebugSession::Launch { .. }))
+        self.initial_session.is_some()
     }
 
     pub fn configuration_report(&self) -> &ConfigurationReport {
@@ -1423,6 +1421,7 @@ mod tests {
                 working_directory: PathBuf::from("/work"),
             })
         );
+        assert!(configuration.needs_deferred_session_configuration());
     }
 
     #[test]

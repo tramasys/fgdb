@@ -543,6 +543,7 @@ impl Ui {
             if debugger_state.inferior_running()
                 || ui.command_pending.get()
                 || debugger_state.transition_pending()
+                || debugger_state.state_stale()
                 || ui.session_pending.get()
                 || ui.native_until_active.get()
                 || !ui.debugger_ready.get()
@@ -572,7 +573,10 @@ impl Ui {
                         String::from("-exec-continue")
                     };
                     (command, "Continuing the selected inferior…")
-                } else if session.as_ref().is_none_or(DebugSession::can_start) {
+                } else if configured_target_can_start(
+                    session.as_ref(),
+                    debugger_state.target_connection(),
+                ) {
                     (String::from("-exec-run"), "Starting the inferior…")
                 } else {
                     return;
@@ -898,6 +902,7 @@ impl Ui {
             self.cancel_running_context_render();
             self.debugger_state
                 .set(self.debugger_state.get().reset_backend());
+            self.update_run_control_label();
             self.command_pending.set(false);
             self.execution_transition_generation
                 .set(self.execution_transition_generation.get().wrapping_add(1));
@@ -923,10 +928,12 @@ impl Ui {
     pub fn set_controls_running(&self, running: bool) {
         let state = self.debugger_state.get();
         if state.inferior_running() == running {
+            self.update_run_control_label();
             return;
         }
-        self.debugger_state
-            .set(state.with_inferior_running(running));
+        let state = state.with_inferior_running(running);
+        self.debugger_state.set(state);
+        self.update_run_control_label();
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
     }
@@ -951,9 +958,31 @@ impl Ui {
         self.debugger_state.get().target_connection()
     }
 
-    pub(crate) fn set_target_connection(&self, connection: TargetConnection) {
-        self.debugger_state
-            .set(self.debugger_state.get().with_target_connection(connection));
+    pub(crate) fn configured_session_can_start(&self) -> bool {
+        configured_target_can_start(
+            self.current_session.borrow().as_ref(),
+            self.debugger_state.get().target_connection(),
+        )
+    }
+
+    pub(crate) fn apply_debugger_state_delta(&self, delta: DebuggerStateDelta) {
+        let state = self.debugger_state.get().applying(delta);
+        self.debugger_state.set(state);
+
+        if delta.changes_target() {
+            self.reset_target_abi();
+        }
+        self.invalidate_allocator_probe_cache();
+        if delta.clears_inferior() {
+            self.set_thread_stop_reason(None);
+            self.clear_inferiors();
+            self.clear_debugger_state();
+        }
+
+        self.update_run_control_label();
+        self.update_control_sensitivity();
+        self.update_thread_control_sensitivity();
+        self.render_inferior_controls();
     }
 
     pub fn movement_commands_available(&self) -> bool {
@@ -1151,14 +1180,25 @@ impl Ui {
         }
         let state = self.debugger_state.get();
         if state.inferior_started() == started {
+            self.update_run_control_label();
             return;
         }
         self.debugger_state
             .set(state.with_inferior_started(started));
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
-        self.run_button
-            .set_label(if started { "Continue" } else { "Run" });
+        self.update_run_control_label();
+    }
+
+    fn update_run_control_label(&self) {
+        let label = if self.debugger_state.get().inferior_started() {
+            "Continue"
+        } else {
+            "Run"
+        };
+        if self.run_button.label().as_deref() != Some(label) {
+            self.run_button.set_label(label);
+        }
     }
 
     pub(super) fn update_control_sensitivity(&self) {
@@ -1180,7 +1220,8 @@ impl Ui {
         let supports_execution = session
             .as_ref()
             .is_none_or(DebugSession::supports_execution);
-        let can_start = session.as_ref().is_none_or(DebugSession::can_start);
+        let can_start =
+            configured_target_can_start(session.as_ref(), debugger_state.target_connection());
         let can_inspect = ready && started && !running && !pending && !stale;
         let can_move = can_inspect && supports_execution;
 
@@ -1195,7 +1236,7 @@ impl Ui {
             run: ready
                 && !running
                 && !pending
-                && ((started && supports_execution) || (!started && can_start)),
+                && ((started && supports_execution) || (!started && can_start && !stale)),
             pause: ready
                 && started
                 && !self.session_pending.get()

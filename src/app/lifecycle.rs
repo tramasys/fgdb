@@ -66,7 +66,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             refresh_thread_policy(weak_ui, client);
         }
         MiEvent::InferiorExited { id, exit_code: _ } => {
-            let selected_exited = ui.selected_inferior_id().as_deref() == Some(id.as_str());
+            let selected_exited = ui.inferior_exit_owns_selected_context(&id);
             let pending_exited = ui.pending_execution_inferior().as_deref() == Some(id.as_str());
             let active_execution_exited = selected_exited
                 || ui
@@ -97,13 +97,22 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 ui.finish_thread_execution_action();
                 ui.set_current_thread_id(None);
                 ui.set_thread_stop_reason(None);
+                // The executable/remote target remains reusable, but this
+                // process no longer exists. Do not leave the global execution
+                // interlock tied to a selector snapshot that may have arrived
+                // after the exit notification.
+                ui.set_controls_running(false);
+                ui.set_inferior_started(false);
                 ui.set_debug_state_stale(false);
                 ui.clear_debugger_state();
-                ui.set_status(
-                    "Inferior exited",
-                    &format!("{id} no longer has a live process."),
-                    Some("status-ready"),
-                );
+                let detail = if ui.configured_session_can_start() {
+                    format!(
+                        "{id} exited. The configured target remains loaded; select Run to start it again."
+                    )
+                } else {
+                    format!("{id} no longer has a live process.")
+                };
+                ui.set_status("Inferior exited", &detail, Some("status-ready"));
             }
             refresh_inferiors(weak_ui, client);
         }

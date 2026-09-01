@@ -345,30 +345,13 @@ impl Ui {
         let stop_owner = unresolved_stop_owner
             .then(|| self.stop_owner_inferior_id.borrow().clone())
             .flatten();
-        let selected = stop_owner
-            .filter(|id| inferiors.iter().any(|inferior| inferior.id == *id))
-            .or_else(|| existing.filter(|id| inferiors.iter().any(|inferior| inferior.id == *id)))
-            .or_else(|| {
-                self.current_thread_id().and_then(|thread| {
-                    inferiors
-                        .iter()
-                        .find(|inferior| {
-                            inferior
-                                .threads
-                                .iter()
-                                .any(|candidate| candidate.id == thread)
-                        })
-                        .map(|inferior| inferior.id.clone())
-                })
-            })
-            .or_else(|| {
-                inferiors
-                    .iter()
-                    .find(|inferior| inferior.state == InferiorState::Stopped)
-                    .or_else(|| inferiors.iter().find(|inferior| inferior.state.is_live()))
-                    .or_else(|| inferiors.first())
-                    .map(|inferior| inferior.id.clone())
-            });
+        let current_thread = self.current_thread_id();
+        let selected = preferred_inferior_id(
+            &inferiors,
+            stop_owner.as_deref(),
+            existing.as_deref(),
+            current_thread.as_deref(),
+        );
         let selection_changed = self.selected_inferior_id.borrow().as_ref() != selected.as_ref();
         self.inferiors.replace(inferiors);
         self.selected_inferior_id.replace(selected);
@@ -638,6 +621,34 @@ impl Ui {
         }
     }
 
+    pub(crate) fn inferior_exit_owns_selected_context(&self, id: &str) -> bool {
+        let selected = self.selected_inferior_id.borrow().clone();
+        if selected.as_deref() == Some(id) {
+            return true;
+        }
+
+        if self.stop_owner_inferior_id.borrow().as_deref() == Some(id) {
+            return true;
+        }
+
+        let inferiors = self.inferiors.borrow();
+        if selected.as_ref().is_some_and(|selected| {
+            inferiors
+                .iter()
+                .any(|inferior| inferior.id == *selected && inferior.state.is_live())
+        }) {
+            return false;
+        }
+        let exiting_is_known = inferiors
+            .iter()
+            .any(|inferior| inferior.id == id && inferior.state != InferiorState::Exited);
+        let another_live_inferior = inferiors
+            .iter()
+            .any(|inferior| inferior.id != id && inferior.state.is_live());
+
+        !another_live_inferior && (exiting_is_known || self.inferior_has_started())
+    }
+
     pub(crate) fn record_inferior_exited(&self, id: &str) {
         self.cancel_running_context_render();
         self.thread_inferior_ids
@@ -655,7 +666,9 @@ impl Ui {
             self.stop_owner_inferior_id.borrow_mut().take();
             self.stop_owner_thread_id.borrow_mut().take();
         }
-        if self.selected_inferior_id.borrow().as_deref() == Some(id) {
+        let selected_exited = self.selected_inferior_id.borrow().as_deref() == Some(id);
+        if selected_exited {
+            self.selected_inferior_id.borrow_mut().take();
             self.apply_selected_inferior_state();
         }
         self.render_inferior_controls();
@@ -1191,6 +1204,52 @@ fn inferior_facts(inferior: &InferiorInfo, stop_owner: bool) -> String {
     format!("{pid}  {threads}{owner}")
 }
 
+fn preferred_inferior_id(
+    inferiors: &[InferiorInfo],
+    stop_owner: Option<&str>,
+    existing: Option<&str>,
+    current_thread: Option<&str>,
+) -> Option<String> {
+    let selectable = |inferior: &&InferiorInfo| inferior.state != InferiorState::Exited;
+    stop_owner
+        .and_then(|id| {
+            inferiors
+                .iter()
+                .filter(selectable)
+                .find(|inferior| inferior.id == id)
+        })
+        .or_else(|| {
+            existing.and_then(|id| {
+                inferiors
+                    .iter()
+                    .filter(selectable)
+                    .find(|inferior| inferior.id == id)
+            })
+        })
+        .or_else(|| {
+            current_thread.and_then(|thread| {
+                inferiors.iter().filter(selectable).find(|inferior| {
+                    inferior
+                        .threads
+                        .iter()
+                        .any(|candidate| candidate.id == thread)
+                })
+            })
+        })
+        .or_else(|| {
+            inferiors
+                .iter()
+                .find(|inferior| inferior.state == InferiorState::Stopped)
+        })
+        .or_else(|| inferiors.iter().find(|inferior| inferior.state.is_live()))
+        .or_else(|| {
+            inferiors
+                .iter()
+                .find(|inferior| inferior.state == InferiorState::NotStarted)
+        })
+        .map(|inferior| inferior.id.clone())
+}
+
 fn inferior_state_css(state: InferiorState) -> &'static str {
     match state {
         InferiorState::Running => "inferior-running",
@@ -1203,7 +1262,8 @@ fn inferior_state_css(state: InferiorState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        dispatch_inferior_card_action, inferior_context_running, running_event_affects_all,
+        dispatch_inferior_card_action, inferior_context_running, preferred_inferior_id,
+        running_event_affects_all,
     };
     use crate::debugger::{InferiorInfo, InferiorState, ThreadInfo};
     use crate::ui::{InferiorAction, InferiorActionHandler};
@@ -1254,5 +1314,30 @@ mod tests {
         assert!(!running_event_affects_all(None, Some("99")));
         assert!(!running_event_affects_all(Some("i2"), None));
         assert!(running_event_affects_all(None, None));
+    }
+
+    #[test]
+    fn rerun_selection_prefers_a_live_inferior_over_the_exited_previous_run() {
+        let inferior = |id: &str, state| InferiorInfo {
+            id: id.to_owned(),
+            pid: None,
+            executable: None,
+            exit_code: None,
+            state,
+            threads: Vec::new(),
+        };
+        let inferiors = [
+            inferior("i1", InferiorState::Exited),
+            inferior("i2", InferiorState::Running),
+        ];
+
+        assert_eq!(
+            preferred_inferior_id(&inferiors, None, Some("i1"), None).as_deref(),
+            Some("i2")
+        );
+        assert_eq!(
+            preferred_inferior_id(&inferiors[..1], None, Some("i1"), None),
+            None
+        );
     }
 }
