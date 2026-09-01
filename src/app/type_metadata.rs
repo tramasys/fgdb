@@ -95,13 +95,10 @@ gdb.selected_inferior().write_memory(v.address,b[::-1] if little else b)"#,
         hex(expression.as_bytes()),
         hex(&raw_bytes),
     );
-    let command = format!(
-        "-interpreter-exec console {}",
-        crate::debugger::quote(&format!(
-            "python exec(bytes.fromhex(\"{}\").decode())",
-            hex(python.as_bytes())
-        ))
-    );
+    let command = crate::debugger::console_command(&format!(
+        "python exec(bytes.fromhex(\"{}\").decode())",
+        hex(python.as_bytes())
+    ));
     let ui_for_response = ui.clone();
     if let Err(error) = client.request(&command, move |client, record| {
         let Some(ui) = ui_for_response.upgrade() else {
@@ -143,13 +140,10 @@ fn request_resolved_metadata(
     let id = NEXT_METADATA_ID.fetch_add(1, Ordering::Relaxed);
     let convenience = format!("fgdb_type_meta_{id}");
     let python = metadata_python(&expression, &convenience);
-    let command = format!(
-        "-interpreter-exec console {}",
-        crate::debugger::quote(&format!(
-            "python exec(bytes.fromhex(\"{}\").decode())",
-            hex(python.as_bytes())
-        ))
-    );
+    let command = crate::debugger::console_command(&format!(
+        "python exec(bytes.fromhex(\"{}\").decode())",
+        hex(python.as_bytes())
+    ));
     let ui_for_response = ui.clone();
     let client_for_response = Rc::clone(&client);
     let variable_for_response = variable.clone();

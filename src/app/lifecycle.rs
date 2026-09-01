@@ -684,10 +684,7 @@ fn configure_gef_context(ui: &Weak<Ui>, client: &MiClient) {
     let Some(command) = gef_context_configuration_command(control, visible) else {
         return;
     };
-    let command = format!(
-        "-interpreter-exec console {}",
-        crate::debugger::quote(command)
-    );
+    let command = crate::debugger::console_command(command);
     let weak_ui = ui.clone();
     if client
         .request(&command, move |_, record| {

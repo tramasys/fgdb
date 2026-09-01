@@ -1,9 +1,11 @@
+mod command;
 pub(crate) mod context;
 mod mi;
 mod model;
 mod session;
 mod target;
 
+pub(crate) use command::{CliCommandBuilder, MiCommandBuilder, console_command};
 pub use mi::{GdbCapabilities, MiClient, MiEvent, MiRecord, quote};
 pub use model::{
     Breakpoint, EnumVariant, InferiorInfo, InferiorState, Instruction, MemoryBlock, MemoryKind,

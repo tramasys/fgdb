@@ -166,10 +166,7 @@ pub(super) fn load_library_symbols_for_source(ui: Weak<Ui>, client: Rc<MiClient>
             None,
         );
     }
-    let command = format!(
-        "-interpreter-exec console {}",
-        crate::debugger::quote("sharedlibrary")
-    );
+    let command = crate::debugger::console_command("sharedlibrary");
     let ui_for_response = ui.clone();
     let client_for_response = Rc::clone(&client);
     let symbol_for_response = symbol;

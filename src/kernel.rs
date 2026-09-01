@@ -396,10 +396,49 @@ struct KernelMetrics {
 
 pub(crate) fn verified_proc_root(pid: u32, debugger_pid: u32) -> Result<PathBuf, String> {
     let root = PathBuf::from(format!("/proc/{pid}"));
+    verified_proc_identity(&root, pid, debugger_pid)?;
+    Ok(root)
+}
+
+fn verified_proc_identity(root: &Path, pid: u32, debugger_pid: u32) -> Result<u64, String> {
+    let before = process::read_proc_stat(&root.join("stat"))
+        .ok_or_else(|| format!("Cannot establish the identity of process {pid}"))?;
     let status = crate::bounded::read_string(&root.join("status"), 1024 * 1024)
         .map_err(|error| format!("Cannot inspect /proc/{pid}/status: {error}"))?;
     verify_tracer(pid, debugger_pid, &status)?;
-    Ok(root)
+    let after = process::read_proc_stat(&root.join("stat"))
+        .ok_or_else(|| format!("Process {pid} disappeared while its identity was checked"))?;
+    if before.start_time != after.start_time {
+        return Err(format!(
+            "Process {pid} changed while its identity was checked"
+        ));
+    }
+    Ok(before.start_time)
+}
+
+fn read_verified_local_proc<T>(
+    pid: u32,
+    debugger_pid: u32,
+    read: impl FnOnce(&Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let root = PathBuf::from(format!("/proc/{pid}"));
+    let before = process::read_proc_stat(&root.join("stat"))
+        .ok_or_else(|| format!("Cannot establish the identity of process {pid}"))?;
+    let before_status = crate::bounded::read_string(&root.join("status"), 1024 * 1024)
+        .map_err(|error| format!("Cannot inspect /proc/{pid}/status: {error}"))?;
+    verify_tracer(pid, debugger_pid, &before_status)?;
+    let value = read(&root)?;
+    let after_status = crate::bounded::read_string(&root.join("status"), 1024 * 1024)
+        .map_err(|error| format!("Cannot revalidate /proc/{pid}/status: {error}"))?;
+    verify_tracer(pid, debugger_pid, &after_status)?;
+    let after = process::read_proc_stat(&root.join("stat"))
+        .ok_or_else(|| format!("Process {pid} disappeared while its data was being read"))?;
+    if before.start_time != after.start_time {
+        return Err(format!(
+            "Process {pid} changed while its procfs data was being read"
+        ));
+    }
+    Ok(value)
 }
 
 /// Returns the ABI encoded by the traced process' executable.
@@ -416,18 +455,26 @@ pub(crate) fn read_local_target_abi(
     crate::debugger::TargetEndian,
     u32,
 )> {
-    let root = verified_proc_root(pid, debugger_pid).ok()?;
-    let bytes = crate::bounded::read_prefix(&root.join("exe"), 40).ok()?;
-    crate::debugger::TargetArchitecture::from_elf_ident(&bytes)
+    read_verified_local_proc(pid, debugger_pid, |root| {
+        let bytes = crate::bounded::read_prefix(&root.join("exe"), 40)
+            .map_err(|error| format!("Cannot inspect /proc/{pid}/exe: {error}"))?;
+        crate::debugger::TargetArchitecture::from_elf_ident(&bytes)
+            .ok_or_else(|| format!("Cannot identify the executable ABI for process {pid}"))
+    })
+    .ok()
 }
 
 pub(crate) fn read_local_parent_pid(pid: u32, debugger_pid: u32) -> Option<u32> {
-    let root = verified_proc_root(pid, debugger_pid).ok()?;
-    let status = crate::bounded::read_string(&root.join("status"), 1024 * 1024).ok()?;
-    status
-        .lines()
-        .find_map(|line| line.strip_prefix("PPid:"))
-        .and_then(|value| value.trim().parse().ok())
+    read_verified_local_proc(pid, debugger_pid, |root| {
+        let status = crate::bounded::read_string(&root.join("status"), 1024 * 1024)
+            .map_err(|error| format!("Cannot inspect /proc/{pid}/status: {error}"))?;
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("PPid:"))
+            .and_then(|value| value.trim().parse().ok())
+            .ok_or_else(|| format!("/proc/{pid}/status did not expose PPid"))
+    })
+    .ok()
 }
 
 fn verify_tracer(pid: u32, debugger_pid: u32, status: &str) -> Result<(), String> {

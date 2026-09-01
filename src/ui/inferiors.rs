@@ -137,10 +137,10 @@ impl Ui {
     pub(crate) fn inferior_action_is_current(&self, action: &InferiorAction) -> bool {
         if !self.debugger_ready.get()
             || self.command_pending.get()
-            || self.execution_transition_pending.get()
+            || self.debugger_state.get().transition_pending()
             || self.session_pending.get()
             || self.native_until_active.get()
-            || self.resynchronization_pending.get()
+            || self.debugger_state.get().resynchronizing()
             || self.inferior_action_pending.get().is_some()
         {
             return false;
@@ -823,13 +823,14 @@ impl Ui {
             controls.detach_on_fork.set_active(detach_on_fork);
         }
         controls.selector_updating.set(false);
-        let busy = self.inferior_running.get()
-            || self.debug_state_stale.get()
+        let debugger_state = self.debugger_state.get();
+        let busy = debugger_state.inferior_running()
+            || debugger_state.state_stale()
             || self.command_pending.get()
-            || self.execution_transition_pending.get()
+            || debugger_state.transition_pending()
             || self.session_pending.get()
             || self.native_until_active.get()
-            || self.resynchronization_pending.get()
+            || debugger_state.resynchronizing()
             || self.inferior_action_pending.get().is_some();
         let available = self.debugger_ready.get() && !busy;
         let visual_transition = self.execution_visual_transition_pending();
@@ -891,14 +892,15 @@ impl Ui {
             controls.selector.set_selected(selected_index);
         }
         controls.selector_updating.set(false);
+        let debugger_state = self.debugger_state.get();
         let busy = self.command_pending.get()
-            || self.execution_transition_pending.get()
+            || debugger_state.transition_pending()
             || self.session_pending.get()
             || self.native_until_active.get()
-            || self.resynchronization_pending.get()
+            || debugger_state.resynchronizing()
             || self.inferior_action_pending.get().is_some();
         let process_controls_available = self.debugger_ready.get() && !busy;
-        let visual_busy = busy || self.inferior_running.get() || self.debug_state_stale.get();
+        let visual_busy = busy || debugger_state.inferior_running() || debugger_state.state_stale();
         set_transient_execution_sensitive(
             &controls.selector,
             !inferiors.is_empty() && process_controls_available,
@@ -948,7 +950,7 @@ impl Ui {
             .as_deref()
             .and_then(|selected| self.first_inferior_child(selected));
         let available = process_controls_available
-            && !self.debug_state_stale.get()
+            && !debugger_state.state_stale()
             && self.inferior_action_pending.get().is_none();
         set_execution_sensitive(&controls.switch_parent, available && parent.is_some(), busy);
         set_execution_sensitive(&controls.switch_child, available && child.is_some(), busy);
@@ -1088,14 +1090,15 @@ impl Ui {
         } else {
             card.relationship.set_visible(false);
         }
+        let debugger_state = self.debugger_state.get();
         let busy = self.command_pending.get()
-            || self.execution_transition_pending.get()
+            || debugger_state.transition_pending()
             || self.session_pending.get()
             || self.native_until_active.get()
-            || self.resynchronization_pending.get()
+            || debugger_state.resynchronizing()
             || self.inferior_action_pending.get().is_some();
         let available = self.debugger_ready.get() && !busy;
-        let visual_busy = busy || self.inferior_running.get() || self.debug_state_stale.get();
+        let visual_busy = busy || debugger_state.inferior_running() || debugger_state.state_stale();
         set_button_label(&card.select, if selected { "Selected" } else { "Switch" });
         set_transient_execution_sensitive(&card.select, !selected && available, visual_busy);
         let execution = match inferior.state {

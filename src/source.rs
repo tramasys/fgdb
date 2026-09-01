@@ -278,12 +278,6 @@ pub fn search_source_files(
         if scope.is_some_and(|scope| !path.starts_with(scope)) {
             continue;
         }
-        let Ok(metadata) = std::fs::metadata(path) else {
-            continue;
-        };
-        if metadata.len() > MAX_SEARCHABLE_SOURCE_BYTES as u64 {
-            continue;
-        }
         let Ok(bytes) = crate::bounded::read_bytes(path, MAX_SEARCHABLE_SOURCE_BYTES) else {
             continue;
         };
@@ -503,8 +497,8 @@ pub fn resolve(reported: &str, roots: &[PathBuf]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_source_tree, build_source_tree_while, case_insensitive_match_column,
-        discover_source_files, paths_match, search_source_files,
+        MAX_SEARCHABLE_SOURCE_BYTES, build_source_tree, build_source_tree_while,
+        case_insensitive_match_column, discover_source_files, paths_match, search_source_files,
     };
     use std::path::{Path, PathBuf};
 
@@ -540,6 +534,35 @@ mod tests {
 
         let cancelled = search_source_files(&[path], "SourceTreeMatch", 10, None, || false);
         assert!(cancelled.is_empty());
+    }
+
+    #[test]
+    fn source_search_accepts_files_below_and_at_the_byte_limit() {
+        let directory = temporary_test_directory("bounded-search-accepted");
+        for (name, length) in [
+            ("below.c", MAX_SEARCHABLE_SOURCE_BYTES - 1),
+            ("exact.c", MAX_SEARCHABLE_SOURCE_BYTES),
+        ] {
+            let path = directory.join(name);
+            let mut contents = vec![b' '; length];
+            contents[..6].copy_from_slice(b"needle");
+            std::fs::write(&path, contents).unwrap();
+            let matches = search_source_files(&[path], "needle", 1, None, || true);
+            assert_eq!(matches.len(), 1, "{name} should be searchable");
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn source_search_rejects_files_over_the_byte_limit() {
+        let directory = temporary_test_directory("bounded-search-rejected");
+        let path = directory.join("over.c");
+        let mut contents = vec![b' '; MAX_SEARCHABLE_SOURCE_BYTES + 1];
+        contents[..6].copy_from_slice(b"needle");
+        std::fs::write(&path, contents).unwrap();
+
+        assert!(search_source_files(&[path], "needle", 1, None, || true).is_empty());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -602,5 +625,15 @@ mod tests {
         let build =
             build_source_tree_while(&files, &[PathBuf::from("/project")], &[], "", || false);
         assert_eq!(build, Default::default());
+    }
+
+    fn temporary_test_directory(name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "fgdb-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
     }
 }

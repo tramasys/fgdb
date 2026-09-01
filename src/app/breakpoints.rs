@@ -292,11 +292,17 @@ fn create_regex_breakpoints(ui: Weak<Ui>, client: &MiClient, spec: BreakpointSpe
             .filter(|breakpoint| !breakpoint.is_location())
             .map(|breakpoint| breakpoint.number)
             .collect::<HashSet<_>>();
-        let console = format!("rbreak {}", spec.location);
-        let command = format!(
-            "-interpreter-exec console {}",
-            crate::debugger::quote(&console)
-        );
+        let Ok(command) = crate::debugger::CliCommandBuilder::new("rbreak")
+            .verbatim_tail(&spec.location)
+            .map(crate::debugger::CliCommandBuilder::finish)
+        else {
+            breakpoint_failure(
+                &ui_for_list,
+                "Regex breakpoint failed",
+                "Function regular expressions cannot contain NUL or line breaks",
+            );
+            return;
+        };
         let ui_for_regex = ui_for_list.clone();
         if let Err(error) = client.request(&command, move |client, record| {
             if !record.is_done() {
@@ -355,10 +361,7 @@ fn configure_regex_breakpoints(
         let mut commands = VecDeque::new();
         if spec.temporary {
             let console = format!("enable delete {}", numbers.join(" "));
-            commands.push_back(format!(
-                "-interpreter-exec console {}",
-                crate::debugger::quote(&console)
-            ));
+            commands.push_back(crate::debugger::console_command(&console));
         }
         let effective_commands = spec.effective_commands();
         for number in &numbers {

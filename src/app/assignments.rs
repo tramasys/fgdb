@@ -110,10 +110,7 @@ fn resolve_rust_string_buffer(ui: Weak<Ui>, client: Rc<MiClient>, name: String, 
         "python p=gdb.default_visualizer(gdb.parse_and_eval(\"*$fgdb_rs_string\")); assert p is not None and hasattr(p, \"_data_ptr\") and getattr(p, \"_length\", None) == {}; gdb.set_convenience_variable(\"fgdb_rs_data\", p._data_ptr)",
         bytes.len()
     );
-    let command = format!(
-        "-interpreter-exec console {}",
-        crate::debugger::quote(&python)
-    );
+    let command = crate::debugger::console_command(&python);
     let ui_for_response = ui.clone();
     let client_for_response = Rc::clone(&client);
     if let Err(error) = client.request(&command, move |_, record| {

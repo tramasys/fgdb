@@ -402,10 +402,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             || {
                 let console_command = format!("catch signal {signal}");
                 (
-                    format!(
-                        "-interpreter-exec console {}",
-                        crate::debugger::quote(&console_command)
-                    ),
+                    crate::debugger::console_command(&console_command),
                     format!("Added a catchpoint for {signal}"),
                 )
             },
@@ -429,10 +426,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 let command = if event == EventCatchpoint::RustPanic {
                     String::from("-break-insert -f rust_panic")
                 } else {
-                    format!(
-                        "-interpreter-exec console {}",
-                        crate::debugger::quote(event.command())
-                    )
+                    crate::debugger::console_command(event.command())
                 };
                 (command, format!("Added the {} stop point", event.label()))
             },

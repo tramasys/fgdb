@@ -320,14 +320,13 @@ impl Ui {
         let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
         let debugger_ready = Rc::clone(&self.debugger_ready);
-        let inferior_started = Rc::clone(&self.inferior_started);
-        let inferior_running = Rc::clone(&self.inferior_running);
+        let debugger_state = Rc::clone(&self.debugger_state);
         let command_pending = Rc::clone(&self.command_pending);
         let session_pending = Rc::clone(&self.session_pending);
         self.locals_view.connect_activate(move |_, position| {
             if !debugger_ready.get()
-                || !inferior_started.get()
-                || inferior_running.get()
+                || !debugger_state.get().inferior_started()
+                || debugger_state.get().inferior_running()
                 || command_pending.get()
                 || session_pending.get()
             {
@@ -399,15 +398,14 @@ impl Ui {
 
         let edit_button = self.locals_edit_button.clone();
         let ready = Rc::clone(&self.debugger_ready);
-        let started = Rc::clone(&self.inferior_started);
-        let running = Rc::clone(&self.inferior_running);
+        let debugger_state = Rc::clone(&self.debugger_state);
         let pending = Rc::clone(&self.command_pending);
         self.locals_selection
             .connect_selected_notify(move |selection| {
                 edit_button.set_sensitive(
                     ready.get()
-                        && started.get()
-                        && !running.get()
+                        && debugger_state.get().inferior_started()
+                        && !debugger_state.get().inferior_running()
                         && !pending.get()
                         && variable_at(selection, selection.selected()).is_some(),
                 );
@@ -426,14 +424,13 @@ impl Ui {
             let target_architecture = Rc::clone(&self.target_architecture);
             let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
             let debugger_ready = Rc::clone(&self.debugger_ready);
-            let inferior_started = Rc::clone(&self.inferior_started);
-            let inferior_running = Rc::clone(&self.inferior_running);
+            let debugger_state = Rc::clone(&self.debugger_state);
             let command_pending = Rc::clone(&self.command_pending);
             let session_pending = Rc::clone(&self.session_pending);
             group.view.connect_activate(move |_, position| {
                 if !debugger_ready.get()
-                    || !inferior_started.get()
-                    || inferior_running.get()
+                    || !debugger_state.get().inferior_started()
+                    || debugger_state.get().inferior_running()
                     || command_pending.get()
                     || session_pending.get()
                 {
@@ -1485,14 +1482,13 @@ impl Ui {
 
         let button = self.memory_add_button.clone();
         let ready = Rc::clone(&self.debugger_ready);
-        let started = Rc::clone(&self.inferior_started);
-        let running = Rc::clone(&self.inferior_running);
+        let debugger_state = Rc::clone(&self.debugger_state);
         let pending = Rc::clone(&self.command_pending);
         self.memory_address_entry.connect_changed(move |entry| {
             button.set_sensitive(
                 ready.get()
-                    && started.get()
-                    && !running.get()
+                    && debugger_state.get().inferior_started()
+                    && !debugger_state.get().inferior_running()
                     && !pending.get()
                     && !entry.text().trim().is_empty(),
             );
@@ -1610,14 +1606,14 @@ impl Ui {
         let breakpoints = Rc::clone(&self.breakpoints);
         let handler = Rc::clone(&self.breakpoint_bulk_delete_handler);
         let ready = Rc::clone(&self.debugger_ready);
-        let running = Rc::clone(&self.inferior_running);
+        let debugger_state = Rc::clone(&self.debugger_state);
         let command_pending = Rc::clone(&self.command_pending);
         let session_pending = Rc::clone(&self.session_pending);
         let until_active = Rc::clone(&self.native_until_active);
         self.delete_all_signal_catchpoints_button
             .connect_clicked(move |_| {
                 if !ready.get()
-                    || running.get()
+                    || debugger_state.get().inferior_running()
                     || command_pending.get()
                     || session_pending.get()
                     || until_active.get()

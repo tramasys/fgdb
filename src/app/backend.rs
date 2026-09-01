@@ -210,6 +210,11 @@ impl BackendController {
         let Some(ui) = self.ui.upgrade() else {
             return glib::Propagation::Proceed;
         };
+        let cleanup = shutdown_cleanup_command(
+            ui.current_session().as_ref(),
+            ui.target_connection(),
+            ui.inferior_has_started(),
+        );
         ui.save_layout();
         ui.set_gdb_recovery_available(false);
         ui.set_controls_ready(false);
@@ -227,8 +232,6 @@ impl BackendController {
             ui.terminal.feed_child(b"quit\ny\n");
             return glib::Propagation::Stop;
         }
-        let cleanup =
-            shutdown_cleanup_command(ui.current_session().as_ref(), ui.inferior_has_started());
         drop(ui);
         if let Some(command) = cleanup {
             let weak = Rc::downgrade(self);

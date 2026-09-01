@@ -6,7 +6,10 @@ use super::*;
 use crate::debugger::Instruction;
 use crate::ui::controls::issue_execution_command;
 
-const MAX_UNTIL_EXPRESSION_BYTES: usize = 4096;
+mod expression;
+
+use expression::{parse_value as parse_condition_value, validate as validate_until_expression};
+
 const DISASSEMBLY_LOOKAHEAD_BYTES: u64 = 512;
 const MAX_UNTIL_LOOKAHEAD_INSTRUCTIONS: usize = 256;
 const MAX_TRACKED_UNTIL_PCS: usize = 8192;
@@ -838,12 +841,7 @@ impl NativeUntilController {
         };
         let command = match command_kind {
             StepCommand::Single => String::from("-exec-step-instruction"),
-            StepCommand::Counted => {
-                format!(
-                    "-interpreter-exec console {}",
-                    crate::debugger::quote(&format!("stepi {steps}"))
-                )
-            }
+            StepCommand::Counted => crate::debugger::console_command(&format!("stepi {steps}")),
             StepCommand::NativeAdvance => {
                 let (Some(target), Some(thread_id)) = (native_target, thread_id.as_deref()) else {
                     if let Some(run) = self.state.borrow_mut().as_mut() {
@@ -1103,10 +1101,7 @@ fn context_suppression_command(control: GefContextControl) -> Option<String> {
             "python globals()['_fgdb_context_hidden_before_until'] = gef.ui.context_hidden; hide_context()"
         }
     };
-    Some(format!(
-        "-interpreter-exec console {}",
-        crate::debugger::quote(python)
-    ))
+    Some(crate::debugger::console_command(python))
 }
 
 fn context_restore_command(
@@ -1123,10 +1118,7 @@ fn context_restore_command(
             "python _fgdb_hidden = globals().pop('_fgdb_context_hidden_before_until', False); gef.ui.context_hidden = _fgdb_hidden; gdb.execute('context') if {render} and not _fgdb_hidden else None; del _fgdb_hidden"
         ),
     };
-    Some(format!(
-        "-interpreter-exec console {}",
-        crate::debugger::quote(&python)
-    ))
+    Some(crate::debugger::console_command(&python))
 }
 
 fn is_internal_until_stop(
@@ -1326,56 +1318,6 @@ fn progress_detail(run: &UntilRun, pending_steps: u64) -> String {
     detail
 }
 
-fn validate_until_expression(expression: &str) -> Result<(), &'static str> {
-    let expression = expression.trim();
-    if expression.is_empty() {
-        return Err("Enter a GDB expression to evaluate after each instruction.");
-    }
-    if expression.len() > MAX_UNTIL_EXPRESSION_BYTES {
-        return Err("The Until expression is too large.");
-    }
-    if contains_assignment(expression) {
-        return Err(
-            "Assignments are not allowed in an Until expression. Use == to compare values.",
-        );
-    }
-    Ok(())
-}
-
-fn contains_assignment(expression: &str) -> bool {
-    let bytes = expression.as_bytes();
-    bytes.iter().enumerate().any(|(index, byte)| {
-        if *byte != b'=' {
-            return false;
-        }
-        let previous = index.checked_sub(1).and_then(|index| bytes.get(index));
-        let next = bytes.get(index + 1);
-        !matches!(previous, Some(b'=' | b'!' | b'<' | b'>')) && next != Some(&b'=')
-    })
-}
-
-fn parse_condition_value(value: &str) -> Option<bool> {
-    let value = value.trim();
-    if value.eq_ignore_ascii_case("true") {
-        return Some(true);
-    }
-    if value.eq_ignore_ascii_case("false") {
-        return Some(false);
-    }
-    let value = value.split_whitespace().next()?.trim_matches(['(', ')']);
-    let (negative, digits) = value
-        .strip_prefix('-')
-        .map_or((false, value), |digits| (true, digits));
-    let number = digits
-        .strip_prefix("0x")
-        .or_else(|| digits.strip_prefix("0X"))
-        .map_or_else(
-            || digits.parse::<u128>().ok(),
-            |digits| u128::from_str_radix(digits, 16).ok(),
-        )?;
-    Some(negative || number != 0)
-}
-
 fn parse_address(value: &str) -> Option<u64> {
     let value = value.trim();
     let digits = value
@@ -1568,8 +1510,21 @@ mod tests {
     fn validates_side_effect_free_until_expressions() {
         assert!(validate_until_expression("$rax == 0").is_ok());
         assert!(validate_until_expression("*(int*)$rbx != 4").is_ok());
+        assert!(validate_until_expression("c == '='").is_ok());
+        assert!(validate_until_expression("strcmp(s, \"=\") == 0").is_ok());
+        assert!(validate_until_expression("foo(\"a=b\") == 1").is_ok());
+        assert!(validate_until_expression("foo(\"a=\\\"b\") == 1").is_ok());
         assert!(validate_until_expression("$rax = 0").is_err());
         assert!(validate_until_expression("value += 1").is_err());
+        assert!(validate_until_expression("value -= 1").is_err());
+        assert!(validate_until_expression("value *= 2").is_err());
+        assert!(validate_until_expression("value /= 2").is_err());
+        assert!(validate_until_expression("value %= 2").is_err());
+        assert!(validate_until_expression("value <<= 1").is_err());
+        assert!(validate_until_expression("value >>= 1").is_err());
+        assert!(validate_until_expression("value &= mask").is_err());
+        assert!(validate_until_expression("value |= mask").is_err());
+        assert!(validate_until_expression("value ^= mask").is_err());
         assert!(validate_until_expression("  ").is_err());
     }
 

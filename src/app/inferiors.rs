@@ -224,10 +224,7 @@ fn select_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String) {
     current_ui.set_inferior_action_pending(Some(InferiorActionPending::Selection));
     current_ui.set_status("Switching inferior", &format!("Selecting {id}"), None);
     drop(current_ui);
-    let command = format!(
-        "-interpreter-exec console {}",
-        crate::debugger::quote(&format!("inferior {number}"))
-    );
+    let command = crate::debugger::console_command(&format!("inferior {number}"));
     let weak_ui = ui.clone();
     let weak_ui_for_error = ui;
     if client

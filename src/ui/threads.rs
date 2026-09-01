@@ -330,20 +330,20 @@ impl Ui {
     fn thread_action_dispatch_available(&self) -> bool {
         self.debugger_ready.get()
             && !self.command_pending.get()
-            && !self.execution_transition_pending.get()
+            && !self.debugger_state.get().transition_pending()
             && !self.session_pending.get()
             && !self.native_until_active.get()
-            && !self.resynchronization_pending.get()
+            && !self.debugger_state.get().resynchronizing()
             && self.thread_controls.action_pending.get().is_none()
     }
 
     pub(crate) fn thread_selection_can_dispatch(&self, id: &str) -> bool {
         self.debugger_ready.get()
             && !self.command_pending.get()
-            && !self.execution_transition_pending.get()
+            && !self.debugger_state.get().transition_pending()
             && !self.session_pending.get()
             && !self.native_until_active.get()
-            && !self.resynchronization_pending.get()
+            && !self.debugger_state.get().resynchronizing()
             && self.inferior_action_pending.get().is_none()
             && self.thread_controls.action_pending.get().is_none()
             && self.current_thread_id().as_deref() != Some(id)
@@ -717,10 +717,10 @@ impl Ui {
         let visual_transition = self.execution_visual_transition_pending();
         let selection_available = ready
             && !self.command_pending.get()
-            && !self.execution_transition_pending.get()
+            && !self.debugger_state.get().transition_pending()
             && !self.session_pending.get()
             && !self.native_until_active.get()
-            && !self.resynchronization_pending.get()
+            && !self.debugger_state.get().resynchronizing()
             && self.inferior_action_pending.get().is_none()
             && !pending;
         let current_thread = self.current_thread_id();
@@ -733,11 +733,11 @@ impl Ui {
         }
         let debugger_available = ready
             && !self.command_pending.get()
-            && !self.execution_transition_pending.get()
+            && !self.debugger_state.get().transition_pending()
             && !self.session_pending.get()
             && !self.native_until_active.get()
-            && !self.resynchronization_pending.get();
-        let stopped_inspection_available = debugger_available && !self.debug_state_stale.get();
+            && !self.debugger_state.get().resynchronizing();
+        let stopped_inspection_available = debugger_available && !self.debug_state_is_stale();
         for (level, button) in self.frame_buttons.borrow().iter() {
             set_transient_execution_sensitive(
                 button,
@@ -782,7 +782,7 @@ impl Ui {
         set_transient_execution_sensitive(
             &self.thread_controls.run_only,
             debugger_available && !pending && selected_stopped && all_threads_stopped,
-            visual_transition || self.inferior_running.get(),
+            visual_transition || self.inferior_is_running(),
         );
         set_transient_execution_sensitive(
             &self.thread_controls.freeze,

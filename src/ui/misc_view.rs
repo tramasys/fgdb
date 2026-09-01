@@ -2436,8 +2436,8 @@ impl Ui {
 
     fn misc_refresh_allowed(&self) -> bool {
         self.debugger_ready.get()
-            && self.inferior_started.get()
-            && !self.inferior_running.get()
+            && self.inferior_has_started()
+            && !self.inferior_is_running()
             && !self.command_pending.get()
     }
 }
