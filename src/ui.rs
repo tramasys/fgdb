@@ -9,7 +9,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gtk::{gio, glib, pango, prelude::*};
@@ -250,7 +250,8 @@ type FilteredCatchpointHandler = Rc<dyn Fn(FilteredCatchpointRequest)>;
 type MemoryWatchHandler = Rc<dyn Fn(u64, String, usize)>;
 type InstructionMemoryHandler = Rc<dyn Fn(String)>;
 type DisassemblyHandler = Rc<dyn Fn(DisassemblyRequest)>;
-type DisassemblySourceCache = Rc<RefCell<HashMap<PathBuf, Rc<Vec<Rc<str>>>>>>;
+type DisassemblySourceCache =
+    Rc<RefCell<crate::performance::BoundedLruCache<PathBuf, Rc<Vec<Rc<str>>>>>>;
 type KernelRefreshHandler = Rc<dyn Fn()>;
 type MiscRefreshHandler = Rc<dyn Fn()>;
 type HeapInspectionHandler = Rc<dyn Fn(HeapInspectionRequest)>;
@@ -1415,7 +1416,8 @@ pub struct Ui {
     execution_source_line: Rc<Cell<Option<u32>>>,
     source_theme: Theme,
     source_style_scheme: Option<sourceview5::StyleScheme>,
-    resolved_source_paths: Rc<RefCell<HashMap<String, Option<PathBuf>>>>,
+    resolved_source_paths:
+        Rc<RefCell<crate::performance::BoundedLruCache<String, Option<PathBuf>>>>,
     call_stack_list: gtk::Box,
     frame_buttons: Rc<RefCell<Vec<(u32, gtk::Button)>>>,
     latest_frames: Rc<RefCell<Vec<StackFrame>>>,
@@ -1578,6 +1580,7 @@ pub struct Ui {
     configuration_dialog: Rc<RefCell<Option<gtk::Window>>>,
     debug_data_view: Rc<RefCell<Option<debug_data::DebugDataView>>>,
     debug_data_state: Rc<RefCell<debug_data::DebugDataState>>,
+    performance_notice_times: Rc<RefCell<HashMap<String, Instant>>>,
     debug_data_generation: Rc<Cell<u64>>,
     debug_data_action_handler: Rc<RefCell<Option<DebugDataActionHandler>>>,
     session_handler: Rc<RefCell<Option<DebugSessionHandler>>>,

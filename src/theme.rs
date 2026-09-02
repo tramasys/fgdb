@@ -193,6 +193,14 @@ headerbar.topbar button.window-control.close:active {{
 .target-label,
 .muted {{ color: @app_muted; }}
 
+.performance-partial {{
+    margin: 3px 4px;
+    padding: 4px 6px;
+    color: @app_warning;
+    background: alpha(@app_warning, 0.06);
+    border-left: 2px solid alpha(@app_warning, 0.62);
+}}
+
 .panel {{
     background: @app_surface;
     border: 0;

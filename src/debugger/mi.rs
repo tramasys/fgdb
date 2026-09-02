@@ -20,13 +20,17 @@ pub use protocol::{
     GdbCapabilities, MiEvent, MiListItem, MiRecord, MiResult, MiValue, result_field,
 };
 
+use crate::performance::{
+    BudgetOutcome, MI_SCOPED_QUEUE_BUDGET, PerformanceNotice, duration_notice,
+};
 #[cfg(test)]
 use parser::{MAX_MI_NESTING, parse_stream_output};
 use parser::{MAX_MI_RECORD_BYTES, parse_any_stream_output};
 #[cfg(test)]
 use requests::MAX_MI_COMMAND_BYTES;
 use requests::{
-    CommandClass, CommandOwner, MAX_CAPTURED_CONSOLE_BYTES, MAX_PENDING_REQUESTS,
+    CommandClass, CommandOwner, MAX_BACKGROUND_SCOPED_REQUESTS, MAX_CAPTURED_CONSOLE_BYTES,
+    MAX_INSPECTION_REQUESTS, MAX_NON_EXECUTION_REQUESTS, MAX_PENDING_REQUESTS,
     MAX_SCOPED_REQUESTS, PendingRequest, REQUEST_TIMEOUT, REQUEST_TIMEOUT_POLL, ResponseHandler,
     ScopedMiRequest, error_record, scoped_mi_command, synthetic_error_record,
     validate_console_command, validate_mi_command,
@@ -44,6 +48,12 @@ type EventHandler = Box<dyn Fn(&MiClient, MiEvent)>;
 
 const MAX_RETAINED_MI_INPUT_BYTES: usize = 256 * 1024;
 const RUST_PRINTER_PROBE: &str = "python import gdb; next(printer for holder in [*gdb.objfiles(), gdb.current_progspace()] for printer in getattr(holder, \"pretty_printers\", []) if getattr(printer, \"name\", \"\") == \"rust\")";
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct MiRecordHeader {
+    token: Option<u64>,
+    kind: Option<u8>,
+}
 
 pub struct MiClient {
     transport_factory: TransportFactory,
@@ -67,6 +77,7 @@ pub struct MiClient {
     write_source: RefCell<Option<glib::SourceId>>,
     timeout_source: RefCell<Option<glib::SourceId>>,
     discarding_oversized_line: Cell<bool>,
+    oversized_record_header: Cell<Option<MiRecordHeader>>,
     thread_exit_since_prompt: Cell<bool>,
     unusable_reported: Cell<bool>,
 }
@@ -105,6 +116,7 @@ impl MiClient {
             write_source: RefCell::new(None),
             timeout_source: RefCell::new(None),
             discarding_oversized_line: Cell::new(false),
+            oversized_record_header: Cell::new(None),
             thread_exit_since_prompt: Cell::new(false),
             unusable_reported: Cell::new(false),
         });
@@ -180,6 +192,7 @@ impl MiClient {
         self.incoming.borrow_mut().clear();
         self.outgoing.borrow_mut().clear();
         self.discarding_oversized_line.set(false);
+        self.oversized_record_header.set(None);
         self.thread_exit_since_prompt.set(false);
         self.unusable_reported.set(false);
         self.quarantined.set(false);
@@ -386,11 +399,46 @@ impl MiClient {
         handler: ResponseHandler,
     ) -> io::Result<u64> {
         validate_mi_command(command)?;
-        if self.pending.borrow().len() >= MAX_PENDING_REQUESTS {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "too many pending GDB/MI requests",
-            ));
+        self.cancel_invalid_pending_requests();
+        let pending_count = self.pending.borrow().len();
+        let inspection_count = self
+            .pending
+            .borrow()
+            .values()
+            .filter(|request| request.class == CommandClass::Inspection)
+            .count();
+        if class == CommandClass::Inspection && inspection_count >= MAX_INSPECTION_REQUESTS {
+            let message = format!(
+                "inspection queue reached its {MAX_INSPECTION_REQUESTS}-request budget; retry after the current refresh"
+            );
+            self.report_performance(PerformanceNotice {
+                outcome: BudgetOutcome::Rejected,
+                operation: command_operation(command),
+                detail: message.clone(),
+            });
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, message));
+        }
+        if class != CommandClass::Execution && pending_count >= MAX_NON_EXECUTION_REQUESTS {
+            let message = format!(
+                "non-execution queue reached its {MAX_NON_EXECUTION_REQUESTS}-request budget; capacity is reserved for debugger execution controls"
+            );
+            self.report_performance(PerformanceNotice {
+                outcome: BudgetOutcome::Rejected,
+                operation: command_operation(command),
+                detail: message.clone(),
+            });
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, message));
+        }
+        if pending_count >= MAX_PENDING_REQUESTS {
+            let message = format!(
+                "MI queue reached its {MAX_PENDING_REQUESTS}-request hard budget; retry after pending commands complete"
+            );
+            self.report_performance(PerformanceNotice {
+                outcome: BudgetOutcome::Rejected,
+                operation: command_operation(command),
+                detail: message.clone(),
+            });
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, message));
         }
         let token = self.allocate_token();
         let now = Instant::now();
@@ -399,6 +447,8 @@ impl MiClient {
             PendingRequest {
                 class,
                 owner,
+                operation: command_operation(command),
+                queued_at: now,
                 deadline: now + class.timeout(),
                 hard_deadline: now + class.maximum_lifetime(),
                 is_current,
@@ -410,6 +460,32 @@ impl MiClient {
             return Err(error);
         }
         Ok(token)
+    }
+
+    fn cancel_invalid_pending_requests(&self) {
+        let stale = self
+            .pending
+            .borrow()
+            .iter()
+            .filter_map(|(token, request)| {
+                request
+                    .is_current
+                    .as_ref()
+                    .is_some_and(|is_current| !is_current())
+                    .then_some(*token)
+            })
+            .collect::<Vec<_>>();
+        for token in stale {
+            self.outgoing.borrow_mut().cancel_unstarted(token);
+            let request = { self.pending.borrow_mut().remove(&token) };
+            if let Some(request) = request {
+                (request.handler)(
+                    self,
+                    synthetic_error_record("superseded", "request superseded"),
+                );
+            }
+        }
+        self.stop_write_source_if_idle();
     }
 
     pub(crate) fn request_with_print_limit_for_stop(
@@ -438,23 +514,29 @@ impl MiClient {
         handler: impl FnOnce(&MiClient, MiRecord) + 'static,
     ) -> io::Result<u64> {
         validate_mi_command(command)?;
+        let operation = command_operation(command);
         let command = scoped_mi_command(command, elements);
         validate_mi_command(&command)?;
         let token = self.allocate_token();
         let class = CommandClass::Inspection;
+        let now = Instant::now();
         let request = ScopedMiRequest {
             token,
             class,
             owner,
+            operation,
             command,
             response: None,
             output: String::new(),
             expect_nested_mi: true,
             is_current: Box::new(is_current),
             handler: Box::new(move |client, record, _| handler(client, record)),
-            deadline: Instant::now() + class.timeout(),
-            hard_deadline: Instant::now() + class.maximum_lifetime(),
+            deadline: now + class.timeout(),
+            hard_deadline: now + class.maximum_lifetime(),
+            queued_at: now,
+            started_at: None,
             cancelled: false,
+            output_truncated: false,
         };
         self.queue_scoped_request(request)?;
         Ok(token)
@@ -478,34 +560,69 @@ impl MiClient {
         handler: impl FnOnce(&MiClient, MiRecord, String) + 'static,
     ) -> io::Result<u64> {
         validate_console_command(command)?;
+        let operation = console_operation(command);
         let command = format!("-interpreter-exec console {}", quote(command));
         validate_mi_command(&command)?;
         let token = self.allocate_token();
+        let now = Instant::now();
         self.queue_scoped_request(ScopedMiRequest {
             token,
             class: CommandClass::Background,
             owner: None,
+            operation,
             command,
             response: None,
             output: String::new(),
             expect_nested_mi: false,
             is_current: Box::new(is_current),
             handler: Box::new(handler),
-            deadline: Instant::now() + CommandClass::Background.timeout(),
-            hard_deadline: Instant::now() + CommandClass::Background.maximum_lifetime(),
+            deadline: now + CommandClass::Background.timeout(),
+            hard_deadline: now + CommandClass::Background.maximum_lifetime(),
+            queued_at: now,
+            started_at: None,
             cancelled: false,
+            output_truncated: false,
         })?;
         Ok(token)
     }
 
     fn queue_scoped_request(&self, request: ScopedMiRequest) -> io::Result<()> {
+        self.cancel_invalid_scoped_queue();
         let queued_requests = usize::from(self.scoped_request.borrow().is_some())
             .saturating_add(self.scoped_queue.borrow().len());
         if queued_requests >= MAX_SCOPED_REQUESTS {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "too many queued scoped GDB requests",
-            ));
+            let message =
+                format!("scoped MI queue reached its {MAX_SCOPED_REQUESTS}-request hard budget");
+            self.report_performance(PerformanceNotice {
+                outcome: BudgetOutcome::Rejected,
+                operation: request.operation.clone(),
+                detail: message.clone(),
+            });
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, message));
+        }
+        let background_requests = usize::from(
+            self.scoped_request
+                .borrow()
+                .as_ref()
+                .is_some_and(|active| active.class == CommandClass::Background),
+        ) + self
+            .scoped_queue
+            .borrow()
+            .iter()
+            .filter(|queued| queued.class == CommandClass::Background)
+            .count();
+        if request.class == CommandClass::Background
+            && background_requests >= MAX_BACKGROUND_SCOPED_REQUESTS
+        {
+            let message = format!(
+                "background queue reached its {MAX_BACKGROUND_SCOPED_REQUESTS}-request budget; retry after queued diagnostics complete"
+            );
+            self.report_performance(PerformanceNotice {
+                outcome: BudgetOutcome::Rejected,
+                operation: request.operation.clone(),
+                detail: message.clone(),
+            });
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, message));
         }
         let queued_bytes = self
             .scoped_queue
@@ -529,11 +646,43 @@ impl MiClient {
             return Ok(());
         }
         if self.scoped_request.borrow().is_some() || !self.scoped_queue.borrow().is_empty() {
-            self.scoped_queue.borrow_mut().push_back(request);
+            let position =
+                self.scoped_queue.borrow().iter().position(|queued| {
+                    queued.class.queue_priority() > request.class.queue_priority()
+                });
+            let mut queue = self.scoped_queue.borrow_mut();
+            if let Some(position) = position {
+                queue.insert(position, request);
+            } else {
+                queue.push_back(request);
+            }
         } else if let Err(failure) = self.start_scoped_request(request) {
             return Err(failure.0);
         }
         Ok(())
+    }
+
+    fn cancel_invalid_scoped_queue(&self) {
+        let mut stale = Vec::new();
+        {
+            let mut queue = self.scoped_queue.borrow_mut();
+            let mut retained = VecDeque::with_capacity(queue.len());
+            while let Some(request) = queue.pop_front() {
+                if !(request.is_current)() {
+                    stale.push(request);
+                } else {
+                    retained.push_back(request);
+                }
+            }
+            *queue = retained;
+        }
+        for request in stale {
+            (request.handler)(
+                self,
+                synthetic_error_record("superseded", "request superseded"),
+                request.output,
+            );
+        }
     }
 
     fn start_scoped_request(
@@ -546,6 +695,12 @@ impl MiClient {
         let now = Instant::now();
         request.deadline = now + request.class.timeout();
         request.hard_deadline = now + request.class.maximum_lifetime();
+        request.started_at = Some(now);
+        let queue_notice = duration_notice(
+            format!("{} queue wait", request.operation),
+            now.saturating_duration_since(request.queued_at),
+            MI_SCOPED_QUEUE_BUDGET,
+        );
         if let Err(error) = self.write_tokenized(request.token, &request.command) {
             return Err(Box::new((error, request)));
         }
@@ -553,6 +708,9 @@ impl MiClient {
         // a duplicate, potentially large allocation while waiting for GDB.
         request.command = String::new();
         self.scoped_request.replace(Some(request));
+        if let Some(notice) = queue_notice {
+            self.report_performance(notice);
+        }
         Ok(())
     }
 
@@ -771,6 +929,14 @@ impl MiClient {
                 return;
             };
             self.discarding_oversized_line.set(false);
+            let header = self
+                .oversized_record_header
+                .replace(None)
+                .unwrap_or_default();
+            self.handle_oversized_record(header);
+            if self.transport_epoch.get() != epoch {
+                return;
+            }
             &bytes[newline + 1..]
         } else {
             bytes
@@ -789,6 +955,8 @@ impl MiClient {
             // accumulated record after every PTY read.
             let complete_end = complete_input_end(bytes).map(|end| previous_len + end);
             if complete_end.is_none() && incoming.len() > MAX_MI_RECORD_BYTES {
+                self.oversized_record_header
+                    .set(Some(mi_record_header(&incoming)));
                 incoming.clear();
                 self.discarding_oversized_line.set(true);
             }
@@ -798,12 +966,6 @@ impl MiClient {
             })
         };
         let Some(complete) = complete else {
-            if self.discarding_oversized_line.get() {
-                self.report_unusable(format!(
-                    "GDB emitted an MI record larger than {} MiB. Debugger synchronization can no longer be trusted.",
-                    MAX_MI_RECORD_BYTES / (1024 * 1024)
-                ));
-            }
             return;
         };
         for line in complete.split(|byte| *byte == b'\n') {
@@ -815,9 +977,7 @@ impl MiClient {
                 continue;
             }
             if line.len() > MAX_MI_RECORD_BYTES {
-                self.report_unusable(String::from(
-                    "GDB emitted an oversized MI record. Debugger synchronization can no longer be trusted.",
-                ));
+                self.handle_oversized_record(mi_record_header(line));
                 continue;
             }
             self.process_line(&String::from_utf8_lossy(line));
@@ -828,6 +988,85 @@ impl MiClient {
         {
             incoming.shrink_to(MAX_RETAINED_MI_INPUT_BYTES);
         }
+    }
+
+    fn handle_oversized_record(&self, header: MiRecordHeader) {
+        let detail = format!(
+            "GDB/MI record exceeded the {} MiB parsing budget",
+            MAX_MI_RECORD_BYTES / (1024 * 1024)
+        );
+        match (header.kind, header.token) {
+            (Some(b'^'), Some(token)) => {
+                self.reject_tokenized_result(token, &detail);
+            }
+            (Some(b'~' | b'&'), _) => {
+                if let Some(request) = self.scoped_request.borrow_mut().as_mut() {
+                    request.output_truncated = true;
+                }
+                self.report_performance(PerformanceNotice {
+                    outcome: BudgetOutcome::Partial,
+                    operation: String::from("GDB console output"),
+                    detail,
+                });
+            }
+            (Some(b'@'), _) => self.report_performance(PerformanceNotice {
+                outcome: BudgetOutcome::Partial,
+                operation: String::from("GDB target output"),
+                detail,
+            }),
+            _ => self.report_unusable(format!(
+                "{detail}. It was an asynchronous state record, so debugger synchronization can no longer be trusted."
+            )),
+        }
+    }
+
+    fn reject_tokenized_result(&self, token: u64, detail: &str) {
+        self.outgoing.borrow_mut().cancel_unstarted(token);
+        let scoped = self
+            .scoped_request
+            .borrow()
+            .as_ref()
+            .is_some_and(|request| request.token == token);
+        if scoped {
+            let request = { self.scoped_request.borrow_mut().take() };
+            if let Some(request) = request {
+                self.report_command_duration(
+                    request.class,
+                    &request.operation,
+                    request.started_at.unwrap_or(request.queued_at),
+                );
+                self.report_performance(PerformanceNotice {
+                    outcome: BudgetOutcome::Rejected,
+                    operation: request.operation.clone(),
+                    detail: detail.to_owned(),
+                });
+                (request.handler)(
+                    self,
+                    synthetic_error_record("resource-limit", detail),
+                    request.output,
+                );
+                self.start_next_scoped_request();
+            }
+            self.stop_write_source_if_idle();
+            return;
+        }
+        let request = { self.pending.borrow_mut().remove(&token) };
+        if let Some(request) = request {
+            self.report_command_duration(request.class, &request.operation, request.queued_at);
+            self.report_performance(PerformanceNotice {
+                outcome: BudgetOutcome::Rejected,
+                operation: request.operation.clone(),
+                detail: detail.to_owned(),
+            });
+            (request.handler)(self, synthetic_error_record("resource-limit", detail));
+        } else {
+            self.report_performance(PerformanceNotice {
+                outcome: BudgetOutcome::Rejected,
+                operation: String::from("late GDB/MI result"),
+                detail: detail.to_owned(),
+            });
+        }
+        self.stop_write_source_if_idle();
     }
 
     fn report_unusable(&self, message: String) {
@@ -841,6 +1080,20 @@ impl MiClient {
             if self.transport_epoch.get() == epoch {
                 (self.event_handler)(self, MiEvent::DebuggerUnusable(message));
             }
+        }
+    }
+
+    fn report_performance(&self, notice: PerformanceNotice) {
+        (self.event_handler)(self, MiEvent::Performance(notice));
+    }
+
+    fn report_command_duration(&self, class: CommandClass, operation: &str, started_at: Instant) {
+        if let Some(notice) = duration_notice(
+            operation,
+            Instant::now().saturating_duration_since(started_at),
+            class.performance_budget(),
+        ) {
+            self.report_performance(notice);
         }
     }
 
@@ -1194,23 +1447,36 @@ impl MiClient {
                     {
                         request.response = Some(response);
                     }
-                } else if command_output && request.output.len() < MAX_CAPTURED_CONSOLE_BYTES {
-                    let remaining = MAX_CAPTURED_CONSOLE_BYTES - request.output.len();
-                    request
-                        .output
-                        .push_str(&output[..output.floor_char_boundary(remaining)]);
+                } else if command_output {
+                    let remaining = MAX_CAPTURED_CONSOLE_BYTES.saturating_sub(request.output.len());
+                    let accepted = output.floor_char_boundary(remaining);
+                    request.output.push_str(&output[..accepted]);
+                    request.output_truncated |= accepted < output.len();
                 }
             }
             return;
         }
 
-        let Ok(record) = parse_record(line) else {
-            if looks_like_mi_record(line) {
-                self.report_unusable(String::from(
+        let record = match parse_record(line) {
+            Ok(record) => record,
+            Err(error) => {
+                let header = mi_record_header(line.as_bytes());
+                if header.kind == Some(b'^')
+                    && let Some(token) = header.token
+                {
+                    self.reject_tokenized_result(
+                        token,
+                        &format!("GDB/MI result exceeded its structural budget: {error}"),
+                    );
+                    return;
+                }
+                if looks_like_mi_record(line) {
+                    self.report_unusable(String::from(
                     "GDB emitted a malformed MI state record. Debugger synchronization can no longer be trusted.",
                 ));
+                }
+                return;
             }
-            return;
         };
 
         match record.kind {
@@ -1225,7 +1491,7 @@ impl MiClient {
                     let Some(request) = request else {
                         return;
                     };
-                    let response = if request.cancelled || !(request.is_current)() {
+                    let mut response = if request.cancelled || !(request.is_current)() {
                         synthetic_error_record("superseded", "request superseded")
                     } else if request.expect_nested_mi {
                         request.response.unwrap_or_else(|| {
@@ -1238,6 +1504,25 @@ impl MiClient {
                     } else {
                         record
                     };
+                    self.report_command_duration(
+                        request.class,
+                        &request.operation,
+                        request.started_at.unwrap_or(request.queued_at),
+                    );
+                    if request.output_truncated {
+                        response.results.push(MiResult {
+                            name: String::from("fgdb-output-truncated"),
+                            value: MiValue::Const(MAX_CAPTURED_CONSOLE_BYTES.to_string()),
+                        });
+                        self.report_performance(PerformanceNotice {
+                            outcome: BudgetOutcome::Partial,
+                            operation: request.operation.clone(),
+                            detail: format!(
+                                "console output was capped at {} KiB; the activity view and parser received a partial result",
+                                MAX_CAPTURED_CONSOLE_BYTES / 1024
+                            ),
+                        });
+                    }
                     (request.handler)(self, response, request.output);
                     self.start_next_scoped_request();
                     return;
@@ -1246,6 +1531,11 @@ impl MiClient {
                     .token
                     .and_then(|token| self.pending.borrow_mut().remove(&token));
                 if let Some(request) = handler {
+                    self.report_command_duration(
+                        request.class,
+                        &request.operation,
+                        request.queued_at,
+                    );
                     (request.handler)(self, record);
                 }
             }
@@ -1470,6 +1760,38 @@ fn gdb_version_from_banner(output: &str) -> Option<String> {
             .then(|| version.to_owned())
         })
     })
+}
+
+fn command_operation(command: &str) -> String {
+    command
+        .split_ascii_whitespace()
+        .next()
+        .filter(|operation| operation.starts_with('-'))
+        .unwrap_or("GDB/MI command")
+        .to_owned()
+}
+
+fn console_operation(command: &str) -> String {
+    let operation = command
+        .split_ascii_whitespace()
+        .next()
+        .filter(|operation| !operation.is_empty())
+        .unwrap_or("command");
+    format!("GDB console `{operation}`")
+}
+
+fn mi_record_header(line: &[u8]) -> MiRecordHeader {
+    let token_end = line
+        .iter()
+        .position(|byte| !byte.is_ascii_digit())
+        .unwrap_or(line.len());
+    let token = (token_end > 0)
+        .then(|| std::str::from_utf8(&line[..token_end]).ok()?.parse().ok())
+        .flatten();
+    MiRecordHeader {
+        token,
+        kind: line.get(token_end).copied(),
+    }
 }
 
 fn looks_like_mi_record(line: &str) -> bool {
@@ -2198,6 +2520,196 @@ mod tests {
                         String::from("Source directories: /src:$cwd\nwarning from GDB\n")
                     ))
                 );
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn scoped_inspection_overtakes_queued_background_work() {
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let client = super::MiClient::open(|_, _| {}).unwrap();
+                client.ready.set(true);
+                client
+                    .request_console("show version", |_, _, _| {})
+                    .unwrap();
+                client
+                    .request_console("show directories", |_, _, _| {})
+                    .unwrap();
+                client
+                    .request_with_print_limit_for_owner(
+                        "-stack-list-variables --simple-values",
+                        32,
+                        None,
+                        || true,
+                        |_, _| {},
+                    )
+                    .unwrap();
+
+                let queue = client.scoped_queue.borrow();
+                assert_eq!(queue.len(), 2);
+                assert_eq!(queue[0].class, super::CommandClass::Inspection);
+                assert_eq!(queue[1].class, super::CommandClass::Background);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn request_admission_preserves_control_and_execution_capacity() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let events_for_client = Rc::clone(&events);
+                let client = super::MiClient::open(move |_, event| {
+                    events_for_client.borrow_mut().push(event);
+                })
+                .unwrap();
+                client.ready.set(true);
+
+                for _ in 0..super::MAX_INSPECTION_REQUESTS {
+                    client
+                        .request_when("-thread-info", || true, |_, _| {})
+                        .unwrap();
+                }
+                let rejected = client.request_when("-thread-info", || true, |_, _| {});
+
+                assert_eq!(rejected.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+                assert!(client.request("-break-insert main", |_, _| {}).is_ok());
+                let additional_controls = super::MAX_NON_EXECUTION_REQUESTS
+                    .saturating_sub(client.pending.borrow().len());
+                for _ in 0..additional_controls {
+                    client.request("-gdb-show language", |_, _| {}).unwrap();
+                }
+                assert_eq!(
+                    client
+                        .request("-gdb-show language", |_, _| {})
+                        .unwrap_err()
+                        .kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+                assert!(client.send("-exec-next").is_ok());
+                assert!(events.borrow().iter().any(|event| matches!(
+                    event,
+                    super::MiEvent::Performance(notice)
+                        if notice.outcome == crate::performance::BudgetOutcome::Rejected
+                )));
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn oversized_tokenized_result_fails_only_its_request() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let events_for_client = Rc::clone(&events);
+                let client = super::MiClient::open(move |_, event| {
+                    events_for_client.borrow_mut().push(event);
+                })
+                .unwrap();
+                client.ready.set(true);
+                let result = Rc::new(RefCell::new(None));
+                let result_for_request = Rc::clone(&result);
+                let token = client
+                    .request("-thread-info", move |_, record| {
+                        result_for_request.replace(Some(record.class));
+                    })
+                    .unwrap();
+
+                let mut oversized = format!("{token}^done,value=\"").into_bytes();
+                oversized.resize(super::MAX_MI_RECORD_BYTES + 1, b'x');
+                client.consume(&oversized);
+                assert!(result.borrow().is_none());
+                assert!(client.discarding_oversized_line.get());
+                client.consume(b"discarded tail\n*running,thread-id=\"all\"\n");
+
+                assert_eq!(result.borrow().as_deref(), Some("resource-limit"));
+                assert!(!client.pending.borrow().contains_key(&token));
+                assert!(!client.discarding_oversized_line.get());
+                assert!(client.is_ready());
+                assert!(
+                    !events
+                        .borrow()
+                        .iter()
+                        .any(|event| matches!(event, super::MiEvent::DebuggerUnusable(_)))
+                );
+                assert!(events.borrow().iter().any(|event| matches!(
+                    event,
+                    super::MiEvent::Running { thread_id }
+                        if thread_id.as_deref() == Some("all")
+                )));
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn oversized_console_capture_returns_an_explicit_partial_result() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let client = super::MiClient::open(|_, _| {}).unwrap();
+                client.ready.set(true);
+                let result = Rc::new(RefCell::new(None));
+                let result_for_request = Rc::clone(&result);
+                let token = client
+                    .request_console("show directories", move |_, record, output| {
+                        result_for_request
+                            .replace(Some((record.output_was_truncated(), output.len())));
+                    })
+                    .unwrap();
+                let output = "x".repeat(super::MAX_CAPTURED_CONSOLE_BYTES + 257);
+
+                client.process_line(&format!("~\"{output}\""));
+                client.process_line(&format!("{token}^done"));
+
+                assert_eq!(
+                    *result.borrow(),
+                    Some((true, super::MAX_CAPTURED_CONSOLE_BYTES))
+                );
+                assert!(client.is_ready());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn oversized_asynchronous_state_requires_recovery() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let events_for_client = Rc::clone(&events);
+                let client = super::MiClient::open(move |_, event| {
+                    events_for_client.borrow_mut().push(event);
+                })
+                .unwrap();
+                client.ready.set(true);
+
+                client.handle_oversized_record(super::MiRecordHeader {
+                    token: None,
+                    kind: Some(b'*'),
+                });
+
+                assert!(!client.is_ready());
+                assert!(matches!(
+                    events.borrow().as_slice(),
+                    [super::MiEvent::DebuggerUnusable(_)]
+                ));
             })
             .unwrap();
     }

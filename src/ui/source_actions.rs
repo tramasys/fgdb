@@ -2,22 +2,28 @@ use super::*;
 
 impl Ui {
     pub(super) fn resolve_source_path(&self, reported_path: &str) -> Option<PathBuf> {
-        const MAX_RESOLVED_SOURCE_PATHS: usize = 4_096;
-
+        let cache_key = reported_path.to_owned();
         if let Some(path) = self
             .resolved_source_paths
-            .borrow()
-            .get(reported_path)
-            .cloned()
+            .borrow_mut()
+            .get_cloned(&cache_key)
         {
             return path;
         }
         let path = source::resolve(reported_path, &self.source_roots.borrow());
         let mut cache = self.resolved_source_paths.borrow_mut();
-        if cache.len() >= MAX_RESOLVED_SOURCE_PATHS {
-            cache.clear();
+        let evicted = cache.insert(cache_key, path.clone());
+        drop(cache);
+        if evicted {
+            self.record_performance_notice(crate::performance::PerformanceNotice {
+                outcome: crate::performance::BudgetOutcome::Evicted,
+                operation: String::from("source-path cache"),
+                detail: format!(
+                    "least-recently used derived path was removed at the {}-entry budget",
+                    crate::performance::RESOLVED_SOURCE_PATH_CACHE_BUDGET
+                ),
+            });
         }
-        cache.insert(reported_path.to_owned(), path.clone());
         path
     }
 

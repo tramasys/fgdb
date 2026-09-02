@@ -587,12 +587,13 @@ impl Ui {
         self.show_threads(&threads);
     }
 
-    pub(super) fn filtered_sorted_threads(
+    pub(super) fn filtered_sorted_thread_page(
         threads: &[ThreadInfo],
         query: &str,
         state_filter: u32,
         sort: u32,
-    ) -> Vec<ThreadInfo> {
+        limit: usize,
+    ) -> (Vec<ThreadInfo>, usize) {
         let mut visible = threads
             .iter()
             .filter(|thread| match state_filter {
@@ -601,33 +602,23 @@ impl Ui {
                 _ => true,
             })
             .filter(|thread| thread_matches_query(thread, query))
-            .cloned()
             .collect::<Vec<_>>();
-        match sort {
-            1 => visible.sort_by(thread_id_order),
-            2 => visible.sort_by(|left, right| {
-                thread_name(left)
-                    .cmp(thread_name(right))
-                    .then_with(|| thread_id_order(left, right))
-            }),
-            3 => visible.sort_by(|left, right| {
-                left.state
-                    .cmp(&right.state)
-                    .then_with(|| thread_id_order(left, right))
-            }),
-            4 => visible.sort_by(|left, right| {
-                thread_core_number(left)
-                    .cmp(&thread_core_number(right))
-                    .then_with(|| thread_id_order(left, right))
-            }),
-            _ => visible.sort_by(|left, right| {
-                right
-                    .current
-                    .cmp(&left.current)
-                    .then_with(|| thread_id_order(left, right))
-            }),
+        let total = visible.len();
+        let current = visible.iter().find(|thread| thread.current).copied();
+        if visible.len() > limit {
+            visible.select_nth_unstable_by(limit, |left, right| thread_order(left, right, sort));
+            visible.truncate(limit);
         }
-        visible
+        visible.sort_by(|left, right| thread_order(left, right, sort));
+        let mut visible = visible.into_iter().cloned().collect::<Vec<_>>();
+        if limit > 0
+            && let Some(current) = current
+            && !visible.iter().any(|thread| thread.id == current.id)
+        {
+            visible.pop();
+            visible.insert(0, current.clone());
+        }
+        (visible, total)
     }
 
     pub(super) fn current_thread_filter_state(&self) -> (String, u32, u32) {
@@ -647,7 +638,9 @@ impl Ui {
             &self.thread_controls.summary,
             &format!("{} visible of {} threads", visible, threads.len()),
         );
-        let labels = threads
+        let selector_threads =
+            bounded_thread_selector_entries(threads, crate::performance::THREAD_SELECTOR_BUDGET);
+        let labels = selector_threads
             .iter()
             .map(|thread| {
                 format!(
@@ -657,10 +650,18 @@ impl Ui {
                 )
             })
             .collect::<Vec<_>>();
-        let ids = threads
+        let ids = selector_threads
             .iter()
             .map(|thread| thread.id.clone())
             .collect::<Vec<_>>();
+        if selector_threads.len() < threads.len() {
+            self.record_performance_notice(crate::performance::PerformanceNotice::count(
+                crate::performance::BudgetOutcome::Partial,
+                "thread comparison selectors",
+                selector_threads.len(),
+                threads.len(),
+            ));
+        }
         let models_changed = *self.thread_controls.compare_ids.borrow() != ids
             || !string_list_matches(&self.thread_controls.compare_left_model, &labels)
             || !string_list_matches(&self.thread_controls.compare_right_model, &labels);
@@ -1045,6 +1046,38 @@ fn thread_id_order(left: &ThreadInfo, right: &ThreadInfo) -> std::cmp::Ordering 
     crate::debugger::compare_thread_ids(&left.id, &right.id)
 }
 
+fn thread_order(left: &ThreadInfo, right: &ThreadInfo, sort: u32) -> std::cmp::Ordering {
+    match sort {
+        1 => thread_id_order(left, right),
+        2 => thread_name(left)
+            .cmp(thread_name(right))
+            .then_with(|| thread_id_order(left, right)),
+        3 => left
+            .state
+            .cmp(&right.state)
+            .then_with(|| thread_id_order(left, right)),
+        4 => thread_core_number(left)
+            .cmp(&thread_core_number(right))
+            .then_with(|| thread_id_order(left, right)),
+        _ => right
+            .current
+            .cmp(&left.current)
+            .then_with(|| thread_id_order(left, right)),
+    }
+}
+
+fn bounded_thread_selector_entries(threads: &[ThreadInfo], limit: usize) -> Vec<&ThreadInfo> {
+    let mut entries = threads.iter().take(limit).collect::<Vec<_>>();
+    if limit > 0
+        && let Some(current) = threads.iter().find(|thread| thread.current)
+        && !entries.iter().any(|thread| thread.id == current.id)
+    {
+        entries.pop();
+        entries.insert(0, current);
+    }
+    entries
+}
+
 fn thread_name(thread: &ThreadInfo) -> &str {
     thread.name.as_deref().unwrap_or("")
 }
@@ -1167,5 +1200,33 @@ mod tests {
             threads.map(|thread| thread.id),
             [String::from("1.3"), String::from("2"), String::from("10")]
         );
+    }
+
+    #[test]
+    fn bounded_thread_page_keeps_counts_and_the_current_thread() {
+        let mut threads = (1..=1_000)
+            .map(|id| thread(&id.to_string(), "worker", "stopped", "0"))
+            .collect::<Vec<_>>();
+        threads.last_mut().unwrap().current = true;
+
+        let (page, total) = Ui::filtered_sorted_thread_page(&threads, "", 0, 1, 10);
+
+        assert_eq!(total, 1_000);
+        assert_eq!(page.len(), 10);
+        assert_eq!(page[0].id, "1000");
+        assert!(page[0].current);
+    }
+
+    #[test]
+    fn bounded_thread_selectors_keep_the_current_thread() {
+        let mut threads = (1..=20)
+            .map(|id| thread(&id.to_string(), "worker", "stopped", "0"))
+            .collect::<Vec<_>>();
+        threads.last_mut().unwrap().current = true;
+
+        let selectors = bounded_thread_selector_entries(&threads, 5);
+
+        assert_eq!(selectors.len(), 5);
+        assert_eq!(selectors[0].id, "20");
     }
 }

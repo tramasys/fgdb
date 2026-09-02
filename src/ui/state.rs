@@ -149,7 +149,9 @@ impl Ui {
             execution_source_line: Rc::new(Cell::new(None)),
             source_theme: theme.clone(),
             source_style_scheme,
-            resolved_source_paths: Rc::new(RefCell::new(HashMap::new())),
+            resolved_source_paths: Rc::new(RefCell::new(crate::performance::BoundedLruCache::new(
+                crate::performance::RESOLVED_SOURCE_PATH_CACHE_BUDGET,
+            ))),
             call_stack_list: workspace.call_stack_list,
             frame_buttons: Rc::new(RefCell::new(Vec::new())),
             latest_frames: Rc::new(RefCell::new(Vec::new())),
@@ -227,7 +229,11 @@ impl Ui {
             register_details_generation: Rc::new(Cell::new(None)),
             instruction_memory_handler: Rc::new(RefCell::new(None)),
             disassembly_handler: Rc::new(RefCell::new(None)),
-            disassembly_source_cache: Rc::new(RefCell::new(HashMap::new())),
+            disassembly_source_cache: Rc::new(RefCell::new(
+                crate::performance::BoundedLruCache::new(
+                    crate::performance::DISASSEMBLY_SOURCE_CACHE_BUDGET,
+                ),
+            )),
             register_groups: workspace.register_groups,
             registers_empty: workspace.registers_empty,
             stack_store: workspace.stack_store,
@@ -312,6 +318,7 @@ impl Ui {
             configuration_dialog: Rc::new(RefCell::new(None)),
             debug_data_view: Rc::new(RefCell::new(None)),
             debug_data_state: Rc::new(RefCell::new(debug_data::DebugDataState::default())),
+            performance_notice_times: Rc::new(RefCell::new(HashMap::new())),
             debug_data_generation: Rc::new(Cell::new(0)),
             debug_data_action_handler: Rc::new(RefCell::new(None)),
             session_handler: Rc::new(RefCell::new(None)),

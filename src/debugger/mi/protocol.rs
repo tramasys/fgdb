@@ -48,6 +48,7 @@ pub enum MiEvent {
         parameter: String,
         value: Option<String>,
     },
+    Performance(crate::performance::PerformanceNotice),
     Error(String),
     Disconnected,
 }
@@ -131,6 +132,10 @@ impl MiRecord {
 
     pub fn error_message(&self) -> Option<&str> {
         self.field("msg").and_then(MiValue::as_const)
+    }
+
+    pub fn output_was_truncated(&self) -> bool {
+        self.field("fgdb-output-truncated").is_some()
     }
 }
 

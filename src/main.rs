@@ -6,6 +6,7 @@ mod debug_info;
 mod debugger;
 mod kernel;
 mod misc;
+mod performance;
 mod rust_toolchain;
 mod source;
 mod theme;

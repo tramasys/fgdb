@@ -16,21 +16,41 @@ pub(super) fn request_source_discovery(
     match request {
         SourceDiscoveryRequest::LoadedFiles(generation) => {
             let ui_for_response = ui.clone();
+            let ui_for_guard = ui.clone();
             if client
-                .request("-file-list-exec-source-files", move |_, record| {
-                    if let Some(ui) = ui_for_response.upgrade() {
-                        let files = if record.is_done() {
-                            crate::debugger::source_files(&record)
-                        } else {
-                            Vec::new()
-                        };
-                        ui.show_loaded_source_files(generation, files);
-                    }
-                })
+                .request_when(
+                    "-file-list-exec-source-files",
+                    move || {
+                        ui_for_guard
+                            .upgrade()
+                            .is_some_and(|ui| ui.loaded_source_files_request_is_current(generation))
+                    },
+                    move |_, record| {
+                        if let Some(ui) = ui_for_response.upgrade() {
+                            if record.is_done() {
+                                ui.show_loaded_source_files(
+                                    generation,
+                                    crate::debugger::source_files(&record),
+                                );
+                            } else {
+                                ui.fail_loaded_source_files_request(
+                                    generation,
+                                    record
+                                        .error_message()
+                                        .unwrap_or("GDB could not enumerate loaded source files")
+                                        .to_owned(),
+                                );
+                            }
+                        }
+                    },
+                )
                 .is_err()
                 && let Some(ui) = ui.upgrade()
             {
-                ui.show_loaded_source_files(generation, Vec::new());
+                ui.fail_loaded_source_files_request(
+                    generation,
+                    String::from("the MI request could not be queued"),
+                );
             }
         }
         SourceDiscoveryRequest::Symbols { query, generation } => {
@@ -59,16 +79,26 @@ fn request_source_symbol_results(ui: Weak<Ui>, client: &MiClient, query: String,
         ),
     ] {
         let search_for_response = Rc::clone(&search);
+        let ui_for_guard = search.ui.clone();
+        let generation = search.generation;
         if client
-            .request(&command, move |_, record| {
-                if record.is_done() {
-                    search_for_response
-                        .locations
-                        .borrow_mut()
-                        .extend(crate::debugger::source_locations(&record));
-                }
-                finish_source_symbol_request(&search_for_response);
-            })
+            .request_when(
+                &command,
+                move || {
+                    ui_for_guard
+                        .upgrade()
+                        .is_some_and(|ui| ui.source_symbol_request_is_current(generation))
+                },
+                move |_, record| {
+                    if record.is_done() {
+                        search_for_response
+                            .locations
+                            .borrow_mut()
+                            .extend(crate::debugger::source_locations(&record));
+                    }
+                    finish_source_symbol_request(&search_for_response);
+                },
+            )
             .is_err()
         {
             finish_source_symbol_request(&search);

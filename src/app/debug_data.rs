@@ -2,6 +2,8 @@ use super::*;
 
 use crate::ui::DebugDataAction;
 
+const MAX_PRETTY_PRINTER_ENTRIES: usize = 20_000;
+
 struct DebugDataQuery {
     ui: Weak<Ui>,
     client: Rc<MiClient>,
@@ -10,6 +12,7 @@ struct DebugDataQuery {
     debuginfod_urls: String,
     source_directories: Vec<String>,
     substitutions: Vec<(String, String)>,
+    notices: Vec<String>,
     errors: Vec<String>,
 }
 
@@ -104,6 +107,7 @@ fn refresh_debug_data(ui: Weak<Ui>, client: Rc<MiClient>) {
         debuginfod_urls: String::new(),
         source_directories: Vec::new(),
         substitutions: Vec::new(),
+        notices: Vec::new(),
         errors: Vec::new(),
     })));
 }
@@ -116,6 +120,7 @@ fn request_debuginfod_status(query: Rc<RefCell<DebugDataQuery>>) {
         debug_data_query_guard(&query),
         move |_, record, output| {
             let mut query = query_for_response.borrow_mut();
+            note_query_truncation(&mut query, &record, "Debuginfod status");
             if record.is_done() {
                 query.debuginfod_status = parse_debuginfod_status(&output);
             } else {
@@ -144,6 +149,7 @@ fn request_debuginfod_urls(query: Rc<RefCell<DebugDataQuery>>) {
         debug_data_query_guard(&query),
         move |_, record, output| {
             let mut query = query_for_response.borrow_mut();
+            note_query_truncation(&mut query, &record, "Debuginfod URLs");
             if record.is_done() {
                 query.debuginfod_urls = parse_setting_tail(&output);
             } else {
@@ -172,6 +178,7 @@ fn request_source_directories(query: Rc<RefCell<DebugDataQuery>>) {
         debug_data_query_guard(&query),
         move |_, record, output| {
             let mut query = query_for_response.borrow_mut();
+            note_query_truncation(&mut query, &record, "Source directories");
             if record.is_done() {
                 query.source_directories = parse_source_directories(&output);
             } else {
@@ -200,6 +207,7 @@ fn request_substitutions(query: Rc<RefCell<DebugDataQuery>>) {
         debug_data_query_guard(&query),
         move |_, record, output| {
             let mut query = query_for_response.borrow_mut();
+            note_query_truncation(&mut query, &record, "Source substitutions");
             if record.is_done() {
                 query.substitutions = parse_substitutions(&output);
             } else {
@@ -244,8 +252,18 @@ fn request_pretty_printers(ui: Weak<Ui>, client: Rc<MiClient>) {
             if !ui.debug_data_pretty_printer_refresh_is_current(generation) {
                 return;
             }
+            note_console_truncation(&ui, &record, "Pretty-printer list");
             let result = if record.is_done() {
-                Ok(parse_pretty_printers(&output))
+                let (printers, total) = parse_pretty_printers(&output);
+                if printers.len() < total {
+                    ui.record_performance_notice(crate::performance::PerformanceNotice::count(
+                        crate::performance::BudgetOutcome::Partial,
+                        "pretty-printer discovery",
+                        printers.len(),
+                        total,
+                    ));
+                }
+                Ok(printers)
             } else {
                 Err(format!(
                     "Pretty-printers: {}",
@@ -297,6 +315,9 @@ fn finish_debug_data_query(query: Rc<RefCell<DebugDataQuery>>) {
     for error in &query.errors {
         ui.add_debug_data_error(error.clone());
     }
+    for notice in &query.notices {
+        ui.add_debug_data_warning(notice.clone());
+    }
     ui.finish_debug_data_refresh(query.generation);
 }
 
@@ -310,6 +331,7 @@ fn run_console_setting(ui: Weak<Ui>, client: Rc<MiClient>, command: String, succ
         let Some(ui) = ui_for_response.upgrade() else {
             return;
         };
+        note_console_truncation(&ui, &record, "Debugger setting output");
         if record.is_done() {
             ui.add_debug_data_success(success);
         } else {
@@ -370,6 +392,7 @@ fn add_source_directory(ui: Weak<Ui>, client: Rc<MiClient>, path: PathBuf) {
     let client_for_refresh = Rc::clone(&client);
     if let Err(error) = client.request_console(&command, move |_, record, output| {
         if let Some(ui) = ui_for_response.upgrade() {
+            note_console_truncation(&ui, &record, "Source-directory command output");
             if record.is_done() {
                 ui.add_runtime_source_directory(path.clone());
                 ui.add_debug_data_success(format!("Added source directory {}", path.display()));
@@ -403,6 +426,7 @@ fn remove_source_directory(ui: Weak<Ui>, client: Rc<MiClient>, path: String) {
     let client_for_refresh = Rc::clone(&client);
     if let Err(error) = client.request_console(&command, move |_, record, output| {
         if let Some(ui) = ui_for_response.upgrade() {
+            note_console_truncation(&ui, &record, "Source-directory command output");
             if record.is_done() {
                 ui.remove_runtime_source_directory(&path);
                 ui.add_debug_data_success(format!("Removed source directory {path}"));
@@ -477,6 +501,7 @@ fn retry_symbols(ui: Weak<Ui>, client: Rc<MiClient>, module: Option<String>) {
     let client_for_refresh = Rc::clone(&client);
     if let Err(error) = client.request_console(&command, move |_, record, output| {
         if let Some(ui) = ui_for_response.upgrade() {
+            note_console_truncation(&ui, &record, "Symbol loading output");
             let detail = output.trim();
             if record.is_done() {
                 if detail.is_empty() {
@@ -498,6 +523,22 @@ fn retry_symbols(ui: Weak<Ui>, client: Rc<MiClient>, module: Option<String>) {
     {
         ui.add_debug_data_error(format!("Could not queue symbol loading: {error}"));
         refresh_debug_data(Rc::downgrade(&ui), client);
+    }
+}
+
+fn note_query_truncation(query: &mut DebugDataQuery, record: &MiRecord, operation: &str) {
+    if record.output_was_truncated() {
+        query.notices.push(format!(
+            "{operation} exceeded the captured-output budget; values shown are partial"
+        ));
+    }
+}
+
+fn note_console_truncation(ui: &Ui, record: &MiRecord, operation: &str) {
+    if record.output_was_truncated() {
+        ui.add_debug_data_warning(format!(
+            "{operation} exceeded the captured-output budget; values shown are partial"
+        ));
     }
 }
 
@@ -542,13 +583,19 @@ fn quoted_gdb_value(input: &str) -> Option<(&str, &str)> {
     value.split_once('\'')
 }
 
-fn parse_pretty_printers(output: &str) -> Vec<String> {
-    output
-        .lines()
-        .map(str::trim_end)
-        .filter(|line| !line.trim().is_empty())
-        .map(str::to_owned)
-        .collect()
+fn parse_pretty_printers(output: &str) -> (Vec<String>, usize) {
+    let mut printers = Vec::new();
+    let mut total = 0_usize;
+    for line in output.lines().map(str::trim_end) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        total += 1;
+        if printers.len() < MAX_PRETTY_PRINTER_ENTRIES {
+            printers.push(line.to_owned());
+        }
+    }
+    (printers, total)
 }
 
 fn console_error<'a>(record: &'a crate::debugger::MiRecord, output: &'a str) -> &'a str {
@@ -599,6 +646,23 @@ mod tests {
         assert_eq!(
             exact_gdb_regex("/usr/lib/libc.so.6"),
             r"^/usr/lib/libc\.so\.6$"
+        );
+    }
+
+    #[test]
+    fn bounds_pretty_printer_discovery_without_hiding_the_total() {
+        let output = (0..MAX_PRETTY_PRINTER_ENTRIES + 7)
+            .map(|index| format!("Printer{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let (printers, total) = parse_pretty_printers(&output);
+
+        assert_eq!(printers.len(), MAX_PRETTY_PRINTER_ENTRIES);
+        assert_eq!(total, MAX_PRETTY_PRINTER_ENTRIES + 7);
+        assert_eq!(
+            printers.last().unwrap(),
+            &format!("Printer{}", MAX_PRETTY_PRINTER_ENTRIES - 1)
         );
     }
 }

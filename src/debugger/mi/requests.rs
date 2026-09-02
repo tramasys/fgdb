@@ -4,13 +4,17 @@ use std::{
 };
 
 use super::{MiClient, MiRecord, MiResult, MiValue, quote};
+use crate::performance::{MI_BACKGROUND_BUDGET, MI_CONTROL_BUDGET, MI_INSPECTION_BUDGET};
 
 pub(super) type ResponseHandler = Box<dyn FnOnce(&MiClient, MiRecord)>;
 pub(super) type ScopedResponseHandler = Box<dyn FnOnce(&MiClient, MiRecord, String)>;
 
 pub(super) const MAX_MI_COMMAND_BYTES: usize = 1024 * 1024;
-pub(super) const MAX_PENDING_REQUESTS: usize = 4096;
-pub(super) const MAX_SCOPED_REQUESTS: usize = 1024;
+pub(super) const MAX_PENDING_REQUESTS: usize = 512;
+pub(super) const MAX_INSPECTION_REQUESTS: usize = 384;
+pub(super) const MAX_NON_EXECUTION_REQUESTS: usize = 480;
+pub(super) const MAX_SCOPED_REQUESTS: usize = 128;
+pub(super) const MAX_BACKGROUND_SCOPED_REQUESTS: usize = 24;
 pub(super) const MAX_CAPTURED_CONSOLE_BYTES: usize = 1024 * 1024;
 pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const MAX_REQUEST_LIFETIME: Duration = Duration::from_secs(5 * 60);
@@ -41,6 +45,23 @@ impl CommandClass {
             Self::Background => MAX_REQUEST_LIFETIME,
         }
     }
+
+    pub(super) fn performance_budget(self) -> Duration {
+        match self {
+            Self::Execution | Self::Control => MI_CONTROL_BUDGET,
+            Self::Inspection => MI_INSPECTION_BUDGET,
+            Self::Background => MI_BACKGROUND_BUDGET,
+        }
+    }
+
+    pub(super) fn queue_priority(self) -> u8 {
+        match self {
+            Self::Execution => 0,
+            Self::Control => 1,
+            Self::Inspection => 2,
+            Self::Background => 3,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +73,8 @@ pub(crate) enum CommandOwner {
 pub(super) struct PendingRequest {
     pub(super) class: CommandClass,
     pub(super) owner: Option<CommandOwner>,
+    pub(super) operation: String,
+    pub(super) queued_at: Instant,
     pub(super) deadline: Instant,
     pub(super) hard_deadline: Instant,
     pub(super) is_current: Option<Box<dyn Fn() -> bool>>,
@@ -62,6 +85,7 @@ pub(super) struct ScopedMiRequest {
     pub(super) token: u64,
     pub(super) class: CommandClass,
     pub(super) owner: Option<CommandOwner>,
+    pub(super) operation: String,
     pub(super) command: String,
     pub(super) response: Option<MiRecord>,
     pub(super) output: String,
@@ -70,7 +94,10 @@ pub(super) struct ScopedMiRequest {
     pub(super) handler: ScopedResponseHandler,
     pub(super) deadline: Instant,
     pub(super) hard_deadline: Instant,
+    pub(super) queued_at: Instant,
+    pub(super) started_at: Option<Instant>,
     pub(super) cancelled: bool,
+    pub(super) output_truncated: bool,
 }
 
 pub(super) fn error_record(message: &str) -> MiRecord {

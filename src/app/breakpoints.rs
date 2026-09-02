@@ -722,21 +722,33 @@ pub(super) fn refresh_breakpoints(ui: &Weak<Ui>, client: &MiClient) {
     };
     drop(current_ui);
     let weak_ui = ui.clone();
+    let weak_ui_for_guard = ui.clone();
     let weak_ui_for_error = ui.clone();
     if client
-        .request("-break-list", move |client, record| {
-            let Some(ui) = weak_ui.upgrade() else {
-                return;
-            };
-            if record.is_done() {
-                ui.show_breakpoints_for_refresh(generation, crate::debugger::breakpoints(&record));
-            }
-            let refresh_again = ui.finish_breakpoint_refresh();
-            drop(ui);
-            if refresh_again {
-                refresh_breakpoints(&weak_ui, client);
-            }
-        })
+        .request_when(
+            "-break-list",
+            move || {
+                weak_ui_for_guard
+                    .upgrade()
+                    .is_some_and(|ui| ui.is_breakpoint_refresh_current(generation))
+            },
+            move |client, record| {
+                let Some(ui) = weak_ui.upgrade() else {
+                    return;
+                };
+                if record.is_done() {
+                    ui.show_breakpoints_for_refresh(
+                        generation,
+                        crate::debugger::breakpoints(&record),
+                    );
+                }
+                let refresh_again = ui.finish_breakpoint_refresh();
+                drop(ui);
+                if refresh_again {
+                    refresh_breakpoints(&weak_ui, client);
+                }
+            },
+        )
         .is_err()
         && let Some(ui) = weak_ui_for_error.upgrade()
     {
@@ -769,24 +781,34 @@ pub(super) fn refresh_modules(ui: &Weak<Ui>, client: &MiClient) {
     };
     drop(current_ui);
     let weak_ui = ui.clone();
+    let weak_ui_for_guard = ui.clone();
     let weak_ui_for_error = ui.clone();
+    let inferior_id_for_guard = inferior_id.clone();
     if client
-        .request(&command, move |client, record| {
-            let Some(ui) = weak_ui.upgrade() else {
-                return;
-            };
-            if record.is_done() && ui.selected_inferior_id() == inferior_id {
-                let modules = crate::debugger::shared_libraries(&record);
-                if ui.show_modules(&modules) {
-                    ui.refresh_module_debug_metadata(false);
+        .request_when(
+            &command,
+            move || {
+                weak_ui_for_guard
+                    .upgrade()
+                    .is_some_and(|ui| ui.selected_inferior_id() == inferior_id_for_guard)
+            },
+            move |client, record| {
+                let Some(ui) = weak_ui.upgrade() else {
+                    return;
+                };
+                if record.is_done() && ui.selected_inferior_id() == inferior_id {
+                    let modules = crate::debugger::shared_libraries(&record);
+                    if ui.show_modules(&modules) {
+                        ui.refresh_module_debug_metadata(false);
+                    }
                 }
-            }
-            let refresh_again = ui.finish_module_refresh();
-            drop(ui);
-            if refresh_again {
-                refresh_modules(&weak_ui, client);
-            }
-        })
+                let refresh_again = ui.finish_module_refresh();
+                drop(ui);
+                if refresh_again {
+                    refresh_modules(&weak_ui, client);
+                }
+            },
+        )
         .is_err()
         && let Some(ui) = weak_ui_for_error.upgrade()
     {
@@ -801,90 +823,99 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
     let generation = current_ui.start_thread_refresh();
     drop(current_ui);
     let weak_ui = ui.clone();
-    let _ = client.request("-thread-info", move |client, record| {
-        if !record.is_done() {
-            return;
-        }
-        let threads = crate::debugger::threads(&record);
-        let Some(ui) = weak_ui.upgrade() else {
-            return;
-        };
-        if !ui.is_thread_refresh_current(generation) {
-            return;
-        }
-        let selection_changed = ui.reconcile_stop_owner_from_threads(&threads);
-        let threads = ui.threads_for_selected_inferior(threads);
-        let recovered_stopped_context = ui.debug_state_is_stale()
-            && threads
-                .iter()
-                .any(|thread| thread.current && thread.state == "stopped");
-        if !threads.is_empty() {
-            ui.set_inferior_started(true);
-        }
-        ui.show_threads_for_refresh(generation, &threads);
-        if recovered_stopped_context {
-            ui.set_controls_running(false);
-            ui.set_debug_state_stale(false);
-        }
-        drop(ui);
-        if recovered_stopped_context {
-            refresh_stopped_state(&weak_ui, client);
-        }
-        if selection_changed {
-            refresh_modules(&weak_ui, client);
-            detect_target_abi(&weak_ui, client);
-        }
-        if !threads.iter().any(|thread| {
-            thread.current
-                && thread
-                    .frame
-                    .as_ref()
-                    .is_some_and(|frame| frame.function == "??")
-        }) {
-            return;
-        }
-        let Some((stop_generation, command)) = weak_ui.upgrade().and_then(|ui| {
-            let stop_generation = ui.current_stop_refresh_generation();
-            let command = format!(
-                "-data-evaluate-expression {}",
-                crate::debugger::quote("(void*)$pc")
+    let weak_ui_for_guard = ui.clone();
+    let _ = client.request_when(
+        "-thread-info",
+        move || {
+            weak_ui_for_guard
+                .upgrade()
+                .is_some_and(|ui| ui.is_thread_refresh_current(generation))
+        },
+        move |client, record| {
+            if !record.is_done() {
+                return;
+            }
+            let threads = crate::debugger::threads(&record);
+            let Some(ui) = weak_ui.upgrade() else {
+                return;
+            };
+            if !ui.is_thread_refresh_current(generation) {
+                return;
+            }
+            let selection_changed = ui.reconcile_stop_owner_from_threads(&threads);
+            let threads = ui.threads_for_selected_inferior(threads);
+            let recovered_stopped_context = ui.debug_state_is_stale()
+                && threads
+                    .iter()
+                    .any(|thread| thread.current && thread.state == "stopped");
+            if !threads.is_empty() {
+                ui.set_inferior_started(true);
+            }
+            ui.show_threads_for_refresh(generation, &threads);
+            if recovered_stopped_context {
+                ui.set_controls_running(false);
+                ui.set_debug_state_stale(false);
+            }
+            drop(ui);
+            if recovered_stopped_context {
+                refresh_stopped_state(&weak_ui, client);
+            }
+            if selection_changed {
+                refresh_modules(&weak_ui, client);
+                detect_target_abi(&weak_ui, client);
+            }
+            if !threads.iter().any(|thread| {
+                thread.current
+                    && thread
+                        .frame
+                        .as_ref()
+                        .is_some_and(|frame| frame.function == "??")
+            }) {
+                return;
+            }
+            let Some((stop_generation, command)) = weak_ui.upgrade().and_then(|ui| {
+                let stop_generation = ui.current_stop_refresh_generation();
+                let command = format!(
+                    "-data-evaluate-expression {}",
+                    crate::debugger::quote("(void*)$pc")
+                );
+                ui.stop_context(stop_generation)
+                    .map(|context| (stop_generation, context.scope_frame(&command)))
+            }) else {
+                return;
+            };
+            let weak_ui = weak_ui.clone();
+            let weak_ui_for_guard = weak_ui.clone();
+            let _ = client.request_for_stop(
+                &command,
+                stop_generation,
+                move || {
+                    weak_ui_for_guard.upgrade().is_some_and(|ui| {
+                        ui.is_thread_refresh_current(generation)
+                            && ui.is_stop_refresh_current(stop_generation)
+                    })
+                },
+                move |_, record| {
+                    if !record.is_done() {
+                        return;
+                    }
+                    let Some(value) = crate::debugger::evaluated_value(&record) else {
+                        return;
+                    };
+                    let Some(symbol) = symbol_annotation(&value).map(str::to_owned) else {
+                        return;
+                    };
+                    let mut threads = threads;
+                    if let Some(thread) = threads.iter_mut().find(|thread| thread.current) {
+                        thread.pc_symbol = Some(symbol);
+                    }
+                    if let Some(ui) = weak_ui.upgrade() {
+                        ui.show_threads_for_refresh(generation, &threads);
+                    }
+                },
             );
-            ui.stop_context(stop_generation)
-                .map(|context| (stop_generation, context.scope_frame(&command)))
-        }) else {
-            return;
-        };
-        let weak_ui = weak_ui.clone();
-        let weak_ui_for_guard = weak_ui.clone();
-        let _ = client.request_for_stop(
-            &command,
-            stop_generation,
-            move || {
-                weak_ui_for_guard.upgrade().is_some_and(|ui| {
-                    ui.is_thread_refresh_current(generation)
-                        && ui.is_stop_refresh_current(stop_generation)
-                })
-            },
-            move |_, record| {
-                if !record.is_done() {
-                    return;
-                }
-                let Some(value) = crate::debugger::evaluated_value(&record) else {
-                    return;
-                };
-                let Some(symbol) = symbol_annotation(&value).map(str::to_owned) else {
-                    return;
-                };
-                let mut threads = threads;
-                if let Some(thread) = threads.iter_mut().find(|thread| thread.current) {
-                    thread.pc_symbol = Some(symbol);
-                }
-                if let Some(ui) = weak_ui.upgrade() {
-                    ui.show_threads_for_refresh(generation, &threads);
-                }
-            },
-        );
-    });
+        },
+    );
 }
 
 pub(super) fn infer_initial_stop_reason(ui: &Weak<Ui>, client: &MiClient) {

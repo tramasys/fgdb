@@ -405,6 +405,9 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 _ => {}
             }
         }
+        MiEvent::Performance(notice) => {
+            ui.record_performance_notice(notice);
+        }
         MiEvent::Error(message) => {
             if ui.native_until_active() {
                 ui.abort_native_until();

@@ -1210,6 +1210,10 @@ impl Ui {
         });
     }
 
+    pub(crate) fn source_symbol_request_is_current(&self, generation: u64) -> bool {
+        self.source_palette_generation.load(Ordering::Relaxed) == generation
+    }
+
     fn show_source_content_results(
         self: &Rc<Self>,
         query: &str,

@@ -158,6 +158,22 @@ fn breakpoint_status_text(breakpoint: &Breakpoint) -> String {
     status.join("  ·  ")
 }
 
+fn bounded_stack_frames(
+    frames: &[StackFrame],
+    limit: usize,
+    selected_level: u32,
+) -> Vec<&StackFrame> {
+    let mut visible = frames.iter().take(limit).collect::<Vec<_>>();
+    if limit > 0
+        && let Some(selected) = frames.iter().find(|frame| frame.level == selected_level)
+        && !visible.iter().any(|frame| frame.level == selected_level)
+    {
+        visible.pop();
+        visible.insert(0, selected);
+    }
+    visible
+}
+
 impl Ui {
     pub(crate) fn current_thread_id(&self) -> Option<String> {
         self.selected_thread_id.borrow().clone()
@@ -171,28 +187,45 @@ impl Ui {
     }
 
     pub fn show_frames(&self, frames: &[StackFrame]) {
+        let render_started = Instant::now();
         self.latest_frames_generation.set(None);
         if self.latest_frames.borrow().as_slice() == frames {
             return;
         }
+        let selected_level = self.selected_frame_level.get();
+        let rendered_frames = bounded_stack_frames(
+            frames,
+            crate::performance::STACK_FRAME_WIDGET_BUDGET,
+            selected_level,
+        );
         let can_update_in_place = {
             let latest = self.latest_frames.borrow();
+            let previous_frames = bounded_stack_frames(
+                &latest,
+                crate::performance::STACK_FRAME_WIDGET_BUDGET,
+                selected_level,
+            );
             let buttons = self.frame_buttons.borrow();
-            latest.len() == frames.len()
-                && buttons.len() == frames.len()
-                && latest
+            previous_frames.len() == rendered_frames.len()
+                && buttons.len() == rendered_frames.len()
+                && previous_frames
                     .iter()
-                    .zip(frames)
+                    .zip(&rendered_frames)
                     .all(|(previous, current)| previous.level == current.level)
         };
         if can_update_in_place {
             let latest = self.latest_frames.borrow();
+            let previous_frames = bounded_stack_frames(
+                &latest,
+                crate::performance::STACK_FRAME_WIDGET_BUDGET,
+                selected_level,
+            );
             for (((level, button), previous), frame) in self
                 .frame_buttons
                 .borrow()
                 .iter()
-                .zip(latest.iter())
-                .zip(frames)
+                .zip(previous_frames)
+                .zip(rendered_frames.iter().copied())
             {
                 debug_assert_eq!(*level, frame.level);
                 if previous != frame {
@@ -206,6 +239,7 @@ impl Ui {
                 self.selected_frame_level.get(),
             );
             self.update_thread_control_sensitivity();
+            self.record_ui_render_duration("call-stack pane", render_started);
             return;
         }
         self.latest_frames.replace(frames.to_vec());
@@ -214,10 +248,11 @@ impl Ui {
         if frames.is_empty() {
             self.call_stack_list
                 .append(&empty_label("No stack frames available"));
+            self.record_ui_render_duration("call-stack pane", render_started);
             return;
         }
 
-        for frame in frames {
+        for frame in &rendered_frames {
             let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
             let displayed_function = compact_function_name(&frame.function);
             let function =
@@ -251,7 +286,22 @@ impl Ui {
                 .push((level, button.clone()));
             self.call_stack_list.append(&button);
         }
+        if rendered_frames.len() < frames.len() {
+            let omitted = frames.len() - rendered_frames.len();
+            let notice = performance_partial_label(&format!(
+                "{omitted} deeper frame{} not rendered",
+                if omitted == 1 { " was" } else { "s were" }
+            ));
+            self.call_stack_list.append(&notice);
+            self.record_performance_notice(crate::performance::PerformanceNotice::count(
+                crate::performance::BudgetOutcome::Partial,
+                "call-stack pane",
+                rendered_frames.len(),
+                frames.len(),
+            ));
+        }
         self.update_thread_control_sensitivity();
+        self.record_ui_render_duration("call-stack pane", render_started);
     }
 
     pub(crate) fn select_frame_in_view(&self, level: u32) {
@@ -660,6 +710,7 @@ impl Ui {
     }
 
     pub fn show_threads(&self, threads: &[ThreadInfo]) {
+        let render_started = Instant::now();
         let explicit_current = threads.iter().find(|thread| thread.current);
         let retained_current = if explicit_current.is_none() {
             self.current_thread_id()
@@ -693,8 +744,15 @@ impl Ui {
             .map(str::to_owned);
         let stop_reason = self.thread_stop_reason.borrow().clone();
         let (query, state_filter, sort) = self.current_thread_filter_state();
-        let rendered_threads = Self::filtered_sorted_threads(threads, &query, state_filter, sort);
-        let visible_thread_count = rendered_threads.len();
+        let (rendered_threads, visible_thread_count) = Self::filtered_sorted_thread_page(
+            threads,
+            &query,
+            state_filter,
+            sort,
+            crate::performance::THREAD_WIDGET_BUDGET,
+        );
+        let rendered_thread_count = rendered_threads.len();
+        let omitted_thread_count = visible_thread_count.saturating_sub(rendered_thread_count);
         if self.latest_threads.borrow().as_ref().is_some_and(|state| {
             state.source_threads == threads
                 && state.rendered_threads == rendered_threads
@@ -754,6 +812,16 @@ impl Ui {
                 sort,
             }));
             self.sync_thread_controls(threads, visible_thread_count);
+            sync_thread_partial_notice(&self.threads_list, omitted_thread_count);
+            if omitted_thread_count > 0 {
+                self.record_performance_notice(crate::performance::PerformanceNotice::count(
+                    crate::performance::BudgetOutcome::Partial,
+                    "thread pane",
+                    rendered_thread_count,
+                    visible_thread_count,
+                ));
+            }
+            self.record_ui_render_duration("thread pane", render_started);
             return;
         }
         self.latest_threads.replace(Some(ThreadRenderState {
@@ -775,6 +843,7 @@ impl Ui {
                 } else {
                     "No threads match the current filter"
                 }));
+            self.record_ui_render_duration("thread pane", render_started);
             return;
         }
         for thread in &rendered_threads {
@@ -800,13 +869,24 @@ impl Ui {
                 .push((thread.id.clone(), button.clone()));
             self.threads_list.append(&button);
         }
+        sync_thread_partial_notice(&self.threads_list, omitted_thread_count);
+        if omitted_thread_count > 0 {
+            self.record_performance_notice(crate::performance::PerformanceNotice::count(
+                crate::performance::BudgetOutcome::Partial,
+                "thread pane",
+                rendered_thread_count,
+                visible_thread_count,
+            ));
+        }
         self.update_thread_control_sensitivity();
+        self.record_ui_render_duration("thread pane", render_started);
     }
 
     pub fn show_modules(&self, modules: &[SharedLibrary]) -> bool {
         if self.latest_modules.borrow().as_slice() == modules {
             return false;
         }
+        let render_started = Instant::now();
         self.latest_modules.replace(modules.to_vec());
         self.reset_debug_data_module_paging();
         if modules.is_empty() {
@@ -818,10 +898,14 @@ impl Ui {
         if modules.is_empty() {
             self.modules_list
                 .append(&empty_label("No shared libraries loaded"));
+            self.record_ui_render_duration("module pane", render_started);
             return true;
         }
 
-        for module in modules {
+        for module in modules
+            .iter()
+            .take(crate::performance::MODULE_WIDGET_BUDGET)
+        {
             let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
             row.add_css_class("module-row");
             let heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
@@ -871,6 +955,22 @@ impl Ui {
             row.append(&path_label);
             self.modules_list.append(&row);
         }
+        if modules.len() > crate::performance::MODULE_WIDGET_BUDGET {
+            let shown = crate::performance::MODULE_WIDGET_BUDGET;
+            let omitted = modules.len() - shown;
+            let notice = performance_partial_label(&format!(
+                "{omitted} additional module{} available in Debug Data",
+                if omitted == 1 { " is" } else { "s are" }
+            ));
+            self.modules_list.append(&notice);
+            self.record_performance_notice(crate::performance::PerformanceNotice::count(
+                crate::performance::BudgetOutcome::Partial,
+                "module pane",
+                shown,
+                modules.len(),
+            ));
+        }
+        self.record_ui_render_duration("module pane", render_started);
         true
     }
 
@@ -1065,24 +1165,31 @@ impl Ui {
     }
 
     fn disassembly_source_text(&self, instruction: &Instruction) -> Option<Rc<str>> {
-        const MAX_SOURCE_FILES: usize = 8;
         const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
 
         let source = instruction.source.as_ref()?;
         let path = self.resolve_source_path(source.source_path())?;
-        let lines = if let Some(lines) = self.disassembly_source_cache.borrow().get(&path).cloned()
-        {
-            lines
-        } else {
-            let contents = crate::bounded::read_string(&path, MAX_SOURCE_BYTES).ok()?;
-            let lines = Rc::new(contents.lines().map(Rc::<str>::from).collect::<Vec<_>>());
-            let mut cache = self.disassembly_source_cache.borrow_mut();
-            if cache.len() >= MAX_SOURCE_FILES {
-                cache.clear();
-            }
-            cache.insert(path, Rc::clone(&lines));
-            lines
-        };
+        let lines =
+            if let Some(lines) = self.disassembly_source_cache.borrow_mut().get_cloned(&path) {
+                lines
+            } else {
+                let contents = crate::bounded::read_string(&path, MAX_SOURCE_BYTES).ok()?;
+                let lines = Rc::new(contents.lines().map(Rc::<str>::from).collect::<Vec<_>>());
+                let mut cache = self.disassembly_source_cache.borrow_mut();
+                let evicted = cache.insert(path, Rc::clone(&lines));
+                drop(cache);
+                if evicted {
+                    self.record_performance_notice(crate::performance::PerformanceNotice {
+                        outcome: crate::performance::BudgetOutcome::Evicted,
+                        operation: String::from("disassembly source cache"),
+                        detail: format!(
+                            "least-recently used file was removed at the {}-file budget",
+                            crate::performance::DISASSEMBLY_SOURCE_CACHE_BUDGET
+                        ),
+                    });
+                }
+                lines
+            };
         let index = usize::try_from(source.line).ok()?.checked_sub(1)?;
         lines.get(index).cloned()
     }
@@ -2072,6 +2179,7 @@ impl Ui {
         if self.breakpoints.borrow().as_slice() == breakpoints {
             return;
         }
+        let render_started = Instant::now();
         let status_only = breakpoint_layout_matches(&self.breakpoints.borrow(), &breakpoints);
         self.breakpoints.replace(breakpoints);
         let active_numbers = self
@@ -2087,17 +2195,22 @@ impl Ui {
         if status_only {
             let breakpoints = self.breakpoints.borrow();
             let rows = self.stop_point_filter_rows.borrow();
-            let parents = breakpoints
+            let rendered_numbers = rows
+                .iter()
+                .map(|row| row.number.as_str())
+                .collect::<HashSet<_>>();
+            let by_number = breakpoints
                 .iter()
                 .filter(|breakpoint| !breakpoint.is_location())
-                .collect::<Vec<_>>();
-            if rows.len() == parents.len()
-                && rows
-                    .iter()
-                    .zip(&parents)
-                    .all(|(row, breakpoint)| row.number == breakpoint.command_number())
+                .filter(|breakpoint| rendered_numbers.contains(breakpoint.command_number()))
+                .map(|breakpoint| (breakpoint.command_number(), breakpoint))
+                .collect::<HashMap<_, _>>();
+            if rows
+                .iter()
+                .all(|row| by_number.contains_key(row.number.as_str()))
             {
-                for (row, breakpoint) in rows.iter().zip(parents) {
+                for row in rows.iter() {
+                    let breakpoint = by_number[row.number.as_str()];
                     let status = breakpoint_status_text(breakpoint);
                     set_label_text(&row.status, &status);
                     row.status.set_visible(!status.is_empty());
@@ -2105,6 +2218,7 @@ impl Ui {
                 drop(rows);
                 drop(breakpoints);
                 self.update_control_sensitivity();
+                self.record_ui_render_duration("stop-point pane", render_started);
                 return;
             }
         }
@@ -2115,27 +2229,48 @@ impl Ui {
             .gdb_capabilities
             .borrow()
             .supports("pending-breakpoints");
+        let total_stop_points = breakpoints.len();
+        let mut rendered_stop_points = 0_usize;
         if breakpoints.is_empty() {
             self.breakpoints_list.append(&empty_label(
                 "No breakpoints, catchpoints, or watchpoints set",
             ));
         } else {
+            let rendered_parent_numbers = breakpoints
+                .iter()
+                .filter(|breakpoint| !breakpoint.is_location())
+                .take(crate::performance::STOP_POINT_WIDGET_BUDGET)
+                .map(|breakpoint| breakpoint.number.as_str())
+                .collect::<HashSet<_>>();
             let mut locations_by_parent: HashMap<&str, Vec<&Breakpoint>> = HashMap::new();
+            let mut retained_location_count = 0_usize;
             for location in breakpoints
                 .iter()
                 .filter(|breakpoint| breakpoint.is_location())
             {
-                if let Some(parent) = location.parent_number.as_deref() {
+                if retained_location_count >= crate::performance::STOP_POINT_WIDGET_BUDGET {
+                    break;
+                }
+                if let Some(parent) = location
+                    .parent_number
+                    .as_deref()
+                    .filter(|parent| rendered_parent_numbers.contains(parent))
+                {
                     locations_by_parent
                         .entry(parent)
                         .or_default()
                         .push(location);
+                    retained_location_count += 1;
                 }
             }
             for breakpoint in breakpoints
                 .iter()
                 .filter(|breakpoint| !breakpoint.is_location())
             {
+                if rendered_stop_points >= crate::performance::STOP_POINT_WIDGET_BUDGET {
+                    break;
+                }
+                rendered_stop_points += 1;
                 let name = if breakpoint.is_watchpoint() {
                     breakpoint
                         .original_location
@@ -2392,6 +2527,10 @@ impl Ui {
                     .into_iter()
                     .flatten()
                 {
+                    if rendered_stop_points >= crate::performance::STOP_POINT_WIDGET_BUDGET {
+                        break;
+                    }
+                    rendered_stop_points += 1;
                     let location_row = gtk::Box::new(gtk::Orientation::Horizontal, 4);
                     location_row.add_css_class("breakpoint-location-row");
                     if !location.enabled {
@@ -2464,6 +2603,20 @@ impl Ui {
                     });
             }
         }
+        if rendered_stop_points < total_stop_points {
+            let omitted = total_stop_points - rendered_stop_points;
+            let notice = performance_partial_label(&format!(
+                "{omitted} additional stop point{} not rendered; use the GDB console for the complete set",
+                if omitted == 1 { " was" } else { "s were" }
+            ));
+            self.breakpoints_list.append(&notice);
+            self.record_performance_notice(crate::performance::PerformanceNotice::count(
+                crate::performance::BudgetOutcome::Partial,
+                "stop-point pane",
+                rendered_stop_points,
+                total_stop_points,
+            ));
+        }
         self.breakpoints_list.append(&self.stop_point_filter.empty);
         apply_stop_point_filter(
             &self.stop_point_filter_rows.borrow(),
@@ -2505,6 +2658,7 @@ impl Ui {
         }
         drop(breakpoints);
         self.update_control_sensitivity();
+        self.record_ui_render_duration("stop-point pane", render_started);
     }
 
     pub fn start_breakpoint_refresh(&self) -> u64 {
@@ -2540,9 +2694,13 @@ impl Ui {
     }
 
     pub fn show_breakpoints_for_refresh(&self, generation: u64, breakpoints: Vec<Breakpoint>) {
-        if self.breakpoint_refresh_generation.get() == generation {
+        if self.is_breakpoint_refresh_current(generation) {
             self.show_breakpoints(breakpoints);
         }
+    }
+
+    pub(crate) fn is_breakpoint_refresh_current(&self, generation: u64) -> bool {
+        self.breakpoint_refresh_generation.get() == generation
     }
 
     pub fn set_breakpoint_enabled_pending(&self, number: &str, enabled: bool) -> bool {
@@ -2662,6 +2820,37 @@ fn update_thread_button(button: &gtk::Button, thread: &ThreadInfo, stop_reason: 
     set_css_class(button, "current-debug-item", thread.current);
 }
 
+fn sync_thread_partial_notice(container: &gtk::Box, omitted: usize) {
+    let existing = container
+        .last_child()
+        .filter(|child| child.has_css_class("performance-partial"));
+    if omitted == 0 {
+        if let Some(existing) = existing {
+            container.remove(&existing);
+        }
+        return;
+    }
+    let text = format!(
+        "{omitted} matching thread{} not rendered; narrow the filter to inspect them",
+        if omitted == 1 { " was" } else { "s were" }
+    );
+    if let Some(label) = existing.and_downcast::<gtk::Label>() {
+        label.set_text(&text);
+    } else {
+        let label = performance_partial_label(&text);
+        container.append(&label);
+    }
+}
+
+fn performance_partial_label(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.add_css_class("performance-partial");
+    label.set_halign(gtk::Align::Fill);
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label
+}
+
 #[cfg(test)]
 mod render_tests {
     use super::*;
@@ -2706,6 +2895,29 @@ mod render_tests {
             memory_kind: MemoryKind::Heap,
             region: region.map(str::to_owned),
         }
+    }
+
+    fn frame(level: u32) -> StackFrame {
+        StackFrame {
+            level,
+            address: format!("0x{level:x}"),
+            function: format!("frame_{level}"),
+            architecture: None,
+            file: None,
+            fullname: None,
+            line: None,
+        }
+    }
+
+    #[test]
+    fn bounded_stack_frames_keep_a_deep_selected_frame() {
+        let frames = (0..20).map(frame).collect::<Vec<_>>();
+
+        let visible = bounded_stack_frames(&frames, 5, 19);
+
+        assert_eq!(visible.len(), 5);
+        assert_eq!(visible[0].level, 19);
+        assert_eq!(visible[1].level, 0);
     }
 
     #[test]

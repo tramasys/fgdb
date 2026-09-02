@@ -5,8 +5,8 @@ use std::{
     sync::mpsc::{self, TryRecvError},
 };
 
-const PRETTY_PRINTER_PAGE_SIZE: usize = 300;
-const DEBUG_DATA_RESULT_PAGE_SIZE: usize = 250;
+const PRETTY_PRINTER_PAGE_SIZE: usize = 150;
+const DEBUG_DATA_RESULT_PAGE_SIZE: usize = 100;
 const DEBUG_DATA_SEARCH_DELAY: Duration = Duration::from_millis(75);
 const MAX_DEBUG_DATA_ACTIVITY_BYTES: usize = 32 * 1024;
 const MAX_DEBUG_DATA_ACTIVITY_EVENTS: usize = 128;
@@ -76,6 +76,7 @@ pub(super) struct DebugDataState {
     pub(super) source_files_ready: bool,
     pub(super) source_files_loading: bool,
     pub(super) source_files_visible: bool,
+    pub(super) source_files_error: Option<String>,
     module_limit: usize,
     source_limit: usize,
     pretty_printers: Rc<Vec<PrettyPrinterScope>>,
@@ -294,6 +295,33 @@ impl Ui {
         self.record_debug_data_activity(DebugDataActivityKind::Error, message);
     }
 
+    pub(crate) fn record_performance_notice(&self, notice: crate::performance::PerformanceNotice) {
+        const NOTICE_COOLDOWN: Duration = Duration::from_secs(5);
+        let now = Instant::now();
+        let key = format!("{:?}:{}", notice.outcome, notice.operation);
+        let mut recent = self.performance_notice_times.borrow_mut();
+        recent.retain(|_, recorded| now.saturating_duration_since(*recorded) < NOTICE_COOLDOWN);
+        if recent
+            .get(&key)
+            .is_some_and(|recorded| now.saturating_duration_since(*recorded) < NOTICE_COOLDOWN)
+        {
+            return;
+        }
+        recent.insert(key, now);
+        drop(recent);
+        self.add_debug_data_warning(notice.message());
+    }
+
+    pub(crate) fn record_ui_render_duration(&self, operation: &str, started_at: Instant) {
+        if let Some(notice) = crate::performance::duration_notice(
+            operation,
+            Instant::now().saturating_duration_since(started_at),
+            crate::performance::UI_RENDER_BUDGET,
+        ) {
+            self.record_performance_notice(notice);
+        }
+    }
+
     fn record_debug_data_activity(&self, kind: DebugDataActivityKind, message: impl Into<String>) {
         let mut message = message.into();
         if message.len() > MAX_DEBUG_DATA_ACTIVITY_BYTES {
@@ -399,6 +427,7 @@ impl Ui {
             let changed = !state.source_files_ready || state.source_files_loading;
             state.source_files_ready = true;
             state.source_files_loading = false;
+            state.source_files_error = None;
             if files_changed {
                 state.source_limit = DEBUG_DATA_RESULT_PAGE_SIZE;
             }
@@ -416,10 +445,30 @@ impl Ui {
             return false;
         }
         state.source_files_loading = true;
+        state.source_files_error = None;
         drop(state);
         self.render_debug_data_overview();
         self.render_debug_data_sources();
         true
+    }
+
+    pub(crate) fn fail_loaded_source_files_request(&self, generation: u64, message: String) {
+        if !self.loaded_source_files_request_is_current(generation) {
+            return;
+        }
+        let mut state = self.debug_data_state.borrow_mut();
+        state.source_files_loading = false;
+        state.source_files_error = Some(message.clone());
+        drop(state);
+        self.add_debug_data_warning(format!(
+            "Loaded-source discovery is unavailable: {message}. Retry from the Sources tab"
+        ));
+        self.render_debug_data_overview();
+        self.render_debug_data_sources();
+    }
+
+    pub(crate) fn loaded_source_files_request_is_current(&self, generation: u64) -> bool {
+        self.source_loaded_generation.load(Ordering::Relaxed) == generation
     }
 
     pub(crate) fn show_debug_data_source_files(&self) -> bool {
@@ -685,6 +734,7 @@ impl Ui {
         let Some(view) = self.debug_data_view.borrow().as_ref().cloned() else {
             return;
         };
+        let render_started = Instant::now();
         clear_page_after_search(&view.modules);
         let query = view.module_search.text().trim().to_ascii_lowercase();
         let terms = query.split_whitespace().collect::<Vec<_>>();
@@ -823,12 +873,14 @@ impl Ui {
             });
             view.modules.append(&retry_all);
         }
+        self.record_ui_render_duration("Debug Data modules", render_started);
     }
 
     fn render_debug_data_sources(&self) {
         let Some(view) = self.debug_data_view.borrow().as_ref().cloned() else {
             return;
         };
+        let render_started = Instant::now();
         clear_page_after_search(&view.sources);
         let (
             source_directories,
@@ -836,6 +888,7 @@ impl Ui {
             files_ready,
             files_loading,
             files_visible,
+            source_error,
             render_limit,
         ) = {
             let state = self.debug_data_state.borrow();
@@ -845,6 +898,7 @@ impl Ui {
                 state.source_files_ready,
                 state.source_files_loading,
                 state.source_files_visible,
+                state.source_files_error.clone(),
                 state.source_limit.max(DEBUG_DATA_RESULT_PAGE_SIZE),
             )
         };
@@ -962,6 +1016,12 @@ impl Ui {
         let source_count = self.loaded_source_files.borrow().len();
         let source_status = if files_loading {
             String::from("Asking GDB for its source-file list…")
+        } else if let Some(error) = source_error.as_deref() {
+            if files_ready {
+                format!("Refresh failed; showing the previous source-file list: {error}")
+            } else {
+                format!("Source-file list unavailable: {error}")
+            }
         } else if files_ready && files_visible {
             format!(
                 "{} source file{} loaded",
@@ -978,6 +1038,8 @@ impl Ui {
         source_actions.append(&source_status);
         let load_sources = gtk::Button::with_label(if files_loading {
             "Loading source files…"
+        } else if source_error.is_some() {
+            "Retry source files"
         } else if files_ready && files_visible {
             "Reload source files"
         } else if files_ready {
@@ -1000,6 +1062,7 @@ impl Ui {
         source_actions.append(&load_sources);
         view.sources.append(&source_actions);
         if !files_ready || !files_visible {
+            self.record_ui_render_duration("Debug Data sources", render_started);
             return;
         }
         let query = view.source_search.text().trim().to_ascii_lowercase();
@@ -1043,12 +1106,14 @@ impl Ui {
             });
             view.sources.append(&show_more);
         }
+        self.record_ui_render_duration("Debug Data sources", render_started);
     }
 
     fn render_debug_data_printers(&self) {
         let Some(view) = self.debug_data_view.borrow().as_ref().cloned() else {
             return;
         };
+        let render_started = Instant::now();
         clear_page_after_search(&view.printers);
         let (scopes, render_limit, ready, loading, error) = {
             let state = self.debug_data_state.borrow();
@@ -1089,11 +1154,13 @@ impl Ui {
                     "Pretty-printers are loaded when this tab is opened",
                 ));
             }
+            self.record_ui_render_duration("Debug Data pretty-printers", render_started);
             return;
         }
         if scopes.is_empty() {
             view.printers
                 .append(&muted_label("No pretty-printers were reported by GDB"));
+            self.record_ui_render_duration("Debug Data pretty-printers", render_started);
             return;
         }
 
@@ -1171,6 +1238,7 @@ impl Ui {
             });
             view.printers.append(&show_more);
         }
+        self.record_ui_render_duration("Debug Data pretty-printers", render_started);
     }
 
     fn render_debug_data_activity(&self) {
@@ -1227,12 +1295,23 @@ impl Ui {
             .swap(false, Ordering::AcqRel);
         let cached = self.module_debug_metadata.borrow().clone();
         let current_generation = Arc::clone(&self.module_debug_generation);
+        let total_paths = paths.len();
+        let paths = paths
+            .into_iter()
+            .take(crate::performance::MODULE_METADATA_FILE_BUDGET)
+            .collect::<Vec<_>>();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let mut metadata = HashMap::with_capacity(paths.len());
+            let started_at = Instant::now();
+            let mut time_budget_exhausted = false;
             for path in paths {
                 if current_generation.load(Ordering::Relaxed) != generation {
                     return;
+                }
+                if started_at.elapsed() >= crate::performance::MODULE_METADATA_TIME_BUDGET {
+                    time_budget_exhausted = true;
+                    break;
                 }
                 let file = std::fs::metadata(&path).ok();
                 let unchanged = file.as_ref().and_then(|file| {
@@ -1256,7 +1335,7 @@ impl Ui {
                 metadata.insert(path, details);
             }
             if current_generation.load(Ordering::Relaxed) == generation {
-                let _ = sender.send(metadata);
+                let _ = sender.send((metadata, total_paths, time_budget_exhausted));
             }
         });
         let weak_ui = Rc::downgrade(self);
@@ -1265,14 +1344,36 @@ impl Ui {
                 return glib::ControlFlow::Break;
             };
             match receiver.try_recv() {
-                Ok(metadata) => {
+                Ok((metadata, total_paths, time_budget_exhausted)) => {
                     ui.module_debug_worker_active
                         .store(false, Ordering::Release);
                     if ui.module_debug_generation.load(Ordering::Relaxed) == generation {
+                        let inspected = metadata.len();
                         let changed = *ui.module_debug_metadata.borrow() != metadata;
                         if changed {
                             ui.module_debug_metadata.replace(metadata);
                             ui.render_debug_data_modules();
+                        }
+                        if inspected < total_paths {
+                            ui.record_performance_notice(
+                                crate::performance::PerformanceNotice {
+                                    outcome: if time_budget_exhausted {
+                                        crate::performance::BudgetOutcome::Deferred
+                                    } else {
+                                        crate::performance::BudgetOutcome::Partial
+                                    },
+                                    operation: String::from("module debug metadata"),
+                                    detail: if time_budget_exhausted {
+                                        format!(
+                                            "inspected {inspected} of {total_paths} modules before the time budget; Refresh can continue the cached scan"
+                                        )
+                                    } else {
+                                        format!(
+                                            "inspected {inspected} of {total_paths} modules; remaining detailed ELF metadata stayed unloaded at the file budget"
+                                        )
+                                    },
+                                },
+                            );
                         }
                     }
                     if ui.module_debug_generation.load(Ordering::Relaxed) != generation {
