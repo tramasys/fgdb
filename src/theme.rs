@@ -1742,6 +1742,8 @@ columnview.memory-map-table row {{ min-height: 28px; }}
 
 .debug-data-window entry.debug-data-search image.left {{ margin-right: 7px; }}
 
+.debug-data-window entry.debug-data-printer-path-input image.left {{ margin-right: 7px; }}
+
 .debug-data-source {{
     min-height: 25px;
     padding: 5px 7px;
@@ -1858,6 +1860,68 @@ columnview.memory-map-table row {{ min-height: 28px; }}
     padding: 5px 8px;
     background: alpha(@app_fg, 0.025);
     border: 1px solid @app_border;
+}}
+
+.debug-data-printer-loaders {{
+    padding: 8px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+}}
+
+.debug-data-printer-loader-heading {{
+    color: @app_accent_hover;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+}}
+
+.debug-data-printer-loader-row {{
+    min-height: 34px;
+    padding: 6px 7px;
+    background: alpha(@app_bg, 0.45);
+    border: 1px solid alpha(@app_border, 0.72);
+}}
+
+.debug-data-printer-loader-name {{
+    color: @app_fg;
+    font-weight: 700;
+}}
+
+.debug-data-printer-loader-path,
+.debug-data-printer-loader-note {{
+    color: @app_muted;
+    font-size: 10px;
+}}
+
+.debug-data-printer-loader-status {{
+    min-width: 58px;
+    padding: 2px 6px;
+    color: @app_muted;
+    background: alpha(@app_fg, 0.04);
+    border: 1px solid @app_border;
+    font-size: 9px;
+    font-weight: 700;
+}}
+
+.debug-data-printer-loader-status.loader-loaded {{
+    color: @app_success;
+    background: alpha(@app_success, 0.09);
+    border-color: alpha(@app_success, 0.34);
+}}
+
+.debug-data-printer-loader-status.loader-discovered {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.10);
+    border-color: alpha(@app_accent, 0.36);
+}}
+
+.debug-data-printer-loader-status.loader-missing,
+.debug-data-printer-loader-status.loader-disabled {{
+    color: @app_muted;
+}}
+
+.debug-data-printer-loader-controls {{
+    margin-top: 2px;
 }}
 
 .debug-data-printer-summary-count,

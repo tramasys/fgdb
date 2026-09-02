@@ -8,8 +8,36 @@ pub(super) fn enable_stable_text_selection(label: &gtk::Label) {
     label.connect_label_notify(clear_label_selection);
 }
 
+pub(super) fn enable_recycled_text_selection(label: &gtk::Label) {
+    // Virtualized rows clear their selection explicitly before every bind.
+    // Avoid property callbacks here because GTK may bind or unbind these labels
+    // while it is updating the owning GtkColumnView row hierarchy.
+    label.set_selectable(true);
+}
+
 pub(super) fn clear_label_selections(root: &impl IsA<gtk::Widget>) {
     clear_widget_label_selections(root.as_ref());
+}
+
+pub(super) fn clear_label_selections_after_switch(root: &impl IsA<gtk::Widget>) {
+    let root = root.as_ref().clone();
+
+    // Wait until GTK has completed the notebook or stack transition. Traversing
+    // a virtualized list from map or unmap callbacks can re-enter its row
+    // lifecycle while GtkColumnView is still attaching or detaching rows.
+    glib::idle_add_local_once(move || {
+        if root.is_mapped() {
+            clear_label_selections(&root);
+        }
+    });
+}
+
+pub(super) fn connect_stack_text_selection_cleanup(stack: &gtk::Stack) {
+    stack.connect_visible_child_notify(|stack| {
+        if let Some(child) = stack.visible_child() {
+            clear_label_selections_after_switch(&child);
+        }
+    });
 }
 
 fn clear_widget_label_selections(widget: &gtk::Widget) {
@@ -39,6 +67,7 @@ struct VariableMenuContext {
     selection: gtk::SingleSelection,
     handler: Rc<RefCell<Option<VariableViewerHandler>>>,
     viewers: Rc<VariableViewerRegistry>,
+    active_popover: Rc<RefCell<Option<gtk::Popover>>>,
 }
 
 pub(super) fn build_locals_view(
@@ -110,6 +139,7 @@ pub(super) fn build_locals_view(
         selection: selection.clone(),
         handler: Rc::clone(viewer_handler),
         viewers: Rc::clone(viewers),
+        active_popover: Rc::new(RefCell::new(None)),
     };
 
     view.append_column(&local_name_column(children_handler, &variable_menu));
@@ -353,6 +383,7 @@ fn local_name_column(
     let selection = variable_menu.selection.clone();
     let children_handler_for_setup = Rc::clone(children_handler);
     let variable_menu_for_setup = variable_menu.clone();
+    let active_popover_for_unbind = Rc::clone(&variable_menu.active_popover);
 
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
@@ -390,10 +421,6 @@ fn local_name_column(
         let children_handler_for_click = Rc::clone(&children_handler_for_setup);
 
         click.connect_pressed(move |gesture, presses, _, _| {
-            if presses != 1 {
-                return;
-            }
-
             let Some(item) = item_for_click.upgrade() else {
                 return;
             };
@@ -407,12 +434,25 @@ fn local_name_column(
             };
 
             let node = data.borrow::<VariableNode>().clone();
+            let position = row.position();
 
-            if !row.is_expandable() && node.load_more.is_none() {
+            if position == gtk::INVALID_LIST_POSITION
+                || position >= selection_for_click.n_items()
+                || (!row.is_expandable() && node.load_more.is_none())
+            {
                 return;
             }
 
-            selection_for_click.set_selected(row.position());
+            // This cell owns expansion and paging clicks. Claim the sequence
+            // before changing the tree model so GtkColumnView does not also
+            // activate a row that may have moved during the same event.
+            gesture.set_state(gtk::EventSequenceState::Claimed);
+
+            if presses != 1 {
+                return;
+            }
+
+            selection_for_click.set_selected(position);
 
             if row.is_expandable() {
                 let expanded = !row.is_expanded();
@@ -426,13 +466,11 @@ fn local_name_column(
                 });
 
                 if expanded {
-                    request_variable_children_if_needed(&node, &children_handler_for_click);
+                    defer_variable_children_if_expanded(&node, &children_handler_for_click);
                 }
             } else {
-                request_next_variable_page_if_needed(&node, &children_handler_for_click);
+                defer_next_variable_page(&node, &children_handler_for_click);
             }
-
-            gesture.set_state(gtk::EventSequenceState::Claimed);
         });
 
         content.add_controller(click);
@@ -539,12 +577,16 @@ fn local_name_column(
         content.set_tooltip_text(Some(&tooltip));
     });
 
-    factory.connect_unbind(|_, object| {
+    factory.connect_unbind(move |_, object| {
         if let Some(expander) = object
             .downcast_ref::<gtk::ListItem>()
             .and_then(gtk::ListItem::child)
             .and_downcast::<gtk::TreeExpander>()
         {
+            if let Some(content) = expander.child() {
+                dismiss_variable_popover_for(&content, &active_popover_for_unbind);
+            }
+
             expander.set_list_row(None::<&gtk::TreeListRow>);
         }
     });
@@ -590,6 +632,12 @@ fn connect_current_variable_context_menu(
             return;
         };
 
+        let position = row.position();
+
+        if position == gtk::INVALID_LIST_POSITION || position >= variable_menu.selection.n_items() {
+            return;
+        }
+
         let node = data.borrow::<VariableNode>();
 
         if node.placeholder {
@@ -598,21 +646,43 @@ fn connect_current_variable_context_menu(
 
         let variable = node.variable.clone();
         drop(node);
-        variable_menu.selection.set_selected(row.position());
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        variable_menu.selection.set_selected(position);
 
         show_variable_context_menu(
             &row_widget_for_click,
             &variable,
             &variable_menu.handler,
             &variable_menu.viewers,
+            &variable_menu.active_popover,
             x,
             y,
         );
-
-        gesture.set_state(gtk::EventSequenceState::Claimed);
     });
 
     row_widget.add_controller(click);
+}
+
+fn dismiss_variable_popover_for(
+    row_widget: &gtk::Widget,
+    active_popover: &Rc<RefCell<Option<gtk::Popover>>>,
+) {
+    let is_attached = active_popover
+        .borrow()
+        .as_ref()
+        .and_then(|popover| popover.parent())
+        .as_ref()
+        .is_some_and(|parent| parent == row_widget);
+
+    if !is_attached {
+        return;
+    }
+
+    let popover = active_popover.borrow_mut().take();
+
+    if let Some(popover) = popover {
+        popover.popdown();
+    }
 }
 
 fn show_variable_context_menu(
@@ -620,9 +690,16 @@ fn show_variable_context_menu(
     variable: &Variable,
     viewer_handler: &Rc<RefCell<Option<VariableViewerHandler>>>,
     viewers: &VariableViewerRegistry,
+    active_popover: &Rc<RefCell<Option<gtk::Popover>>>,
     x: f64,
     y: f64,
 ) {
+    let previous_popover = active_popover.borrow_mut().take();
+
+    if let Some(popover) = previous_popover {
+        popover.popdown();
+    }
+
     let popover = gtk::Popover::new();
     popover.add_css_class("local-variable-menu");
     popover.set_autohide(true);
@@ -688,7 +765,8 @@ fn show_variable_context_menu(
             let viewer_handler = Rc::clone(viewer_handler);
             let popover = popover.downgrade();
 
-            button.connect_clicked(move |_| {
+            button.connect_clicked(move |button| {
+                button.set_sensitive(false);
                 let handler = viewer_handler.borrow().clone();
 
                 if let Some(handler) = handler {
@@ -736,12 +814,26 @@ fn show_variable_context_menu(
 
     popover.set_child(Some(&menu));
 
-    popover.connect_closed(|popover| {
+    let active_popover_for_close = Rc::downgrade(active_popover);
+
+    popover.connect_closed(move |popover| {
+        if let Some(active_popover) = active_popover_for_close.upgrade() {
+            let is_active = active_popover
+                .borrow()
+                .as_ref()
+                .is_some_and(|active| active == popover);
+
+            if is_active {
+                active_popover.borrow_mut().take();
+            }
+        }
+
         if popover.parent().is_some() {
             popover.unparent();
         }
     });
 
+    active_popover.replace(Some(popover.clone()));
     popover.popup();
 }
 
@@ -794,6 +886,20 @@ pub(super) fn request_variable_children_if_needed(
     }
 }
 
+pub(super) fn defer_variable_children_if_expanded(
+    node: &VariableNode,
+    children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
+) {
+    let node = node.clone();
+    let children_handler = Rc::clone(children_handler);
+
+    glib::idle_add_local_once(move || {
+        if node.expanded.get() {
+            request_variable_children_if_needed(&node, &children_handler);
+        }
+    });
+}
+
 pub(super) fn request_next_variable_page_if_needed(
     node: &VariableNode,
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
@@ -815,6 +921,18 @@ pub(super) fn request_next_variable_page_if_needed(
     }
 }
 
+pub(super) fn defer_next_variable_page(
+    node: &VariableNode,
+    children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
+) {
+    let node = node.clone();
+    let children_handler = Rc::clone(children_handler);
+
+    glib::idle_add_local_once(move || {
+        request_next_variable_page_if_needed(&node, &children_handler);
+    });
+}
+
 fn local_text_column(
     title: &str,
     width: i32,
@@ -824,6 +942,7 @@ fn local_text_column(
     variable_menu: &VariableMenuContext,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
+    let active_popover_for_unbind = Rc::clone(&variable_menu.active_popover);
     let variable_menu = variable_menu.clone();
 
     factory.connect_setup(move |_, object| {
@@ -841,7 +960,7 @@ fn local_text_column(
 
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
-        enable_stable_text_selection(&label);
+        enable_recycled_text_selection(&label);
         connect_current_variable_context_menu(&label, item, &variable_menu);
         item.set_child(Some(&label));
     });
@@ -902,6 +1021,17 @@ fn local_text_column(
         };
 
         label.set_tooltip_text(Some(&tooltip));
+    });
+
+    factory.connect_unbind(move |_, object| {
+        let Some(label) = object
+            .downcast_ref::<gtk::ListItem>()
+            .and_then(gtk::ListItem::child)
+        else {
+            return;
+        };
+
+        dismiss_variable_popover_for(&label, &active_popover_for_unbind);
     });
 
     let column_view = gtk::ColumnViewColumn::new(Some(title), Some(factory));

@@ -109,13 +109,13 @@ impl Ui {
                 let location = gtk::Label::new(Some(&issue.location()));
                 location.add_css_class("configuration-issue-location");
                 location.set_halign(gtk::Align::Start);
-                location.set_selectable(true);
+                enable_stable_text_selection(&location);
                 location.set_ellipsize(pango::EllipsizeMode::Middle);
                 location.set_tooltip_text(Some(&issue.location()));
                 row.append(&location);
                 let message = gtk::Label::new(Some(issue.message()));
                 message.set_halign(gtk::Align::Start);
-                message.set_selectable(true);
+                enable_stable_text_selection(&message);
                 message.set_wrap(true);
                 message.set_wrap_mode(pango::WrapMode::WordChar);
                 row.append(&message);
@@ -146,7 +146,7 @@ impl Ui {
             let row = i32::try_from(index + 1).unwrap_or(i32::MAX);
             let name = configuration_grid_label(entry.name(), "configuration-setting");
             let value = configuration_grid_label(entry.value(), "configuration-value");
-            value.set_selectable(true);
+            enable_stable_text_selection(&value);
             value.set_wrap(true);
             value.set_wrap_mode(pango::WrapMode::WordChar);
             value.set_hexpand(true);
@@ -202,7 +202,7 @@ fn configuration_fact(name: &str, value: &str) -> gtk::Box {
     let value = gtk::Label::new(Some(value));
     value.add_css_class("configuration-fact-value");
     value.set_halign(gtk::Align::Start);
-    value.set_selectable(true);
+    enable_stable_text_selection(&value);
     value.set_ellipsize(pango::EllipsizeMode::Middle);
     value.set_hexpand(true);
     value.set_tooltip_text(Some(value.text().as_str()));

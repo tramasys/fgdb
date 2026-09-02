@@ -1071,7 +1071,7 @@ fn rebuild_cfg_text_widgets(
         header.set_valign(gtk::Align::Start);
         header.set_xalign(0.0);
         header.set_yalign(0.0);
-        header.set_selectable(true);
+        enable_stable_text_selection(&header);
         header.set_ellipsize(pango::EllipsizeMode::End);
         header.set_size_request((layout.width - 20.0).max(1.0) as i32, 18);
         header.add_css_class("cfg-block-label");
@@ -1084,7 +1084,7 @@ fn rebuild_cfg_text_widgets(
         body.set_valign(gtk::Align::Start);
         body.set_xalign(0.0);
         body.set_yalign(0.0);
-        body.set_selectable(true);
+        enable_stable_text_selection(&body);
         let attributes = pango::AttrList::new();
 
         attributes.insert(pango::AttrInt::new_line_height_absolute(

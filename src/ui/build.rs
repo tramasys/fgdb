@@ -851,11 +851,8 @@ pub(super) fn build_left_sidebar() -> LeftSidebar {
 
     navigation.append_page(&modules_scrolled, Some(&gtk::Label::new(Some("Modules"))));
     navigation.append_page(&source_tree.root, Some(&gtk::Label::new(Some("Sources"))));
-    let navigation_for_selection = navigation.clone();
-
-    navigation.connect_switch_page(move |_, _, _| {
-        let navigation = navigation_for_selection.clone();
-        glib::idle_add_local_once(move || clear_label_selections(&navigation));
+    navigation.connect_switch_page(move |_, page, _| {
+        clear_label_selections_after_switch(page);
     });
 
     sidebar.append(&inferior_controls.summary);
@@ -1679,11 +1676,8 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
 
     let misc_page = notebook.append_page(&misc_view.root, Some(&gtk::Label::new(Some("Misc"))));
     let compact_tabs = build_compact_inspector_navigation(&notebook);
-    let notebook_for_selection = notebook.clone();
-
-    notebook.connect_switch_page(move |_, _, _| {
-        let notebook = notebook_for_selection.clone();
-        glib::idle_add_local_once(move || clear_label_selections(&notebook));
+    notebook.connect_switch_page(move |_, page, _| {
+        clear_label_selections_after_switch(page);
     });
 
     connect_kernel_tab_visibility(

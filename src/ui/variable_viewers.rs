@@ -500,7 +500,7 @@ fn variable_viewer_column(
         label.set_halign(gtk::Align::Fill);
         label.set_xalign(0.0);
         label.set_ellipsize(pango::EllipsizeMode::Middle);
-        enable_stable_text_selection(&label);
+        enable_recycled_text_selection(&label);
         item.set_child(Some(&label));
     });
 
@@ -518,6 +518,7 @@ fn variable_viewer_column(
         };
 
         let row = data.borrow::<VariableViewerRow>();
+        clear_label_selection(&label);
 
         let text = match field {
             0 => row.ordinal.to_string(),

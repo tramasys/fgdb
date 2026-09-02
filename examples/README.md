@@ -119,7 +119,7 @@ cargo run -- target/debug-fixtures/c-misc-allocator-target
 cargo run -- target/debug-fixtures/c-misc-locks-target
 ```
 
-Set the breakpoint named in the table before running each live target. For the Auxv fixture, configure the environment through fgdb’s session launcher if you want the entry to appear in **Args / Env** as well as in the program’s locals.
+Set the breakpoint named in the table before running each live target. For the Auxv fixture, configure the environment through fgdb's session launcher if you want the entry to appear in **Args / Env** as well as in the program's locals.
 
 Generate a deterministic core file separately so it is not created during every normal fixture build:
 

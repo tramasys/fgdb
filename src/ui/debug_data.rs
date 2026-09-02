@@ -59,6 +59,7 @@ pub(crate) enum DebugDataAction {
     ShowMoreSources,
     ShowMorePrettyPrinters,
     LoadPrettyPrinters,
+    LoadPrettyPrinterScript(PathBuf),
     AddSourceDirectory(PathBuf),
     RemoveSourceDirectory(String),
     AddSubstitution { from: String, to: String },
@@ -85,7 +86,25 @@ pub(super) struct DebugDataState {
     pretty_printers_loading: bool,
     pretty_printer_generation: u64,
     pretty_printer_error: Option<String>,
+    gcc_pretty_printer_directory: Option<PathBuf>,
+    configured_pretty_printer_paths: Vec<PathBuf>,
+    runtime_pretty_printer_paths: Vec<PathBuf>,
+    pretty_printer_script_loading: bool,
+    safe_mode: bool,
     activity: Vec<DebugDataActivity>,
+}
+
+impl DebugDataState {
+    pub(super) fn from_launch_config(config: &crate::config::LaunchConfig) -> Self {
+        Self {
+            gcc_pretty_printer_directory: config
+                .gcc_pretty_printer_directory()
+                .map(Path::to_path_buf),
+            configured_pretty_printer_paths: config.pretty_printer_paths.clone(),
+            safe_mode: config.safe_mode,
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -100,6 +119,9 @@ pub(super) struct DebugDataView {
     pub(super) module_search: gtk::Entry,
     pub(super) source_search: gtk::Entry,
     pub(super) printer_search: gtk::Entry,
+    pub(super) printer_path: gtk::Entry,
+    pub(super) printer_browse: gtk::Button,
+    pub(super) printer_load: gtk::Button,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -123,6 +145,21 @@ fn defer_debug_data_action(
 
     if let Some(handler) = handler {
         glib::idle_add_local_once(move || handler(action));
+    }
+}
+
+fn dispatch_pretty_printer_path(
+    entry: &gtk::Entry,
+    handler: &Rc<RefCell<Option<DebugDataActionHandler>>>,
+) {
+    let path = entry.text();
+    let path = path.trim();
+
+    if !path.is_empty() {
+        defer_debug_data_action(
+            handler,
+            DebugDataAction::LoadPrettyPrinterScript(PathBuf::from(path)),
+        );
     }
 }
 
@@ -302,6 +339,69 @@ impl Ui {
         state.pretty_printers_ready
             || state.pretty_printers_loading
             || state.pretty_printer_error.is_some()
+    }
+
+    pub(crate) fn begin_pretty_printer_script_load(&self, path: &Path) -> Result<(), String> {
+        let mut state = self.debug_data_state.borrow_mut();
+
+        if state.pretty_printer_script_loading {
+            return Err(String::from(
+                "Another pretty-printer script is still loading",
+            ));
+        }
+
+        if state
+            .runtime_pretty_printer_paths
+            .iter()
+            .any(|loaded| loaded == path)
+        {
+            return Err(String::from(
+                "This pretty-printer script is already loaded for the current GDB session",
+            ));
+        }
+
+        state.pretty_printer_script_loading = true;
+        drop(state);
+        self.render_debug_data_printers();
+
+        Ok(())
+    }
+
+    pub(crate) fn finish_pretty_printer_script_load(&self, path: PathBuf, loaded: bool) {
+        let mut state = self.debug_data_state.borrow_mut();
+        state.pretty_printer_script_loading = false;
+
+        if loaded && !state.runtime_pretty_printer_paths.contains(&path) {
+            state.runtime_pretty_printer_paths.push(path);
+        }
+
+        drop(state);
+
+        if loaded && let Some(view) = self.debug_data_view.borrow().as_ref() {
+            view.printer_path.set_text("");
+        }
+
+        self.render_debug_data_printers();
+    }
+
+    pub(crate) fn reset_runtime_pretty_printer_scripts(&self) {
+        let mut state = self.debug_data_state.borrow_mut();
+        let reload_registry = state.pretty_printers_ready
+            || state.pretty_printers_loading
+            || state.pretty_printer_error.is_some();
+        state.runtime_pretty_printer_paths.clear();
+        state.pretty_printer_script_loading = false;
+        state.pretty_printers = Rc::new(Vec::new());
+        state.pretty_printers_ready = false;
+        state.pretty_printers_loading = false;
+        state.pretty_printer_error = None;
+        state.pretty_printer_generation = state.pretty_printer_generation.wrapping_add(1);
+        drop(state);
+        self.render_debug_data_printers();
+
+        if reload_registry {
+            self.dispatch_debug_data_action(DebugDataAction::LoadPrettyPrinters);
+        }
     }
 
     pub(crate) fn add_debug_data_progress(&self, message: impl Into<String>) {
@@ -623,6 +723,24 @@ impl Ui {
         let sources = debug_data_page_with_search(&source_search);
         let printer_search = debug_data_search("Filter scope, provider, or printer name");
         let printers = debug_data_page_with_search(&printer_search);
+        let printer_path = gtk::Entry::builder()
+            .placeholder_text("/path/to/pretty-printer.py")
+            .primary_icon_name("document-open-symbolic")
+            .hexpand(true)
+            .build();
+
+        printer_path.add_css_class("debug-data-printer-path-input");
+        let printer_browse = gtk::Button::with_label("Browse…");
+        printer_browse.add_css_class("inline-action");
+        let printer_load = gtk::Button::with_label("Load");
+        printer_load.add_css_class("inline-action");
+        printer_load.set_sensitive(false);
+        let load_for_entry = printer_load.clone();
+
+        printer_path.connect_changed(move |entry| {
+            load_for_entry.set_sensitive(entry.is_sensitive() && !entry.text().trim().is_empty());
+        });
+
         let activity = debug_data_page();
         append_debug_data_page(&notebook, &overview, "Overview");
         append_debug_data_page(&notebook, &modules, "Modules");
@@ -643,7 +761,45 @@ impl Ui {
             module_search: module_search.clone(),
             source_search: source_search.clone(),
             printer_search: printer_search.clone(),
+            printer_path: printer_path.clone(),
+            printer_browse: printer_browse.clone(),
+            printer_load: printer_load.clone(),
         }));
+
+        let handler = Rc::clone(&self.debug_data_action_handler);
+        let path_for_load = printer_path.clone();
+
+        printer_load.connect_clicked(move |_| {
+            dispatch_pretty_printer_path(&path_for_load, &handler);
+        });
+
+        let handler = Rc::clone(&self.debug_data_action_handler);
+
+        printer_path.connect_activate(move |entry| {
+            dispatch_pretty_printer_path(entry, &handler);
+        });
+
+        let parent = window.clone();
+
+        printer_browse.connect_clicked(move |_| {
+            let dialog = gtk::FileDialog::builder()
+                .title("Load pretty-printer script")
+                .modal(true)
+                .build();
+
+            let parent = parent.clone();
+            let printer_path = printer_path.clone();
+
+            glib::spawn_future_local(async move {
+                let Ok(file) = dialog.open_future(Some(&parent)).await else {
+                    return;
+                };
+
+                if let Some(path) = file.path() {
+                    printer_path.set_text(&path.to_string_lossy());
+                }
+            });
+        });
 
         connect_debug_data_search(
             &module_search,
@@ -663,12 +819,10 @@ impl Ui {
             Ui::reset_debug_data_pretty_printer_limit,
         );
 
-        let window_for_switch = window.clone();
         let weak_ui = Rc::downgrade(self);
 
-        notebook.connect_switch_page(move |_, _, page| {
-            let window = window_for_switch.clone();
-            glib::idle_add_local_once(move || clear_label_selections(&window));
+        notebook.connect_switch_page(move |_, page_widget, page| {
+            clear_label_selections_after_switch(page_widget);
 
             if page == 3
                 && let Some(ui) = weak_ui.upgrade()
@@ -1328,7 +1482,18 @@ impl Ui {
         let render_started = Instant::now();
         clear_page_after_search(&view.printers);
 
-        let (scopes, render_limit, ready, loading, error) = {
+        let (
+            scopes,
+            render_limit,
+            ready,
+            loading,
+            error,
+            gcc_directory,
+            configured_paths,
+            runtime_paths,
+            script_loading,
+            safe_mode,
+        ) = {
             let state = self.debug_data_state.borrow();
 
             (
@@ -1337,10 +1502,37 @@ impl Ui {
                 state.pretty_printers_ready,
                 state.pretty_printers_loading,
                 state.pretty_printer_error.clone(),
+                state.gcc_pretty_printer_directory.clone(),
+                state.configured_pretty_printer_paths.clone(),
+                state.runtime_pretty_printer_paths.clone(),
+                state.pretty_printer_script_loading,
+                state.safe_mode,
             )
         };
 
         view.printer_search.set_sensitive(ready && !loading);
+        let printer_supported = self.gdb_capabilities().pretty_printing;
+        view.printer_path
+            .set_sensitive(printer_supported && !script_loading && !loading);
+        view.printer_browse
+            .set_sensitive(printer_supported && !script_loading && !loading);
+        view.printer_load.set_sensitive(
+            printer_supported
+                && !script_loading
+                && !loading
+                && !view.printer_path.text().trim().is_empty(),
+        );
+
+        view.printers.append(&pretty_printer_loader_panel(
+            &view,
+            &scopes,
+            gcc_directory.as_deref(),
+            &configured_paths,
+            &runtime_paths,
+            script_loading,
+            safe_mode,
+            printer_supported,
+        ));
 
         if loading {
             view.printers.append(&muted_label(if scopes.is_empty() {
@@ -1889,6 +2081,143 @@ fn filter_pretty_printer_scope(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn pretty_printer_loader_panel(
+    view: &DebugDataView,
+    scopes: &[PrettyPrinterScope],
+    gcc_directory: Option<&Path>,
+    configured_paths: &[PathBuf],
+    runtime_paths: &[PathBuf],
+    loading: bool,
+    safe_mode: bool,
+    printer_supported: bool,
+) -> gtk::Box {
+    let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    panel.add_css_class("debug-data-printer-loaders");
+    let heading = gtk::Label::new(Some("PRINTER LOADERS"));
+    heading.add_css_class("debug-data-printer-loader-heading");
+    heading.set_halign(gtk::Align::Start);
+    panel.append(&heading);
+
+    let gcc_registered = pretty_printer_registry_contains(scopes, "libstdc++");
+    let (gcc_path, gcc_status, gcc_status_class) = if safe_mode {
+        (
+            String::from("Automatic discovery is disabled in safe mode"),
+            "DISABLED",
+            "loader-disabled",
+        )
+    } else if let Some(directory) = gcc_directory {
+        (
+            directory.display().to_string(),
+            if gcc_registered {
+                "LOADED"
+            } else {
+                "DISCOVERED"
+            },
+            if gcc_registered {
+                "loader-loaded"
+            } else {
+                "loader-discovered"
+            },
+        )
+    } else {
+        (
+            String::from("No compiler-matched installation was found"),
+            "NOT FOUND",
+            "loader-missing",
+        )
+    };
+
+    panel.append(&pretty_printer_loader_row(
+        "GCC C++ stdcxx",
+        &gcc_path,
+        gcc_status,
+        gcc_status_class,
+    ));
+
+    for path in configured_paths {
+        panel.append(&pretty_printer_loader_row(
+            "Configured script",
+            &path.display().to_string(),
+            if safe_mode { "DISABLED" } else { "STARTUP" },
+            if safe_mode {
+                "loader-disabled"
+            } else {
+                "loader-discovered"
+            },
+        ));
+    }
+
+    for path in runtime_paths {
+        panel.append(&pretty_printer_loader_row(
+            "Session script",
+            &path.display().to_string(),
+            "LOADED",
+            "loader-loaded",
+        ));
+    }
+
+    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+    controls.add_css_class("debug-data-printer-loader-controls");
+    controls.append(&view.printer_path);
+    controls.append(&view.printer_browse);
+    controls.append(&view.printer_load);
+    panel.append(&controls);
+    let note = wrapping_value(if !printer_supported {
+        "This GDB does not expose dynamic pretty printing"
+    } else if loading {
+        "Loading the selected script inside GDB…"
+    } else {
+        "Scripts execute inside GDB for this session. Add pretty_printer_path to the fgdb configuration to load a script at startup"
+    });
+
+    note.add_css_class("debug-data-printer-loader-note");
+    panel.append(&note);
+
+    panel
+}
+
+fn pretty_printer_loader_row(name: &str, path: &str, status: &str, status_class: &str) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.add_css_class("debug-data-printer-loader-row");
+    let identity = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    identity.set_hexpand(true);
+    let name = gtk::Label::new(Some(name));
+    name.add_css_class("debug-data-printer-loader-name");
+    name.set_halign(gtk::Align::Start);
+    identity.append(&name);
+    let path = selectable_value(path);
+    path.add_css_class("debug-data-printer-loader-path");
+    path.set_ellipsize(pango::EllipsizeMode::Middle);
+    path.set_tooltip_text(Some(path.text().as_str()));
+    identity.append(&path);
+    row.append(&identity);
+    let status = gtk::Label::new(Some(status));
+    status.add_css_class("debug-data-printer-loader-status");
+    status.add_css_class(status_class);
+    status.set_valign(gtk::Align::Center);
+    row.append(&status);
+
+    row
+}
+
+fn pretty_printer_registry_contains(scopes: &[PrettyPrinterScope], needle: &str) -> bool {
+    scopes.iter().any(|scope| {
+        text_matches(&scope.name, needle)
+            || scope
+                .direct_printers
+                .iter()
+                .any(|printer| text_matches(printer, needle))
+            || scope.providers.iter().any(|provider| {
+                text_matches(&provider.name, needle)
+                    || provider
+                        .printers
+                        .iter()
+                        .any(|printer| text_matches(printer, needle))
+            })
+    })
+}
+
 fn pretty_printer_scope_card(
     scope: &str,
     direct_printers: &[String],
@@ -2249,7 +2578,7 @@ fn selectable_value(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.set_halign(gtk::Align::Start);
     label.set_xalign(0.0);
-    label.set_selectable(true);
+    enable_stable_text_selection(&label);
     label.set_focusable(false);
     label.set_ellipsize(pango::EllipsizeMode::Middle);
     label.set_tooltip_text(Some(text));

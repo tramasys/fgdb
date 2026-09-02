@@ -330,7 +330,9 @@ impl Ui {
             configuration_report: config.configuration_report().clone(),
             configuration_dialog: Rc::new(RefCell::new(None)),
             debug_data_view: Rc::new(RefCell::new(None)),
-            debug_data_state: Rc::new(RefCell::new(debug_data::DebugDataState::default())),
+            debug_data_state: Rc::new(RefCell::new(
+                debug_data::DebugDataState::from_launch_config(config),
+            )),
             performance_notice_times: Rc::new(RefCell::new(HashMap::new())),
             adaptive_render_budgets: Rc::new(RefCell::new(
                 crate::performance::AdaptiveRenderBudgets::default(),

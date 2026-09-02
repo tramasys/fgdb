@@ -3,6 +3,7 @@ mod background;
 mod bounded;
 mod breakpoint_gutter;
 mod config;
+mod cpp_toolchain;
 mod debug_info;
 mod debugger;
 mod kernel;
@@ -51,7 +52,7 @@ fn main() -> gtk::glib::ExitCode {
         .expect("fgdb's bundled resources must be valid");
 
     match config::LaunchConfig::from_process() {
-        Ok(StartupAction::Run(configuration)) => run_application(configuration),
+        Ok(StartupAction::Run(configuration)) => run_application(*configuration),
         Ok(StartupAction::Print(output)) => {
             print!("{output}");
 

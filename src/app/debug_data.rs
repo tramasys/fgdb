@@ -72,6 +72,9 @@ pub(super) fn handle_debug_data_action(
             }
         }
         DebugDataAction::LoadPrettyPrinters => request_pretty_printers(ui, client),
+        DebugDataAction::LoadPrettyPrinterScript(path) => {
+            load_pretty_printer_script(ui, client, path);
+        }
         DebugDataAction::AddSourceDirectory(path) => add_source_directory(ui, client, path),
         DebugDataAction::RemoveSourceDirectory(path) => {
             remove_source_directory(ui, client, path);
@@ -316,6 +319,143 @@ fn request_pretty_printers(ui: Weak<Ui>, client: Rc<MiClient>) {
             ui.finish_debug_data_pretty_printer_refresh(generation, Err(message));
         }
     }
+}
+
+fn load_pretty_printer_script(ui: Weak<Ui>, client: Rc<MiClient>, path: PathBuf) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+
+    let path = if path.is_absolute() {
+        path
+    } else {
+        current_ui
+            .current_session()
+            .as_ref()
+            .and_then(DebugSession::working_directory)
+            .map_or(path.clone(), |directory| directory.join(path))
+    };
+
+    drop(current_ui);
+
+    let path = match validate_pretty_printer_script(&path) {
+        Ok(path) => path,
+        Err(error) => {
+            if let Some(ui) = ui.upgrade() {
+                ui.add_debug_data_error(error);
+            }
+
+            return;
+        }
+    };
+
+    let Some(path_text) = path.to_str() else {
+        if let Some(ui) = ui.upgrade() {
+            ui.add_debug_data_error(
+                "The pretty-printer path is not valid UTF-8 for this GDB session",
+            );
+        }
+
+        return;
+    };
+
+    let Ok(path_argument) = crate::debugger::gdb_cli_string(path_text) else {
+        if let Some(ui) = ui.upgrade() {
+            ui.add_debug_data_error("The pretty-printer path contains unsupported characters");
+        }
+
+        return;
+    };
+
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+
+    if let Err(error) = current_ui.begin_pretty_printer_script_load(&path) {
+        current_ui.add_debug_data_warning(error);
+
+        return;
+    }
+
+    current_ui.add_debug_data_progress(format!("Loading pretty-printer script {}", path.display()));
+    drop(current_ui);
+    let ui_for_response = ui.clone();
+    let client_for_response = Rc::clone(&client);
+    let path_for_response = path.clone();
+
+    if let Err(error) = client.request_console(
+        &format!("source {path_argument}"),
+        move |_, record, output| {
+            let Some(ui) = ui_for_response.upgrade() else {
+                return;
+            };
+
+            note_console_truncation(&ui, &record, "Pretty-printer load output");
+
+            if record.is_done() {
+                ui.finish_pretty_printer_script_load(path_for_response.clone(), true);
+                let output = output.trim();
+                let message = if output.is_empty() {
+                    format!(
+                        "Loaded pretty-printer script {}",
+                        path_for_response.display()
+                    )
+                } else {
+                    format!(
+                        "Loaded pretty-printer script {}\n{output}",
+                        path_for_response.display()
+                    )
+                };
+
+                ui.add_debug_data_success(message);
+                client_for_response.refresh_pretty_printer_capabilities();
+                request_pretty_printers(Rc::downgrade(&ui), client_for_response);
+            } else {
+                ui.finish_pretty_printer_script_load(path_for_response.clone(), false);
+                ui.add_debug_data_error(format!(
+                    "Could not load pretty-printer script {}: {}",
+                    path_for_response.display(),
+                    console_error(&record, &output)
+                ));
+            }
+        },
+    ) && let Some(ui) = ui.upgrade()
+    {
+        ui.finish_pretty_printer_script_load(path.clone(), false);
+        ui.add_debug_data_error(format!(
+            "Could not queue pretty-printer script {}: {error}",
+            path.display()
+        ));
+    }
+}
+
+fn validate_pretty_printer_script(path: &Path) -> Result<PathBuf, String> {
+    if path.as_os_str().is_empty() {
+        return Err(String::from("Choose a pretty-printer script to load"));
+    }
+
+    let path = path.canonicalize().map_err(|error| {
+        format!(
+            "Could not open pretty-printer script '{}': {error}",
+            path.display()
+        )
+    })?;
+
+    let metadata = path.metadata().map_err(|error| {
+        format!(
+            "Could not inspect pretty-printer script '{}': {error}",
+            path.display()
+        )
+    })?;
+
+    if !metadata.is_file() {
+        return Err(format!(
+            "Pretty-printer path '{}' is not a regular file",
+            path.display()
+        ));
+    }
+
+    Ok(path)
 }
 
 fn debug_data_query_guard(query: &Rc<RefCell<DebugDataQuery>>) -> impl Fn() -> bool + 'static {

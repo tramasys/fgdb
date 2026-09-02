@@ -113,6 +113,7 @@ pub(super) fn build_misc_view(theme: &Theme) -> MiscView {
     root.add_css_class("kernel-page");
     root.add_css_class("misc-page");
     let pages = gtk::Stack::new();
+    connect_stack_text_selection_cleanup(&pages);
     pages.set_size_request(0, 0);
     pages.set_vexpand(true);
     pages.set_vhomogeneous(false);
@@ -388,6 +389,7 @@ fn build_allocator_page() -> AllocatorWidgets {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_vexpand(true);
     let views = gtk::Stack::new();
+    connect_stack_text_selection_cleanup(&views);
     views.set_vexpand(true);
     views.set_vhomogeneous(false);
     views.set_hhomogeneous(false);

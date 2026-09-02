@@ -8,10 +8,10 @@ use std::{
 
 use clap::{Parser, error::ErrorKind};
 
-use crate::rust_toolchain::RustToolchain;
+use crate::{cpp_toolchain::GccPrettyPrinter, rust_toolchain::RustToolchain};
 
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
-const DEFAULT_CONFIG: &str = "# fgdb configuration\n# Environment variables override these values for one launch.\ngdb=gdb\ngdb_args=\nsource_path=\ngef_context=hide\nsafe_mode=false\n# working_directory=/path/to/project\n\n# Named profiles can contain these settings and a startup session.\n# [profile example]\n# executable=/path/to/program\n# arguments=--flag 'argument with spaces'\n# working_directory=/path/to/project\n";
+const DEFAULT_CONFIG: &str = "# fgdb configuration\n# Environment variables override these values for one launch.\ngdb=gdb\ngdb_args=\nsource_path=\n# Pretty-printer scripts execute inside GDB. Use the platform path separator for multiple scripts.\n# pretty_printer_path=/path/to/printer.py\ngef_context=hide\nsafe_mode=false\n# working_directory=/path/to/project\n\n# Named profiles can contain these settings and a startup session.\n# [profile example]\n# executable=/path/to/program\n# arguments=--flag 'argument with spaces'\n# working_directory=/path/to/project\n";
 const DEFAULT_SECTION: &str = "<default>";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,8 +233,10 @@ pub struct LaunchConfig {
     pub gdb_startup_arguments: Vec<String>,
     pub gef_context_visible: bool,
     pub source_paths: Vec<PathBuf>,
+    pub pretty_printer_paths: Vec<PathBuf>,
     pub working_directory: PathBuf,
     pub safe_mode: bool,
+    gcc_pretty_printer: Option<Arc<GccPrettyPrinter>>,
     rust_toolchain: Option<Arc<RustToolchain>>,
     initial_session: Option<DebugSession>,
     configuration_report: Arc<ConfigurationReport>,
@@ -280,6 +282,12 @@ impl LaunchConfig {
                 ));
             }
 
+            collect_check_pretty_printer_path_issues(
+                &mut loaded,
+                cli.profile.as_deref(),
+                env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            );
+
             if !loaded.issues.is_empty() {
                 return Err(StartupError::with_config(
                     config_check_report(&loaded, cli.profile.as_deref()),
@@ -299,7 +307,7 @@ impl LaunchConfig {
         let current_directory = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         resolve_launch_config(cli, &loaded, environment, current_directory)
-            .map(StartupAction::Run)
+            .map(|configuration| StartupAction::Run(Box::new(configuration)))
             .map_err(|message| StartupError::with_config(message, false, &loaded.path))
     }
 
@@ -309,10 +317,22 @@ impl LaunchConfig {
         if self.safe_mode {
             arguments.push(String::from("--nx"));
         } else {
+            if let Some(pretty_printer) = self.gcc_pretty_printer.as_deref() {
+                arguments.extend(pretty_printer.gdb_arguments());
+            }
+
             if !debugger_is_rust_gdb(&self.gdb_executable)
                 && let Some(toolchain) = self.rust_toolchain.as_deref()
             {
                 arguments.extend(toolchain.gdb_printer_arguments());
+            }
+
+            for path in &self.pretty_printer_paths {
+                if let Some(path) = path.to_str()
+                    && let Ok(path) = crate::debugger::gdb_cli_string(path)
+                {
+                    arguments.extend([String::from("-iex"), format!("source {path}")]);
+                }
             }
 
             arguments.extend(self.gdb_startup_arguments.iter().cloned());
@@ -346,6 +366,12 @@ impl LaunchConfig {
         self.rust_toolchain.as_deref().map(RustToolchain::sysroot)
     }
 
+    pub fn gcc_pretty_printer_directory(&self) -> Option<&Path> {
+        self.gcc_pretty_printer
+            .as_deref()
+            .map(GccPrettyPrinter::python_directory)
+    }
+
     pub fn needs_deferred_session_configuration(&self) -> bool {
         self.initial_session.is_some()
     }
@@ -364,7 +390,7 @@ fn debugger_is_rust_gdb(executable: &str) -> bool {
 
 #[derive(Debug)]
 pub enum StartupAction {
-    Run(LaunchConfig),
+    Run(Box<LaunchConfig>),
     Print(String),
 }
 
@@ -465,6 +491,7 @@ struct ConfigLayer {
     gdb_startup_arguments: Option<String>,
     gef_context_visible: Option<bool>,
     source_paths: Option<Vec<PathBuf>>,
+    pretty_printer_paths: Option<Vec<PathBuf>>,
     working_directory: Option<PathBuf>,
     safe_mode: Option<bool>,
     executable: Option<PathBuf>,
@@ -495,6 +522,7 @@ impl ConfigLayer {
             gdb_startup_arguments,
             gef_context_visible,
             source_paths,
+            pretty_printer_paths,
             working_directory,
             safe_mode,
             executable,
@@ -519,6 +547,7 @@ struct LoadedConfig {
     config: FileConfig,
     created: bool,
     issues: Vec<ConfigurationIssue>,
+    locations: BTreeMap<(String, &'static str), usize>,
 }
 
 #[derive(Debug)]
@@ -568,6 +597,7 @@ fn loaded_config_from_contents(path: PathBuf, contents: &str, created: bool) -> 
         config: parsed.config,
         created,
         issues: parsed.issues,
+        locations: parsed.locations,
     }
 }
 
@@ -584,6 +614,7 @@ fn fallback_loaded_config(path: PathBuf, message: String) -> LoadedConfig {
         config: parsed.config,
         created: false,
         issues: parsed.issues,
+        locations: parsed.locations,
     }
 }
 
@@ -720,6 +751,7 @@ fn canonical_config_key(key: &str) -> Option<&'static str> {
         "gdb_args" | "gdb_arguments" => Some("gdb_args"),
         "gef_context" | "gef.context" => Some("gef_context"),
         "source_path" | "source_paths" => Some("source_path"),
+        "pretty_printer_path" | "pretty_printer_paths" => Some("pretty_printer_path"),
         "working_directory" | "cwd" => Some("working_directory"),
         "safe_mode" => Some("safe_mode"),
         "executable" => Some("executable"),
@@ -751,6 +783,9 @@ fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> 
         }
         "source_path" => {
             layer.source_paths = Some(env::split_paths(unquoted).collect());
+        }
+        "pretty_printer_path" => {
+            layer.pretty_printer_paths = Some(env::split_paths(unquoted).collect());
         }
         "working_directory" => layer.working_directory = Some(PathBuf::from(required()?)),
         "safe_mode" => {
@@ -1028,6 +1063,9 @@ fn read_environment_overrides() -> (EnvironmentOverrides, Vec<ConfigurationIssue
     overrides.layer.source_paths =
         env::var_os("FGDB_SOURCE_PATH").map(|paths| env::split_paths(&paths).collect());
 
+    overrides.layer.pretty_printer_paths =
+        env::var_os("FGDB_PRETTY_PRINTER_PATH").map(|paths| env::split_paths(&paths).collect());
+
     overrides.layer.working_directory = env::var_os("FGDB_WORKING_DIRECTORY").map(PathBuf::from);
 
     overrides.layer.safe_mode =
@@ -1081,6 +1119,7 @@ fn resolve_launch_config(
 ) -> Result<LaunchConfig, String> {
     let config = &loaded.config;
     let selected_profile = cli.profile.clone().or_else(|| environment.profile.clone());
+    let pretty_printer_paths_from_environment = environment.layer.pretty_printer_paths.is_some();
     let mut settings = config.defaults.clone();
 
     if let Some(name) = selected_profile.as_ref() {
@@ -1122,20 +1161,52 @@ fn resolve_launch_config(
         RustToolchain::discover(&working_directory, std::time::Duration::from_millis(250))
             .map(Arc::new);
 
+    let gcc_pretty_printer = (!safe_mode)
+        .then(|| {
+            GccPrettyPrinter::discover(&working_directory, std::time::Duration::from_millis(250))
+        })
+        .flatten()
+        .map(Arc::new);
+
     let source_paths = settings.source_paths.unwrap_or_default();
+    let (pretty_printer_paths, pretty_printer_path_errors) = resolve_pretty_printer_paths(
+        settings.pretty_printer_paths.unwrap_or_default(),
+        &working_directory,
+    );
+    let mut configuration_issues = loaded.issues.clone();
+
+    for (path, error) in pretty_printer_path_errors {
+        let message = format!(
+            "Could not use pretty-printer script '{}': {error}",
+            path.display()
+        );
+
+        if pretty_printer_paths_from_environment {
+            configuration_issues.push(ConfigurationIssue::external(
+                "FGDB_PRETTY_PRINTER_PATH",
+                message,
+            ));
+        } else {
+            let section = selected_profile.as_deref().unwrap_or(DEFAULT_SECTION);
+            let line = configuration_line(&loaded.locations, section, "pretty_printer_path");
+
+            configuration_issues.push(ConfigurationIssue::file(&loaded.path, line, message));
+        }
+    }
 
     let configuration_report = Arc::new(ConfigurationReport {
         active_path: loaded.path.clone(),
         loaded_paths: loaded.loaded_paths.clone(),
         created: loaded.created,
         selected_profile: selected_profile.clone(),
-        issues: loaded.issues.clone(),
+        issues: configuration_issues,
         effective: effective_configuration(
             selected_profile.as_deref(),
             &gdb_executable,
             &gdb_startup_arguments,
             settings.gef_context_visible.unwrap_or(false),
             &source_paths,
+            &pretty_printer_paths,
             &working_directory,
             safe_mode,
             initial_session.as_ref(),
@@ -1147,12 +1218,108 @@ fn resolve_launch_config(
         gdb_startup_arguments,
         gef_context_visible: settings.gef_context_visible.unwrap_or(false),
         source_paths,
+        pretty_printer_paths,
         working_directory,
         safe_mode,
+        gcc_pretty_printer,
         rust_toolchain,
         initial_session,
         configuration_report,
     })
+}
+
+fn collect_check_pretty_printer_path_issues(
+    loaded: &mut LoadedConfig,
+    selected_profile: Option<&str>,
+    current_directory: PathBuf,
+) {
+    let mut settings = loaded.config.defaults.clone();
+
+    if let Some(profile) = selected_profile.and_then(|name| loaded.config.profiles.get(name)) {
+        settings.overlay(profile);
+    }
+
+    let working_directory = settings.working_directory.unwrap_or(current_directory);
+
+    let (_, errors) = resolve_pretty_printer_paths(
+        settings.pretty_printer_paths.unwrap_or_default(),
+        &working_directory,
+    );
+    let section = selected_profile.unwrap_or(DEFAULT_SECTION);
+    let line = configuration_line(&loaded.locations, section, "pretty_printer_path");
+
+    for (path, error) in errors {
+        push_configuration_issue(
+            &mut loaded.issues,
+            ConfigurationIssue::file(
+                &loaded.path,
+                line,
+                format!(
+                    "Could not use pretty-printer script '{}': {error}",
+                    path.display()
+                ),
+            ),
+        );
+    }
+}
+
+fn resolve_pretty_printer_paths(
+    paths: Vec<PathBuf>,
+    working_directory: &Path,
+) -> (Vec<PathBuf>, Vec<(PathBuf, String)>) {
+    let mut resolved = Vec::new();
+    let mut errors = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for path in paths {
+        if path.as_os_str().is_empty() {
+            continue;
+        }
+
+        let candidate = if path.is_absolute() {
+            path.clone()
+        } else {
+            working_directory.join(&path)
+        };
+
+        let canonical = match candidate.canonicalize() {
+            Ok(canonical) => canonical,
+            Err(error) => {
+                errors.push((path, error.to_string()));
+
+                continue;
+            }
+        };
+
+        match canonical.metadata() {
+            Ok(metadata) if metadata.is_file() => {}
+            Ok(_) => {
+                errors.push((path, String::from("the path is not a regular file")));
+
+                continue;
+            }
+            Err(error) => {
+                errors.push((path, error.to_string()));
+
+                continue;
+            }
+        }
+
+        if canonical.to_str().is_none() {
+            errors.push((
+                path,
+                String::from("the path is not valid UTF-8 for this GDB session"),
+            ));
+
+            continue;
+        }
+
+        if seen.insert(canonical.clone()) {
+            resolved.push(canonical);
+        }
+    }
+
+    (resolved, errors)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1162,6 +1329,7 @@ fn effective_configuration(
     gdb_startup_arguments: &[String],
     gef_context_visible: bool,
     source_paths: &[PathBuf],
+    pretty_printer_paths: &[PathBuf],
     working_directory: &Path,
     safe_mode: bool,
     initial_session: Option<&DebugSession>,
@@ -1187,6 +1355,18 @@ fn effective_configuration(
                 String::from("none")
             } else {
                 source_paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(":")
+            },
+        ),
+        EffectiveConfigurationEntry::new(
+            "pretty_printer_path",
+            if pretty_printer_paths.is_empty() {
+                String::from("none")
+            } else {
+                pretty_printer_paths
                     .iter()
                     .map(|path| path.display().to_string())
                     .collect::<Vec<_>>()
@@ -1480,7 +1660,7 @@ mod tests {
     use super::{
         Cli, ConfigLayer, DebugSession, EnvironmentOverrides, FileConfig, LaunchConfig,
         RustToolchain, fallback_loaded_config, loaded_config_from_contents, parse_user_config,
-        resolve_launch_config, validate_file_config,
+        resolve_launch_config, resolve_pretty_printer_paths, validate_file_config,
     };
     use clap::Parser;
     use std::{path::PathBuf, sync::Arc};
@@ -1505,8 +1685,10 @@ mod tests {
             gdb_startup_arguments: vec![String::from("-ex"), String::from("init-gef-special")],
             gef_context_visible: false,
             source_paths: Vec::new(),
+            pretty_printer_paths: Vec::new(),
             working_directory: PathBuf::from("/tmp"),
             safe_mode: false,
+            gcc_pretty_printer: None,
             rust_toolchain: Some(Arc::new(RustToolchain::with_printer_directory(
                 "/opt/rust",
                 "/opt/rust/lib/rustlib/etc",
@@ -1797,6 +1979,69 @@ mod tests {
                 ..FileConfig::default()
             }
         );
+    }
+
+    #[test]
+    fn resolves_and_deduplicates_pretty_printer_scripts() {
+        let root =
+            std::env::temp_dir().join(format!("fgdb-config-printers-{}", std::process::id()));
+        let script = root.join("printers.py");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&script, "# test printer\n").unwrap();
+
+        let (paths, errors) =
+            resolve_pretty_printer_paths(vec![PathBuf::from("printers.py"), script.clone()], &root);
+
+        assert!(errors.is_empty());
+        assert_eq!(paths, [script.canonicalize().unwrap()]);
+
+        let (_, errors) = resolve_pretty_printer_paths(vec![PathBuf::from("missing.py")], &root);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].0, PathBuf::from("missing.py"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn reports_invalid_pretty_printer_paths_at_their_configuration_line() {
+        let configuration = resolve(
+            &["fgdb"],
+            "gdb=gdb\npretty_printer_path=missing-printer.py\n",
+        );
+        let report = configuration.configuration_report();
+
+        assert!(configuration.pretty_printer_paths.is_empty());
+        assert!(report.issues().iter().any(|issue| {
+            issue.location() == "/tmp/config.conf:2"
+                && issue.message().contains("missing-printer.py")
+        }));
+    }
+
+    #[test]
+    fn configured_pretty_printer_scripts_are_quoted_as_startup_commands() {
+        let root = std::env::temp_dir().join(format!(
+            "fgdb-config-printer-command-{}",
+            std::process::id()
+        ));
+        let script = root.join("user printer.py");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&script, "# test printer\n").unwrap();
+        let contents = format!("gdb=gdb\npretty_printer_path={}\n", script.display());
+        let configuration = resolve(&["fgdb"], &contents);
+        let expected = format!(
+            "source {}",
+            crate::debugger::gdb_cli_string(script.canonicalize().unwrap().to_str().unwrap())
+                .unwrap()
+        );
+
+        assert!(
+            configuration
+                .gdb_arguments()
+                .windows(2)
+                .any(|arguments| arguments == ["-iex", expected.as_str()])
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

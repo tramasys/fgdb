@@ -18,6 +18,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
 
     match event {
         MiEvent::Ready(capabilities) => {
+            ui.reset_runtime_pretty_printer_scripts();
             ui.finish_execution_transition();
             ui.set_command_pending(false);
             ui.set_active_thread_execution(None);

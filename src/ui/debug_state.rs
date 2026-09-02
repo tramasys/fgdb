@@ -854,7 +854,7 @@ impl Ui {
             };
 
             if node.load_more.is_some() {
-                request_next_variable_page_if_needed(&node, &children_handler);
+                defer_next_variable_page(&node, &children_handler);
             } else if !node.placeholder {
                 if row.is_expandable() {
                     let expanded = !row.is_expanded();
@@ -862,7 +862,7 @@ impl Ui {
                     row.set_expanded(expanded);
 
                     if expanded {
-                        request_variable_children_if_needed(&node, &children_handler);
+                        defer_variable_children_if_expanded(&node, &children_handler);
                     }
                 } else {
                     let variable = node.variable;

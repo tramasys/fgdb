@@ -2178,7 +2178,7 @@ pub(super) fn open_breakpoint_editor(
     content.append(&command_header);
 
     let command_hint = gtk::Label::new(Some(
-        "One GDB command per line. Logpoints add ‘silent’ and ‘continue’ automatically.",
+        "One GDB command per line. Logpoints add 'silent' and 'continue' automatically.",
     ));
 
     command_hint.add_css_class("muted");

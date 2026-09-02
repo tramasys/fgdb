@@ -205,6 +205,7 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     warnings.add_css_class("kernel-warnings");
     warnings.set_visible(false);
     let pages = gtk::Stack::new();
+    connect_stack_text_selection_cleanup(&pages);
     pages.set_size_request(0, 0);
     pages.set_vexpand(true);
     pages.set_vhomogeneous(false);
@@ -329,8 +330,6 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
         let pages = pages.clone();
 
         glib::idle_add_local_once(move || {
-            clear_label_selections(&pages);
-
             if let Some(child) = pages.visible_child() {
                 child.queue_resize();
                 child.queue_allocate();
@@ -1010,6 +1009,7 @@ fn build_tls() -> (
     });
 
     let metadata_pages = gtk::Stack::new();
+    connect_stack_text_selection_cleanup(&metadata_pages);
     metadata_pages.set_vexpand(true);
     metadata_pages.set_vhomogeneous(false);
     metadata_pages.set_transition_type(gtk::StackTransitionType::None);
@@ -1040,6 +1040,7 @@ fn build_tls() -> (
     metadata_empty.set_valign(gtk::Align::Center);
     metadata_empty.set_vexpand(true);
     let metadata = gtk::Stack::new();
+    connect_stack_text_selection_cleanup(&metadata);
     metadata.set_vexpand(true);
     metadata.set_vhomogeneous(false);
     metadata.set_transition_type(gtk::StackTransitionType::None);
