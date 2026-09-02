@@ -1136,7 +1136,7 @@ fn syscall_architecture(
     }
 }
 
-fn is_unconditional_branch(mnemonic: &str, architecture: TargetArchitecture) -> bool {
+pub(super) fn is_unconditional_branch(mnemonic: &str, architecture: TargetArchitecture) -> bool {
     match architecture {
         TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
             mnemonic.starts_with("jmp") || mnemonic.starts_with("ljmp")
@@ -1156,7 +1156,7 @@ fn is_unconditional_branch(mnemonic: &str, architecture: TargetArchitecture) -> 
     }
 }
 
-fn is_conditional_branch(mnemonic: &str, architecture: TargetArchitecture) -> bool {
+pub(super) fn is_conditional_branch(mnemonic: &str, architecture: TargetArchitecture) -> bool {
     match architecture {
         TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
             mnemonic.starts_with('j') || mnemonic.starts_with("loop")
@@ -1278,7 +1278,7 @@ pub(crate) fn instruction_ends_linear_flow(
         || mnemonic.starts_with("sysexit"))
 }
 
-fn normalized_instruction_parts<'a>(
+pub(super) fn normalized_instruction_parts<'a>(
     instruction: &'a str,
     architecture: TargetArchitecture,
 ) -> (Cow<'a, str>, &'a str) {

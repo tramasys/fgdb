@@ -9,6 +9,43 @@ const PRETTY_PRINTER_PAGE_SIZE: usize = 300;
 const DEBUG_DATA_RESULT_PAGE_SIZE: usize = 250;
 const DEBUG_DATA_SEARCH_DELAY: Duration = Duration::from_millis(75);
 const MAX_DEBUG_DATA_ACTIVITY_BYTES: usize = 32 * 1024;
+const MAX_DEBUG_DATA_ACTIVITY_EVENTS: usize = 128;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DebugDataActivityKind {
+    Progress,
+    Success,
+    Warning,
+    Error,
+}
+
+impl DebugDataActivityKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Progress => "STARTED",
+            Self::Success => "DONE",
+            Self::Warning => "NOTICE",
+            Self::Error => "ERROR",
+        }
+    }
+
+    fn css_class(self) -> &'static str {
+        match self {
+            Self::Progress => "activity-progress",
+            Self::Success => "activity-success",
+            Self::Warning => "activity-warning",
+            Self::Error => "activity-error",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DebugDataActivity {
+    kind: DebugDataActivityKind,
+    message: Rc<str>,
+    time: String,
+    occurrences: u32,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum DebugDataAction {
@@ -47,7 +84,7 @@ pub(super) struct DebugDataState {
     pretty_printers_loading: bool,
     pretty_printer_generation: u64,
     pretty_printer_error: Option<String>,
-    pub(super) activity: Vec<String>,
+    activity: Vec<DebugDataActivity>,
 }
 
 #[derive(Clone)]
@@ -241,21 +278,31 @@ impl Ui {
             || state.pretty_printer_error.is_some()
     }
 
-    pub(crate) fn add_debug_data_activity(&self, message: impl Into<String>) {
+    pub(crate) fn add_debug_data_progress(&self, message: impl Into<String>) {
+        self.record_debug_data_activity(DebugDataActivityKind::Progress, message);
+    }
+
+    pub(crate) fn add_debug_data_success(&self, message: impl Into<String>) {
+        self.record_debug_data_activity(DebugDataActivityKind::Success, message);
+    }
+
+    pub(crate) fn add_debug_data_warning(&self, message: impl Into<String>) {
+        self.record_debug_data_activity(DebugDataActivityKind::Warning, message);
+    }
+
+    pub(crate) fn add_debug_data_error(&self, message: impl Into<String>) {
+        self.record_debug_data_activity(DebugDataActivityKind::Error, message);
+    }
+
+    fn record_debug_data_activity(&self, kind: DebugDataActivityKind, message: impl Into<String>) {
         let mut message = message.into();
         if message.len() > MAX_DEBUG_DATA_ACTIVITY_BYTES {
             message.truncate(message.floor_char_boundary(MAX_DEBUG_DATA_ACTIVITY_BYTES));
             message.push_str("\n… output truncated in the activity view");
         }
+        let time = debug_data_activity_time();
         let mut state = self.debug_data_state.borrow_mut();
-        if state.activity.last() == Some(&message) {
-            return;
-        }
-        state.activity.push(message);
-        if state.activity.len() > 128 {
-            let excess = state.activity.len() - 128;
-            state.activity.drain(..excess);
-        }
+        append_debug_data_activity(&mut state.activity, kind, message, time);
         drop(state);
         self.render_debug_data_activity();
     }
@@ -1132,17 +1179,20 @@ impl Ui {
         };
         clear_debug_data_box(&view.activity);
         let activity = self.debug_data_state.borrow().activity.clone();
+        view.activity
+            .append(&debug_data_activity_summary(&activity));
         if activity.is_empty() {
-            view.activity.append(&muted_label(
-                "Symbol downloads and diagnostic errors appear here",
-            ));
+            let empty = muted_label("Symbol downloads and diagnostic errors appear here");
+            empty.add_css_class("debug-data-activity-empty");
+            view.activity.append(&empty);
             return;
         }
+        let feed = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        feed.add_css_class("debug-data-activity-feed");
         for event in activity.iter().rev() {
-            let event = wrapping_value(event);
-            event.add_css_class("debug-data-activity");
-            view.activity.append(&event);
+            feed.append(&debug_data_activity_row(event));
         }
+        view.activity.append(&feed);
     }
 
     pub(crate) fn refresh_module_debug_metadata(self: &Rc<Self>, force: bool) {
@@ -1498,6 +1548,128 @@ fn pretty_printer_grid(printers: &[String]) -> gtk::Grid {
     grid
 }
 
+fn debug_data_activity_time() -> String {
+    glib::DateTime::now_local()
+        .and_then(|time| time.format("%H:%M:%S"))
+        .map(|time| time.to_string())
+        .unwrap_or_else(|_| String::from("--:--:--"))
+}
+
+fn append_debug_data_activity(
+    activity: &mut Vec<DebugDataActivity>,
+    kind: DebugDataActivityKind,
+    message: String,
+    time: String,
+) {
+    if let Some(last) = activity
+        .last_mut()
+        .filter(|last| last.kind == kind && last.message.as_ref() == message.as_str())
+    {
+        last.time = time;
+        last.occurrences = last.occurrences.saturating_add(1);
+        return;
+    }
+    activity.push(DebugDataActivity {
+        kind,
+        message: Rc::from(message),
+        time,
+        occurrences: 1,
+    });
+    if activity.len() > MAX_DEBUG_DATA_ACTIVITY_EVENTS {
+        let excess = activity.len() - MAX_DEBUG_DATA_ACTIVITY_EVENTS;
+        activity.drain(..excess);
+    }
+}
+
+fn debug_data_activity_summary(activity: &[DebugDataActivity]) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.add_css_class("debug-data-activity-summary");
+    let labels = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    labels.set_hexpand(true);
+    labels.set_valign(gtk::Align::Center);
+    let title = gtk::Label::new(Some("RECENT ACTIVITY"));
+    title.set_halign(gtk::Align::Start);
+    title.set_xalign(0.0);
+    title.add_css_class("debug-data-activity-summary-title");
+    let issue_count = activity
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind,
+                DebugDataActivityKind::Warning | DebugDataActivityKind::Error
+            )
+        })
+        .count();
+    let detail = match (activity.len(), issue_count) {
+        (0, _) => String::from("No activity has been recorded for this session"),
+        (events, 0) => format!("{events} events · no warnings or errors"),
+        (events, 1) => format!("{events} events · 1 warning or error"),
+        (events, issues) => format!("{events} events · {issues} warnings or errors"),
+    };
+    let detail = gtk::Label::new(Some(&detail));
+    detail.set_halign(gtk::Align::Start);
+    detail.set_xalign(0.0);
+    detail.add_css_class("debug-data-activity-summary-detail");
+    labels.append(&title);
+    labels.append(&detail);
+    row.append(&labels);
+    let order = gtk::Label::new(Some("NEWEST FIRST"));
+    order.set_halign(gtk::Align::End);
+    order.set_valign(gtk::Align::Center);
+    order.add_css_class("debug-data-activity-order");
+    row.append(&order);
+    row
+}
+
+fn debug_data_activity_row(event: &DebugDataActivity) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
+    row.add_css_class("debug-data-activity-row");
+    row.add_css_class(event.kind.css_class());
+
+    let badge = gtk::Label::new(Some(event.kind.label()));
+    badge.set_halign(gtk::Align::Start);
+    badge.set_valign(gtk::Align::Center);
+    badge.add_css_class("debug-data-activity-kind");
+    row.append(&badge);
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    content.set_hexpand(true);
+    content.set_valign(gtk::Align::Center);
+    let (headline, detail) = event.message.split_once('\n').map_or_else(
+        || (event.message.as_ref(), None),
+        |(headline, detail)| (headline, (!detail.is_empty()).then_some(detail)),
+    );
+    let headline = wrapping_value(headline);
+    headline.set_hexpand(true);
+    headline.set_halign(gtk::Align::Fill);
+    headline.add_css_class("debug-data-activity-message");
+    content.append(&headline);
+    if let Some(detail) = detail {
+        let detail = wrapping_value(detail);
+        detail.set_hexpand(true);
+        detail.set_halign(gtk::Align::Fill);
+        detail.add_css_class("debug-data-activity-detail");
+        content.append(&detail);
+    }
+    row.append(&content);
+
+    let metadata = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    metadata.set_valign(gtk::Align::Center);
+    let time = gtk::Label::new(Some(&event.time));
+    time.set_halign(gtk::Align::End);
+    time.add_css_class("debug-data-activity-time");
+    metadata.append(&time);
+    if event.occurrences > 1 {
+        let occurrences = gtk::Label::new(Some(&format!("×{}", event.occurrences)));
+        occurrences.set_halign(gtk::Align::End);
+        occurrences.set_tooltip_text(Some("Consecutive identical events"));
+        occurrences.add_css_class("debug-data-activity-occurrences");
+        metadata.append(&occurrences);
+    }
+    row.append(&metadata);
+    row
+}
+
 fn debug_data_page() -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 6);
     page.set_margin_top(8);
@@ -1708,5 +1880,49 @@ mod tests {
         let filtered = filtered.expect("the matching printer should be visible");
         assert_eq!(matching, 1);
         assert_eq!(filtered.direct_printers, ["Printer499"]);
+    }
+
+    #[test]
+    fn coalesces_only_consecutive_activity_with_the_same_kind() {
+        let mut activity = Vec::new();
+        append_debug_data_activity(
+            &mut activity,
+            DebugDataActivityKind::Progress,
+            String::from("Loading symbols"),
+            String::from("10:00:00"),
+        );
+        append_debug_data_activity(
+            &mut activity,
+            DebugDataActivityKind::Progress,
+            String::from("Loading symbols"),
+            String::from("10:00:01"),
+        );
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].occurrences, 2);
+        assert_eq!(activity[0].time, "10:00:01");
+
+        append_debug_data_activity(
+            &mut activity,
+            DebugDataActivityKind::Error,
+            String::from("Loading symbols"),
+            String::from("10:00:02"),
+        );
+        assert_eq!(activity.len(), 2);
+        assert_eq!(activity[1].occurrences, 1);
+    }
+
+    #[test]
+    fn activity_history_retains_only_the_newest_bounded_entries() {
+        let mut activity = Vec::new();
+        for index in 0..MAX_DEBUG_DATA_ACTIVITY_EVENTS + 5 {
+            append_debug_data_activity(
+                &mut activity,
+                DebugDataActivityKind::Success,
+                format!("event {index}"),
+                String::from("10:00:00"),
+            );
+        }
+        assert_eq!(activity.len(), MAX_DEBUG_DATA_ACTIVITY_EVENTS);
+        assert_eq!(activity[0].message.as_ref(), "event 5");
     }
 }

@@ -37,6 +37,7 @@ impl Ui {
         let target_pointer_bits = Rc::new(Cell::new(usize::BITS));
         let target_pointer_bits_known = Rc::new(Cell::new(false));
         let inspector_bindings = InspectorBindings {
+            theme,
             variable_children_handler: &variable_children_handler,
             variable_viewer_handler: &variable_viewer_handler,
             variable_viewers: &variable_viewers,

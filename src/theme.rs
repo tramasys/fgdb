@@ -1730,12 +1730,114 @@ columnview.memory-map-table row {{ min-height: 28px; }}
 
 .debug-data-window entry.debug-data-search image.left {{ margin-right: 7px; }}
 
-.debug-data-source,
-.debug-data-activity {{
+.debug-data-source {{
     min-height: 25px;
     padding: 5px 7px;
     color: @app_fg;
     background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+}}
+
+.debug-data-activity-summary {{
+    padding: 8px 10px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+}}
+
+.debug-data-activity-summary-title {{
+    color: @app_accent_hover;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+}}
+
+.debug-data-activity-summary-detail {{
+    color: @app_muted;
+    font-size: 10px;
+}}
+
+.debug-data-activity-order {{
+    color: alpha(@app_muted, 0.82);
+    font-size: 9px;
+    font-weight: 700;
+}}
+
+.debug-data-activity-feed {{
+    background: @app_bg;
+    border: 1px solid @app_border;
+}}
+
+.debug-data-activity-row {{
+    padding: 8px 10px;
+    background: alpha(@app_fg, 0.018);
+    border-bottom: 1px solid alpha(@app_border, 0.82);
+    border-left: 2px solid @app_border;
+}}
+
+.debug-data-activity-row:nth-child(odd) {{
+    background: alpha(@app_fg, 0.034);
+}}
+
+.debug-data-activity-row.activity-progress {{ border-left-color: @app_accent_hover; }}
+.debug-data-activity-row.activity-success {{ border-left-color: @app_success; }}
+.debug-data-activity-row.activity-warning {{ border-left-color: @app_warning; }}
+.debug-data-activity-row.activity-error {{ border-left-color: @app_danger; }}
+
+.debug-data-activity-kind {{
+    min-width: 54px;
+    min-height: 17px;
+    padding: 1px 5px;
+    color: @app_muted;
+    background: alpha(@app_fg, 0.055);
+    border: 1px solid @app_border;
+    font-size: 9px;
+    font-weight: 700;
+}}
+
+.activity-progress .debug-data-activity-kind {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.14);
+    border-color: alpha(@app_accent, 0.48);
+}}
+
+.activity-success .debug-data-activity-kind {{
+    color: @app_success;
+    background: alpha(@app_success, 0.10);
+    border-color: alpha(@app_success, 0.34);
+}}
+
+.activity-warning .debug-data-activity-kind {{
+    color: @app_warning;
+    background: alpha(@app_warning, 0.10);
+    border-color: alpha(@app_warning, 0.38);
+}}
+
+.activity-error .debug-data-activity-kind {{
+    color: @app_danger;
+    background: alpha(@app_danger, 0.10);
+    border-color: alpha(@app_danger, 0.38);
+}}
+
+.debug-data-activity-message {{ color: @app_fg; }}
+
+.debug-data-activity-detail {{
+    color: @app_muted;
+    font-size: 10px;
+}}
+
+.debug-data-activity-time,
+.debug-data-activity-occurrences {{
+    min-width: 54px;
+    color: @app_muted;
+    font-size: 9px;
+}}
+
+.debug-data-activity-occurrences {{ color: @app_accent_hover; }}
+
+.debug-data-activity-empty {{
+    min-height: 52px;
+    padding: 12px;
+    background: alpha(@app_fg, 0.018);
     border: 1px solid @app_border;
 }}
 
@@ -3035,6 +3137,167 @@ paned.misc-startup-split > separator:hover {{
 
 .misc-data-note {{
     padding: 3px 7px;
+}}
+
+.cfg-page {{
+    min-width: 0;
+    background: @app_bg;
+}}
+
+.cfg-toolbar {{
+    min-height: 52px;
+    padding: 9px 10px;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}}
+
+.cfg-summary {{
+    color: @app_accent_hover;
+    font-size: 12px;
+    font-weight: 700;
+}}
+
+.cfg-stat {{
+    min-height: 20px;
+    padding: 1px 7px;
+    color: @app_fg;
+    background: alpha(@app_fg, 0.045);
+    border: 1px solid alpha(@app_border, 0.86);
+    font-size: 11px;
+}}
+
+.cfg-summary-row,
+.cfg-detail-row {{
+    min-height: 20px;
+}}
+
+.cfg-detail {{
+    color: @app_muted;
+    font-size: 11px;
+}}
+
+.cfg-block-detail {{
+    color: @app_accent_hover;
+}}
+
+.cfg-bounded-detail {{
+    color: @app_warning;
+}}
+
+button.cfg-follow {{
+    min-height: 32px;
+    margin: 0;
+    padding: 5px 10px;
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.06);
+    border: 1px solid @app_border;
+}}
+
+button.cfg-follow:hover,
+button.cfg-follow:focus-visible {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.12);
+    border-color: alpha(@app_accent, 0.55);
+}}
+
+button.cfg-follow:checked {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.17);
+    border-color: alpha(@app_accent, 0.65);
+}}
+
+.cfg-legend {{
+    background: alpha(@app_fg, 0.025);
+    border-bottom: 1px solid @app_border;
+}}
+
+button.cfg-legend-toggle,
+button.cfg-legend-toggle:hover,
+button.cfg-legend-toggle:focus-visible,
+button.cfg-legend-toggle:checked {{
+    min-height: 32px;
+    margin: 0;
+    padding: 6px 10px;
+    color: @app_muted;
+    background: transparent;
+    border: 0;
+    font-size: 11px;
+}}
+
+button.cfg-legend-toggle:hover,
+button.cfg-legend-toggle:focus-visible {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.07);
+}}
+
+button.cfg-legend-toggle:checked {{
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.05);
+}}
+
+.cfg-legend-items {{
+    padding: 9px 10px;
+    border-top: 1px solid alpha(@app_border, 0.72);
+}}
+
+.cfg-legend-item {{
+    min-height: 46px;
+    padding: 6px 9px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid alpha(@app_border, 0.78);
+}}
+
+.cfg-legend-sample {{
+    min-width: 28px;
+    font-size: 13px;
+    font-weight: 700;
+}}
+
+.cfg-legend-sample.branch {{ color: @app_accent; }}
+.cfg-legend-sample.fallthrough {{ color: @app_muted; }}
+.cfg-legend-sample.current {{ color: @app_accent_hover; }}
+
+.cfg-legend-title {{
+    color: @app_fg;
+    font-size: 11px;
+    font-weight: 600;
+}}
+
+.cfg-legend-detail {{
+    color: @app_muted;
+    font-size: 11px;
+}}
+
+scrolledwindow.cfg-scroll,
+scrolledwindow.cfg-scroll > viewport,
+.cfg-canvas-layer,
+.cfg-canvas {{
+    background: @app_bg;
+    border: 0;
+}}
+
+.cfg-block-label {{
+    background: transparent;
+    font-size: 11px;
+}}
+
+.cfg-block-header-label {{
+    color: @app_accent_hover;
+    font-weight: 700;
+}}
+
+.cfg-block-body-label {{
+    color: @app_fg;
+}}
+
+.cfg-block-label selection {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.30);
+}}
+
+.cfg-empty {{
+    margin: 16px;
+    padding: 10px;
 }}
 
 stackswitcher.allocator-view-tabs {{

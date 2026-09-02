@@ -932,6 +932,12 @@ impl Ui {
         );
         self.instructions_title.set_text(&title);
         self.instructions_title.set_tooltip_text(Some(&title));
+        self.misc_view.cfg.show(
+            &instructions,
+            pc,
+            self.target_architecture(),
+            self.target_pointer_bits(),
+        );
         if instructions.is_empty() {
             self.instructions_empty.set_visible(true);
             self.instructions_store.remove_all();

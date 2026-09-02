@@ -1500,7 +1500,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
     let kernel_view = build_kernel_view(&bindings.kernel);
-    let misc_view = build_misc_view();
+    let misc_view = build_misc_view(bindings.theme);
 
     append_responsive_inspector_page(&notebook, &state, "Context");
     append_responsive_inspector_page(&notebook, &expression_watches_page, "Watches");

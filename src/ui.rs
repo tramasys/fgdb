@@ -273,6 +273,7 @@ struct MiscViewBindings<'a> {
 }
 
 struct InspectorBindings<'a> {
+    theme: &'a Theme,
     variable_children_handler: &'a Rc<RefCell<Option<VariableChildrenHandler>>>,
     variable_viewer_handler: &'a Rc<RefCell<Option<VariableViewerHandler>>>,
     variable_viewers: &'a Rc<VariableViewerRegistry>,
@@ -1032,6 +1033,7 @@ struct MiscView {
     in_flight: Rc<Cell<bool>>,
     needs_refresh: Rc<Cell<bool>>,
     pages: gtk::Stack,
+    cfg: CfgView,
     allocator_requested: Rc<Cell<bool>>,
     allocator_probe_fresh: Rc<Cell<bool>>,
     allocator_probe_cache: Rc<RefCell<Option<crate::misc::AllocatorProbe>>>,
@@ -1792,6 +1794,7 @@ struct LeftSidebar {
 }
 
 mod build;
+mod cfg_view;
 pub(crate) mod controls;
 mod debug_state;
 mod dialogs;
@@ -1816,6 +1819,7 @@ pub(crate) use variable_viewers::{
 pub(crate) use views::compact_variable_type;
 
 use build::*;
+use cfg_view::*;
 use controls::*;
 use dialogs::*;
 use formatting::*;

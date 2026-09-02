@@ -1,9 +1,10 @@
 use super::*;
 
-const MISC_PAGES: [(&str, &str); 6] = [
+const MISC_PAGES: [(&str, &str); 7] = [
     ("startup-vectors", "Args / Env"),
     ("auxv", "Auxv"),
     ("call-abi", "Call ABI"),
+    ("cfg", "CFG"),
     ("allocator", "Allocator"),
     ("locks", "Locks"),
     ("core-dump", "Core dump"),
@@ -99,7 +100,7 @@ struct CoreWidgets {
     split: gtk::Paned,
 }
 
-pub(super) fn build_misc_view() -> MiscView {
+pub(super) fn build_misc_view(theme: &Theme) -> MiscView {
     let active = Rc::new(Cell::new(false));
     let in_flight = Rc::new(Cell::new(false));
     let needs_refresh = Rc::new(Cell::new(true));
@@ -138,6 +139,8 @@ pub(super) fn build_misc_view() -> MiscView {
     pages.add_titled(&auxv.root, Some("auxv"), "Auxv");
     let call_abi = build_call_abi_page();
     pages.add_titled(&call_abi.root, Some("call-abi"), "Call ABI");
+    let cfg = build_cfg_view(theme);
+    pages.add_titled(&cfg.root, Some("cfg"), "CFG");
     let allocator = build_allocator_page();
     pages.add_titled(&allocator.root, Some("allocator"), "Allocator");
     let locks = build_locks_page();
@@ -154,6 +157,7 @@ pub(super) fn build_misc_view() -> MiscView {
         in_flight,
         needs_refresh,
         pages,
+        cfg,
         allocator_requested,
         allocator_probe_fresh,
         allocator_probe_cache: Rc::new(RefCell::new(None)),

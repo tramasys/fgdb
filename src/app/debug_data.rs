@@ -42,13 +42,13 @@ pub(super) fn handle_debug_data_action(
             if let Some(ui) = ui.upgrade()
                 && ui.show_debug_data_source_files()
             {
-                ui.add_debug_data_activity("Loading source files from GDB");
+                ui.add_debug_data_progress("Loading source files from GDB");
                 ui.request_loaded_source_files();
             }
         }
         DebugDataAction::ReloadSourceFiles => {
             if let Some(ui) = ui.upgrade() {
-                ui.add_debug_data_activity("Reloading source files from GDB");
+                ui.add_debug_data_progress("Reloading source files from GDB");
                 ui.request_loaded_source_files();
             }
         }
@@ -87,7 +87,7 @@ fn refresh_debug_data(ui: Weak<Ui>, client: Rc<MiClient>) {
     let generation = current_ui.begin_debug_data_refresh();
     let refresh_printers = current_ui.debug_data_pretty_printers_were_requested();
     if !current_ui.gdb_capabilities().pretty_printing {
-        current_ui.add_debug_data_activity(
+        current_ui.add_debug_data_warning(
             "Pretty printing is disabled; raw values remain available in Locals and Arguments",
         );
     }
@@ -253,14 +253,14 @@ fn request_pretty_printers(ui: Weak<Ui>, client: Rc<MiClient>) {
                 ))
             };
             if let Err(error) = &result {
-                ui.add_debug_data_activity(error.clone());
+                ui.add_debug_data_error(error.clone());
             }
             ui.finish_debug_data_pretty_printer_refresh(generation, result);
         },
     ) {
         let message = format!("Pretty-printers: {error}");
         if let Some(ui) = ui.upgrade() {
-            ui.add_debug_data_activity(message.clone());
+            ui.add_debug_data_error(message.clone());
             ui.finish_debug_data_pretty_printer_refresh(generation, Err(message));
         }
     }
@@ -295,7 +295,7 @@ fn finish_debug_data_query(query: Rc<RefCell<DebugDataQuery>>) {
         query.substitutions.clone(),
     );
     for error in &query.errors {
-        ui.add_debug_data_activity(error.clone());
+        ui.add_debug_data_error(error.clone());
     }
     ui.finish_debug_data_refresh(query.generation);
 }
@@ -303,7 +303,7 @@ fn finish_debug_data_query(query: Rc<RefCell<DebugDataQuery>>) {
 fn run_console_setting(ui: Weak<Ui>, client: Rc<MiClient>, command: String, success: String) {
     let ui_for_response = ui.clone();
     if let Some(ui) = ui.upgrade() {
-        ui.add_debug_data_activity(format!("Applying: {command}"));
+        ui.add_debug_data_progress(format!("Applying: {command}"));
     }
     let client_for_refresh = Rc::clone(&client);
     if let Err(error) = client.request_console(&command, move |_, record, output| {
@@ -311,9 +311,9 @@ fn run_console_setting(ui: Weak<Ui>, client: Rc<MiClient>, command: String, succ
             return;
         };
         if record.is_done() {
-            ui.add_debug_data_activity(success);
+            ui.add_debug_data_success(success);
         } else {
-            ui.add_debug_data_activity(format!(
+            ui.add_debug_data_error(format!(
                 "Setting failed: {}",
                 console_error(&record, &output)
             ));
@@ -321,7 +321,7 @@ fn run_console_setting(ui: Weak<Ui>, client: Rc<MiClient>, command: String, succ
         refresh_debug_data(ui_for_response, client_for_refresh);
     }) && let Some(ui) = ui.upgrade()
     {
-        ui.add_debug_data_activity(format!("Could not queue setting: {error}"));
+        ui.add_debug_data_error(format!("Could not queue setting: {error}"));
         refresh_debug_data(Rc::downgrade(&ui), client);
     }
 }
@@ -332,26 +332,25 @@ fn set_pretty_printing(ui: Weak<Ui>, client: Rc<MiClient>, enabled: bool) {
     if client
         .set_pretty_printing(enabled, move |_, record| {
             if let Some(ui) = ui_for_response.upgrade() {
-                ui.add_debug_data_activity(if record.is_done() {
-                    if enabled {
+                if record.is_done() {
+                    ui.add_debug_data_success(if enabled {
                         "Dynamic pretty printing enabled"
                     } else {
                         "Dynamic pretty printing disabled"
-                    }
-                    .to_owned()
+                    });
                 } else {
-                    format!(
+                    ui.add_debug_data_error(format!(
                         "Could not change pretty printing: {}",
                         record.error_message().unwrap_or("GDB rejected the command")
-                    )
-                });
+                    ));
+                }
             }
             refresh_debug_data(ui_for_response, client_for_refresh);
         })
         .is_err()
         && let Some(ui) = ui.upgrade()
     {
-        ui.add_debug_data_activity("Could not queue the pretty-printing command");
+        ui.add_debug_data_error("Could not queue the pretty-printing command");
         refresh_debug_data(Rc::downgrade(&ui), client);
     }
 }
@@ -359,7 +358,7 @@ fn set_pretty_printing(ui: Weak<Ui>, client: Rc<MiClient>, enabled: bool) {
 fn add_source_directory(ui: Weak<Ui>, client: Rc<MiClient>, path: PathBuf) {
     let Some(path_text) = path.to_str() else {
         if let Some(ui) = ui.upgrade() {
-            ui.add_debug_data_activity("Source path is not valid UTF-8 for this GDB session");
+            ui.add_debug_data_error("Source path is not valid UTF-8 for this GDB session");
         }
         return;
     };
@@ -373,9 +372,9 @@ fn add_source_directory(ui: Weak<Ui>, client: Rc<MiClient>, path: PathBuf) {
         if let Some(ui) = ui_for_response.upgrade() {
             if record.is_done() {
                 ui.add_runtime_source_directory(path.clone());
-                ui.add_debug_data_activity(format!("Added source directory {}", path.display()));
+                ui.add_debug_data_success(format!("Added source directory {}", path.display()));
             } else {
-                ui.add_debug_data_activity(format!(
+                ui.add_debug_data_error(format!(
                     "Could not add source directory: {}",
                     console_error(&record, &output)
                 ));
@@ -384,7 +383,7 @@ fn add_source_directory(ui: Weak<Ui>, client: Rc<MiClient>, path: PathBuf) {
         refresh_debug_data(ui_for_response, client_for_refresh);
     }) && let Some(ui) = ui.upgrade()
     {
-        ui.add_debug_data_activity(format!("Could not queue source-directory change: {error}"));
+        ui.add_debug_data_error(format!("Could not queue source-directory change: {error}"));
         refresh_debug_data(Rc::downgrade(&ui), client);
     }
 }
@@ -406,9 +405,9 @@ fn remove_source_directory(ui: Weak<Ui>, client: Rc<MiClient>, path: String) {
         if let Some(ui) = ui_for_response.upgrade() {
             if record.is_done() {
                 ui.remove_runtime_source_directory(&path);
-                ui.add_debug_data_activity(format!("Removed source directory {path}"));
+                ui.add_debug_data_success(format!("Removed source directory {path}"));
             } else {
-                ui.add_debug_data_activity(format!(
+                ui.add_debug_data_error(format!(
                     "Could not remove source directory: {}",
                     console_error(&record, &output)
                 ));
@@ -417,7 +416,7 @@ fn remove_source_directory(ui: Weak<Ui>, client: Rc<MiClient>, path: String) {
         refresh_debug_data(ui_for_response, client_for_refresh);
     }) && let Some(ui) = ui.upgrade()
     {
-        ui.add_debug_data_activity(format!("Could not queue source-directory change: {error}"));
+        ui.add_debug_data_error(format!("Could not queue source-directory change: {error}"));
         refresh_debug_data(Rc::downgrade(&ui), client);
     }
 }
@@ -453,7 +452,7 @@ fn retry_symbols(ui: Weak<Ui>, client: Rc<MiClient>, module: Option<String>) {
     if let Some(current_ui) = ui.upgrade()
         && current_ui.debuginfod_status_for_debug_data() == "ask"
     {
-        current_ui.add_debug_data_activity(
+        current_ui.add_debug_data_warning(
             "Symbol retry was not started: choose whether to enable or disable debuginfod first",
         );
         return;
@@ -469,7 +468,7 @@ fn retry_symbols(ui: Weak<Ui>, client: Rc<MiClient>, module: Option<String>) {
         },
     );
     if let Some(ui) = ui.upgrade() {
-        ui.add_debug_data_activity(module.as_deref().map_or_else(
+        ui.add_debug_data_progress(module.as_deref().map_or_else(
             || String::from("Retrying symbols for all shared libraries…"),
             |module| format!("Retrying symbols for {module}…"),
         ));
@@ -479,20 +478,25 @@ fn retry_symbols(ui: Weak<Ui>, client: Rc<MiClient>, module: Option<String>) {
     if let Err(error) = client.request_console(&command, move |_, record, output| {
         if let Some(ui) = ui_for_response.upgrade() {
             let detail = output.trim();
-            ui.add_debug_data_activity(if record.is_done() {
+            if record.is_done() {
                 if detail.is_empty() {
-                    String::from("Symbol loading completed")
+                    ui.add_debug_data_success("Symbol loading completed");
+                } else if detail.contains("No loaded shared libraries match") {
+                    ui.add_debug_data_warning(detail);
                 } else {
-                    detail.to_owned()
+                    ui.add_debug_data_success(detail);
                 }
             } else {
-                format!("Symbol loading failed: {}", console_error(&record, &output))
-            });
+                ui.add_debug_data_error(format!(
+                    "Symbol loading failed: {}",
+                    console_error(&record, &output)
+                ));
+            }
         }
         refresh_debug_data(ui_for_response, client_for_refresh);
     }) && let Some(ui) = ui.upgrade()
     {
-        ui.add_debug_data_activity(format!("Could not queue symbol loading: {error}"));
+        ui.add_debug_data_error(format!("Could not queue symbol loading: {error}"));
         refresh_debug_data(Rc::downgrade(&ui), client);
     }
 }
