@@ -262,6 +262,7 @@ impl DisassemblyController {
         }
         ui.clear_disassembly_error();
         ui.set_disassembly_loading(true);
+        let stop_generation = ui.current_stop_refresh_generation();
         drop(ui);
 
         let generation = self.generation.get().wrapping_add(1);
@@ -274,31 +275,46 @@ impl DisassemblyController {
             "-data-evaluate-expression {}",
             crate::debugger::quote(&format!("(void*)({expression})"))
         );
+        let Some(command) = frame_scoped_stop_command(&self.ui, stop_generation, &command) else {
+            self.fail("The selected stop context changed");
+            return;
+        };
         let controller = Rc::clone(self);
         if self
             .client
-            .request(&command, move |_, record| {
-                if controller.generation.get() != generation {
-                    return;
-                }
-                if !record.is_done() {
-                    controller.fail(
-                        record
-                            .error_message()
-                            .unwrap_or("GDB could not resolve that location"),
-                    );
-                    return;
-                }
-                let Some(value) = crate::debugger::evaluated_value(&record) else {
-                    controller.fail("GDB returned no address for that location");
-                    return;
-                };
-                let Some(address) = evaluated_address(&value) else {
-                    controller.fail("The expression does not resolve to an address");
-                    return;
-                };
-                controller.request_function(address, generation, history);
-            })
+            .request_for_stop(
+                &command,
+                stop_generation,
+                {
+                    let ui = self.ui.clone();
+                    move || {
+                        ui.upgrade()
+                            .is_some_and(|ui| ui.is_stop_refresh_current(stop_generation))
+                    }
+                },
+                move |_, record| {
+                    if controller.generation.get() != generation {
+                        return;
+                    }
+                    if !record.is_done() {
+                        controller.fail(
+                            record
+                                .error_message()
+                                .unwrap_or("GDB could not resolve that location"),
+                        );
+                        return;
+                    }
+                    let Some(value) = crate::debugger::evaluated_value(&record) else {
+                        controller.fail("GDB returned no address for that location");
+                        return;
+                    };
+                    let Some(address) = evaluated_address(&value) else {
+                        controller.fail("The expression does not resolve to an address");
+                        return;
+                    };
+                    controller.request_function(address, generation, history);
+                },
+            )
             .is_err()
         {
             self.fail("The GDB/MI channel is unavailable");
@@ -443,11 +459,18 @@ impl DisassemblyController {
         let weak_ui_for_guard = self.ui.clone();
         let weak_ui_for_response = self.ui.clone();
         let generation = request.generation;
+        let Some(command) = frame_scoped_stop_command(&self.ui, generation, &command) else {
+            if let Some(ui) = self.ui.upgrade() {
+                ui.show_call_abi_target_resolution(&request, None);
+            }
+            return;
+        };
         let request_for_response = request.clone();
         if self
             .client
-            .request_when(
+            .request_for_stop(
                 &command,
+                generation,
                 move || {
                     weak_ui_for_guard
                         .upgrade()

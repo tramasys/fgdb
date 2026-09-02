@@ -83,12 +83,13 @@ fn linked_is_current(traversal: &Rc<RefCell<LinkedTraversal>>) -> bool {
 }
 
 fn seed_linked_root_address(traversal: Rc<RefCell<LinkedTraversal>>) {
-    let (varobj, should_query, client) = {
+    let (varobj, should_query, client, generation) = {
         let traversal = traversal.borrow();
         (
             traversal.current.varobj.clone(),
             traversal.current_address.is_none() && !traversal.current.is_pointer(),
             Rc::clone(&traversal.client),
+            traversal.generation,
         )
     };
     let Some(varobj) = varobj.filter(|_| should_query) else {
@@ -102,8 +103,9 @@ fn seed_linked_root_address(traversal: Rc<RefCell<LinkedTraversal>>) {
     let traversal_for_guard = Rc::clone(&traversal);
     let traversal_for_response = Rc::clone(&traversal);
     if client
-        .request_when(
+        .request_for_stop(
             &command,
+            generation,
             move || linked_is_current(&traversal_for_guard),
             move |client, record| {
                 if record.class == "superseded" {
@@ -121,11 +123,24 @@ fn seed_linked_root_address(traversal: Rc<RefCell<LinkedTraversal>>) {
                     "-data-evaluate-expression {}",
                     crate::debugger::quote(&format!("&({path})"))
                 );
+                let command = {
+                    let traversal = traversal_for_response.borrow();
+                    frame_scoped_stop_command(&traversal.ui, traversal.generation, &command)
+                };
+                let Some(command) = command else {
+                    finish_linked(
+                        &traversal_for_response,
+                        Some(String::from(STALE_VIEWER_MESSAGE)),
+                    );
+                    return;
+                };
+                let generation = traversal_for_response.borrow().generation;
                 let traversal_for_guard = Rc::clone(&traversal_for_response);
                 let traversal_for_address = Rc::clone(&traversal_for_response);
                 if client
-                    .request_when(
+                    .request_for_stop(
                         &command,
+                        generation,
                         move || linked_is_current(&traversal_for_guard),
                         move |_, record| {
                             if record.class == "superseded" {
@@ -198,15 +213,19 @@ fn request_linked_dereference(traversal: Rc<RefCell<LinkedTraversal>>, current: 
         );
         return;
     };
-    let client = Rc::clone(&traversal.borrow().client);
+    let (client, generation) = {
+        let traversal = traversal.borrow();
+        (Rc::clone(&traversal.client), traversal.generation)
+    };
     let command = format!(
         "-var-info-path-expression {}",
         crate::debugger::quote(varobj)
     );
     let traversal_for_guard = Rc::clone(&traversal);
     let traversal_for_response = Rc::clone(&traversal);
-    if let Err(error) = client.request_when(
+    if let Err(error) = client.request_for_stop(
         &command,
+        generation,
         move || linked_is_current(&traversal_for_guard),
         move |_client, record| {
             if record.class == "superseded" {
@@ -232,12 +251,24 @@ fn request_linked_dereference(traversal: Rc<RefCell<LinkedTraversal>>, current: 
                 "-var-create {dereference_varobj} * {}",
                 crate::debugger::quote(&format!("*({path})"))
             );
+            let command = {
+                let traversal = traversal_for_response.borrow();
+                frame_scoped_stop_command(&traversal.ui, traversal.generation, &command)
+            };
+            let Some(command) = command else {
+                finish_linked(
+                    &traversal_for_response,
+                    Some(String::from(STALE_VIEWER_MESSAGE)),
+                );
+                return;
+            };
             let traversal_for_guard = Rc::clone(&traversal_for_response);
             let traversal_for_dereference = Rc::clone(&traversal_for_response);
             let client = Rc::clone(&traversal_for_response.borrow().client);
-            if let Err(error) = client.request_with_print_limit_when(
+            if let Err(error) = client.request_with_print_limit_for_stop(
                 &command,
                 AUTOMATIC_PRINT_ELEMENTS,
+                generation,
                 move || linked_is_current(&traversal_for_guard),
                 move |_, record| {
                     if record.class == "superseded" {
@@ -291,16 +322,20 @@ fn request_linked_children(traversal: Rc<RefCell<LinkedTraversal>>, current: Var
         );
         return;
     };
-    let client = Rc::clone(&traversal.borrow().client);
+    let (client, generation) = {
+        let traversal = traversal.borrow();
+        (Rc::clone(&traversal.client), traversal.generation)
+    };
     let command = format!(
         "-var-list-children --all-values {} 0 {LINKED_NODE_FIELD_LIMIT}",
         crate::debugger::quote(varobj)
     );
     let traversal_for_guard = Rc::clone(&traversal);
     let traversal_for_response = Rc::clone(&traversal);
-    if let Err(error) = client.request_with_print_limit_when(
+    if let Err(error) = client.request_with_print_limit_for_stop(
         &command,
         AUTOMATIC_PRINT_ELEMENTS,
+        generation,
         move || linked_is_current(&traversal_for_guard),
         move |_, record| {
             if record.class == "superseded" {
@@ -364,16 +399,20 @@ fn request_linked_access_groups(
         request_linked_access_groups(traversal, current, groups, fields);
         return;
     };
-    let client = Rc::clone(&traversal.borrow().client);
+    let (client, generation) = {
+        let traversal = traversal.borrow();
+        (Rc::clone(&traversal.client), traversal.generation)
+    };
     let command = format!(
         "-var-list-children --all-values {} 0 {LINKED_NODE_FIELD_LIMIT}",
         crate::debugger::quote(varobj)
     );
     let traversal_for_guard = Rc::clone(&traversal);
     let traversal_for_response = Rc::clone(&traversal);
-    if let Err(error) = client.request_with_print_limit_when(
+    if let Err(error) = client.request_with_print_limit_for_stop(
         &command,
         AUTOMATIC_PRINT_ELEMENTS,
+        generation,
         move || linked_is_current(&traversal_for_guard),
         move |_, record| {
             if record.class == "superseded" {

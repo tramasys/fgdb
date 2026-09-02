@@ -114,6 +114,7 @@ use debug_data::handle_debug_data_action;
 mod inferiors;
 mod kernel;
 mod lifecycle;
+mod lifecycle_reducer;
 mod misc;
 mod refresh;
 mod session;

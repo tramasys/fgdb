@@ -216,18 +216,25 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             return;
         };
         let generation = current_ui.current_stop_refresh_generation();
-        drop(current_ui);
-        let weak_ui = weak_ui.clone();
         let command = format!(
             "-data-read-memory-bytes {} 32",
             crate::debugger::quote(&expression)
         );
+        let Some(command) = current_ui
+            .stop_context(generation)
+            .map(|context| context.scope_frame(&command))
+        else {
+            return;
+        };
+        drop(current_ui);
+        let weak_ui = weak_ui.clone();
         let expression_for_response = expression.clone();
         let weak_ui_for_response = weak_ui.clone();
         let weak_ui_for_guard = weak_ui.clone();
         if client
-            .request_when(
+            .request_for_stop(
                 &command,
+                generation,
                 move || {
                     weak_ui_for_guard
                         .upgrade()
@@ -264,17 +271,24 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             return;
         };
         let generation = current_ui.current_stop_refresh_generation();
-        drop(current_ui);
-        let weak_ui = weak_ui.clone();
         let command = format!(
             "-data-read-memory-bytes {} {byte_count}",
             crate::debugger::quote(&expression)
         );
+        let Some(command) = current_ui
+            .stop_context(generation)
+            .map(|context| context.scope_frame(&command))
+        else {
+            return;
+        };
+        drop(current_ui);
+        let weak_ui = weak_ui.clone();
         let weak_ui_for_response = weak_ui.clone();
         let weak_ui_for_guard = weak_ui.clone();
         if client
-            .request_when(
+            .request_for_stop(
                 &command,
+                generation,
                 move || {
                     weak_ui_for_guard
                         .upgrade()
@@ -540,16 +554,20 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
     ui.set_variable_object_assignment_handler(move |variable, value| {
-        let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
+        let (Some(client), Some(current_ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
+            return;
+        };
+        let generation = current_ui.current_stop_refresh_generation();
+        let Some(context) = current_ui.stop_context(generation) else {
             return;
         };
         let command = variable.varobj.as_deref().map_or_else(
             || {
                 let expression = assignment_expression(&variable.name, &value);
-                format!(
+                context.scope_frame(&format!(
                     "-data-evaluate-expression {}",
                     crate::debugger::quote(&expression)
-                )
+                ))
             },
             |varobj| {
                 format!(
@@ -559,29 +577,41 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 )
             },
         );
+        drop(current_ui);
+        let weak_ui = weak_ui.clone();
         let name = variable.name;
         let weak_ui_for_response = weak_ui.clone();
-        if let Err(error) = client.request(&command, move |client, record| {
-            let Some(ui) = weak_ui_for_response.upgrade() else {
-                return;
-            };
-            if record.is_done() {
-                ui.set_status(
-                    "Paused",
-                    &format!("Updated {name} to {value}"),
-                    Some("status-ready"),
-                );
-                refresh_stopped_state(&weak_ui_for_response, client);
-            } else {
-                ui.set_status(
-                    "Assignment failed",
-                    record
-                        .error_message()
-                        .unwrap_or("GDB rejected the new value"),
-                    Some("status-error"),
-                );
-            }
-        }) && let Some(ui) = weak_ui.upgrade()
+        let weak_ui_for_guard = weak_ui.clone();
+        if let Err(error) = client.request_control_for_stop(
+            &command,
+            generation,
+            move || {
+                weak_ui_for_guard
+                    .upgrade()
+                    .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+            },
+            move |client, record| {
+                let Some(ui) = weak_ui_for_response.upgrade() else {
+                    return;
+                };
+                if record.is_done() {
+                    ui.set_status(
+                        "Paused",
+                        &format!("Updated {name} to {value}"),
+                        Some("status-ready"),
+                    );
+                    refresh_stopped_state(&weak_ui_for_response, client);
+                } else if record.class != "superseded" {
+                    ui.set_status(
+                        "Assignment failed",
+                        record
+                            .error_message()
+                            .unwrap_or("GDB rejected the new value"),
+                        Some("status-error"),
+                    );
+                }
+            },
+        ) && let Some(ui) = weak_ui.upgrade()
         {
             ui.set_status(
                 "Assignment failed",
@@ -609,9 +639,10 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
     ui.set_vector_assignment_handler(move |register, field, changes| {
-        let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
+        let (Some(client), Some(current_ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
             return;
         };
+        let generation = current_ui.current_stop_refresh_generation();
         let Some(expression) = vector_assignment_expression(&register, &field, &changes) else {
             return;
         };
@@ -619,33 +650,51 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             "-data-evaluate-expression {}",
             crate::debugger::quote(&expression)
         );
+        let Some(command) = current_ui
+            .stop_context(generation)
+            .map(|context| context.scope_frame(&command))
+        else {
+            return;
+        };
+        drop(current_ui);
+        let weak_ui = weak_ui.clone();
         let register_for_response = register;
         let weak_ui_for_response = weak_ui.clone();
-        if let Err(error) = client.request(&command, move |client, record| {
-            let Some(ui) = weak_ui_for_response.upgrade() else {
-                return;
-            };
-            if record.is_done() {
-                ui.set_status(
-                    "Paused",
-                    &format!(
-                        "Updated {} lane{} in ${register_for_response}",
-                        changes.len(),
-                        if changes.len() == 1 { "" } else { "s" }
-                    ),
-                    Some("status-ready"),
-                );
-                refresh_stopped_state(&weak_ui_for_response, client);
-            } else {
-                ui.set_status(
-                    "Register assignment failed",
-                    record
-                        .error_message()
-                        .unwrap_or("GDB rejected one of the lane values"),
-                    Some("status-error"),
-                );
-            }
-        }) && let Some(ui) = weak_ui.upgrade()
+        let weak_ui_for_guard = weak_ui.clone();
+        if let Err(error) = client.request_control_for_stop(
+            &command,
+            generation,
+            move || {
+                weak_ui_for_guard
+                    .upgrade()
+                    .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+            },
+            move |client, record| {
+                let Some(ui) = weak_ui_for_response.upgrade() else {
+                    return;
+                };
+                if record.is_done() {
+                    ui.set_status(
+                        "Paused",
+                        &format!(
+                            "Updated {} lane{} in ${register_for_response}",
+                            changes.len(),
+                            if changes.len() == 1 { "" } else { "s" }
+                        ),
+                        Some("status-ready"),
+                    );
+                    refresh_stopped_state(&weak_ui_for_response, client);
+                } else if record.class != "superseded" {
+                    ui.set_status(
+                        "Register assignment failed",
+                        record
+                            .error_message()
+                            .unwrap_or("GDB rejected one of the lane values"),
+                        Some("status-error"),
+                    );
+                }
+            },
+        ) && let Some(ui) = weak_ui.upgrade()
         {
             ui.set_status(
                 "Register assignment failed",

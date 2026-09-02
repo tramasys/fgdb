@@ -24,7 +24,19 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     if current_ui.inferior_is_running() {
         return;
     }
-    let generation = current_ui.start_stop_refresh();
+    let Some(context) = current_ui.begin_stop_refresh(client.transport_epoch()) else {
+        current_ui.set_debug_state_stale(true);
+        current_ui.set_status(
+            "Waiting for a stopped thread",
+            "GDB did not identify a safe thread context for inspection. Refreshing the thread list.",
+            Some("status-ready"),
+        );
+        drop(current_ui);
+        refresh_threads(ui, client);
+        return;
+    };
+    let generation = context.generation();
+    client.cancel_stale_stop_requests(generation);
     drop(current_ui);
 
     let variable_update_batch = variable_update_batch(ui, generation, 2);
@@ -37,23 +49,30 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     }));
 
     let weak_ui = ui.clone();
+    let weak_ui_for_guard = ui.clone();
     let stack_inputs_for_frames = Rc::clone(&stack_inputs);
+    let frames_command = context.scope_thread("-stack-list-frames 0 24");
     if client
-        .request("-stack-list-frames 0 24", move |client, record| {
-            if !stop_refresh_is_current(&weak_ui, generation) {
-                return;
-            }
-            let frames = if record.is_done() {
-                crate::debugger::stack_frames(&record)
-            } else {
-                Vec::new()
-            };
-            if let Some(ui) = weak_ui.upgrade() {
-                ui.show_frames_for_refresh(generation, &frames);
-            }
-            stack_inputs_for_frames.borrow_mut().frames = Some(frames);
-            start_stack_refresh_if_ready(&stack_inputs_for_frames, client);
-        })
+        .request_for_stop(
+            &frames_command,
+            generation,
+            move || stop_refresh_is_current(&weak_ui_for_guard, generation),
+            move |client, record| {
+                if !stop_refresh_is_current(&weak_ui, generation) {
+                    return;
+                }
+                let frames = if record.is_done() {
+                    crate::debugger::stack_frames(&record)
+                } else {
+                    Vec::new()
+                };
+                if let Some(ui) = weak_ui.upgrade() {
+                    ui.show_frames_for_refresh(generation, &frames);
+                }
+                stack_inputs_for_frames.borrow_mut().frames = Some(frames);
+                start_stack_refresh_if_ready(&stack_inputs_for_frames, client);
+            },
+        )
         .is_err()
     {
         if let Some(ui) = stack_inputs.borrow().ui.upgrade() {
@@ -64,33 +83,42 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     }
 
     let weak_ui = ui.clone();
-    let _ = client.request("-stack-info-frame", move |_, record| {
-        if !stop_refresh_is_current(&weak_ui, generation) {
-            return;
-        }
-        if let (Some(ui), Some(frame)) = (
-            weak_ui.upgrade(),
-            record
-                .is_done()
-                .then(|| crate::debugger::current_frame(&record))
-                .flatten(),
-        ) {
-            ui.show_execution_location(&frame);
-            let pc = frame.address.clone();
-            let architecture = frame.architecture;
-            ui.request_disassembly_for_stop(pc, architecture);
-        } else if let Some(ui) = weak_ui.upgrade() {
-            ui.clear_execution_location();
-        }
-    });
+    let weak_ui_for_guard = ui.clone();
+    let frame_command = context.scope_frame("-stack-info-frame");
+    let _ = client.request_for_stop(
+        &frame_command,
+        generation,
+        move || stop_refresh_is_current(&weak_ui_for_guard, generation),
+        move |_, record| {
+            if !stop_refresh_is_current(&weak_ui, generation) {
+                return;
+            }
+            if let (Some(ui), Some(frame)) = (
+                weak_ui.upgrade(),
+                record
+                    .is_done()
+                    .then(|| crate::debugger::current_frame(&record))
+                    .flatten(),
+            ) {
+                ui.show_execution_location(&frame);
+                let pc = frame.address.clone();
+                let architecture = frame.architecture;
+                ui.request_disassembly_for_stop(pc, architecture);
+            } else if let Some(ui) = weak_ui.upgrade() {
+                ui.clear_execution_location();
+            }
+        },
+    );
 
     let weak_ui = ui.clone();
     let weak_ui_for_guard = ui.clone();
     let variable_update_batch_for_locals = Rc::clone(&variable_update_batch);
+    let variables_command = context.scope_frame("-stack-list-variables --simple-values");
     if client
-        .request_with_print_limit_when(
-            "-stack-list-variables --simple-values",
+        .request_with_print_limit_for_stop(
+            &variables_command,
             AUTOMATIC_PRINT_ELEMENTS,
+            generation,
             move || stop_refresh_is_current(&weak_ui_for_guard, generation),
             move |client, record| {
                 if record.is_done() {
@@ -189,33 +217,39 @@ pub(super) fn refresh_registers(
     }
 
     let weak_ui = ui.clone();
+    let weak_ui_for_guard = ui.clone();
     let stack_inputs_for_names = Rc::clone(&stack_inputs);
     if client
-        .request("-data-list-register-names", move |client, record| {
-            if !stop_refresh_is_current(&weak_ui, generation) {
-                return;
-            }
-            if !record.is_done() {
-                finish_empty_register_refresh(
-                    &weak_ui,
+        .request_for_stop(
+            "-data-list-register-names",
+            generation,
+            move || stop_refresh_is_current(&weak_ui_for_guard, generation),
+            move |client, record| {
+                if !stop_refresh_is_current(&weak_ui, generation) {
+                    return;
+                }
+                if !record.is_done() {
+                    finish_empty_register_refresh(
+                        &weak_ui,
+                        client,
+                        generation,
+                        &stack_inputs_for_names,
+                    );
+                    return;
+                }
+                let names = Rc::new(crate::debugger::register_names(&record));
+                if let Some(ui) = weak_ui.upgrade() {
+                    ui.cache_register_names(Rc::clone(&names));
+                }
+                request_register_values(
+                    weak_ui.clone(),
                     client,
                     generation,
-                    &stack_inputs_for_names,
+                    Rc::clone(&stack_inputs_for_names),
+                    names,
                 );
-                return;
-            }
-            let names = Rc::new(crate::debugger::register_names(&record));
-            if let Some(ui) = weak_ui.upgrade() {
-                ui.cache_register_names(Rc::clone(&names));
-            }
-            request_register_values(
-                weak_ui.clone(),
-                client,
-                generation,
-                Rc::clone(&stack_inputs_for_names),
-                names,
-            );
-        })
+            },
+        )
         .is_err()
     {
         finish_empty_register_refresh(ui, client, generation, &stack_inputs);
@@ -260,33 +294,43 @@ fn request_register_values(
     for number in numbers {
         let _ = write!(command, " {number}");
     }
+    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
+        finish_empty_register_refresh(&ui, client, generation, &stack_inputs);
+        return;
+    };
     let ui_for_response = ui.clone();
+    let ui_for_guard = ui.clone();
     let stack_inputs_for_response = Rc::clone(&stack_inputs);
     if client
-        .request(&command, move |client, record| {
-            if !stop_refresh_is_current(&ui_for_response, generation) {
-                return;
-            }
-            if !record.is_done() {
-                finish_empty_register_refresh(
-                    &ui_for_response,
-                    client,
-                    generation,
-                    &stack_inputs_for_response,
-                );
-                return;
-            }
-            let registers = crate::debugger::registers(&record, &names);
-            let registers_for_enrichment = ui_for_response.upgrade().and_then(|ui| {
-                ui.show_registers_for_refresh(generation, &registers);
-                ui.register_details_visible().then(|| registers.clone())
-            });
-            stack_inputs_for_response.borrow_mut().registers = Some(registers);
-            start_stack_refresh_if_ready(&stack_inputs_for_response, client);
-            if let Some(registers) = registers_for_enrichment {
-                enrich_registers(ui_for_response, client, generation, registers);
-            }
-        })
+        .request_for_stop(
+            &command,
+            generation,
+            move || stop_refresh_is_current(&ui_for_guard, generation),
+            move |client, record| {
+                if !stop_refresh_is_current(&ui_for_response, generation) {
+                    return;
+                }
+                if !record.is_done() {
+                    finish_empty_register_refresh(
+                        &ui_for_response,
+                        client,
+                        generation,
+                        &stack_inputs_for_response,
+                    );
+                    return;
+                }
+                let registers = crate::debugger::registers(&record, &names);
+                let registers_for_enrichment = ui_for_response.upgrade().and_then(|ui| {
+                    ui.show_registers_for_refresh(generation, &registers);
+                    ui.register_details_visible().then(|| registers.clone())
+                });
+                stack_inputs_for_response.borrow_mut().registers = Some(registers);
+                start_stack_refresh_if_ready(&stack_inputs_for_response, client);
+                if let Some(registers) = registers_for_enrichment {
+                    enrich_registers(ui_for_response, client, generation, registers);
+                }
+            },
+        )
         .is_err()
     {
         finish_empty_register_refresh(&ui, client, generation, &stack_inputs);
@@ -503,13 +547,23 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
         "-var-create {varobj_name} * {}",
         crate::debugger::quote(&display_name)
     );
+    let command = {
+        let state = state.borrow();
+        frame_scoped_stop_command(&state.ui, state.generation, &command)
+    };
+    let Some(command) = command else {
+        discard_variable_refresh(client, &state);
+        return;
+    };
     let state_for_response = Rc::clone(&state);
     let state_for_guard = Rc::clone(&state);
     let varobj_for_response = varobj_name;
+    let generation = state.borrow().generation;
     if client
-        .request_with_print_limit_when(
+        .request_with_print_limit_for_stop(
             &command,
             AUTOMATIC_PRINT_ELEMENTS,
+            generation,
             move || {
                 let state = state_for_guard.borrow();
                 variable_refresh_is_current(&state)
@@ -618,9 +672,10 @@ fn variable_update_batch_ready(
     let batch_for_guard = Rc::clone(batch);
     let states_for_response = states.clone();
     if client
-        .request_with_print_limit_when(
+        .request_with_print_limit_for_stop(
             "-var-update --all-values *",
             AUTOMATIC_PRINT_ELEMENTS,
+            batch.generation,
             move || variable_update_batch_is_current(&batch_for_guard),
             move |client, record| {
                 apply_bulk_variable_updates(
@@ -825,6 +880,16 @@ pub(super) fn stop_refresh_is_current(ui: &Weak<Ui>, generation: u64) -> bool {
         .is_some_and(|ui| ui.is_stop_refresh_current(generation))
 }
 
+pub(crate) fn frame_scoped_stop_command(
+    ui: &Weak<Ui>,
+    generation: u64,
+    command: &str,
+) -> Option<String> {
+    ui.upgrade()?
+        .stop_context(generation)
+        .map(|context| context.scope_frame(command))
+}
+
 thread_local! {
     static OWNED_VARIABLE_OBJECTS: RefCell<HashMap<String, HashSet<String>>> =
         RefCell::new(HashMap::new());
@@ -904,6 +969,12 @@ pub(super) fn request_variable_children(
         request_lazy_local_variable_children(ui, client, variable, from);
         return;
     };
+    let Some(generation) = ui.upgrade().and_then(|current_ui| {
+        let generation = current_ui.current_stop_refresh_generation();
+        current_ui.stop_context(generation).map(|_| generation)
+    }) else {
+        return;
+    };
     // Dynamic varobjs may advertise available pretty-printed children only
     // through `has_more`; GDB documents `numchild` as unreliable for them.
     if variable.num_children > 0 || variable.has_more {
@@ -921,13 +992,15 @@ pub(super) fn request_variable_children(
         let ui_for_guard = ui.clone();
         let varobj_for_guard = varobj.clone();
         let variable_for_response = variable.clone();
-        if let Err(error) = client.request_with_print_limit_when(
+        if let Err(error) = client.request_with_print_limit_for_stop(
             &command,
             to,
+            generation,
             move || {
-                ui_for_guard
-                    .upgrade()
-                    .is_some_and(|ui| ui.has_variable_object(&varobj_for_guard))
+                ui_for_guard.upgrade().is_some_and(|ui| {
+                    ui.is_stop_refresh_current(generation)
+                        && ui.has_variable_object(&varobj_for_guard)
+                })
             },
             move |_, record| {
                 if let Some(ui) = ui_for_response.upgrade() {
@@ -975,93 +1048,117 @@ pub(super) fn request_variable_children(
     let client_for_path = Rc::clone(&client);
     let varobj_for_path = varobj.clone();
     let display_name = variable.name;
+    let ui_for_path_guard = ui.clone();
+    let varobj_for_path_guard = varobj.clone();
     if client
-        .request(&command, move |_, record| {
-            let Some(path) = crate::debugger::variable_path_expression(&record) else {
-                if let Some(ui) = ui_for_path.upgrade() {
-                    ui.show_variable_children_error(
-                        &varobj_for_path,
-                        record
-                            .error_message()
-                            .unwrap_or("GDB cannot dereference this pointer type"),
-                    );
+        .request_for_stop(
+            &command,
+            generation,
+            move || {
+                ui_for_path_guard.upgrade().is_some_and(|ui| {
+                    ui.is_stop_refresh_current(generation)
+                        && ui.has_variable_object(&varobj_for_path_guard)
+                })
+            },
+            move |_, record| {
+                let Some(path) = crate::debugger::variable_path_expression(&record) else {
+                    if let Some(ui) = ui_for_path.upgrade() {
+                        ui.show_variable_children_error(
+                            &varobj_for_path,
+                            record
+                                .error_message()
+                                .unwrap_or("GDB cannot dereference this pointer type"),
+                        );
+                    }
+                    return;
+                };
+                let dereference_varobj = next_variable_object_name();
+                let command = format!(
+                    "-var-create {dereference_varobj} * {}",
+                    crate::debugger::quote(&format!("*({path})"))
+                );
+                let command = ui_for_path.upgrade().and_then(|ui| {
+                    ui.stop_context(generation)
+                        .map(|context| context.scope_frame(&command))
+                });
+                let Some(command) = command else {
+                    return;
+                };
+                if !ui_for_path
+                    .upgrade()
+                    .is_some_and(|ui| ui.has_variable_object(&varobj_for_path))
+                {
+                    return;
                 }
-                return;
-            };
-            let dereference_varobj = next_variable_object_name();
-            let command = format!(
-                "-var-create {dereference_varobj} * {}",
-                crate::debugger::quote(&format!("*({path})"))
-            );
-            if !ui_for_path
-                .upgrade()
-                .is_some_and(|ui| ui.has_variable_object(&varobj_for_path))
-            {
-                return;
-            }
-            let ui_for_dereference = ui_for_path.clone();
-            let ui_for_guard = ui_for_path.clone();
-            let varobj_for_dereference = varobj_for_path.clone();
-            let varobj_for_guard = varobj_for_path.clone();
-            let ui_for_request_error = ui_for_path.clone();
-            let varobj_for_request_error = varobj_for_path.clone();
-            let dereference_varobj_for_response = dereference_varobj;
-            if client_for_path
-                .request_with_print_limit_when(
-                    &command,
-                    AUTOMATIC_PRINT_ELEMENTS,
-                    move || {
-                        ui_for_guard
-                            .upgrade()
-                            .is_some_and(|ui| ui.has_variable_object(&varobj_for_guard))
-                    },
-                    move |client, record| {
-                        let child = record
-                            .is_done()
-                            .then(|| {
-                                crate::debugger::variable_object(
-                                    &record,
-                                    &format!("*{display_name}"),
-                                )
+                let ui_for_dereference = ui_for_path.clone();
+                let ui_for_guard = ui_for_path.clone();
+                let varobj_for_dereference = varobj_for_path.clone();
+                let varobj_for_guard = varobj_for_path.clone();
+                let ui_for_request_error = ui_for_path.clone();
+                let varobj_for_request_error = varobj_for_path.clone();
+                let dereference_varobj_for_response = dereference_varobj;
+                if client_for_path
+                    .request_with_print_limit_for_stop(
+                        &command,
+                        AUTOMATIC_PRINT_ELEMENTS,
+                        generation,
+                        move || {
+                            ui_for_guard.upgrade().is_some_and(|ui| {
+                                ui.is_stop_refresh_current(generation)
+                                    && ui.has_variable_object(&varobj_for_guard)
                             })
-                            .flatten();
-                        if let Some(child) = child {
-                            let attached = ui_for_dereference.upgrade().is_some_and(|ui| {
-                                ui.show_variable_children(
+                        },
+                        move |client, record| {
+                            let child = record
+                                .is_done()
+                                .then(|| {
+                                    crate::debugger::variable_object(
+                                        &record,
+                                        &format!("*{display_name}"),
+                                    )
+                                })
+                                .flatten();
+                            if let Some(child) = child {
+                                let attached = ui_for_dereference.upgrade().is_some_and(|ui| {
+                                    ui.show_variable_children(
+                                        &varobj_for_dereference,
+                                        std::slice::from_ref(&child),
+                                    )
+                                });
+                                if attached {
+                                    register_owned_variable_object(
+                                        &varobj_for_dereference,
+                                        &dereference_varobj_for_response,
+                                    );
+                                } else {
+                                    delete_variable_object(
+                                        client,
+                                        &dereference_varobj_for_response,
+                                    );
+                                }
+                            } else if let Some(ui) = ui_for_dereference.upgrade() {
+                                delete_variable_object(client, &dereference_varobj_for_response);
+                                ui.show_variable_children_error(
                                     &varobj_for_dereference,
-                                    std::slice::from_ref(&child),
-                                )
-                            });
-                            if attached {
-                                register_owned_variable_object(
-                                    &varobj_for_dereference,
-                                    &dereference_varobj_for_response,
+                                    record
+                                        .error_message()
+                                        .unwrap_or("GDB cannot dereference this pointer"),
                                 );
                             } else {
                                 delete_variable_object(client, &dereference_varobj_for_response);
                             }
-                        } else if let Some(ui) = ui_for_dereference.upgrade() {
-                            delete_variable_object(client, &dereference_varobj_for_response);
-                            ui.show_variable_children_error(
-                                &varobj_for_dereference,
-                                record
-                                    .error_message()
-                                    .unwrap_or("GDB cannot dereference this pointer"),
-                            );
-                        } else {
-                            delete_variable_object(client, &dereference_varobj_for_response);
-                        }
-                    },
-                )
-                .is_err()
-                && let Some(ui) = ui_for_request_error.upgrade()
-            {
-                ui.show_variable_children_error(
-                    &varobj_for_request_error,
-                    "The MI channel is unavailable",
-                );
-            }
-        })
+                        },
+                    )
+                    .is_err()
+                    && let Some(ui) = ui_for_request_error.upgrade()
+                {
+                    ui.show_variable_children_error(
+                        &varobj_for_request_error,
+                        "The MI channel is unavailable",
+                    );
+                }
+            },
+        )
         .is_err()
         && let Some(ui) = ui.upgrade()
     {
@@ -1096,6 +1193,12 @@ fn request_lazy_local_variable_children(
         "-var-create {varobj} * {}",
         crate::debugger::quote(&variable.name)
     );
+    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
+        if let Some(ui) = ui.upgrade() {
+            ui.finish_local_variable_object(generation, &variable);
+        }
+        return;
+    };
     let ui_for_guard = ui.clone();
     let variable_for_guard = variable.clone();
     let ui_for_response = ui.clone();
@@ -1103,9 +1206,10 @@ fn request_lazy_local_variable_children(
     let client_for_response = Rc::clone(&client);
     let varobj_for_response = varobj.clone();
     if client
-        .request_with_print_limit_when(
+        .request_with_print_limit_for_stop(
             &command,
             AUTOMATIC_PRINT_ELEMENTS,
+            generation,
             move || {
                 ui_for_guard.upgrade().is_some_and(|ui| {
                     ui.is_stop_refresh_current(generation)
@@ -1266,11 +1370,16 @@ pub(super) fn request_register_chain(
         "-data-evaluate-expression {}",
         crate::debugger::quote(&expression)
     );
+    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
+        complete_register_sequence(client, &refresh);
+        return;
+    };
     let refresh_for_guard = Rc::clone(&refresh);
     let refresh_for_handler = Rc::clone(&refresh);
     if client
-        .request_when(
+        .request_for_stop(
             &command,
+            generation,
             move || {
                 let state = refresh_for_guard.borrow();
                 stop_refresh_is_current(&state.ui, state.generation)
@@ -1390,12 +1499,17 @@ pub(super) fn request_register_string(
         "-data-evaluate-expression {}",
         crate::debugger::quote(&expression)
     );
+    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
+        complete_register_sequence(client, &refresh);
+        return;
+    };
     let refresh_for_handler = Rc::clone(&refresh);
     let refresh_for_guard = Rc::clone(&refresh);
     if client
-        .request_with_print_limit_when(
+        .request_with_print_limit_for_stop(
             &command,
             POINTER_STRING_PREVIEW_ELEMENTS,
+            generation,
             move || {
                 let state = refresh_for_guard.borrow();
                 stop_refresh_is_current(&state.ui, state.generation)
@@ -1504,18 +1618,32 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
     }
     let selected_inferior = cached.and_then(|(_, _, selected)| selected);
     let ui_for_request = ui.clone();
+    let ui_for_guard = ui.clone();
     if client
-        .request("-list-thread-groups", move |client, record| {
-            if !stop_refresh_is_current(&ui, generation) {
-                return;
-            }
-            let pid = selected_inferior
-                .as_deref()
-                .and_then(|id| crate::debugger::inferior_pid_for_group(&record, id))
-                .or_else(|| crate::debugger::inferior_pid(&record));
-            let debugger_pid = ui.upgrade().and_then(|ui| ui.debugger_pid());
-            continue_stack_refresh(ui, client, generation, registers, frames, pid, debugger_pid);
-        })
+        .request_for_stop(
+            "-list-thread-groups",
+            generation,
+            move || stop_refresh_is_current(&ui_for_guard, generation),
+            move |client, record| {
+                if !stop_refresh_is_current(&ui, generation) {
+                    return;
+                }
+                let pid = selected_inferior
+                    .as_deref()
+                    .and_then(|id| crate::debugger::inferior_pid_for_group(&record, id))
+                    .or_else(|| crate::debugger::inferior_pid(&record));
+                let debugger_pid = ui.upgrade().and_then(|ui| ui.debugger_pid());
+                continue_stack_refresh(
+                    ui,
+                    client,
+                    generation,
+                    registers,
+                    frames,
+                    pid,
+                    debugger_pid,
+                );
+            },
+        )
         .is_err()
         && let Some(ui) = ui_for_request.upgrade()
     {
@@ -1744,42 +1872,51 @@ fn request_tls_runtime(
         .find(|region| region.contains(base))
         .map(MemoryRegion::description);
     let command = format!("-data-read-memory-bytes ${register} {TLS_READ_BYTES}");
+    let Some(command) = frame_scoped_stop_command(ui, generation, &command) else {
+        return;
+    };
     let ui_for_response = ui.clone();
+    let ui_for_guard = ui.clone();
     let ui_for_error = ui.clone();
     let mapping_for_response = mapping.clone();
     if client
-        .request(&command, move |_, record| {
-            if !stop_refresh_is_current(&ui_for_response, generation) {
-                return;
-            }
-            let memory = record
-                .is_done()
-                .then(|| crate::debugger::memory_block(&record))
-                .flatten();
-            if let Some(ui) = ui_for_response.upgrade() {
-                if let Some(memory) = memory.as_ref() {
-                    ui.show_tls_runtime_for_refresh(
-                        generation,
-                        (architecture, ui.target_endian(), ui.target_pointer_bits()),
-                        register,
-                        base,
-                        mapping_for_response.as_deref(),
-                        Ok(memory),
-                    );
-                } else {
-                    ui.show_tls_runtime_for_refresh(
-                        generation,
-                        (architecture, ui.target_endian(), ui.target_pointer_bits()),
-                        register,
-                        base,
-                        mapping_for_response.as_deref(),
-                        Err(record
-                            .error_message()
-                            .unwrap_or("GDB could not read the live TLS block")),
-                    );
+        .request_for_stop(
+            &command,
+            generation,
+            move || stop_refresh_is_current(&ui_for_guard, generation),
+            move |_, record| {
+                if !stop_refresh_is_current(&ui_for_response, generation) {
+                    return;
                 }
-            }
-        })
+                let memory = record
+                    .is_done()
+                    .then(|| crate::debugger::memory_block(&record))
+                    .flatten();
+                if let Some(ui) = ui_for_response.upgrade() {
+                    if let Some(memory) = memory.as_ref() {
+                        ui.show_tls_runtime_for_refresh(
+                            generation,
+                            (architecture, ui.target_endian(), ui.target_pointer_bits()),
+                            register,
+                            base,
+                            mapping_for_response.as_deref(),
+                            Ok(memory),
+                        );
+                    } else {
+                        ui.show_tls_runtime_for_refresh(
+                            generation,
+                            (architecture, ui.target_endian(), ui.target_pointer_bits()),
+                            register,
+                            base,
+                            mapping_for_response.as_deref(),
+                            Err(record
+                                .error_message()
+                                .unwrap_or("GDB could not read the live TLS block")),
+                        );
+                    }
+                }
+            },
+        )
         .is_err()
         && let Some(ui) = ui_for_error.upgrade()
     {
@@ -1845,45 +1982,54 @@ pub(super) fn request_stack_memory(
         "-data-read-memory-bytes ${stack_register} {}",
         word_size * STACK_WORD_COUNT
     );
+    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
+        return;
+    };
     let ui_for_request = ui.clone();
+    let ui_for_guard = ui.clone();
     if client
-        .request(&command, move |client, record| {
-            if !stop_refresh_is_current(&ui, generation) {
-                return;
-            }
-            let Some(memory) = crate::debugger::memory_block(&record) else {
-                if let Some(ui) = ui.upgrade() {
-                    ui.show_stack_unavailable_for_refresh(
-                        generation,
-                        record
-                            .error_message()
-                            .unwrap_or("GDB could not read memory at the stack pointer"),
-                    );
+        .request_for_stop(
+            &command,
+            generation,
+            move || stop_refresh_is_current(&ui_for_guard, generation),
+            move |client, record| {
+                if !stop_refresh_is_current(&ui, generation) {
+                    return;
                 }
-                return;
-            };
-            let entries = build_stack_entries(
-                &memory,
-                word_size,
-                endian,
-                architecture,
-                &registers,
-                &frames,
-                &regions,
-            );
-            if let Some(ui) = ui.upgrade() {
-                ui.show_stack_for_refresh(generation, &entries);
-            }
-            enrich_stack(
-                ui,
-                client,
-                generation,
-                entries,
-                stack_register,
-                word_size,
-                endian,
-            );
-        })
+                let Some(memory) = crate::debugger::memory_block(&record) else {
+                    if let Some(ui) = ui.upgrade() {
+                        ui.show_stack_unavailable_for_refresh(
+                            generation,
+                            record
+                                .error_message()
+                                .unwrap_or("GDB could not read memory at the stack pointer"),
+                        );
+                    }
+                    return;
+                };
+                let entries = build_stack_entries(
+                    &memory,
+                    word_size,
+                    endian,
+                    architecture,
+                    &registers,
+                    &frames,
+                    &regions,
+                );
+                if let Some(ui) = ui.upgrade() {
+                    ui.show_stack_for_refresh(generation, &entries);
+                }
+                enrich_stack(
+                    ui,
+                    client,
+                    generation,
+                    entries,
+                    stack_register,
+                    word_size,
+                    endian,
+                );
+            },
+        )
         .is_err()
         && let Some(ui) = ui_for_request.upgrade()
     {
@@ -1981,11 +2127,16 @@ pub(super) fn request_stack_chain(
         "-data-evaluate-expression {}",
         crate::debugger::quote(&expression)
     );
+    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
+        complete_stack_sequence(client, &refresh);
+        return;
+    };
     let refresh_for_guard = Rc::clone(&refresh);
     let refresh_for_handler = Rc::clone(&refresh);
     if client
-        .request_when(
+        .request_for_stop(
             &command,
+            generation,
             move || {
                 let state = refresh_for_guard.borrow();
                 stop_refresh_is_current(&state.ui, state.generation)
@@ -2092,12 +2243,17 @@ pub(super) fn request_stack_string(
         "-data-evaluate-expression {}",
         crate::debugger::quote(&expression)
     );
+    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
+        complete_stack_sequence(client, &refresh);
+        return;
+    };
     let refresh_for_handler = Rc::clone(&refresh);
     let refresh_for_guard = Rc::clone(&refresh);
     if client
-        .request_with_print_limit_when(
+        .request_with_print_limit_for_stop(
             &command,
             POINTER_STRING_PREVIEW_ELEMENTS,
+            generation,
             move || {
                 let state = refresh_for_guard.borrow();
                 stop_refresh_is_current(&state.ui, state.generation)

@@ -9,6 +9,7 @@ pub(super) struct SessionController {
     client: Rc<MiClient>,
     configured_environment: RefCell<HashSet<String>>,
     busy: Cell<bool>,
+    generation: Cell<u64>,
 }
 
 enum SequenceCompletion {
@@ -21,6 +22,7 @@ struct CommandSequence {
     controller: Rc<SessionController>,
     commands: RefCell<VecDeque<SessionCommand>>,
     completion: RefCell<Option<SequenceCompletion>>,
+    generation: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,6 +54,7 @@ impl SessionController {
             client,
             configured_environment: RefCell::new(HashSet::new()),
             busy: Cell::new(false),
+            generation: Cell::new(0),
         })
     }
 
@@ -184,10 +187,13 @@ impl SessionController {
         commands: Vec<SessionCommand>,
         completion: SequenceCompletion,
     ) {
+        let generation = self.generation.get().wrapping_add(1);
+        self.generation.set(generation);
         let sequence = Rc::new(CommandSequence {
             controller: Rc::clone(self),
             commands: RefCell::new(commands.into()),
             completion: RefCell::new(Some(completion)),
+            generation,
         });
         run_next(sequence);
     }
@@ -351,11 +357,18 @@ fn run_next(sequence: Rc<CommandSequence>) {
         return;
     };
     let sequence_for_response = Rc::clone(&sequence);
+    let sequence_for_guard = Rc::clone(&sequence);
     let state_after = command.state_after;
     if let Err(error) = sequence
         .controller
         .client
-        .request(&command.text, move |client, record| {
+        .request_for_session(
+            &command.text,
+            sequence.generation,
+            move || {
+                sequence_for_guard.controller.generation.get() == sequence_for_guard.generation
+            },
+            move |client, record| {
             if record.is_success() {
                 if let Some(delta) = state_after
                     && let Some(ui) = sequence_for_response.controller.ui.upgrade()
@@ -375,7 +388,8 @@ fn run_next(sequence: Rc<CommandSequence>) {
                         .unwrap_or("GDB rejected the session command"),
                 );
             }
-        })
+            },
+        )
     {
         sequence
             .controller

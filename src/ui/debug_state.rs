@@ -1490,6 +1490,7 @@ impl Ui {
     }
 
     pub fn start_stop_refresh(&self) -> u64 {
+        self.active_stop_context.borrow_mut().take();
         self.pending_local_variable_objects.borrow_mut().clear();
         clear_variable_change_markers(&self.locals_store);
         clear_variable_change_markers(&self.expression_watches_store);
@@ -1519,8 +1520,52 @@ impl Ui {
         generation
     }
 
+    pub(crate) fn begin_stop_refresh(
+        &self,
+        transport_epoch: u64,
+    ) -> Option<crate::debugger::StopContext> {
+        let generation = self.start_stop_refresh();
+        let thread_id = self.current_thread_id()?;
+        let frame_level = match self.selected_frame_level.get() {
+            u32::MAX => 0,
+            level => level,
+        };
+        if self.selected_frame_level.get() != frame_level {
+            self.select_frame_in_view(frame_level);
+        }
+        let context = crate::debugger::StopContext::new(
+            transport_epoch,
+            generation,
+            self.selected_inferior_id(),
+            thread_id,
+            frame_level,
+        )?;
+        self.active_stop_context.replace(Some(context.clone()));
+        Some(context)
+    }
+
+    pub(crate) fn stop_context(&self, generation: u64) -> Option<crate::debugger::StopContext> {
+        self.active_stop_context
+            .borrow()
+            .as_ref()
+            .filter(|context| context.generation() == generation)
+            .cloned()
+    }
+
     pub fn is_stop_refresh_current(&self, generation: u64) -> bool {
-        self.stop_refresh_generation.get() == generation
+        if self.stop_refresh_generation.get() != generation {
+            return false;
+        }
+        self.active_stop_context
+            .borrow()
+            .as_ref()
+            .is_some_and(|context| {
+                self.current_thread_id().as_deref() == Some(context.thread_id())
+                    && self.selected_frame_level.get() == context.frame_level()
+                    && context.inferior_id().is_none_or(|inferior| {
+                        self.selected_inferior_id().as_deref() == Some(inferior)
+                    })
+            })
     }
 
     pub fn current_stop_refresh_generation(&self) -> u64 {

@@ -6,8 +6,11 @@ use crate::debugger::{EnumVariant, ValueTypeKind, ValueTypeMetadata};
 static NEXT_METADATA_ID: AtomicU64 = AtomicU64::new(1);
 
 pub(super) fn request_value_type_metadata(ui: Weak<Ui>, client: Rc<MiClient>, variable: Variable) {
+    let Some(generation) = ui.upgrade().map(|ui| ui.current_stop_refresh_generation()) else {
+        return;
+    };
     let Some(varobj) = variable.varobj.as_deref() else {
-        request_resolved_metadata(ui, client, variable.name.clone(), variable);
+        request_resolved_metadata(ui, client, generation, variable.name.clone(), variable);
         return;
     };
     let command = format!(
@@ -15,19 +18,30 @@ pub(super) fn request_value_type_metadata(ui: Weak<Ui>, client: Rc<MiClient>, va
         crate::debugger::quote(varobj)
     );
     let ui_for_response = ui.clone();
+    let ui_for_guard = ui.clone();
     let client_for_response = Rc::clone(&client);
     let variable_for_response = variable.clone();
     if client
-        .request(&command, move |_, record| {
-            let expression = crate::debugger::variable_path_expression(&record)
-                .unwrap_or_else(|| variable_for_response.name.clone());
-            request_resolved_metadata(
-                ui_for_response,
-                client_for_response,
-                expression,
-                variable_for_response,
-            );
-        })
+        .request_for_stop(
+            &command,
+            generation,
+            move || {
+                ui_for_guard
+                    .upgrade()
+                    .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+            },
+            move |_, record| {
+                let expression = crate::debugger::variable_path_expression(&record)
+                    .unwrap_or_else(|| variable_for_response.name.clone());
+                request_resolved_metadata(
+                    ui_for_response,
+                    client_for_response,
+                    generation,
+                    expression,
+                    variable_for_response,
+                );
+            },
+        )
         .is_err()
     {
         present_editor(&ui, variable, None);
@@ -40,8 +54,22 @@ pub(super) fn assign_float_bytes(
     variable: Variable,
     raw_bytes: Vec<u8>,
 ) {
+    let Some(generation) = ui.upgrade().and_then(|current_ui| {
+        let generation = current_ui.current_stop_refresh_generation();
+        current_ui.stop_context(generation).map(|_| generation)
+    }) else {
+        show_float_assignment_error(&ui, "The selected stop context changed");
+        return;
+    };
     let Some(varobj) = variable.varobj.as_deref() else {
-        assign_resolved_float(ui, client, variable.name.clone(), variable, raw_bytes);
+        assign_resolved_float(
+            ui,
+            client,
+            generation,
+            variable.name.clone(),
+            variable,
+            raw_bytes,
+        );
         return;
     };
     let command = format!(
@@ -49,28 +77,38 @@ pub(super) fn assign_float_bytes(
         crate::debugger::quote(varobj)
     );
     let ui_for_response = ui.clone();
+    let ui_for_guard = ui.clone();
     let client_for_response = Rc::clone(&client);
     let variable_for_response = variable;
     let raw_for_response = raw_bytes;
     if client
-        .request(&command, move |_, record| {
-            let Some(expression) = crate::debugger::variable_path_expression(&record) else {
-                show_float_assignment_error(
-                    &ui_for_response,
-                    record
-                        .error_message()
-                        .unwrap_or("GDB could not resolve the selected value"),
+        .request_for_stop(
+            &command,
+            generation,
+            move || stop_refresh_is_current(&ui_for_guard, generation),
+            move |_, record| {
+                if record.class == "superseded" {
+                    return;
+                }
+                let Some(expression) = crate::debugger::variable_path_expression(&record) else {
+                    show_float_assignment_error(
+                        &ui_for_response,
+                        record
+                            .error_message()
+                            .unwrap_or("GDB could not resolve the selected value"),
+                    );
+                    return;
+                };
+                assign_resolved_float(
+                    ui_for_response,
+                    client_for_response,
+                    generation,
+                    expression,
+                    variable_for_response,
+                    raw_for_response,
                 );
-                return;
-            };
-            assign_resolved_float(
-                ui_for_response,
-                client_for_response,
-                expression,
-                variable_for_response,
-                raw_for_response,
-            );
-        })
+            },
+        )
         .is_err()
     {
         show_float_assignment_error(&ui, "MI channel is unavailable");
@@ -80,6 +118,7 @@ pub(super) fn assign_float_bytes(
 fn assign_resolved_float(
     ui: Weak<Ui>,
     client: Rc<MiClient>,
+    generation: u64,
     expression: String,
     variable: Variable,
     raw_bytes: Vec<u8>,
@@ -99,28 +138,38 @@ gdb.selected_inferior().write_memory(v.address,b[::-1] if little else b)"#,
         "python exec(bytes.fromhex(\"{}\").decode())",
         hex(python.as_bytes())
     ));
+    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
+        show_float_assignment_error(&ui, "The selected stop context changed");
+        return;
+    };
     let ui_for_response = ui.clone();
-    if let Err(error) = client.request(&command, move |client, record| {
-        let Some(ui) = ui_for_response.upgrade() else {
-            return;
-        };
-        if record.is_done() {
-            ui.set_status(
-                "Paused",
-                &format!("Updated the exact bit pattern of {}", variable.name),
-                Some("status-ready"),
-            );
-            refresh_stopped_state(&ui_for_response, client);
-        } else {
-            ui.set_status(
-                "Assignment failed",
-                record.error_message().unwrap_or(
-                    "GDB could not write the raw bits (the value may live only in a register)",
-                ),
-                Some("status-error"),
-            );
-        }
-    }) {
+    let ui_for_guard = ui.clone();
+    if let Err(error) = client.request_control_for_stop(
+        &command,
+        generation,
+        move || stop_refresh_is_current(&ui_for_guard, generation),
+        move |client, record| {
+            let Some(ui) = ui_for_response.upgrade() else {
+                return;
+            };
+            if record.is_done() {
+                ui.set_status(
+                    "Paused",
+                    &format!("Updated the exact bit pattern of {}", variable.name),
+                    Some("status-ready"),
+                );
+                refresh_stopped_state(&ui_for_response, client);
+            } else if record.class != "superseded" {
+                ui.set_status(
+                    "Assignment failed",
+                    record.error_message().unwrap_or(
+                        "GDB could not write the raw bits (the value may live only in a register)",
+                    ),
+                    Some("status-error"),
+                );
+            }
+        },
+    ) {
         show_float_assignment_error(&ui, &error.to_string());
     }
 }
@@ -134,6 +183,7 @@ fn show_float_assignment_error(ui: &Weak<Ui>, message: &str) {
 fn request_resolved_metadata(
     ui: Weak<Ui>,
     client: Rc<MiClient>,
+    generation: u64,
     expression: String,
     variable: Variable,
 ) {
@@ -144,30 +194,59 @@ fn request_resolved_metadata(
         "python exec(bytes.fromhex(\"{}\").decode())",
         hex(python.as_bytes())
     ));
+    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
+        return;
+    };
     let ui_for_response = ui.clone();
+    let ui_for_guard = ui.clone();
     let client_for_response = Rc::clone(&client);
     let variable_for_response = variable.clone();
     if client
-        .request(&command, move |_, record| {
-            if !record.is_done() {
-                present_editor(&ui_for_response, variable_for_response, None);
-                return;
-            }
-            let ui_for_value = ui_for_response.clone();
-            let variable_for_value = variable_for_response.clone();
-            let evaluate = format!("-data-evaluate-expression ${convenience}");
-            if client_for_response
-                .request(&evaluate, move |_, record| {
-                    let metadata = crate::debugger::evaluated_value(&record)
-                        .as_deref()
-                        .and_then(parse_metadata);
-                    present_editor(&ui_for_value, variable_for_value, metadata);
-                })
-                .is_err()
-            {
-                present_editor(&ui_for_response, variable_for_response, None);
-            }
-        })
+        .request_for_stop(
+            &command,
+            generation,
+            move || {
+                ui_for_guard
+                    .upgrade()
+                    .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+            },
+            move |_, record| {
+                if !record.is_done() {
+                    present_editor(&ui_for_response, variable_for_response, None);
+                    return;
+                }
+                let ui_for_value = ui_for_response.clone();
+                let variable_for_value = variable_for_response.clone();
+                let evaluate = format!("-data-evaluate-expression ${convenience}");
+                let Some(evaluate) =
+                    frame_scoped_stop_command(&ui_for_response, generation, &evaluate)
+                else {
+                    return;
+                };
+                if client_for_response
+                    .request_for_stop(
+                        &evaluate,
+                        generation,
+                        {
+                            let ui = ui_for_value.clone();
+                            move || {
+                                ui.upgrade()
+                                    .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+                            }
+                        },
+                        move |_, record| {
+                            let metadata = crate::debugger::evaluated_value(&record)
+                                .as_deref()
+                                .and_then(parse_metadata);
+                            present_editor(&ui_for_value, variable_for_value, metadata);
+                        },
+                    )
+                    .is_err()
+                {
+                    present_editor(&ui_for_response, variable_for_response, None);
+                }
+            },
+        )
         .is_err()
     {
         present_editor(&ui, variable, None);

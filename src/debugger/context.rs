@@ -1,6 +1,86 @@
 use super::{
     MemoryBlock, MemoryKind, Register, StackEntry, StackFrame, TargetArchitecture, TargetEndian,
+    thread_id_argument,
 };
+
+/// Immutable identity for data collected at one debugger stop.
+///
+/// GDB keeps an implicit global thread and frame selection. UI callbacks and
+/// terminal commands can change that selection while an earlier group of MI
+/// requests is still in flight, so stopped-state requests must carry their own
+/// explicit context and responses must be rejected once this identity is no
+/// longer current.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StopContext {
+    transport_epoch: u64,
+    generation: u64,
+    inferior_id: Option<String>,
+    thread_id: String,
+    frame_level: u32,
+}
+
+impl StopContext {
+    pub(crate) fn new(
+        transport_epoch: u64,
+        generation: u64,
+        inferior_id: Option<String>,
+        thread_id: String,
+        frame_level: u32,
+    ) -> Option<Self> {
+        thread_id_argument(&thread_id)?;
+        Some(Self {
+            transport_epoch,
+            generation,
+            inferior_id,
+            thread_id,
+            frame_level,
+        })
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn inferior_id(&self) -> Option<&str> {
+        self.inferior_id.as_deref()
+    }
+
+    pub(crate) fn thread_id(&self) -> &str {
+        &self.thread_id
+    }
+
+    pub(crate) fn frame_level(&self) -> u32 {
+        self.frame_level
+    }
+
+    /// Add an explicit thread selector to an MI command.
+    pub(crate) fn scope_thread(&self, command: &str) -> String {
+        scope_mi_command(command, &self.thread_id, None)
+    }
+
+    /// Add explicit thread and frame selectors to an MI command.
+    pub(crate) fn scope_frame(&self, command: &str) -> String {
+        scope_mi_command(command, &self.thread_id, Some(self.frame_level))
+    }
+}
+
+fn scope_mi_command(command: &str, thread_id: &str, frame_level: Option<u32>) -> String {
+    let (operation, arguments) = command
+        .split_once(' ')
+        .map_or((command, ""), |(operation, arguments)| {
+            (operation, arguments)
+        });
+    let mut scoped = format!("{operation} --thread {thread_id}");
+    if let Some(frame_level) = frame_level {
+        use std::fmt::Write as _;
+        let _ = write!(scoped, " --frame {frame_level}");
+    }
+    if !arguments.is_empty() {
+        scoped.push(' ');
+        scoped.push_str(arguments);
+    }
+    scoped
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MemoryRegion {
@@ -245,12 +325,34 @@ fn region_description(region: &MemoryRegion) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        MemoryRegion, annotate_memory_regions, build_stack_entries, parse_memory_region,
-        pointer_address,
+        MemoryRegion, StopContext, annotate_memory_regions, build_stack_entries,
+        parse_memory_region, pointer_address,
     };
     use crate::debugger::{
         MemoryBlock, MemoryKind, Register, StackFrame, TargetArchitecture, TargetEndian,
     };
+
+    #[test]
+    fn stop_context_scopes_mi_commands_without_reordering_arguments() {
+        let context =
+            StopContext::new(7, 11, Some(String::from("i2")), String::from("2.19"), 3).unwrap();
+        assert_eq!(
+            context.scope_thread("-stack-list-frames 0 24"),
+            "-stack-list-frames --thread 2.19 0 24"
+        );
+        assert_eq!(
+            context.scope_frame("-stack-list-variables --simple-values"),
+            "-stack-list-variables --thread 2.19 --frame 3 --simple-values"
+        );
+        assert_eq!(context.transport_epoch, 7);
+        assert_eq!(context.generation(), 11);
+        assert_eq!(context.inferior_id(), Some("i2"));
+    }
+
+    #[test]
+    fn stop_context_rejects_unsafe_thread_identifiers() {
+        assert!(StopContext::new(1, 1, None, String::from("1 --all"), 0).is_none());
+    }
 
     #[test]
     fn extracts_addresses_from_symbolic_values() {

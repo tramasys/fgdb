@@ -26,15 +26,19 @@ use parser::{MAX_MI_RECORD_BYTES, parse_any_stream_output};
 #[cfg(test)]
 use requests::MAX_MI_COMMAND_BYTES;
 use requests::{
-    MAX_CAPTURED_CONSOLE_BYTES, MAX_PENDING_REQUESTS, MAX_REQUEST_LIFETIME, MAX_SCOPED_REQUESTS,
-    PendingRequest, REQUEST_TIMEOUT, REQUEST_TIMEOUT_POLL, ResponseHandler, ScopedMiRequest,
-    error_record, scoped_mi_command, synthetic_error_record, validate_console_command,
-    validate_mi_command,
+    CommandClass, CommandOwner, MAX_CAPTURED_CONSOLE_BYTES, MAX_PENDING_REQUESTS,
+    MAX_SCOPED_REQUESTS, PendingRequest, REQUEST_TIMEOUT, REQUEST_TIMEOUT_POLL, ResponseHandler,
+    ScopedMiRequest, error_record, scoped_mi_command, synthetic_error_record,
+    validate_console_command, validate_mi_command,
 };
+#[cfg(test)]
+use transport::test_transport;
 use transport::{
     IoSource, MAX_MI_WRITE_BATCH_BYTES, MAX_QUEUED_MI_BYTES, MiTransport, OutgoingQueue,
     complete_input_end, drain_outgoing, open_transport,
 };
+
+type TransportFactory = Rc<dyn Fn() -> io::Result<MiTransport>>;
 
 type EventHandler = Box<dyn Fn(&MiClient, MiEvent)>;
 
@@ -42,10 +46,10 @@ const MAX_RETAINED_MI_INPUT_BYTES: usize = 256 * 1024;
 const RUST_PRINTER_PROBE: &str = "python import gdb; next(printer for holder in [*gdb.objfiles(), gdb.current_progspace()] for printer in getattr(holder, \"pretty_printers\", []) if getattr(printer, \"name\", \"\") == \"rust\")";
 
 pub struct MiClient {
+    transport_factory: TransportFactory,
     transport: RefCell<MiTransport>,
     incoming: RefCell<Vec<u8>>,
     next_token: Cell<u64>,
-    response_progress_generation: Cell<u64>,
     printer_probe_generation: Cell<u64>,
     ready: Cell<bool>,
     initializing: Cell<bool>,
@@ -69,12 +73,21 @@ pub struct MiClient {
 
 impl MiClient {
     pub fn open(event_handler: impl Fn(&MiClient, MiEvent) + 'static) -> io::Result<Rc<Self>> {
-        let transport = open_transport()?;
+        let factory: TransportFactory = Rc::new(open_transport);
+        let transport = factory()?;
+        Ok(Self::from_transport(transport, factory, event_handler))
+    }
+
+    fn from_transport(
+        transport: MiTransport,
+        transport_factory: TransportFactory,
+        event_handler: impl Fn(&MiClient, MiEvent) + 'static,
+    ) -> Rc<Self> {
         let client = Rc::new_cyclic(|self_weak| Self {
+            transport_factory,
             transport: RefCell::new(transport),
             incoming: RefCell::new(Vec::new()),
             next_token: Cell::new(1),
-            response_progress_generation: Cell::new(0),
             printer_probe_generation: Cell::new(0),
             ready: Cell::new(false),
             initializing: Cell::new(false),
@@ -96,7 +109,20 @@ impl MiClient {
             unusable_reported: Cell::new(false),
         });
         client.install_sources();
-        Ok(client)
+        client
+    }
+
+    #[cfg(test)]
+    fn open_with_injected_transport(
+        event_handler: impl Fn(&MiClient, MiEvent) + 'static,
+    ) -> io::Result<(Rc<Self>, std::os::unix::net::UnixStream)> {
+        let (transport, peer) = test_transport()?;
+        let factory: TransportFactory =
+            Rc::new(|| test_transport().map(|(transport, _)| transport));
+        Ok((
+            Self::from_transport(transport, factory, event_handler),
+            peer,
+        ))
     }
 
     pub fn slave_path(&self) -> PathBuf {
@@ -109,6 +135,10 @@ impl MiClient {
 
     pub(crate) fn weak(&self) -> Weak<Self> {
         self.self_weak.clone()
+    }
+
+    pub(crate) fn transport_epoch(&self) -> u64 {
+        self.transport_epoch.get()
     }
 
     pub(crate) fn quarantine(&self, message: impl Into<String>) {
@@ -144,7 +174,7 @@ impl MiClient {
             self.outgoing.borrow_mut().clear();
             self.fail_pending_requests("GDB/MI connection replaced");
         }
-        let transport = open_transport()?;
+        let transport = (self.transport_factory)()?;
         let slave_path = transport.slave_path.clone();
         self.transport.replace(transport);
         self.incoming.borrow_mut().clear();
@@ -156,7 +186,6 @@ impl MiClient {
         self.ready.set(false);
         self.initializing.set(false);
         self.capabilities.replace(GdbCapabilities::default());
-        self.response_progress_generation.set(0);
         self.connected.set(true);
         self.install_sources();
         Ok(slave_path)
@@ -183,7 +212,7 @@ impl MiClient {
     }
 
     pub fn send(&self, command: &str) -> io::Result<u64> {
-        self.request(command, |client, record| {
+        self.request_inner(command, CommandClass::Execution, None, None, Box::new(|client, record| {
             if record.is_success() {
                 return;
             }
@@ -199,7 +228,7 @@ impl MiClient {
                 "superseded" | "unavailable" => {}
                 _ => (client.event_handler)(client, MiEvent::Error(message)),
             }
-        })
+        }))
     }
 
     pub fn request(
@@ -207,7 +236,13 @@ impl MiClient {
         command: &str,
         handler: impl FnOnce(&MiClient, MiRecord) + 'static,
     ) -> io::Result<u64> {
-        self.request_inner(command, None, Box::new(handler))
+        self.request_inner(
+            command,
+            CommandClass::Control,
+            None,
+            None,
+            Box::new(handler),
+        )
     }
 
     pub fn request_when(
@@ -216,12 +251,137 @@ impl MiClient {
         is_current: impl Fn() -> bool + 'static,
         handler: impl FnOnce(&MiClient, MiRecord) + 'static,
     ) -> io::Result<u64> {
-        self.request_inner(command, Some(Box::new(is_current)), Box::new(handler))
+        self.request_inner(
+            command,
+            CommandClass::Inspection,
+            None,
+            Some(Box::new(is_current)),
+            Box::new(handler),
+        )
+    }
+
+    pub(crate) fn request_for_stop(
+        &self,
+        command: &str,
+        generation: u64,
+        is_current: impl Fn() -> bool + 'static,
+        handler: impl FnOnce(&MiClient, MiRecord) + 'static,
+    ) -> io::Result<u64> {
+        self.request_inner(
+            command,
+            CommandClass::Inspection,
+            Some(CommandOwner::Stop(generation)),
+            Some(Box::new(is_current)),
+            Box::new(handler),
+        )
+    }
+
+    pub(crate) fn request_control_for_stop(
+        &self,
+        command: &str,
+        generation: u64,
+        is_current: impl Fn() -> bool + 'static,
+        handler: impl FnOnce(&MiClient, MiRecord) + 'static,
+    ) -> io::Result<u64> {
+        self.request_inner(
+            command,
+            CommandClass::Control,
+            Some(CommandOwner::Stop(generation)),
+            Some(Box::new(is_current)),
+            Box::new(handler),
+        )
+    }
+
+    pub(crate) fn request_for_session(
+        &self,
+        command: &str,
+        generation: u64,
+        is_current: impl Fn() -> bool + 'static,
+        handler: impl FnOnce(&MiClient, MiRecord) + 'static,
+    ) -> io::Result<u64> {
+        self.request_inner(
+            command,
+            CommandClass::Control,
+            Some(CommandOwner::Session(generation)),
+            Some(Box::new(is_current)),
+            Box::new(handler),
+        )
+    }
+
+    /// Cancel inspection work that belongs to an older stop. Tokened requests
+    /// can be forgotten safely even after being written because their late
+    /// result cannot be mistaken for another command. A sent scoped console
+    /// request remains installed until its un-tokened output is drained.
+    pub(crate) fn cancel_stale_stop_requests(&self, current_generation: u64) {
+        let stale_tokens = self
+            .pending
+            .borrow()
+            .iter()
+            .filter_map(|(token, request)| {
+                matches!(request.owner, Some(CommandOwner::Stop(generation)) if generation != current_generation)
+                    .then_some(*token)
+            })
+            .collect::<Vec<_>>();
+        for token in stale_tokens {
+            self.outgoing.borrow_mut().cancel_unstarted(token);
+            let request = { self.pending.borrow_mut().remove(&token) };
+            if let Some(request) = request {
+                (request.handler)(
+                    self,
+                    synthetic_error_record("superseded", "request superseded by a newer stop"),
+                );
+            }
+        }
+
+        let mut cancelled = Vec::new();
+        {
+            let mut queue = self.scoped_queue.borrow_mut();
+            let mut retained = VecDeque::with_capacity(queue.len());
+            while let Some(request) = queue.pop_front() {
+                if matches!(request.owner, Some(CommandOwner::Stop(generation)) if generation != current_generation)
+                {
+                    cancelled.push(request);
+                } else {
+                    retained.push_back(request);
+                }
+            }
+            *queue = retained;
+        }
+        for request in cancelled {
+            (request.handler)(
+                self,
+                synthetic_error_record("superseded", "request superseded by a newer stop"),
+                request.output,
+            );
+        }
+
+        let active = self.scoped_request.borrow().as_ref().and_then(|request| {
+            matches!(request.owner, Some(CommandOwner::Stop(generation)) if generation != current_generation)
+                .then_some(request.token)
+        });
+        if let Some(token) = active {
+            if self.outgoing.borrow_mut().cancel_unstarted(token) {
+                let request = { self.scoped_request.borrow_mut().take() };
+                if let Some(request) = request {
+                    (request.handler)(
+                        self,
+                        synthetic_error_record("superseded", "request superseded by a newer stop"),
+                        request.output,
+                    );
+                }
+                self.start_next_scoped_request();
+            } else if let Some(request) = self.scoped_request.borrow_mut().as_mut() {
+                request.cancelled = true;
+            }
+        }
+        self.stop_write_source_if_idle();
     }
 
     fn request_inner(
         &self,
         command: &str,
+        class: CommandClass,
+        owner: Option<CommandOwner>,
         is_current: Option<Box<dyn Fn() -> bool>>,
         handler: ResponseHandler,
     ) -> io::Result<u64> {
@@ -237,9 +397,10 @@ impl MiClient {
         self.pending.borrow_mut().insert(
             token,
             PendingRequest {
-                deadline: now + REQUEST_TIMEOUT,
-                hard_deadline: now + MAX_REQUEST_LIFETIME,
-                progress_generation: self.response_progress_generation.get(),
+                class,
+                owner,
+                deadline: now + class.timeout(),
+                hard_deadline: now + class.maximum_lifetime(),
                 is_current,
                 handler,
             },
@@ -251,10 +412,28 @@ impl MiClient {
         Ok(token)
     }
 
-    pub fn request_with_print_limit_when(
+    pub(crate) fn request_with_print_limit_for_stop(
         &self,
         command: &str,
         elements: usize,
+        generation: u64,
+        is_current: impl Fn() -> bool + 'static,
+        handler: impl FnOnce(&MiClient, MiRecord) + 'static,
+    ) -> io::Result<u64> {
+        self.request_with_print_limit_for_owner(
+            command,
+            elements,
+            Some(CommandOwner::Stop(generation)),
+            is_current,
+            handler,
+        )
+    }
+
+    fn request_with_print_limit_for_owner(
+        &self,
+        command: &str,
+        elements: usize,
+        owner: Option<CommandOwner>,
         is_current: impl Fn() -> bool + 'static,
         handler: impl FnOnce(&MiClient, MiRecord) + 'static,
     ) -> io::Result<u64> {
@@ -262,16 +441,20 @@ impl MiClient {
         let command = scoped_mi_command(command, elements);
         validate_mi_command(&command)?;
         let token = self.allocate_token();
+        let class = CommandClass::Inspection;
         let request = ScopedMiRequest {
             token,
+            class,
+            owner,
             command,
             response: None,
             output: String::new(),
             expect_nested_mi: true,
             is_current: Box::new(is_current),
             handler: Box::new(move |client, record, _| handler(client, record)),
-            deadline: Instant::now() + REQUEST_TIMEOUT,
-            hard_deadline: Instant::now() + MAX_REQUEST_LIFETIME,
+            deadline: Instant::now() + class.timeout(),
+            hard_deadline: Instant::now() + class.maximum_lifetime(),
+            cancelled: false,
         };
         self.queue_scoped_request(request)?;
         Ok(token)
@@ -300,14 +483,17 @@ impl MiClient {
         let token = self.allocate_token();
         self.queue_scoped_request(ScopedMiRequest {
             token,
+            class: CommandClass::Background,
+            owner: None,
             command,
             response: None,
             output: String::new(),
             expect_nested_mi: false,
             is_current: Box::new(is_current),
             handler: Box::new(handler),
-            deadline: Instant::now() + REQUEST_TIMEOUT,
-            hard_deadline: Instant::now() + MAX_REQUEST_LIFETIME,
+            deadline: Instant::now() + CommandClass::Background.timeout(),
+            hard_deadline: Instant::now() + CommandClass::Background.maximum_lifetime(),
+            cancelled: false,
         })?;
         Ok(token)
     }
@@ -358,8 +544,8 @@ impl MiClient {
         // request that waited behind another scoped query still receives the
         // full response window once it reaches the command channel.
         let now = Instant::now();
-        request.deadline = now + REQUEST_TIMEOUT;
-        request.hard_deadline = now + MAX_REQUEST_LIFETIME;
+        request.deadline = now + request.class.timeout();
+        request.hard_deadline = now + request.class.maximum_lifetime();
         if let Err(error) = self.write_tokenized(request.token, &request.command) {
             return Err(Box::new((error, request)));
         }
@@ -660,25 +846,15 @@ impl MiClient {
 
     fn expire_requests(&self) {
         let now = Instant::now();
-        let progress_generation = self.response_progress_generation.get();
         let expired = {
-            let mut pending = self.pending.borrow_mut();
+            let pending = self.pending.borrow();
             pending
-                .iter_mut()
+                .iter()
                 .filter_map(|(token, request)| {
                     let stale = request
                         .is_current
                         .as_ref()
                         .is_some_and(|is_current| !is_current());
-                    if !stale
-                        && request.deadline <= now
-                        && request.hard_deadline > now
-                        && request.progress_generation != progress_generation
-                    {
-                        request.deadline = now + REQUEST_TIMEOUT;
-                        request.progress_generation = progress_generation;
-                        return None;
-                    }
                     (stale || request.deadline <= now || request.hard_deadline <= now)
                         .then_some((*token, stale))
                 })
@@ -688,6 +864,7 @@ impl MiClient {
             let cancelled_before_write = self.outgoing.borrow_mut().cancel_unstarted(token);
             let request = { self.pending.borrow_mut().remove(&token) };
             if let Some(request) = request {
+                let command_class = request.class;
                 let (class, message) = if stale {
                     ("superseded", "request superseded")
                 } else {
@@ -696,8 +873,9 @@ impl MiClient {
                 (request.handler)(self, synthetic_error_record(class, message));
                 if !stale && !cancelled_before_write {
                     self.report_unusable(format!(
-                        "GDB stopped making MI response progress for {} seconds or retained one request for more than five minutes. The command stream can no longer be synchronized safely.",
-                        REQUEST_TIMEOUT.as_secs()
+                        "GDB did not complete a {:?} command within its {}-second response budget. The command stream can no longer be synchronized safely.",
+                        command_class,
+                        command_class.timeout().as_secs()
                     ));
                     return;
                 }
@@ -707,7 +885,7 @@ impl MiClient {
         let scoped_state = self.scoped_request.borrow().as_ref().map(|request| {
             (
                 request.token,
-                !(request.is_current)(),
+                request.cancelled || !(request.is_current)(),
                 request.deadline <= now,
                 request.hard_deadline <= now,
             )
@@ -726,6 +904,7 @@ impl MiClient {
                 let Some(request) = request else {
                     return;
                 };
+                let command_class = request.class;
                 let (class, reason) = if lifetime_timed_out {
                     ("timeout", "GDB request exceeded its maximum lifetime")
                 } else if idle_timed_out {
@@ -737,13 +916,14 @@ impl MiClient {
                 if timed_out && !cancelled_before_write {
                     let message = if lifetime_timed_out {
                         format!(
-                            "GDB retained one command for more than {} minutes. The MI command stream can no longer be synchronized safely.",
-                            MAX_REQUEST_LIFETIME.as_secs() / 60
+                            "GDB retained one {:?} command for more than {} seconds. The MI command stream can no longer be synchronized safely.",
+                            command_class,
+                            command_class.maximum_lifetime().as_secs()
                         )
                     } else {
                         format!(
                             "GDB stopped making command progress for {} seconds. The MI command stream can no longer be synchronized safely.",
-                            REQUEST_TIMEOUT.as_secs()
+                            command_class.timeout().as_secs()
                         )
                     };
                     self.report_unusable(message);
@@ -995,14 +1175,6 @@ impl MiClient {
 
         if matches!(line.as_bytes().first(), Some(b'~' | b'&' | b'@')) {
             let output = parse_any_stream_output(line).ok();
-            if output.as_deref().is_some_and(gdb_reports_unusable_target) {
-                self.report_unusable(String::from(
-                    "GDB reported that the target is no longer writable and further execution is probably impossible.",
-                ));
-            }
-            if self.quarantined.get() {
-                return;
-            }
             // Console stream records matter on this private MI channel only
             // while a scoped `interpreter-exec mi` request is waiting for its
             // nested result. Avoid decoding ignored console output, and avoid
@@ -1013,8 +1185,7 @@ impl MiClient {
                 let command_output = matches!(line.as_bytes().first(), Some(b'~' | b'&'));
                 if command_output {
                     let now = Instant::now();
-                    request.deadline = (now + REQUEST_TIMEOUT).min(request.hard_deadline);
-                    self.note_response_progress();
+                    request.deadline = (now + request.class.timeout()).min(request.hard_deadline);
                 }
                 if request.expect_nested_mi {
                     if line.starts_with('~')
@@ -1054,8 +1225,7 @@ impl MiClient {
                     let Some(request) = request else {
                         return;
                     };
-                    self.note_response_progress();
-                    let response = if !(request.is_current)() {
+                    let response = if request.cancelled || !(request.is_current)() {
                         synthetic_error_record("superseded", "request superseded")
                     } else if request.expect_nested_mi {
                         request.response.unwrap_or_else(|| {
@@ -1076,7 +1246,6 @@ impl MiClient {
                     .token
                     .and_then(|token| self.pending.borrow_mut().remove(&token));
                 if let Some(request) = handler {
-                    self.note_response_progress();
                     (request.handler)(self, record);
                 }
             }
@@ -1106,8 +1275,19 @@ impl MiClient {
                     .and_then(|frame| result_field(frame, "addr"))
                     .and_then(MiValue::as_const)
                     .map(str::to_owned);
+                let frame_level = record
+                    .field("frame")
+                    .and_then(MiValue::as_tuple)
+                    .and_then(|frame| result_field(frame, "level"))
+                    .and_then(MiValue::as_const)
+                    .and_then(|level| level.parse().ok());
                 let thread_id = record
                     .field("thread-id")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned);
+                let group_id = record
+                    .field("thread-group")
+                    .or_else(|| record.field("thread-group-id"))
                     .and_then(MiValue::as_const)
                     .map(str::to_owned);
                 let fork_pid = record
@@ -1124,6 +1304,8 @@ impl MiClient {
                         signal_meaning,
                         address,
                         thread_id,
+                        group_id,
+                        frame_level,
                         fork_pid,
                         all_stopped,
                     },
@@ -1205,11 +1387,18 @@ impl MiClient {
                     .field("id")
                     .and_then(MiValue::as_const)
                     .map(str::to_owned);
+                let frame_level = record
+                    .field("frame")
+                    .and_then(MiValue::as_tuple)
+                    .and_then(|frame| result_field(frame, "level"))
+                    .and_then(MiValue::as_const)
+                    .and_then(|level| level.parse().ok());
                 (self.event_handler)(
                     self,
                     MiEvent::SelectionChanged {
                         thread_id,
                         group_id: None,
+                        frame_level,
                     },
                 );
             }
@@ -1223,16 +1412,26 @@ impl MiClient {
                     MiEvent::SelectionChanged {
                         thread_id: None,
                         group_id,
+                        frame_level: None,
                     },
                 );
             }
+            '=' if record.class == "cmd-param-changed" => {
+                let Some(parameter) = record
+                    .field("param")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned)
+                else {
+                    return;
+                };
+                let value = record
+                    .field("value")
+                    .and_then(MiValue::as_const)
+                    .map(str::to_owned);
+                (self.event_handler)(self, MiEvent::CommandParameterChanged { parameter, value });
+            }
             _ => {}
         }
-    }
-
-    fn note_response_progress(&self) {
-        self.response_progress_generation
-            .set(self.response_progress_generation.get().wrapping_add(1));
     }
 }
 
@@ -1271,11 +1470,6 @@ fn gdb_version_from_banner(output: &str) -> Option<String> {
             .then(|| version.to_owned())
         })
     })
-}
-
-fn gdb_reports_unusable_target(output: &str) -> bool {
-    output.contains("Further execution is probably impossible")
-        || output.contains("further execution is probably impossible")
 }
 
 fn looks_like_mi_record(line: &str) -> bool {
@@ -1372,6 +1566,44 @@ mod tests {
                 let second = client.reconnect().unwrap();
                 assert_ne!(first, second);
                 assert_eq!(client.slave_path(), second);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn injected_transport_runs_a_deterministic_request_transcript() {
+        use std::{
+            cell::RefCell,
+            io::{Read, Write},
+            rc::Rc,
+        };
+
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let result = Rc::new(RefCell::new(None));
+                let result_for_request = Rc::clone(&result);
+                let (client, mut peer) =
+                    super::MiClient::open_with_injected_transport(|_, _| {}).unwrap();
+                let token = client
+                    .request("-thread-info", move |_, record| {
+                        result_for_request.replace(Some(record.class));
+                    })
+                    .unwrap();
+
+                super::MiClient::on_write_ready(&client.weak(), gtk::glib::IOCondition::OUT);
+                let mut command = [0_u8; 128];
+                let count = peer.read(&mut command).unwrap();
+                assert_eq!(
+                    std::str::from_utf8(&command[..count]).unwrap(),
+                    format!("{token}-thread-info\n")
+                );
+
+                peer.write_all(format!("{token}^done\n").as_bytes())
+                    .unwrap();
+                super::MiClient::on_io_ready(&client.weak(), gtk::glib::IOCondition::IN);
+                assert_eq!(result.borrow().as_deref(), Some("done"));
             })
             .unwrap();
     }
@@ -1546,11 +1778,13 @@ mod tests {
                 client.process_line(r#"=thread-created,id="3",group-id="i2""#);
                 client.process_line(r#"=thread-exited,id="4",group-id="i2""#);
                 client.process_line(r#"=library-loaded,id="libc",thread-group="i2""#);
-                client.process_line(r#"=thread-selected,id="3""#);
+                client.process_line(
+                    r#"=thread-selected,id="3",frame={level="2",addr="0x401004"}"#,
+                );
                 client.process_line(r#"=thread-group-selected,id="i2""#);
                 client.process_line(r#"*running,thread-id="all""#);
                 client.process_line(
-                    r#"*stopped,reason="fork",newpid="4313",thread-id="3",stopped-threads="all",frame={addr="0x401000"}"#,
+                    r#"*stopped,reason="fork",newpid="4313",thread-id="3",thread-group="i2",stopped-threads="all",frame={level="0",addr="0x401000"}"#,
                 );
                 client.process_line(r#"=thread-group-exited,id="i2",exit-code="0""#);
                 client.process_line("(gdb)");
@@ -1576,10 +1810,12 @@ mod tests {
                         super::MiEvent::SelectionChanged {
                             thread_id: Some(String::from("3")),
                             group_id: None,
+                            frame_level: Some(2),
                         },
                         super::MiEvent::SelectionChanged {
                             thread_id: None,
                             group_id: Some(String::from("i2")),
+                            frame_level: None,
                         },
                         super::MiEvent::Running {
                             thread_id: Some(String::from("all")),
@@ -1590,6 +1826,8 @@ mod tests {
                             signal_meaning: None,
                             address: Some(String::from("0x401000")),
                             thread_id: Some(String::from("3")),
+                            group_id: Some(String::from("i2")),
+                            frame_level: Some(0),
                             fork_pid: Some(4313),
                             all_stopped: true,
                         },
@@ -1605,7 +1843,35 @@ mod tests {
     }
 
     #[test]
-    fn reports_fatal_gdb_target_warnings_once() {
+    fn publishes_structured_command_parameter_changes() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let events = Rc::new(RefCell::new(Vec::new()));
+                let events_for_client = Rc::clone(&events);
+                let client = super::MiClient::open(move |_, event| {
+                    events_for_client.borrow_mut().push(event);
+                })
+                .unwrap();
+                client.ready.set(true);
+                client.process_line(r#"=cmd-param-changed,param="scheduler-locking",value="step""#);
+
+                assert_eq!(
+                    events.borrow().as_slice(),
+                    [super::MiEvent::CommandParameterChanged {
+                        parameter: String::from("scheduler-locking"),
+                        value: Some(String::from("step")),
+                    }]
+                );
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn console_prose_does_not_drive_debugger_state() {
         use std::{cell::RefCell, rc::Rc};
 
         let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
@@ -1624,14 +1890,9 @@ mod tests {
                 client.process_line(warning);
                 client.process_line("(gdb)");
 
-                assert_eq!(
-                    events.borrow().as_slice(),
-                    [super::MiEvent::DebuggerUnusable(String::from(
-                        "GDB reported that the target is no longer writable and further execution is probably impossible."
-                    ))]
-                );
-                assert!(!client.is_ready());
-                assert!(client.request("-thread-info", |_, _| {}).is_err());
+                assert!(events.borrow().is_empty());
+                assert!(client.is_ready());
+                assert!(client.request("-thread-info", |_, _| {}).is_ok());
             })
             .unwrap();
     }
@@ -1743,7 +2004,7 @@ mod tests {
     }
 
     #[test]
-    fn response_progress_extends_later_requests_without_hiding_a_real_stall() {
+    fn unrelated_response_progress_does_not_extend_an_expired_request() {
         use std::{cell::RefCell, rc::Rc, time::Instant};
 
         let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
@@ -1770,20 +2031,62 @@ mod tests {
 
                 client.expire_requests();
 
-                assert!(second_result.borrow().is_none());
-                assert!(client.pending.borrow().contains_key(&second));
-                client.outgoing.borrow_mut().clear();
-                client
-                    .pending
-                    .borrow_mut()
-                    .get_mut(&second)
-                    .unwrap()
-                    .deadline = Instant::now();
-
-                client.expire_requests();
-
                 assert_eq!(second_result.borrow().as_deref(), Some("timeout"));
-                assert!(!client.is_ready());
+                assert!(!client.pending.borrow().contains_key(&second));
+                assert!(client.is_ready());
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn newer_stop_cancels_owned_inspection_without_touching_current_work() {
+        use std::{cell::RefCell, rc::Rc};
+
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let client = super::MiClient::open(|_, _| {}).unwrap();
+                client.ready.set(true);
+                let results = Rc::new(RefCell::new(Vec::new()));
+
+                let results_for_old = Rc::clone(&results);
+                let old = client
+                    .request_for_stop(
+                        "-stack-list-frames --thread 1",
+                        1,
+                        || true,
+                        move |_, record| results_for_old.borrow_mut().push(record.class),
+                    )
+                    .unwrap();
+                let results_for_scoped = Rc::clone(&results);
+                let old_scoped = client
+                    .request_with_print_limit_for_stop(
+                        "-stack-list-variables --thread 1 --frame 0 --simple-values",
+                        32,
+                        1,
+                        || true,
+                        move |_, record| results_for_scoped.borrow_mut().push(record.class),
+                    )
+                    .unwrap();
+                let current = client
+                    .request_for_stop("-thread-info", 2, || true, |_, _| {})
+                    .unwrap();
+
+                client.cancel_stale_stop_requests(2);
+
+                assert_eq!(results.borrow().as_slice(), ["superseded", "superseded"]);
+                assert!(!client.pending.borrow().contains_key(&old));
+                assert!(client.pending.borrow().contains_key(&current));
+                assert_ne!(
+                    client
+                        .scoped_request
+                        .borrow()
+                        .as_ref()
+                        .map(|request| request.token),
+                    Some(old_scoped)
+                );
+                assert!(client.is_ready());
             })
             .unwrap();
     }
@@ -1803,9 +2106,10 @@ mod tests {
                 let first_is_current_for_request = Rc::clone(&first_is_current);
                 let first_result_for_request = Rc::clone(&first_result);
                 let first = client
-                    .request_with_print_limit_when(
+                    .request_with_print_limit_for_owner(
                         "-data-evaluate-expression value",
                         32,
+                        None,
                         move || first_is_current_for_request.get(),
                         move |_, record| {
                             first_result_for_request.replace(Some(record.class));
@@ -1817,9 +2121,10 @@ mod tests {
                 client.outgoing.borrow_mut().clear();
                 first_is_current.set(false);
                 let second = client
-                    .request_with_print_limit_when(
+                    .request_with_print_limit_for_owner(
                         "-data-evaluate-expression other",
                         32,
+                        None,
                         || true,
                         |_, _| {},
                     )

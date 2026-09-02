@@ -380,7 +380,7 @@ impl Ui {
         self.invalidate_source_discovery();
     }
 
-    fn invalidate_source_discovery(&self) {
+    pub(crate) fn invalidate_source_discovery(&self) {
         self.resolved_source_paths.borrow_mut().clear();
         self.source_loaded_cache.borrow_mut().take();
         self.source_tree_cache.borrow_mut().take();

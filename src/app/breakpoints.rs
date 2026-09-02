@@ -843,12 +843,28 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
         }) {
             return;
         }
-        let weak_ui = weak_ui.clone();
-        let _ = client.request(
-            &format!(
+        let Some((stop_generation, command)) = weak_ui.upgrade().and_then(|ui| {
+            let stop_generation = ui.current_stop_refresh_generation();
+            let command = format!(
                 "-data-evaluate-expression {}",
                 crate::debugger::quote("(void*)$pc")
-            ),
+            );
+            ui.stop_context(stop_generation)
+                .map(|context| (stop_generation, context.scope_frame(&command)))
+        }) else {
+            return;
+        };
+        let weak_ui = weak_ui.clone();
+        let weak_ui_for_guard = weak_ui.clone();
+        let _ = client.request_for_stop(
+            &command,
+            stop_generation,
+            move || {
+                weak_ui_for_guard.upgrade().is_some_and(|ui| {
+                    ui.is_thread_refresh_current(generation)
+                        && ui.is_stop_refresh_current(stop_generation)
+                })
+            },
             move |_, record| {
                 if !record.is_done() {
                     return;

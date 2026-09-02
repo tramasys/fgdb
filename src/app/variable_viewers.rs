@@ -52,15 +52,20 @@ fn create_viewer_root(
         "-var-create {varobj_name} * {}",
         crate::debugger::quote(&request.variable.name)
     );
+    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
+        session.finish(STALE_VIEWER_MESSAGE);
+        return;
+    };
     let ui_for_guard = ui.clone();
     let session_for_guard = Rc::clone(&session);
     let ui_for_response = ui;
     let session_for_response = Rc::clone(&session);
     let client_for_response = Rc::clone(&client);
     let varobj_for_response = varobj_name;
-    if let Err(error) = client.request_with_print_limit_when(
+    if let Err(error) = client.request_with_print_limit_for_stop(
         &command,
         AUTOMATIC_PRINT_ELEMENTS,
+        generation,
         move || viewer_is_current(&ui_for_guard, &session_for_guard, generation),
         move |_, record| {
             if record.class == "superseded" {

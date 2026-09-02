@@ -20,6 +20,8 @@ pub enum MiEvent {
         signal_meaning: Option<String>,
         address: Option<String>,
         thread_id: Option<String>,
+        group_id: Option<String>,
+        frame_level: Option<u32>,
         fork_pid: Option<u32>,
         all_stopped: bool,
     },
@@ -40,6 +42,11 @@ pub enum MiEvent {
     SelectionChanged {
         thread_id: Option<String>,
         group_id: Option<String>,
+        frame_level: Option<u32>,
+    },
+    CommandParameterChanged {
+        parameter: String,
+        value: Option<String>,
     },
     Error(String),
     Disconnected,

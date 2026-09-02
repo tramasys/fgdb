@@ -16,16 +16,52 @@ pub(super) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 pub(super) const MAX_REQUEST_LIFETIME: Duration = Duration::from_secs(5 * 60);
 pub(super) const REQUEST_TIMEOUT_POLL: Duration = Duration::from_millis(250);
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum CommandClass {
+    Execution,
+    #[default]
+    Control,
+    Inspection,
+    Background,
+}
+
+impl CommandClass {
+    pub(super) fn timeout(self) -> Duration {
+        match self {
+            Self::Execution | Self::Control => REQUEST_TIMEOUT,
+            Self::Inspection => Duration::from_secs(15),
+            Self::Background => Duration::from_secs(60),
+        }
+    }
+
+    pub(super) fn maximum_lifetime(self) -> Duration {
+        match self {
+            Self::Execution | Self::Control => Duration::from_secs(60),
+            Self::Inspection => Duration::from_secs(90),
+            Self::Background => MAX_REQUEST_LIFETIME,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommandOwner {
+    Stop(u64),
+    Session(u64),
+}
+
 pub(super) struct PendingRequest {
+    pub(super) class: CommandClass,
+    pub(super) owner: Option<CommandOwner>,
     pub(super) deadline: Instant,
     pub(super) hard_deadline: Instant,
-    pub(super) progress_generation: u64,
     pub(super) is_current: Option<Box<dyn Fn() -> bool>>,
     pub(super) handler: ResponseHandler,
 }
 
 pub(super) struct ScopedMiRequest {
     pub(super) token: u64,
+    pub(super) class: CommandClass,
+    pub(super) owner: Option<CommandOwner>,
     pub(super) command: String,
     pub(super) response: Option<MiRecord>,
     pub(super) output: String,
@@ -34,6 +70,7 @@ pub(super) struct ScopedMiRequest {
     pub(super) handler: ScopedResponseHandler,
     pub(super) deadline: Instant,
     pub(super) hard_deadline: Instant,
+    pub(super) cancelled: bool,
 }
 
 pub(super) fn error_record(message: &str) -> MiRecord {

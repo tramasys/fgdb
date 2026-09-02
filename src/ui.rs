@@ -1552,6 +1552,7 @@ pub struct Ui {
     previous_registers: Rc<RefCell<HashMap<String, String>>>,
     cached_register_names: Rc<RefCell<Option<Rc<Vec<String>>>>>,
     stop_refresh_generation: Rc<Cell<u64>>,
+    active_stop_context: Rc<RefCell<Option<crate::debugger::StopContext>>>,
     thread_refresh_generation: Rc<Cell<u64>>,
     breakpoint_refresh_generation: Rc<Cell<u64>>,
     breakpoint_refresh_gate: Rc<RefreshGate>,

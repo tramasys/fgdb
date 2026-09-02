@@ -1,3 +1,4 @@
+use super::lifecycle_reducer::{EventAdmission, admit_event, reduce_stop_transition};
 use super::*;
 
 pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEvent) {
@@ -9,11 +10,8 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
     // records from the old command must not make the UI look usable again.
     // Ready is allowed to establish a freshly reconnected backend and
     // Disconnected still performs final transport cleanup.
-    if ui.gdb_recovery_required()
-        && !matches!(
-            &event,
-            MiEvent::Ready(_) | MiEvent::DebuggerUnusable(_) | MiEvent::Disconnected
-        )
+    if admit_event(ui.gdb_recovery_required(), &event)
+        == EventAdmission::IgnoreFromQuarantinedBackend
     {
         return;
     }
@@ -164,7 +162,8 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             // Any queued stop-state responses now describe the previous stop.
             // Invalidating them also prevents recursive pointer enrichment from
             // issuing more MI work while the inferior is running.
-            ui.start_stop_refresh();
+            let generation = ui.start_stop_refresh();
+            client.cancel_stale_stop_requests(generation);
             ui.start_thread_refresh();
             ui.invalidate_kernel_refresh();
             ui.invalidate_misc_refresh();
@@ -183,6 +182,8 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             signal_meaning,
             address,
             thread_id,
+            group_id,
+            frame_level,
             fork_pid,
             all_stopped,
         } => {
@@ -191,28 +192,28 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             // different thread. Some GDB versions omit stopped-threads="all"
             // on that replacement record. The preceding exit candidate makes
             // this stop unambiguous and prevents a false 15-second hang.
-            let replacement_after_thread_exit =
-                ui.thread_execution_exit_candidate().is_some() && ui.non_stop_mode() != Some(true);
-            let terminal_all_stopped = all_stopped || replacement_after_thread_exit;
+            let stop_transition = reduce_stop_transition(
+                ui.non_stop_mode(),
+                ui.thread_execution_exit_candidate().is_some(),
+                ui.active_thread_execution().as_deref(),
+                thread_id.as_deref(),
+                all_stopped,
+            );
+            let terminal_all_stopped = stop_transition.terminal_all_stopped;
             let transition_targets_group = ui.pending_execution_inferior().is_some();
             let thread_transition_affected =
                 ui.execution_transition_matches_thread(thread_id.as_deref(), terminal_all_stopped);
             let thread_action_affected =
                 ui.thread_execution_transition_matches(thread_id.as_deref(), terminal_all_stopped);
-            let active_execution_stopped = terminal_all_stopped
-                || ui
-                    .active_thread_execution()
-                    .as_deref()
-                    .is_some_and(|active| {
-                        matches!(thread_id.as_deref(), None | Some("all"))
-                            || thread_id.as_deref() == Some(active)
-                    });
+            let active_execution_stopped = stop_transition.active_execution_stopped;
             let was_until_active = ui.native_until_active();
             if active_execution_stopped || was_until_active {
                 ui.set_active_thread_execution(None);
                 ui.set_thread_execution_exit_candidate(None);
             }
+            ui.record_thread_group(thread_id.as_deref(), group_id.as_deref());
             ui.set_current_thread_id(thread_id.as_deref());
+            ui.select_frame_in_view(frame_level.unwrap_or(0));
             // The preceding *running event marks the inferior as running, but
             // stopped-state queries intentionally refuse to run in that state.
             // Clear it before populating context, source marks, registers and
@@ -366,14 +367,42 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         MiEvent::SelectionChanged {
             thread_id,
             group_id,
+            frame_level,
         } => {
             ui.apply_gdb_selection(thread_id.as_deref(), group_id.as_deref());
+            if let Some(level) = frame_level {
+                ui.select_frame_in_view(level);
+            }
             let inspectable = ui.selected_inferior_context_stopped() && !ui.native_until_active();
             refresh_inferiors(weak_ui, client);
             if inspectable {
                 ui.set_controls_running(false);
                 ui.set_debug_state_stale(false);
                 refresh_stopped_state(weak_ui, client);
+            }
+        }
+        MiEvent::CommandParameterChanged {
+            parameter,
+            value: _,
+        } => {
+            // GDB emits these while processing init files too. Ready performs
+            // the initial synchronization; reacting before that boundary can
+            // interleave application requests with MI bootstrap commands.
+            if !client.is_ready() {
+                return;
+            }
+            match parameter.as_str() {
+                "scheduler-locking" | "non-stop" => refresh_thread_policy(weak_ui, client),
+                "follow-fork-mode" | "detach-on-fork" => refresh_fork_policy(weak_ui, client),
+                "architecture" | "endian" => {
+                    ui.reset_target_abi();
+                    detect_target_abi(weak_ui, client);
+                }
+                "directories" | "substitute-path" => {
+                    ui.invalidate_source_discovery();
+                    request_initial_source(weak_ui, client);
+                }
+                _ => {}
             }
         }
         MiEvent::Error(message) => {

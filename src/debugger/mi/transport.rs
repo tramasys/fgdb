@@ -133,7 +133,7 @@ pub(super) enum IoSource {
 
 pub(super) struct MiTransport {
     pub(super) master: File,
-    pub(super) _slave: OwnedFd,
+    pub(super) _slave: Option<OwnedFd>,
     pub(super) slave_path: PathBuf,
 }
 
@@ -151,9 +151,28 @@ pub(super) fn open_transport() -> io::Result<MiTransport> {
     fcntl(&master, FcntlArg::F_SETFL(flags)).map_err(io::Error::other)?;
     Ok(MiTransport {
         master,
-        _slave: pty.slave,
+        _slave: Some(pty.slave),
         slave_path,
     })
+}
+
+#[cfg(test)]
+pub(super) fn test_transport() -> io::Result<(MiTransport, std::os::unix::net::UnixStream)> {
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
+
+    let (client, peer) = UnixStream::pair()?;
+    client.set_nonblocking(true)?;
+    peer.set_nonblocking(true)?;
+    let master = File::from(OwnedFd::from(client));
+    Ok((
+        MiTransport {
+            master,
+            _slave: None,
+            slave_path: PathBuf::from("<injected-mi-transport>"),
+        },
+        peer,
+    ))
 }
 
 pub(super) fn complete_input_end(incoming: &[u8]) -> Option<usize> {
