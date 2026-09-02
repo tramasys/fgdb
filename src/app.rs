@@ -16,7 +16,8 @@ use crate::{
         StackFrame, TargetArchitecture, TargetEndian, ThreadInfo, Variable,
         context::{
             MemoryRegion, annotate_memory_regions, build_stack_entries, is_pointer_register,
-            looks_like_string_word, pointer_address, read_memory_regions,
+            looks_like_string_word, memory_region_for_address, pointer_address,
+            read_memory_regions,
         },
         launch_gdb,
     },
@@ -40,11 +41,15 @@ const MAX_VARIABLE_CHILDREN: usize = 4096;
 const STACK_WORD_COUNT: usize = 32;
 const POINTER_STRING_PREVIEW_ELEMENTS: usize = 256;
 const POINTER_ENRICHMENT_CONCURRENCY: usize = 4;
-const MAX_AUTOMATIC_VARIABLE_OBJECTS: usize = 256;
+// Keep stop refresh responsive even in generated or macro-heavy frames.
+// Remaining aggregate roots stay visible and create their varobj lazily when
+// the user expands them.
+const MAX_AUTOMATIC_VARIABLE_OBJECTS: usize = 32;
 static NEXT_VARIABLE_OBJECT_ID: AtomicU64 = AtomicU64::new(1);
 
 fn next_variable_object_name() -> String {
     let id = NEXT_VARIABLE_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
+
     format!("fgdb_var_{}_{id}", std::process::id())
 }
 
@@ -86,6 +91,7 @@ struct VariableRefresh {
     needs_update: Vec<bool>,
     next_index: usize,
     created: usize,
+    automatic_creation_limit: usize,
     created_varobjs: HashSet<String>,
     update_batch: Option<Rc<VariableUpdateBatch>>,
     bulk_completed: bool,
@@ -163,6 +169,7 @@ mod tests {
         assert_eq!(pointer_expression("rsp", 0), "(void*)($rsp)");
         assert_eq!(pointer_expression("rsp", 1), "*(void**)($rsp)");
         assert_eq!(pointer_expression("rsp", 2), "*(void**)(*(void**)($rsp))");
+
         assert_eq!(
             stack_pointer_expression("rsp", 8, 1),
             "*(void**)(*(void**)($rsp+0x8))"
@@ -188,12 +195,16 @@ mod tests {
             memory_kind: MemoryKind::Stack,
             region: Some(String::from("rw-p · [stack]")),
         };
+
         let word = u64::from_le_bytes(*b"LD_LIBRA");
+
         assert_eq!(
             stack_string_address(&entry, word, 1, TargetEndian::Little, 8),
             Some(0x7fff_1000)
         );
+
         entry.memory_kind = MemoryKind::Code;
+
         assert_eq!(
             stack_string_address(&entry, word, 1, TargetEndian::Little, 8),
             None
@@ -203,6 +214,7 @@ mod tests {
     #[test]
     fn finds_the_pointer_behind_an_inline_register_string_preview() {
         let word = u64::from_le_bytes(*b"LD_LIBRA");
+
         let mut register = Register {
             name: String::from("rsp"),
             value: String::from("0x7fffffffc5f0"),
@@ -212,6 +224,7 @@ mod tests {
                 format!("0x{word:x}"),
             ],
         };
+
         assert_eq!(
             register_string_address(
                 &register,
@@ -223,7 +236,9 @@ mod tests {
             ),
             Some(0x7fff_f7fe_edf6)
         );
+
         register.name = String::from("rip");
+
         assert_eq!(
             register_string_address(
                 &register,
@@ -240,6 +255,7 @@ mod tests {
     #[test]
     fn builds_variable_assignment_expressions() {
         assert_eq!(assignment_expression("count", "42"), "count = (42)");
+
         assert_eq!(
             assignment_expression("message", "\"hello world\""),
             "message = (\"hello world\")"
@@ -252,6 +268,7 @@ mod tests {
             symbol_annotation("0x55555555516f <main+15>"),
             Some("<main+15>")
         );
+
         assert_eq!(parse_gdb_integer("0x2"), Some(2));
         assert_eq!(parse_gdb_integer("17"), Some(17));
     }
@@ -274,6 +291,7 @@ mod tests {
             .as_deref(),
             Some("($ymm0.v8_float[0] = (1.5), $ymm0.v8_float[7] = (-2.0))")
         );
+
         assert_eq!(vector_assignment_expression("xmm0", "v2_int64", &[]), None);
     }
 }

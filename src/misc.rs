@@ -15,7 +15,6 @@ use crate::{
 mod heap;
 
 pub(crate) use heap::{HeapDiscovery, NativeHeapQuery, NativeHeapReadRequest, inspect_native_heap};
-
 const MAX_AUXV_BYTES: usize = 1024 * 1024;
 const MAX_MAPS_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TASKS: usize = 4096;
@@ -193,6 +192,7 @@ const MAX_HEAP_INSPECTION_CELL_CHARS: usize = 2_048;
 fn parse_heap_inspection(command: &str, output: &str) -> HeapInspectionSnapshot {
     let output = strip_terminal_sequences(output);
     let truncated_by_capture = output.contains("[fgdb: console output truncated");
+
     let exception = output
         .lines()
         .skip_while(|line| !line.contains("Exception raised"))
@@ -200,6 +200,7 @@ fn parse_heap_inspection(command: &str, output: &str) -> HeapInspectionSnapshot 
         .map(str::trim)
         .find(|line| !line.is_empty() && !is_heap_output_divider(line))
         .map(str::to_owned);
+
     let mut rows = Vec::new();
     let mut section = String::new();
     let mut diagnostic = exception;
@@ -211,51 +212,63 @@ fn parse_heap_inspection(command: &str, output: &str) -> HeapInspectionSnapshot 
         if rows.len() == MAX_HEAP_INSPECTION_ROWS {
             break;
         }
+
         let line = raw_line.trim();
+
         if line.is_empty() || line.starts_with("[fgdb: console output truncated") {
             continue;
         }
+
         if line.contains("Exception raised") {
             break;
         }
+
         if let Some(title) = heap_output_title(line) {
             section = title.to_owned();
             rows.push(heap_inspection_row("Section", "", "", "", title));
             continue;
         }
+
         if let Some(row) = parse_heap_arena_row(line, &section) {
             arena_count += 1;
             rows.push(row);
             continue;
         }
+
         if let Some(row) = parse_heap_bin_row(line) {
             bin_count += 1;
             rows.push(row);
             continue;
         }
+
         if let Some(row) = parse_heap_chunk_row(line) {
             chunk_count += 1;
             rows.push(row);
             continue;
         }
+
         if let Some(row) = parse_heap_table_row(line) {
             chunk_count += usize::from(row.kind == "Chunk");
             rows.push(row);
             continue;
         }
+
         if let Some(row) = parse_heap_field_row(line, &section) {
             rows.push(row);
             continue;
         }
+
         if let Some(row) = parse_heap_label_row(line, &section) {
             rows.push(row);
             continue;
         }
 
         let is_error = heap_output_error(line);
+
         if is_error && diagnostic.is_none() {
             diagnostic = Some(trim_heap_status_prefix(line).to_owned());
         }
+
         rows.push(heap_inspection_row(
             if is_error { "Error" } else { "Info" },
             "",
@@ -268,21 +281,27 @@ fn parse_heap_inspection(command: &str, output: &str) -> HeapInspectionSnapshot 
     let row_limit_reached = rows.len() == MAX_HEAP_INSPECTION_ROWS;
     let truncated = truncated_by_capture || row_limit_reached;
     let mut counts = Vec::new();
+
     if arena_count > 0 {
         counts.push(format!("{arena_count} arena{}", plural(arena_count)));
     }
+
     if chunk_count > 0 {
         counts.push(format!("{chunk_count} chunk{}", plural(chunk_count)));
     }
+
     if bin_count > 0 {
         counts.push(format!("{bin_count} bin{}", plural(bin_count)));
     }
+
     if counts.is_empty() {
         counts.push(format!("{} output row{}", rows.len(), plural(rows.len())));
     }
+
     if truncated {
         counts.push(String::from("display capped"));
     }
+
     HeapInspectionSnapshot {
         command: command.to_owned(),
         summary: counts.join("  ·  "),
@@ -297,6 +316,7 @@ fn parse_heap_arena_row(line: &str, section: &str) -> Option<HeapInspectionRow> 
     let fields = parse_heap_object(line, "Arena")?;
     let location = heap_field(&fields, &["addr", "base"]).unwrap_or_default();
     let metric = heap_field(&fields, &["system_mem", "size"]).unwrap_or_default();
+
     let state = if section.to_ascii_lowercase().contains("main_arena") {
         "main"
     } else if section.to_ascii_lowercase().contains("thread_arena") {
@@ -304,6 +324,7 @@ fn parse_heap_arena_row(line: &str, section: &str) -> Option<HeapInspectionRow> 
     } else {
         ""
     };
+
     Some(heap_inspection_row(
         "Arena",
         &location,
@@ -319,9 +340,11 @@ fn parse_heap_chunk_row(line: &str) -> Option<HeapInspectionRow> {
     let location = heap_field(&fields, &["addr", "base"]).unwrap_or_default();
     let metric = heap_field(&fields, &["size", "usable_size"]).unwrap_or_default();
     let flags = heap_field(&fields, &["flags"]).unwrap_or_default();
+
     let suffix = line
         .rsplit_once(')')
         .map_or("", |(_, suffix)| suffix.trim());
+
     let details = [
         format_heap_fields(&fields, &["addr", "base", "size", "usable_size", "flags"]),
         suffix.to_owned(),
@@ -330,6 +353,7 @@ fn parse_heap_chunk_row(line: &str) -> Option<HeapInspectionRow> {
     .filter(|value| !value.is_empty())
     .collect::<Vec<_>>()
     .join("  ·  ");
+
     Some(heap_inspection_row(
         "Chunk", &location, &metric, &flags, &details,
     ))
@@ -340,13 +364,16 @@ fn parse_heap_bin_row(line: &str) -> Option<HeapInspectionRow> {
     let open = line.find("[idx=")?;
     let close = line[open..].find(']').map(|offset| open + offset)?;
     let name = line[..open].trim().trim_end_matches(':');
+
     if !name.to_ascii_lowercase().contains("bin") {
         return None;
     }
+
     let fields = parse_comma_fields(&line[open + 1..close]);
     let index = heap_field(&fields, &["idx"]).unwrap_or_default();
     let size = heap_field(&fields, &["size"]).unwrap_or_default();
     let count = heap_field(&fields, &["count"]);
+
     let metric = count.map_or(size.clone(), |count| {
         if size.is_empty() {
             format!("count {count}")
@@ -354,8 +381,10 @@ fn parse_heap_bin_row(line: &str) -> Option<HeapInspectionRow> {
             format!("{size}  ·  count {count}")
         }
     });
+
     let details = line[close + 1..].trim().trim_start_matches(':').trim();
     let lower = details.to_ascii_lowercase();
+
     let state = if lower.contains("corrupt") || lower.contains("loop detected") {
         "warning"
     } else if details.is_empty() || details == "0x00" {
@@ -363,6 +392,7 @@ fn parse_heap_bin_row(line: &str) -> Option<HeapInspectionRow> {
     } else {
         "occupied"
     };
+
     Some(heap_inspection_row(
         &normalize_heap_bin_name(name),
         &format!("index {index}"),
@@ -376,9 +406,11 @@ fn parse_heap_bin_row(line: &str) -> Option<HeapInspectionRow> {
 fn parse_heap_table_row(line: &str) -> Option<HeapInspectionRow> {
     let tokens = line.split_whitespace().collect::<Vec<_>>();
     let address = tokens.first()?.trim_end_matches(':');
+
     if !is_hex_address(address) || tokens.len() < 2 {
         return None;
     }
+
     let mut size_index = tokens
         .iter()
         .enumerate()
@@ -386,6 +418,7 @@ fn parse_heap_table_row(line: &str) -> Option<HeapInspectionRow> {
         .find_map(|(index, token)| {
             is_hex_address(token.trim_matches(['(', ')', ','])).then_some(index)
         });
+
     if size_index.is_some_and(|index| tokens[index].starts_with('(')) {
         size_index = tokens
             .iter()
@@ -395,12 +428,16 @@ fn parse_heap_table_row(line: &str) -> Option<HeapInspectionRow> {
                 is_hex_address(token.trim_matches(['(', ')', ','])).then_some(index)
             });
     }
+
     let state_index = size_index.and_then(|index| (index + 1 < tokens.len()).then_some(index + 1));
+
     let metric = size_index.map_or(String::new(), |index| {
         tokens[index].trim_matches(['(', ')', ',']).to_owned()
     });
+
     let state = state_index.map_or(String::new(), |index| tokens[index].to_owned());
     let detail_start = state_index.map_or(1, |index| index + 1);
+
     Some(heap_inspection_row(
         "Chunk",
         address,
@@ -415,6 +452,7 @@ fn parse_heap_field_row(line: &str, section: &str) -> Option<HeapInspectionRow> 
     let line = line.trim().trim_end_matches(',');
     let (name, value) = line.split_once(" = ")?;
     let name = name.trim();
+
     if name.is_empty()
         || name.len() > 96
         || !name
@@ -423,6 +461,7 @@ fn parse_heap_field_row(line: &str, section: &str) -> Option<HeapInspectionRow> 
     {
         return None;
     }
+
     Some(heap_inspection_row(
         if section.is_empty() { "Field" } else { section },
         name,
@@ -435,10 +474,13 @@ fn parse_heap_field_row(line: &str, section: &str) -> Option<HeapInspectionRow> 
 #[cfg(test)]
 fn parse_heap_label_row(line: &str, section: &str) -> Option<HeapInspectionRow> {
     let (name, value) = line.split_once(':')?;
+
     let name = name
         .trim()
         .trim_start_matches(['[', '+', '!', '-', '*', ']']);
+
     let value = value.trim();
+
     if name.is_empty()
         || value.is_empty()
         || name.len() > 96
@@ -451,6 +493,7 @@ fn parse_heap_label_row(line: &str, section: &str) -> Option<HeapInspectionRow> 
     {
         return None;
     }
+
     Some(heap_inspection_row(
         if section.is_empty() {
             "Property"
@@ -468,6 +511,7 @@ fn parse_heap_label_row(line: &str, section: &str) -> Option<HeapInspectionRow> 
 fn parse_heap_object(line: &str, kind: &str) -> Option<Vec<(String, String)>> {
     let start = line.find(&format!("{kind}("))? + kind.len() + 1;
     let end = line[start..].find(')').map(|offset| start + offset)?;
+
     Some(parse_comma_fields(&line[start..end]))
 }
 
@@ -477,6 +521,7 @@ fn parse_comma_fields(fields: &str) -> Vec<(String, String)> {
         .split(',')
         .filter_map(|field| {
             let (name, value) = field.trim().split_once('=')?;
+
             Some((name.trim().to_owned(), value.trim().to_owned()))
         })
         .collect()
@@ -505,6 +550,7 @@ fn format_heap_fields(fields: &[(String, String)], excluded: &[&str]) -> String 
 #[cfg(test)]
 fn normalize_heap_bin_name(name: &str) -> String {
     let lower = name.to_ascii_lowercase().replace('_', " ");
+
     if lower.contains("tcache") {
         String::from("Tcache bin")
     } else if lower.contains("fast") {
@@ -526,12 +572,15 @@ fn heap_output_title(line: &str) -> Option<&str> {
         .chars()
         .filter(|character| matches!(character, '-' | '─' | '='))
         .count();
+
     if divider_count < 8 {
         return None;
     }
+
     let title = line.trim_matches(|character: char| {
         character.is_whitespace() || matches!(character, '-' | '─' | '=')
     });
+
     (!title.is_empty()).then_some(title)
 }
 
@@ -546,6 +595,7 @@ fn is_heap_output_divider(line: &str) -> bool {
 #[cfg(test)]
 fn heap_output_error(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
+
     lower.starts_with("[-]")
         || lower.starts_with("error")
         || lower.contains("undefined command")
@@ -604,6 +654,7 @@ fn plural(count: usize) -> &'static str {
 fn strip_terminal_sequences(input: &str) -> String {
     let mut output = String::with_capacity(input.len());
     let mut characters = input.chars().peekable();
+
     while let Some(character) = characters.next() {
         if character == '\u{1b}' {
             match characters.next() {
@@ -619,6 +670,7 @@ fn strip_terminal_sequences(input: &str) -> String {
                         if control == '\u{7}' {
                             break;
                         }
+
                         if control == '\u{1b}' && characters.next_if_eq(&'\\').is_some() {
                             break;
                         }
@@ -632,6 +684,7 @@ fn strip_terminal_sequences(input: &str) -> String {
             output.push(character);
         }
     }
+
     output
 }
 
@@ -780,29 +833,36 @@ pub(crate) fn read_live_misc(
     allocator_probe: AllocatorProbe,
 ) -> Result<LiveMiscSnapshot, String> {
     let root = crate::kernel::verified_proc_root(pid, debugger_pid)?;
+
     let abi = read_abi(&root.join("exe")).unwrap_or(Abi {
         architecture: TargetArchitecture::Unknown,
         endian: TargetEndian::Little,
         pointer_bits: usize::BITS,
     });
+
     let (maps, maps_capped) = read_maps(&root.join("maps"))?;
     let startup = crate::kernel::read_process_startup(pid, debugger_pid)?;
     let mut warnings = Vec::new();
+
     if maps_capped {
         warnings.push(format!(
             "Mapping-backed Misc data was capped at {MAX_MAPPINGS} VMAs"
         ));
     }
+
     let mut auxv = match crate::bounded::read_bytes(&root.join("auxv"), MAX_AUXV_BYTES) {
         Ok(bytes) => parse_auxv(&bytes, abi, &maps),
         Err(error) => {
             warnings.push(format!("Cannot read /proc/{pid}/auxv: {error}"));
+
             Vec::new()
         }
     };
+
     let executable = std::fs::read_link(root.join("exe"))
         .ok()
         .map(|path| path.to_string_lossy().into_owned());
+
     for entry in &mut auxv {
         match entry.kind {
             15 => entry.interpretation = abi.architecture.display_name().to_owned(),
@@ -814,9 +874,11 @@ pub(crate) fn read_live_misc(
             _ => {}
         }
     }
+
     let allocator = allocator_snapshot(&maps, &allocator_probe);
     let locks = include_locks.then(|| read_locks(&root, abi.architecture));
     crate::kernel::verified_proc_root(pid, debugger_pid)?;
+
     Ok(LiveMiscSnapshot {
         startup,
         auxv,
@@ -832,10 +894,13 @@ pub(crate) fn read_process_address_space(
 ) -> Result<ProcessAddressSpace, String> {
     let root = crate::kernel::verified_proc_root(pid, debugger_pid)?;
     let abi = read_abi(&root.join("exe"));
+
     let executable = std::fs::read_link(root.join("exe"))
         .ok()
         .map(|path| path.to_string_lossy().into_owned());
+
     let (mappings, capped) = read_maps(&root.join("maps"))?;
+
     let interpreter = abi
         .and_then(|abi| {
             crate::bounded::read_bytes(&root.join("auxv"), MAX_AUXV_BYTES)
@@ -849,7 +914,9 @@ pub(crate) fn read_process_address_space(
                 .map(|mapping| mapping.path.clone())
                 .filter(|path| !path.is_empty())
         });
+
     crate::kernel::verified_proc_root(pid, debugger_pid)?;
+
     Ok(ProcessAddressSpace {
         executable,
         interpreter,
@@ -872,6 +939,7 @@ pub(crate) fn call_abi_snapshot(
             function: frame.function.clone(),
         })
         .collect::<Vec<_>>();
+
     CallAbiSnapshot {
         architecture: architecture.display_name().to_owned(),
         calling_convention: linux_calling_convention(architecture, pointer_bits).to_owned(),
@@ -901,7 +969,9 @@ pub(crate) fn call_abi_transfer(
         }
         CallAbiPhase::Sequential => String::from("No ABI call transfer at the current instruction"),
     };
+
     let mut selected = Vec::new();
+
     let mut add = |role: String, name: &str| {
         if let Some(register) = registers.iter().find(|register| register.name == name) {
             selected.push(CallAbiRegister {
@@ -911,6 +981,7 @@ pub(crate) fn call_abi_transfer(
             });
         }
     };
+
     match phase {
         CallAbiPhase::OutgoingCall { .. } => {
             for (index, name) in architecture.call_argument_registers().iter().enumerate() {
@@ -919,6 +990,7 @@ pub(crate) fn call_abi_transfer(
                     name,
                 );
             }
+
             add_stack_pointer(&mut add, architecture, registers, "Call-site stack pointer");
         }
         CallAbiPhase::IncomingEntry { .. } => {
@@ -928,6 +1000,7 @@ pub(crate) fn call_abi_transfer(
                     name,
                 );
             }
+
             add_stack_pointer(&mut add, architecture, registers, "Entry stack pointer");
         }
         CallAbiPhase::Returning | CallAbiPhase::Returned { .. } => {
@@ -937,8 +1010,10 @@ pub(crate) fn call_abi_transfer(
                 } else {
                     "Secondary / wide return register"
                 };
+
                 add(role.to_owned(), name);
             }
+
             add_stack_pointer(
                 &mut add,
                 architecture,
@@ -948,6 +1023,7 @@ pub(crate) fn call_abi_transfer(
         }
         CallAbiPhase::Sequential => {}
     }
+
     CallAbiTransfer {
         context,
         registers: selected,
@@ -974,6 +1050,7 @@ fn transfer_context(kind: &str, target: Option<&str>) -> String {
 fn call_abi_contract(architecture: TargetArchitecture) -> Vec<CallAbiFact> {
     let argument_registers = architecture.call_argument_registers();
     let return_registers = architecture.call_return_registers();
+
     vec![
         CallAbiFact {
             aspect: String::from("Integer / pointer arguments"),
@@ -1073,6 +1150,7 @@ fn linux_calling_convention(architecture: TargetArchitecture, pointer_bits: u32)
 fn read_abi(path: &Path) -> Option<Abi> {
     let bytes = crate::bounded::read_prefix(path, 40).ok()?;
     let (architecture, endian, pointer_bits) = TargetArchitecture::from_elf_ident(&bytes)?;
+
     Some(Abi {
         architecture,
         endian,
@@ -1083,29 +1161,37 @@ fn read_abi(path: &Path) -> Option<Abi> {
 fn read_maps(path: &Path) -> Result<(Vec<ProcessMapping>, bool), String> {
     let text = crate::bounded::read_string(path, MAX_MAPS_BYTES)
         .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
+
     let mut mappings = Vec::new();
     let mut capped = false;
+
     for (index, line) in text.lines().enumerate() {
         if index == MAX_MAPPINGS {
             capped = true;
             break;
         }
+
         let mut fields = line
             .splitn(6, char::is_whitespace)
             .filter(|value| !value.is_empty());
+
         let Some(range) = fields.next() else { continue };
+
         let Some((start, end)) = range.split_once('-') else {
             continue;
         };
+
         let (Ok(start), Ok(end)) = (u64::from_str_radix(start, 16), u64::from_str_radix(end, 16))
         else {
             continue;
         };
+
         let permissions = fields.next().unwrap_or("").to_owned();
         let _offset = fields.next();
         let _device = fields.next();
         let _inode = fields.next();
         let path = fields.next().unwrap_or("").trim().to_owned();
+
         mappings.push(ProcessMapping {
             start,
             end,
@@ -1113,6 +1199,7 @@ fn read_maps(path: &Path) -> Result<(Vec<ProcessMapping>, bool), String> {
             path,
         });
     }
+
     Ok((mappings, capped))
 }
 
@@ -1120,12 +1207,14 @@ fn parse_auxv(bytes: &[u8], abi: Abi, maps: &[ProcessMapping]) -> Vec<AuxvEntry>
     let word = usize::try_from(abi.pointer_bits / 8)
         .unwrap_or(8)
         .clamp(4, 8);
+
     bytes
         .chunks_exact(word * 2)
         .take(512)
         .filter_map(|pair| {
             let kind = read_word(&pair[..word], abi.endian)?;
             let value = read_word(&pair[word..], abi.endian)?;
+
             (kind != 0).then(|| AuxvEntry {
                 kind,
                 name: auxv_name(kind).to_owned(),
@@ -1140,9 +1229,11 @@ fn auxv_value(bytes: &[u8], abi: Abi, wanted_kind: u64) -> Option<u64> {
     let word = usize::try_from(abi.pointer_bits / 8)
         .unwrap_or(8)
         .clamp(4, 8);
+
     bytes.chunks_exact(word * 2).take(512).find_map(|pair| {
         let kind = read_word(&pair[..word], abi.endian)?;
         let value = read_word(&pair[word..], abi.endian)?;
+
         (kind == wanted_kind).then_some(value)
     })
 }
@@ -1151,6 +1242,7 @@ fn read_word(bytes: &[u8], endian: TargetEndian) -> Option<u64> {
     match bytes.len() {
         4 => {
             let bytes: [u8; 4] = bytes.try_into().ok()?;
+
             Some(u64::from(match endian {
                 TargetEndian::Little => u32::from_le_bytes(bytes),
                 TargetEndian::Big => u32::from_be_bytes(bytes),
@@ -1158,6 +1250,7 @@ fn read_word(bytes: &[u8], endian: TargetEndian) -> Option<u64> {
         }
         8 => {
             let bytes: [u8; 8] = bytes.try_into().ok()?;
+
             Some(match endian {
                 TargetEndian::Little => u64::from_le_bytes(bytes),
                 TargetEndian::Big => u64::from_be_bytes(bytes),
@@ -1216,6 +1309,7 @@ fn interpret_auxv(kind: u64, value: u64, abi: Abi, maps: &[ProcessMapping]) -> S
                 } else {
                     &mapping.path
                 };
+
                 format!("{} + 0x{:x}", path, value.saturating_sub(mapping.start))
             },
         ),
@@ -1337,10 +1431,12 @@ fn format_hwcap(architecture: TargetArchitecture, second: bool, value: u64) -> S
         ],
         _ => &[],
     };
+
     let decoded = names
         .iter()
         .filter_map(|(bit, name)| (value & (1_u64 << bit) != 0).then_some(*name))
         .collect::<Vec<_>>();
+
     if decoded.is_empty() {
         format!("bit mask 0x{value:x}")
     } else {
@@ -1356,17 +1452,21 @@ fn allocator_snapshot(
     let mut runtime_modules = Vec::new();
     let mut allocation_frontends = Vec::new();
     let mut frontend_modules = Vec::new();
+
     for mapping in maps {
         if let Some(family) = allocator_family_for_path(&mapping.path) {
             push_unique(&mut runtime_families, family);
             let module = mapping_display_name(&mapping.path);
+
             if !runtime_modules.iter().any(|(known, _)| *known == family) {
                 runtime_modules.push((family, module));
             }
         }
+
         if let Some(frontend) = allocation_frontend_for_path(&mapping.path) {
             push_unique(&mut allocation_frontends, frontend.to_owned());
             let module = mapping_display_name(&mapping.path);
+
             if !frontend_modules.iter().any(|(known, _)| *known == frontend) {
                 frontend_modules.push((frontend, module));
             }
@@ -1377,6 +1477,7 @@ fn allocator_snapshot(
     let mut marker_families = Vec::new();
     let mut colocated_marker_families = Vec::new();
     let mut evidence = Vec::new();
+
     let primary_probe_symbol = allocator_probe
         .symbols
         .iter()
@@ -1387,14 +1488,18 @@ fn allocator_snapshot(
                 .iter()
                 .find(|symbol| symbol.name == "free" && !symbol.indirect)
         });
+
     let primary_mapping =
         primary_probe_symbol.and_then(|symbol| mapping_containing(maps, symbol.address));
+
     for symbol in &allocator_probe.symbols {
         let mapping = mapping_containing(maps, symbol.address);
+
         let owner = mapping.map_or_else(
             || String::from("unmapped address"),
             |mapping| mapping_display_name(&mapping.path),
         );
+
         if is_default_allocator_binding(&symbol.name) {
             default_bindings.push(AllocatorBinding {
                 symbol: symbol.name.clone(),
@@ -1402,26 +1507,32 @@ fn allocator_snapshot(
                 owner,
                 indirect: symbol.indirect,
             });
+
             if symbol.indirect {
                 evidence.push(format!(
                     "{} resolves only to a PLT/GOT trampoline at 0x{:x}",
                     symbol.name, symbol.address
                 ));
             }
+
             continue;
         }
+
         if let Some(family) = allocator_family_for_symbol(&symbol.name) {
             push_unique(&mut marker_families, family);
             push_unique(&mut runtime_families, family);
+
             if mappings_have_same_owner(primary_mapping, mapping) {
                 push_unique(&mut colocated_marker_families, family);
             }
+
             evidence.push(format!(
                 "{} at 0x{:x} in {owner}",
                 symbol.name, symbol.address
             ));
         } else if let Some(frontend) = allocation_frontend_for_symbol(&symbol.name) {
             push_unique(&mut allocation_frontends, frontend.to_owned());
+
             evidence.push(format!(
                 "allocation frontend {} at 0x{:x} in {owner}",
                 frontend, symbol.address
@@ -1437,15 +1548,19 @@ fn allocator_snapshot(
                 .iter()
                 .find(|binding| binding.symbol == "free" && !binding.indirect)
         });
+
     let primary_owner_family =
         primary_mapping.and_then(|mapping| allocator_family_for_path(&mapping.path));
+
     let colocated_marker_family = strongest_marker_family(&colocated_marker_families);
     let marker_family = strongest_marker_family(&marker_families);
     let malloc_mapping = direct_binding_mapping(allocator_probe, maps, "malloc");
     let free_mapping = direct_binding_mapping(allocator_probe, maps, "free");
+
     let split_core_bindings = malloc_mapping
         .zip(free_mapping)
         .is_some_and(|(malloc, free)| !mappings_have_same_owner(Some(malloc), Some(free)));
+
     if split_core_bindings {
         evidence.push(format!(
             "malloc resolves to {} but free resolves to {}",
@@ -1469,12 +1584,15 @@ fn allocator_snapshot(
             _ => {}
         }
     }
+
     if let Some(primary_mapping) = primary_mapping {
         for binding in &default_bindings {
             if binding.indirect || matches!(binding.symbol.as_str(), "malloc" | "free") {
                 continue;
             }
+
             let mapping = mapping_containing(maps, binding.address);
+
             if mapping.is_some() && !mappings_have_same_owner(Some(primary_mapping), mapping) {
                 evidence.push(format!(
                     "{} resolves separately in {}",
@@ -1483,6 +1601,7 @@ fn allocator_snapshot(
             }
         }
     }
+
     let binding_basis = primary_binding.map_or("resolved allocator binding", |binding| {
         if binding.symbol == "malloc" {
             "resolved malloc binding"
@@ -1490,18 +1609,22 @@ fn allocator_snapshot(
             "resolved free binding (malloc unavailable)"
         }
     });
+
     let indirect_binding_count = default_bindings
         .iter()
         .filter(|binding| binding.indirect)
         .count();
+
     let conflicting_colocated_markers = colocated_marker_families.len() > 1
         && strongest_marker_family(&colocated_marker_families).is_none();
+
     let owner_marker_conflict = primary_owner_family.is_some_and(|owner| {
         !owner.is_libc_dispatch()
             && colocated_marker_families
                 .iter()
                 .any(|marker| *marker != owner && !marker.is_libc_dispatch())
     });
+
     let (implementation, detection_basis, selected_family) = if split_core_bindings {
         (
             String::from("split allocator bindings"),
@@ -1604,32 +1727,40 @@ fn allocator_snapshot(
     for (family, module) in runtime_modules {
         evidence.push(format!("{} runtime module {module}", family.display_name()));
     }
+
     for (frontend, module) in frontend_modules {
         evidence.push(format!("{frontend} runtime module {module}"));
     }
+
     if allocator_probe.dispatch_failures > 0 {
         evidence.push(format!(
             "{} optional GDB symbol probes could not be queued",
             allocator_probe.dispatch_failures
         ));
     }
+
     let mut heap_bytes = 0_u64;
     let mut anonymous_writable_bytes = 0_u64;
     let mut regions = Vec::new();
+
     for mapping in maps {
         let writable_private = mapping.permissions.starts_with("rw")
             && mapping.permissions.as_bytes().get(3) == Some(&b'p');
+
         let role = if mapping.path == "[heap]" {
             heap_bytes = heap_bytes.saturating_add(mapping.end.saturating_sub(mapping.start));
+
             Some(String::from("brk heap"))
         } else if writable_private && mapping.path.is_empty() {
             anonymous_writable_bytes =
                 anonymous_writable_bytes.saturating_add(mapping.end.saturating_sub(mapping.start));
+
             Some(String::from("anonymous writable (possible arena)"))
         } else {
             allocator_family_for_path(&mapping.path)
                 .map(|family| format!("{} runtime", family.display_name()))
         };
+
         if let Some(role) = role {
             regions.push(AllocatorRegion {
                 start: mapping.start,
@@ -1644,6 +1775,7 @@ fn allocator_snapshot(
             });
         }
     }
+
     AllocatorSnapshot {
         implementation,
         detection_basis,
@@ -1750,12 +1882,15 @@ impl AllocatorFamily {
 
 fn allocator_family_for_path(path: &str) -> Option<AllocatorFamily> {
     let path = normalized_mapping_path(path);
+
     let name = Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(path);
+
     let lower_name = name.to_ascii_lowercase();
     let lower_path = path.to_ascii_lowercase();
+
     if lower_name.starts_with("libjemalloc.so") {
         Some(AllocatorFamily::Jemalloc)
     } else if lower_name.starts_with("libtcmalloc") || lower_name.starts_with("libgoogle-perftools")
@@ -1822,6 +1957,7 @@ fn allocator_family_for_symbol(symbol: &str) -> Option<AllocatorFamily> {
         "mallctl" | "malloc_stats_print" | "je_malloc" | "je_mallctl" => {
             Some(AllocatorFamily::Jemalloc)
         }
+
         "tc_malloc"
         | "tc_free"
         | "MallocExtension_GetNumericProperty"
@@ -1861,6 +1997,7 @@ fn allocation_frontend_for_path(path: &str) -> Option<&'static str> {
         .file_name()
         .and_then(|name| name.to_str())?
         .to_ascii_lowercase();
+
     if name.starts_with("libpython") {
         Some("CPython pymalloc")
     } else if name.starts_with("libruby") {
@@ -1882,11 +2019,14 @@ fn allocation_frontend_for_path(path: &str) -> Option<&'static str> {
 
 fn strongest_marker_family(families: &[AllocatorFamily]) -> Option<AllocatorFamily> {
     let strongest = families.iter().map(|family| family.specificity()).max()?;
+
     let mut candidates = families
         .iter()
         .copied()
         .filter(|family| family.specificity() == strongest);
+
     let family = candidates.next()?;
+
     candidates.next().is_none().then_some(family)
 }
 
@@ -1910,6 +2050,7 @@ fn mapping_containing(maps: &[ProcessMapping], address: u64) -> Option<&ProcessM
     let index = maps
         .partition_point(|mapping| mapping.start <= address)
         .checked_sub(1)?;
+
     maps.get(index).filter(|mapping| address < mapping.end)
 }
 
@@ -1918,8 +2059,10 @@ fn mappings_have_same_owner(left: Option<&ProcessMapping>, right: Option<&Proces
         if left.start == right.start && left.end == right.end {
             return true;
         }
+
         let left_path = normalized_mapping_path(&left.path);
         let right_path = normalized_mapping_path(&right.path);
+
         !left_path.is_empty() && left_path == right_path
     })
 }
@@ -1930,6 +2073,7 @@ fn normalized_mapping_path(path: &str) -> &str {
 
 pub(crate) fn allocator_probe_value_is_indirect(value: &str) -> bool {
     let value = value.to_ascii_lowercase();
+
     value.contains("@plt")
         || value.contains(".plt>")
         || value.contains("<plt")
@@ -1942,6 +2086,7 @@ fn mapping_display_name(path: &str) -> String {
     if path.is_empty() {
         return String::from("anonymous mapping");
     }
+
     Path::new(path)
         .file_name()
         .and_then(|name| name.to_str())
@@ -1959,22 +2104,27 @@ fn read_locks(root: &Path, architecture: TargetArchitecture) -> LockSnapshot {
     let mut snapshot = LockSnapshot::default();
     let mut thread_names = HashMap::new();
     let task_root = root.join("task");
+
     let entries = match std::fs::read_dir(&task_root) {
         Ok(entries) => entries,
         Err(error) => {
             snapshot
                 .warnings
                 .push(format!("Cannot enumerate {}: {error}", task_root.display()));
+
             return snapshot;
         }
     };
+
     for (index, entry) in entries.flatten().enumerate() {
         if index == MAX_TASKS {
             snapshot
                 .warnings
                 .push(format!("Lock inspection was capped at {MAX_TASKS} threads"));
+
             break;
         }
+
         let Some(tid) = entry
             .file_name()
             .to_str()
@@ -1982,19 +2132,25 @@ fn read_locks(root: &Path, architecture: TargetArchitecture) -> LockSnapshot {
         else {
             continue;
         };
+
         snapshot.threads_scanned += 1;
         let task = entry.path();
+
         let thread = crate::bounded::read_string(&task.join("comm"), 4096)
             .unwrap_or_default()
             .trim()
             .to_owned();
+
         thread_names.insert(tid, thread.clone());
         let state = read_thread_state(&task.join("status"));
+
         let wchan = crate::bounded::read_string(&task.join("wchan"), 4096)
             .unwrap_or_default()
             .trim()
             .to_owned();
+
         let syscall = crate::bounded::read_string(&task.join("syscall"), 64 * 1024).ok();
+
         if let Some(wait) = syscall
             .as_deref()
             .and_then(|line| parse_lock_wait(tid, &thread, &state, &wchan, line, architecture))
@@ -2016,9 +2172,11 @@ fn read_locks(root: &Path, architecture: TargetArchitecture) -> LockSnapshot {
             });
         }
     }
+
     snapshot
         .waits
         .sort_by_key(|wait| (wait.address.unwrap_or(u64::MAX), wait.tid));
+
     snapshot.dependencies = derive_lock_dependencies(
         root,
         &snapshot.waits,
@@ -2026,7 +2184,9 @@ fn read_locks(root: &Path, architecture: TargetArchitecture) -> LockSnapshot {
         architecture.default_endian(),
         &mut snapshot.warnings,
     );
+
     snapshot.deadlocks = find_deadlock_cycles(&snapshot.dependencies);
+
     snapshot
 }
 
@@ -2043,9 +2203,12 @@ fn derive_lock_dependencies(
                 "Lock ownership is unavailable because the target byte order is unknown",
             ));
         }
+
         return Vec::new();
     };
+
     let memory_path = root.join("mem");
+
     let memory = match File::open(&memory_path) {
         Ok(memory) => memory,
         Err(error) => {
@@ -2055,32 +2218,42 @@ fn derive_lock_dependencies(
                     memory_path.display()
                 ));
             }
+
             return Vec::new();
         }
     };
+
     let mut dependencies = Vec::new();
+
     for wait in waits {
         let Some(address) = wait.address else {
             continue;
         };
+
         let mut bytes = [0_u8; 4];
+
         if memory.read_at(&mut bytes, address).ok() != Some(bytes.len()) {
             continue;
         }
+
         let value = match endian {
             TargetEndian::Little => u32::from_le_bytes(bytes),
             TargetEndian::Big => u32::from_be_bytes(bytes),
         };
+
         // Linux PI and robust futex words carry the owner TID in their low
         // 30 bits. Ordinary pthread mutexes commonly use 1 or 2 instead, so
         // accept an owner only when it matches a thread observed in this task.
         let owner_tid = value & 0x3fff_ffff;
         let pi_owner_word = matches!(wait.operation.as_str(), "FUTEX_LOCK_PI" | "FUTEX_LOCK_PI2");
+
         let robust_owner_word =
             matches!(wait.operation.as_str(), "FUTEX_WAIT" | "FUTEX_WAIT_BITSET")
                 && value & 0x8000_0000 != 0
                 && wait.expected == Some(u64::from(value));
+
         let owner_encoded = pi_owner_word || robust_owner_word;
+
         if !owner_encoded
             || owner_tid <= 2
             || owner_tid == wait.tid
@@ -2088,6 +2261,7 @@ fn derive_lock_dependencies(
         {
             continue;
         }
+
         dependencies.push(LockDependency {
             waiter_tid: wait.tid,
             waiter: wait.thread.clone(),
@@ -2100,8 +2274,10 @@ fn derive_lock_dependencies(
             futex_value: value,
         });
     }
+
     dependencies.sort_by_key(|edge| (edge.waiter_tid, edge.owner_tid, edge.address));
     dependencies.dedup();
+
     dependencies
 }
 
@@ -2110,43 +2286,55 @@ fn find_deadlock_cycles(dependencies: &[LockDependency]) -> Vec<DeadlockCycle> {
         .iter()
         .map(|edge| (edge.waiter_tid, edge.owner_tid))
         .collect::<HashMap<_, _>>();
+
     let mut starts = edges.keys().copied().collect::<Vec<_>>();
     starts.sort_unstable();
     let mut canonical_cycles = HashSet::new();
     let mut cycles = Vec::new();
+
     for start in starts {
         let mut path = Vec::new();
         let mut positions = HashMap::new();
         let mut current = start;
+
         while let Some(&next) = edges.get(&current) {
             if let Some(&position) = positions.get(&current) {
                 let mut cycle = path[position..].to_vec();
+
                 if cycle.len() < 2 {
                     break;
                 }
+
                 let rotation = cycle
                     .iter()
                     .enumerate()
                     .min_by_key(|(_, tid)| *tid)
                     .map(|(index, _)| index)
                     .unwrap_or(0);
+
                 cycle.rotate_left(rotation);
+
                 if canonical_cycles.insert(cycle.clone()) {
                     let mut chain = cycle.iter().map(u32::to_string).collect::<Vec<_>>();
                     chain.push(cycle[0].to_string());
+
                     cycles.push(DeadlockCycle {
                         tids: cycle,
                         description: format!("TID {}", chain.join(" waits for TID ")),
                     });
                 }
+
                 break;
             }
+
             positions.insert(current, path.len());
             path.push(current);
             current = next;
         }
     }
+
     cycles.sort_by(|left, right| left.tids.cmp(&right.tids));
+
     cycles
 }
 
@@ -2174,25 +2362,32 @@ fn parse_lock_wait(
         .take(7)
         .map(parse_kernel_number)
         .collect::<Option<Vec<_>>>()?;
+
     let (&number, arguments) = values.split_first()?;
     let name = architecture.syscall_name(number);
+
     if name != "futex" && name != "futex_waitv" {
         return None;
     }
+
     if name == "futex_waitv" {
         let vector = arguments.first().copied();
         let count = arguments.get(1).copied();
         let flags = arguments.get(2).copied().unwrap_or(0);
+
         let mut details = vector.map_or_else(
             || String::from("wait vector address unavailable"),
             |vector| format!("wait vector at 0x{vector:x}"),
         );
+
         if flags != 0 {
             let _ = write!(details, " with flags 0x{flags:x}");
         }
+
         if !wchan.is_empty() && wchan != "0" {
             let _ = write!(details, " · {wchan}");
         }
+
         return Some(LockWait {
             tid,
             thread: thread.to_owned(),
@@ -2207,23 +2402,30 @@ fn parse_lock_wait(
             details,
         });
     }
+
     let operation = arguments.get(1).copied().unwrap_or(0);
     let base = operation & 0x7f;
+
     if !is_futex_wait_operation(base) {
         return None;
     }
+
     let private = operation & 0x80 != 0;
     let realtime = operation & 0x100 != 0;
     let mut flags = Vec::new();
+
     if private {
         flags.push("private");
     }
+
     if realtime {
         flags.push("realtime clock");
     }
+
     if !wchan.is_empty() && wchan != "0" {
         flags.push(wchan);
     }
+
     Some(LockWait {
         tid,
         thread: thread.to_owned(),
@@ -2237,15 +2439,19 @@ fn parse_lock_wait(
 
 fn is_non_waiting_futex_syscall(syscall: &str, architecture: TargetArchitecture) -> bool {
     let mut values = syscall.split_whitespace().take(3).map(parse_kernel_number);
+
     let Some(number) = values.next().flatten() else {
         return false;
     };
+
     if architecture.syscall_name(number) != "futex" {
         return false;
     }
+
     let Some(operation) = values.nth(1).flatten() else {
         return false;
     };
+
     !is_futex_wait_operation(operation & 0x7f)
 }
 
@@ -2282,24 +2488,32 @@ fn futex_operation(operation: u64) -> &'static str {
 pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
     let file =
         File::open(path).map_err(|error| format!("Cannot open {}: {error}", path.display()))?;
+
     let size = file
         .metadata()
         .map_err(|error| format!("Cannot stat {}: {error}", path.display()))?
         .len();
+
     let mut header = [0_u8; 64];
+
     read_exact_at(&file, &mut header, 0)
         .map_err(|error| format!("Cannot read ELF header from {}: {error}", path.display()))?;
+
     let (architecture, endian, pointer_bits) = TargetArchitecture::from_elf_ident(&header)
         .ok_or_else(|| format!("{} is not a supported ELF core file", path.display()))?;
+
     let abi = Abi {
         architecture,
         endian,
         pointer_bits,
     };
+
     let elf_type = read_u16(&header[16..18], endian).unwrap_or(0);
+
     if elf_type != 4 {
         return Err(format!("{} is ELF but not an ET_CORE file", path.display()));
     }
+
     let (phoff, phentsize, phnum) = if pointer_bits == 64 {
         (
             read_u64(&header[32..40], endian).unwrap_or(0),
@@ -2313,9 +2527,11 @@ pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
             usize::from(read_u16(&header[44..46], endian).unwrap_or(0)),
         )
     };
+
     let program_header_bytes = u64::try_from(phnum)
         .unwrap_or(u64::MAX)
         .saturating_mul(phentsize);
+
     if phnum > MAX_CORE_PROGRAM_HEADERS
         || phentsize < if pointer_bits == 64 { 56 } else { 32 }
         || phentsize > 4096
@@ -2325,6 +2541,7 @@ pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
             "The core file has an invalid or excessive program-header table",
         ));
     }
+
     let mut snapshot = CoreDumpSnapshot {
         path: path.to_owned(),
         size,
@@ -2336,6 +2553,7 @@ pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
         },
         ..CoreDumpSnapshot::default()
     };
+
     for index in 0..phnum {
         let offset = phoff
             .checked_add(
@@ -2344,12 +2562,16 @@ pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
                     .saturating_mul(phentsize),
             )
             .ok_or_else(|| String::from("Program-header offset overflow"))?;
+
         let mut program = vec![0_u8; usize::try_from(phentsize).unwrap_or(0)];
+
         read_exact_at(&file, &mut program, offset)
             .map_err(|error| format!("Cannot read core program header {index}: {error}"))?;
+
         if read_u32(&program[..4], endian) != Some(4) {
             continue;
         }
+
         let (note_offset, note_size, alignment) = if pointer_bits == 64 {
             (
                 read_u64(&program[8..16], endian).unwrap_or(0),
@@ -2363,10 +2585,13 @@ pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
                 u64::from(read_u32(&program[28..32], endian).unwrap_or(4)),
             )
         };
+
         parse_note_segment(&file, note_offset, note_size, alignment, abi, &mut snapshot)?;
     }
+
     snapshot.threads.sort_unstable();
     snapshot.threads.dedup();
+
     Ok(snapshot)
 }
 
@@ -2381,54 +2606,73 @@ fn parse_note_segment(
     let end = offset
         .checked_add(size)
         .ok_or_else(|| String::from("Core note range overflow"))?;
+
     let alignment = alignment.clamp(4, 4096);
     let mut cursor = offset;
+
     while cursor.checked_add(12).is_some_and(|value| value <= end)
         && snapshot.notes.len() < MAX_CORE_NOTES
     {
         let mut header = [0_u8; 12];
+
         read_exact_at(file, &mut header, cursor)
             .map_err(|error| format!("Cannot read core note: {error}"))?;
+
         let name_size = u64::from(read_u32(&header[0..4], abi.endian).unwrap_or(0));
         let desc_size = u64::from(read_u32(&header[4..8], abi.endian).unwrap_or(0));
         let kind = read_u32(&header[8..12], abi.endian).unwrap_or(0);
         let name_offset = cursor + 12;
+
         let desc_offset = align_up(name_offset + name_size, alignment)
             .ok_or_else(|| String::from("Core note offset overflow"))?;
+
         let next = align_up(desc_offset + desc_size, alignment)
             .ok_or_else(|| String::from("Core note offset overflow"))?;
+
         if next > end || next <= cursor {
             snapshot
                 .warnings
                 .push(String::from("Stopped at a malformed core note"));
+
             break;
         }
+
         let displayed_name_size = usize::try_from(name_size)
             .unwrap_or(MAX_CORE_NOTE_NAME_BYTES)
             .min(MAX_CORE_NOTE_NAME_BYTES);
+
         let mut name = vec![0_u8; displayed_name_size];
+
         read_exact_at(file, &mut name, name_offset)
             .map_err(|error| format!("Cannot read core note owner: {error}"))?;
+
         let owner = String::from_utf8_lossy(name.split(|byte| *byte == 0).next().unwrap_or(&[]))
             .into_owned();
+
         snapshot.notes.push(CoreNote {
             owner,
             kind: note_name(kind),
             bytes: desc_size,
         });
+
         if desc_size > MAX_CORE_NOTE_BYTES as u64 {
             push_core_warning_once(snapshot, "Skipped an oversized core note payload");
         } else if matches!(kind, 1 | 3 | 6 | 0x5349_4749 | 0x4649_4c45) {
             let mut descriptor = vec![0_u8; usize::try_from(desc_size).unwrap_or(0)];
+
             read_exact_at(file, &mut descriptor, desc_offset)
                 .map_err(|error| format!("Cannot read core note payload: {error}"))?;
+
             parse_core_note(kind, &descriptor, abi, snapshot);
         }
+
         cursor = next;
     }
+
     if snapshot.notes.len() == MAX_CORE_NOTES {
         push_core_warning_once(snapshot, "Core note display was capped");
     }
+
     Ok(())
 }
 
@@ -2442,6 +2686,7 @@ fn parse_core_note(kind: u32, bytes: &[u8], abi: Abi, snapshot: &mut CoreDumpSna
     match kind {
         1 => {
             let pid_offset = if abi.pointer_bits == 64 { 32 } else { 24 };
+
             if let Some(pid) = bytes
                 .get(pid_offset..pid_offset + 4)
                 .and_then(|bytes| read_u32(bytes, abi.endian))
@@ -2455,9 +2700,11 @@ fn parse_core_note(kind: u32, bytes: &[u8], abi: Abi, snapshot: &mut CoreDumpSna
             } else {
                 (16, 32, 48)
             };
+
             snapshot.pid = bytes
                 .get(pid_offset..pid_offset + 4)
                 .and_then(|bytes| read_u32(bytes, abi.endian));
+
             snapshot.process_name = c_string_at(bytes, name_offset, 16);
             snapshot.command = c_string_at(bytes, command_offset, 80);
         }
@@ -2466,15 +2713,18 @@ fn parse_core_note(kind: u32, bytes: &[u8], abi: Abi, snapshot: &mut CoreDumpSna
             snapshot.signal = bytes
                 .get(0..4)
                 .and_then(|bytes| read_i32(bytes, abi.endian));
+
             snapshot.signal_code = bytes
                 .get(8..12)
                 .and_then(|bytes| read_i32(bytes, abi.endian));
+
             if snapshot
                 .signal
                 .is_some_and(|signal| matches!(signal, 4 | 5 | 7 | 8 | 11))
             {
                 let address_offset = if abi.pointer_bits == 64 { 16 } else { 12 };
                 let word = usize::try_from(abi.pointer_bits / 8).unwrap_or(8);
+
                 snapshot.fault_address = bytes
                     .get(address_offset..address_offset + word)
                     .and_then(|bytes| read_word(bytes, abi.endian));
@@ -2489,32 +2739,42 @@ fn parse_core_files(bytes: &[u8], abi: Abi, snapshot: &mut CoreDumpSnapshot) {
     let word = usize::try_from(abi.pointer_bits / 8)
         .unwrap_or(8)
         .clamp(4, 8);
+
     if bytes.len() < word * 2 {
         return;
     }
+
     let declared_count = read_word(&bytes[..word], abi.endian)
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or(0);
+
     let count = declared_count.min(MAX_CORE_FILES.saturating_sub(snapshot.files.len()));
+
     if count < declared_count {
         push_core_warning_once(snapshot, "Core mapped-file display was capped");
     }
+
     let page_size = read_word(&bytes[word..word * 2], abi.endian).unwrap_or(1);
     let table_end = word * 2 + declared_count.saturating_mul(word * 3);
+
     let Some(table) = bytes.get(word * 2..table_end) else {
         return;
     };
+
     let paths = bytes
         .get(table_end..)
         .unwrap_or(&[])
         .split(|byte| *byte == 0);
+
     for (index, path) in paths.take(count).enumerate() {
         let entry = &table[index * word * 3..(index + 1) * word * 3];
         let start = read_word(&entry[..word], abi.endian).unwrap_or(0);
         let end = read_word(&entry[word..word * 2], abi.endian).unwrap_or(0);
+
         let file_offset = read_word(&entry[word * 2..], abi.endian)
             .unwrap_or(0)
             .saturating_mul(page_size);
+
         snapshot.files.push(CoreMappedFile {
             start,
             end,
@@ -2539,11 +2799,13 @@ fn note_name(kind: u32) -> String {
 fn c_string_at(bytes: &[u8], offset: usize, maximum: usize) -> Option<String> {
     let bytes = bytes.get(offset..offset.saturating_add(maximum).min(bytes.len()))?;
     let bytes = bytes.split(|byte| *byte == 0).next().unwrap_or(bytes);
+
     (!bytes.is_empty()).then(|| String::from_utf8_lossy(bytes).trim().to_owned())
 }
 
 fn align_up(value: u64, alignment: u64) -> Option<u64> {
     let remainder = value % alignment;
+
     if remainder == 0 {
         Some(value)
     } else {
@@ -2554,22 +2816,27 @@ fn align_up(value: u64, alignment: u64) -> Option<u64> {
 fn read_exact_at(file: &File, mut bytes: &mut [u8], mut offset: u64) -> io::Result<()> {
     while !bytes.is_empty() {
         let read = file.read_at(bytes, offset)?;
+
         if read == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "unexpected end of file",
             ));
         }
+
         offset = offset
             .checked_add(read as u64)
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "file offset overflow"))?;
+
         bytes = &mut bytes[read..];
     }
+
     Ok(())
 }
 
 fn read_u16(bytes: &[u8], endian: TargetEndian) -> Option<u16> {
     let bytes: [u8; 2] = bytes.try_into().ok()?;
+
     Some(match endian {
         TargetEndian::Little => u16::from_le_bytes(bytes),
         TargetEndian::Big => u16::from_be_bytes(bytes),
@@ -2578,6 +2845,7 @@ fn read_u16(bytes: &[u8], endian: TargetEndian) -> Option<u16> {
 
 fn read_u32(bytes: &[u8], endian: TargetEndian) -> Option<u32> {
     let bytes: [u8; 4] = bytes.try_into().ok()?;
+
     Some(match endian {
         TargetEndian::Little => u32::from_le_bytes(bytes),
         TargetEndian::Big => u32::from_be_bytes(bytes),
@@ -2586,6 +2854,7 @@ fn read_u32(bytes: &[u8], endian: TargetEndian) -> Option<u32> {
 
 fn read_i32(bytes: &[u8], endian: TargetEndian) -> Option<i32> {
     let bytes: [u8; 4] = bytes.try_into().ok()?;
+
     Some(match endian {
         TargetEndian::Little => i32::from_le_bytes(bytes),
         TargetEndian::Big => i32::from_be_bytes(bytes),
@@ -2594,6 +2863,7 @@ fn read_i32(bytes: &[u8], endian: TargetEndian) -> Option<i32> {
 
 fn read_u64(bytes: &[u8], endian: TargetEndian) -> Option<u64> {
     let bytes: [u8; 8] = bytes.try_into().ok()?;
+
     Some(match endian {
         TargetEndian::Little => u64::from_le_bytes(bytes),
         TargetEndian::Big => u64::from_be_bytes(bytes),
@@ -2633,8 +2903,10 @@ mod tests {
             dependency(30, 10),
             dependency(40, 20),
         ]);
+
         assert_eq!(cycles.len(), 1);
         assert_eq!(cycles[0].tids, [10, 20, 30]);
+
         assert_eq!(
             cycles[0].description,
             "TID 10 waits for TID 20 waits for TID 30 waits for TID 10"
@@ -2653,10 +2925,12 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ));
+
         std::fs::create_dir_all(&root).unwrap();
         let mut memory = [0_u8; 64];
         memory[16..20].copy_from_slice(&0x8000_0014_u32.to_le_bytes());
         std::fs::write(root.join("mem"), memory).unwrap();
+
         let waits = [LockWait {
             tid: 10,
             thread: String::from("waiter"),
@@ -2666,8 +2940,10 @@ mod tests {
             expected: Some(0x8000_0014),
             details: String::new(),
         }];
+
         let names = HashMap::from([(10, String::from("waiter")), (20, String::from("owner"))]);
         let mut warnings = Vec::new();
+
         let dependencies = derive_lock_dependencies(
             &root,
             &waits,
@@ -2675,6 +2951,7 @@ mod tests {
             Some(TargetEndian::Little),
             &mut warnings,
         );
+
         std::fs::remove_dir_all(&root).unwrap();
         assert!(warnings.is_empty());
         assert_eq!(dependencies.len(), 1);
@@ -2690,10 +2967,12 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ));
+
         std::fs::create_dir_all(&root).unwrap();
         let mut memory = [0_u8; 64];
         memory[16..20].copy_from_slice(&0x8000_0014_u32.to_le_bytes());
         std::fs::write(root.join("mem"), memory).unwrap();
+
         let waits = [LockWait {
             tid: 10,
             thread: String::from("waiter"),
@@ -2703,7 +2982,9 @@ mod tests {
             expected: Some(0x8000_0014),
             details: String::new(),
         }];
+
         let names = HashMap::from([(10, String::from("waiter")), (20, String::from("owner"))]);
+
         let dependencies = derive_lock_dependencies(
             &root,
             &waits,
@@ -2711,6 +2992,7 @@ mod tests {
             Some(TargetEndian::Little),
             &mut Vec::new(),
         );
+
         std::fs::remove_dir_all(&root).unwrap();
         assert!(dependencies.is_empty());
     }
@@ -2724,8 +3006,8 @@ mod tests {
             "0x555555559000  (0x0)  0x70  Used  -  -\n",
             "Chunk(base=0x555555561080, addr=0x555555561090, size=0x18f80, flags=PREV_INUSE) <- top\n",
         );
-        let snapshot = parse_heap_inspection("heap bins tcache", output);
 
+        let snapshot = parse_heap_inspection("heap bins tcache", output);
         assert_eq!(snapshot.diagnostic, None);
         assert_eq!(snapshot.rows[1].kind, "Arena");
         assert_eq!(snapshot.rows[1].location, "0x7ffff7e19ac0");
@@ -2750,13 +3032,16 @@ mod tests {
             "---------------- Detailed stacktrace ----------------\n",
             "File /tmp/gef.py, line 1\n",
         );
+
         let snapshot = parse_heap_inspection("heap bins", output);
 
         assert_eq!(
             snapshot.diagnostic.as_deref(),
             Some("TypeError: unsupported format string passed to NoneType.__format__")
         );
+
         assert!(snapshot.rows.iter().any(|row| row.location == "top"));
+
         assert!(
             !snapshot
                 .rows
@@ -2769,7 +3054,6 @@ mod tests {
     fn strips_gef_terminal_coloring_from_heap_diagnostics() {
         let output = "\u{1b}[1m\u{1b}[31m[!]\u{1b}[0m Heap not initialized\n";
         let snapshot = parse_heap_inspection("heap bins tcache", output);
-
         assert_eq!(snapshot.diagnostic.as_deref(), Some("Heap not initialized"));
         assert_eq!(snapshot.rows.len(), 1);
         assert_eq!(snapshot.rows[0].details, "Heap not initialized");
@@ -2779,13 +3063,15 @@ mod tests {
     #[test]
     fn caps_heap_output_rows_and_cells() {
         let oversized = "x".repeat(MAX_HEAP_INSPECTION_CELL_CHARS + 32);
+
         let output = std::iter::repeat_n(oversized.as_str(), MAX_HEAP_INSPECTION_ROWS + 8)
             .collect::<Vec<_>>()
             .join("\n");
-        let snapshot = parse_heap_inspection("backend-dump", &output);
 
+        let snapshot = parse_heap_inspection("backend-dump", &output);
         assert!(snapshot.truncated);
         assert_eq!(snapshot.rows.len(), MAX_HEAP_INSPECTION_ROWS);
+
         assert_eq!(
             snapshot.rows[0].details.chars().count(),
             MAX_HEAP_INSPECTION_CELL_CHARS
@@ -2811,6 +3097,7 @@ mod tests {
         bytes.extend_from_slice(&33_u64.to_le_bytes());
         bytes.extend_from_slice(&28_u64.to_le_bytes());
         bytes.extend_from_slice(&64_u64.to_le_bytes());
+
         assert_eq!(
             parse_auxv(&bytes, abi64(), &[]),
             vec![
@@ -2880,6 +3167,7 @@ mod tests {
     #[test]
     fn ignores_non_blocking_futex_operations() {
         let syscall = "202 0x12340000 1 1 0 0 0";
+
         assert!(
             parse_lock_wait(
                 17,
@@ -2891,6 +3179,7 @@ mod tests {
             )
             .is_none()
         );
+
         assert!(is_non_waiting_futex_syscall(
             syscall,
             TargetArchitecture::X86_64
@@ -2922,6 +3211,7 @@ mod tests {
             ],
             &AllocatorProbe::default(),
         );
+
         assert_eq!(snapshot.implementation, "jemalloc");
         assert_eq!(snapshot.detection_basis, "loaded module evidence");
         assert_eq!(snapshot.heap_bytes, 0x2000);
@@ -2945,6 +3235,7 @@ mod tests {
                 path: String::from("/usr/lib/libjemalloc.so.2"),
             },
         ];
+
         let probe = AllocatorProbe {
             complete: true,
             dispatch_failures: 0,
@@ -2966,10 +3257,12 @@ mod tests {
                 },
             ],
         };
+
         let snapshot = allocator_snapshot(&maps, &probe);
         assert_eq!(snapshot.implementation, "jemalloc");
         assert_eq!(snapshot.detection_basis, "resolved malloc binding");
         assert_eq!(snapshot.default_bindings[0].owner, "libjemalloc.so.2");
+
         assert_eq!(
             snapshot.detected_runtimes,
             [String::from("jemalloc"), String::from("glibc / ptmalloc")]
@@ -2984,6 +3277,7 @@ mod tests {
             permissions: String::from("r-xp"),
             path: String::from("/opt/bin/service"),
         }];
+
         let probe = AllocatorProbe {
             complete: true,
             dispatch_failures: 0,
@@ -3000,8 +3294,10 @@ mod tests {
                 },
             ],
         };
+
         let snapshot = allocator_snapshot(&maps, &probe);
         assert_eq!(snapshot.implementation, "tcmalloc");
+
         assert_eq!(
             snapshot.detection_basis,
             "resolved binding with allocator-specific symbols"
@@ -3030,7 +3326,9 @@ mod tests {
                 path: String::from("/opt/lib/libmalloc-wrapper.so"),
             },
         ];
+
         let ambiguous = allocator_snapshot(&maps, &AllocatorProbe::default());
+
         assert_eq!(
             ambiguous.implementation,
             "multiple allocator runtimes detected"
@@ -3055,6 +3353,7 @@ mod tests {
                 ],
             },
         );
+
         assert_eq!(custom.implementation, "custom or interposed allocator");
     }
 
@@ -3064,13 +3363,16 @@ mod tests {
             allocator_test_mapping(0x1000, 0x2000, "/usr/lib/libjemalloc.so.2"),
             allocator_test_mapping(0x3000, 0x4000, "/usr/lib/libc.so.6"),
         ];
+
         let probe = allocator_test_probe(&[
             allocator_test_symbol("malloc", 0x1100),
             allocator_test_symbol("free", 0x3100),
         ]);
+
         let snapshot = allocator_snapshot(&maps, &probe);
         assert_eq!(snapshot.implementation, "split allocator bindings");
         assert!(snapshot.detection_basis.contains("different modules"));
+
         assert!(
             snapshot
                 .evidence
@@ -3085,10 +3387,12 @@ mod tests {
             allocator_test_mapping(0x1000, 0x2000, "/tmp/libtcmalloc.so.4 (deleted)"),
             allocator_test_mapping(0x3000, 0x4000, "/tmp/libtcmalloc.so.4"),
         ];
+
         let probe = allocator_test_probe(&[
             allocator_test_symbol("malloc", 0x1100),
             allocator_test_symbol("free", 0x3100),
         ]);
+
         let snapshot = allocator_snapshot(&maps, &probe);
         assert_eq!(snapshot.implementation, "tcmalloc");
         assert_ne!(snapshot.implementation, "split allocator bindings");
@@ -3115,6 +3419,7 @@ mod tests {
         ] {
             assert!(allocator_probe_value_is_indirect(value), "{value}");
         }
+
         assert!(!allocator_probe_value_is_indirect(
             "(void *) 0x7ffff7e1c920 <__GI___libc_malloc>"
         ));
@@ -3154,6 +3459,7 @@ mod tests {
     #[test]
     fn records_a_degraded_probe_without_overstating_completeness() {
         let maps = [allocator_test_mapping(0x1000, 0x2000, "/usr/lib/libc.so.6")];
+
         let snapshot = allocator_snapshot(
             &maps,
             &AllocatorProbe {
@@ -3162,7 +3468,9 @@ mod tests {
                 symbols: Vec::new(),
             },
         );
+
         assert_eq!(snapshot.probe_dispatch_failures, 3);
+
         assert!(
             snapshot
                 .evidence
@@ -3178,6 +3486,7 @@ mod tests {
             0x2000,
             "/opt/bin/jemalloc-benchmark",
         )];
+
         let probe = allocator_test_probe(&[allocator_test_symbol("malloc", 0x1100)]);
         let snapshot = allocator_snapshot(&maps, &probe);
         assert_eq!(snapshot.implementation, "custom or interposed allocator");
@@ -3191,11 +3500,13 @@ mod tests {
             0x3000,
             "/opt/bin/static-service",
         )];
+
         let probe = allocator_test_probe(&[
             allocator_test_symbol("malloc", 0x1100),
             allocator_test_symbol("__libc_malloc", 0x1200),
             allocator_test_symbol("tc_malloc", 0x1300),
         ]);
+
         let snapshot = allocator_snapshot(&maps, &probe);
         assert_eq!(snapshot.implementation, "tcmalloc");
         assert!(snapshot.detection_basis.contains("allocator-specific"));
@@ -3208,11 +3519,13 @@ mod tests {
             0x3000,
             "/opt/bin/static-service",
         )];
+
         let probe = allocator_test_probe(&[
             allocator_test_symbol("malloc", 0x1100),
             allocator_test_symbol("tc_malloc", 0x1200),
             allocator_test_symbol("mi_malloc", 0x1300),
         ]);
+
         let snapshot = allocator_snapshot(&maps, &probe);
         assert_eq!(snapshot.implementation, "conflicting allocator evidence");
     }
@@ -3223,12 +3536,15 @@ mod tests {
             allocator_test_mapping(0x1000, 0x2000, "/usr/lib/libc.so.6"),
             allocator_test_mapping(0x3000, 0x4000, "/opt/bin/go-service"),
         ];
+
         let probe = allocator_test_probe(&[
             allocator_test_symbol("malloc", 0x1100),
             allocator_test_symbol("runtime.mallocgc", 0x3100),
         ]);
+
         let snapshot = allocator_snapshot(&maps, &probe);
         assert_eq!(snapshot.implementation, "glibc / ptmalloc");
+
         assert_eq!(
             snapshot.allocation_frontends,
             [String::from("Go managed heap")]
@@ -3271,6 +3587,7 @@ mod tests {
             fullname: None,
             line: Some(7),
         }];
+
         let registers = [
             Register {
                 name: String::from("rip"),
@@ -3288,8 +3605,10 @@ mod tests {
                 pointer_chain: Vec::new(),
             },
         ];
+
         let snapshot = call_abi_snapshot(TargetArchitecture::X86_64, 64, 0, &frames);
         assert_eq!(snapshot.current_frame.unwrap().function, "main");
+
         assert_eq!(
             snapshot.contract[0].value,
             "$rdi  $rsi  $rdx  $rcx  $r8  $r9"
@@ -3302,6 +3621,7 @@ mod tests {
             },
             &registers,
         );
+
         assert_eq!(transfer.context, "OUTGOING CALL  ·  malloc");
         assert_eq!(transfer.registers.len(), 2);
         assert_eq!(transfer.registers[0].name, "$rdi");
@@ -3323,13 +3643,11 @@ mod tests {
         bytes[52..54].copy_from_slice(&64_u16.to_le_bytes());
         bytes[54..56].copy_from_slice(&56_u16.to_le_bytes());
         bytes[56..58].copy_from_slice(&1_u16.to_le_bytes());
-
         let program = &mut bytes[64..120];
         program[0..4].copy_from_slice(&4_u32.to_le_bytes());
         program[8..16].copy_from_slice(&120_u64.to_le_bytes());
         program[32..40].copy_from_slice(&44_u64.to_le_bytes());
         program[48..56].copy_from_slice(&4_u64.to_le_bytes());
-
         let note = &mut bytes[120..];
         note[0..4].copy_from_slice(&5_u32.to_le_bytes());
         note[4..8].copy_from_slice(&24_u32.to_le_bytes());
@@ -3344,6 +3662,7 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("worker")
         ));
+
         std::fs::write(&path, bytes).unwrap();
         let snapshot = read_core_dump(&path).unwrap();
         std::fs::remove_file(path).unwrap();

@@ -20,9 +20,11 @@ impl RustToolchain {
         let started = Instant::now();
         let output = rustc_output(working_directory, &["--print=sysroot"], timeout)?;
         let sysroot = parse_rustc_sysroot(std::str::from_utf8(&output).ok()?)?;
+
         if !sysroot.is_dir() {
             return None;
         }
+
         let commit_hash = timeout
             .checked_sub(started.elapsed())
             .filter(|remaining| !remaining.is_zero())
@@ -32,11 +34,14 @@ impl RustToolchain {
                     .ok()
                     .and_then(parse_rustc_commit_hash)
             });
+
         let printer_directory = sysroot.join("lib/rustlib/etc");
+
         let printer_directory = printer_directory
             .join(RUST_GDB_LOADER)
             .is_file()
             .then_some(printer_directory);
+
         Some(Self {
             sysroot,
             printer_directory,
@@ -68,9 +73,11 @@ impl RustToolchain {
         let Some(printer_directory) = self.printer_directory.as_deref() else {
             return Vec::new();
         };
+
         let Some(printer_directory) = printer_directory.to_str() else {
             return Vec::new();
         };
+
         let mut arguments = vec![
             format!("--directory={printer_directory}"),
             String::from("-iex"),
@@ -79,8 +86,10 @@ impl RustToolchain {
                 gdb_cli_string(printer_directory)
             ),
         ];
+
         if let Some(commit_hash) = self.commit_hash.as_deref() {
             let rust_sources = self.sysroot.join("lib/rustlib/src/rust");
+
             if rust_sources.is_dir()
                 && let Some(rust_sources) = rust_sources.to_str()
             {
@@ -94,6 +103,7 @@ impl RustToolchain {
                 ]);
             }
         }
+
         arguments
     }
 }
@@ -110,11 +120,14 @@ fn rustc_output(
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+
     let deadline = Instant::now().checked_add(timeout)?;
+
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 let output = child.wait_with_output().ok()?;
+
                 return (status.success() && output.stdout.len() <= MAX_RUSTC_OUTPUT_BYTES)
                     .then_some(output.stdout);
             }
@@ -130,6 +143,7 @@ fn rustc_output(
 
 fn parse_rustc_sysroot(output: &str) -> Option<PathBuf> {
     let sysroot = PathBuf::from(output.trim());
+
     (!sysroot.as_os_str().is_empty() && sysroot.is_absolute()).then_some(sysroot)
 }
 
@@ -157,6 +171,7 @@ fn gdb_cli_string(value: &str) -> String {
             character => quoted.push(character),
         }
     }
+
     quoted.push('"');
     quoted
 }
@@ -209,6 +224,7 @@ mod tests {
             printer_directory: None,
             commit_hash: None,
         };
+
         assert!(toolchain.gdb_printer_arguments().is_empty());
     }
 }

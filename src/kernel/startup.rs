@@ -41,8 +41,10 @@ pub(crate) fn read_process_startup(
     debugger_pid: u32,
 ) -> Result<ProcessStartupSnapshot, String> {
     let root = super::verified_proc_root(pid, debugger_pid)?;
+
     let before = read_startup_ranges(&root.join("stat"))
         .ok_or_else(|| format!("Cannot read argument boundaries from /proc/{pid}/stat"))?;
+
     let mut snapshot = ProcessStartupSnapshot {
         pid,
         argument_range: before.arguments,
@@ -78,6 +80,7 @@ pub(crate) fn read_process_startup(
                         .map_or((entry, &[][..]), |separator| {
                             (&entry[..separator], &entry[separator + 1..])
                         });
+
                     ProcessEnvironment {
                         index,
                         address: entry_address(before.environment, offset, entry.len()),
@@ -95,12 +98,15 @@ pub(crate) fn read_process_startup(
 
     let after = read_startup_ranges(&root.join("stat"))
         .ok_or_else(|| format!("Process {pid} disappeared while its startup data was read"))?;
+
     super::verified_proc_root(pid, debugger_pid)?;
+
     if before.identity != after.identity {
         return Err(format!(
             "Process {pid} changed while its startup data was being read"
         ));
     }
+
     Ok(snapshot)
 }
 
@@ -116,6 +122,7 @@ fn parse_startup_ranges(stat: &str) -> Option<StartupRanges> {
     let mut argument_end = None;
     let mut environment_start = None;
     let mut environment_end = None;
+
     for (index, value) in stat.rsplit_once(") ")?.1.split_whitespace().enumerate() {
         let target = match index {
             19 => &mut identity,
@@ -125,11 +132,14 @@ fn parse_startup_ranges(stat: &str) -> Option<StartupRanges> {
             48 => &mut environment_end,
             _ => continue,
         };
+
         *target = value.parse::<u64>().ok();
+
         if index == 48 {
             break;
         }
     }
+
     Some(StartupRanges {
         identity: identity?,
         arguments: argument_start
@@ -147,14 +157,17 @@ fn valid_range(start: u64, end: u64) -> Option<(u64, u64)> {
 
 fn nul_entries(bytes: &[u8]) -> impl Iterator<Item = (usize, &[u8])> {
     let mut offset = 0;
+
     bytes.split_inclusive(|byte| *byte == 0).map(move |entry| {
         let start = offset;
         offset += entry.len();
+
         let value = if entry.last() == Some(&0) {
             &entry[..entry.len() - 1]
         } else {
             entry
         };
+
         (start, value)
     })
 }
@@ -164,12 +177,14 @@ fn entry_address(range: Option<(u64, u64)>, offset: usize, byte_len: usize) -> O
     let offset = u64::try_from(offset).ok()?;
     let byte_len = u64::try_from(byte_len).ok()?;
     let address = start.checked_add(offset)?;
+
     (address.checked_add(byte_len)? < end).then_some(address)
 }
 
 fn display_bytes(bytes: &[u8]) -> String {
     if let Ok(text) = std::str::from_utf8(bytes) {
         let mut display = String::with_capacity(text.len());
+
         for character in text.chars() {
             match character {
                 '\n' => display.push_str("\\n"),
@@ -177,23 +192,28 @@ fn display_bytes(bytes: &[u8]) -> String {
                 '\t' => display.push_str("\\t"),
                 character if character.is_control() => {
                     use std::fmt::Write as _;
+
                     let _ = write!(display, "\\u{{{:x}}}", u32::from(character));
                 }
                 character => display.push(character),
             }
         }
+
         return display;
     }
 
     let mut display = String::with_capacity(bytes.len());
+
     for byte in bytes {
         if byte.is_ascii_graphic() || *byte == b' ' {
             display.push(char::from(*byte));
         } else {
             use std::fmt::Write as _;
+
             let _ = write!(display, "\\x{byte:02x}");
         }
     }
+
     display
 }
 
@@ -207,6 +227,7 @@ mod tests {
             nul_entries(b"fgdb\0\0--flag\0").collect::<Vec<_>>(),
             vec![(0, &b"fgdb"[..]), (5, &b""[..]), (6, &b"--flag"[..])]
         );
+
         assert!(nul_entries(b"").next().is_none());
     }
 
@@ -226,6 +247,7 @@ mod tests {
         fields[47] = "8192";
         fields[48] = "8256";
         let stat = format!("77 (name with ) parens) {}", fields.join(" "));
+
         assert_eq!(
             parse_startup_ranges(&stat),
             Some(StartupRanges {

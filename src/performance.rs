@@ -8,12 +8,12 @@ pub(crate) const MI_INSPECTION_BUDGET: Duration = Duration::from_millis(750);
 pub(crate) const MI_CONTROL_BUDGET: Duration = Duration::from_secs(2);
 pub(crate) const MI_BACKGROUND_BUDGET: Duration = Duration::from_secs(5);
 pub(crate) const MI_SCOPED_QUEUE_BUDGET: Duration = Duration::from_millis(500);
-
 pub(crate) const THREAD_WIDGET_BUDGET: usize = 256;
 pub(crate) const THREAD_SELECTOR_BUDGET: usize = 512;
 pub(crate) const STACK_FRAME_WIDGET_BUDGET: usize = 512;
 pub(crate) const MODULE_WIDGET_BUDGET: usize = 256;
 pub(crate) const STOP_POINT_WIDGET_BUDGET: usize = 512;
+pub(crate) const LOCALS_ROOT_PAGE_SIZE: usize = 512;
 pub(crate) const MODULE_METADATA_FILE_BUDGET: usize = 512;
 pub(crate) const MODULE_METADATA_TIME_BUDGET: Duration = Duration::from_secs(3);
 pub(crate) const RESOLVED_SOURCE_PATH_CACHE_BUDGET: usize = 4_096;
@@ -91,6 +91,74 @@ pub(crate) fn duration_notice(
     (elapsed > budget).then(|| PerformanceNotice::slow(operation, elapsed, budget))
 }
 
+#[derive(Clone, Debug)]
+struct AdaptiveLimit {
+    current: usize,
+    minimum: usize,
+    maximum: usize,
+    fast_samples: u8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RenderLimitAdjustment {
+    pub(crate) previous: usize,
+    pub(crate) current: usize,
+}
+
+/// Learns conservative widget page sizes from actual GTK construction time.
+/// Limits fall quickly after a missed frame and recover slowly after several
+/// consistently cheap renders, avoiding oscillation on heterogeneous hosts.
+#[derive(Default)]
+pub(crate) struct AdaptiveRenderBudgets {
+    limits: HashMap<String, AdaptiveLimit>,
+}
+
+impl AdaptiveRenderBudgets {
+    pub(crate) fn limit(&mut self, operation: &str, default: usize, minimum: usize) -> usize {
+        self.limits
+            .entry(operation.to_owned())
+            .or_insert(AdaptiveLimit {
+                current: default,
+                minimum: minimum.min(default).max(1),
+                maximum: default.max(1),
+                fast_samples: 0,
+            })
+            .current
+    }
+
+    pub(crate) fn observe(
+        &mut self,
+        operation: &str,
+        elapsed: Duration,
+    ) -> Option<RenderLimitAdjustment> {
+        let limit = self.limits.get_mut(operation)?;
+        let previous = limit.current;
+
+        if elapsed > UI_RENDER_BUDGET {
+            limit.current = limit.current.div_ceil(2).max(limit.minimum);
+            limit.fast_samples = 0;
+        } else if elapsed <= UI_RENDER_BUDGET / 2 {
+            limit.fast_samples = limit.fast_samples.saturating_add(1);
+
+            if limit.fast_samples >= 8 {
+                limit.current = limit
+                    .current
+                    .saturating_add(limit.minimum)
+                    .min(limit.maximum);
+
+                limit.fast_samples = 0;
+            }
+        } else {
+            limit.fast_samples = 0;
+        }
+
+        (previous != limit.current).then_some(RenderLimitAdjustment {
+            previous,
+            current: limit.current,
+        })
+    }
+}
+
 fn format_duration(duration: Duration) -> String {
     if duration >= Duration::from_secs(1) {
         format!("{:.2} s", duration.as_secs_f64())
@@ -133,30 +201,36 @@ where
         self.clock = self.clock.wrapping_add(1);
         let entry = self.entries.get_mut(key)?;
         entry.last_used = self.clock;
+
         Some(entry.value.clone())
     }
 
     /// Returns true when inserting this entry evicted an older entry.
     pub(crate) fn insert(&mut self, key: K, value: V) -> bool {
         self.clock = self.clock.wrapping_add(1);
+
         if let Some(entry) = self.entries.get_mut(&key) {
             entry.value = value;
             entry.last_used = self.clock;
             return false;
         }
+
         if self.capacity == 0 {
             return true;
         }
+
         let evicted = if self.entries.len() >= self.capacity {
             let oldest = self
                 .entries
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(key, _)| key.clone());
+
             oldest.is_some_and(|key| self.entries.remove(&key).is_some())
         } else {
             false
         };
+
         self.entries.insert(
             key,
             CacheEntry {
@@ -164,6 +238,7 @@ where
                 last_used: self.clock,
             },
         );
+
         evicted
     }
 
@@ -184,8 +259,10 @@ mod tests {
     #[test]
     fn duration_budget_only_reports_actual_breaches() {
         assert!(duration_notice("render", Duration::from_millis(16), UI_RENDER_BUDGET).is_none());
+
         let notice =
             duration_notice("render", Duration::from_millis(17), UI_RENDER_BUDGET).unwrap();
+
         assert_eq!(notice.outcome, BudgetOutcome::Slow);
         assert!(notice.message().contains("17 ms"));
     }
@@ -193,6 +270,7 @@ mod tests {
     #[test]
     fn count_notices_make_partial_results_explicit() {
         let notice = PerformanceNotice::count(BudgetOutcome::Partial, "threads", 256, 1_024);
+
         assert_eq!(
             notice.message(),
             "Performance budget: threads was partial — showing 256 of 1024 entries"
@@ -218,5 +296,35 @@ mod tests {
         assert!(cache.insert("unused", 1));
         assert_eq!(cache.len(), 0);
         assert_eq!(cache.get_cloned(&"unused"), None);
+    }
+
+    #[test]
+    fn adaptive_render_limits_shed_fast_and_recover_slowly() {
+        let mut budgets = AdaptiveRenderBudgets::default();
+        assert_eq!(budgets.limit("threads", 256, 32), 256);
+
+        assert_eq!(
+            budgets
+                .observe("threads", Duration::from_millis(20))
+                .unwrap()
+                .current,
+            128
+        );
+
+        for _ in 0..7 {
+            assert!(
+                budgets
+                    .observe("threads", Duration::from_millis(4))
+                    .is_none()
+            );
+        }
+
+        assert_eq!(
+            budgets
+                .observe("threads", Duration::from_millis(4))
+                .unwrap()
+                .current,
+            160
+        );
     }
 }

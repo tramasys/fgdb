@@ -38,10 +38,12 @@ pub(super) fn reduce_stop_transition(
     // replacement stop emitted after the stepping thread exits.
     let replacement_after_thread_exit = exit_candidate_present && non_stop != Some(true);
     let terminal_all_stopped = all_stopped || replacement_after_thread_exit;
+
     let active_execution_stopped = terminal_all_stopped
         || active_thread.is_some_and(|active| {
             matches!(reported_thread, None | Some("all")) || reported_thread == Some(active)
         });
+
     StopTransition {
         terminal_all_stopped,
         active_execution_stopped,
@@ -59,14 +61,17 @@ mod tests {
             admit_event(true, &MiEvent::Running { thread_id: None }),
             EventAdmission::IgnoreFromQuarantinedBackend
         );
+
         assert_eq!(
             admit_event(true, &MiEvent::Ready(GdbCapabilities::default())),
             EventAdmission::Apply
         );
+
         assert_eq!(
             admit_event(true, &MiEvent::Disconnected),
             EventAdmission::Apply
         );
+
         assert_eq!(
             admit_event(false, &MiEvent::Running { thread_id: None }),
             EventAdmission::Apply
@@ -85,7 +90,6 @@ mod tests {
         let unrelated = reduce_stop_transition(Some(true), true, Some("2"), Some("3"), false);
         assert!(!unrelated.terminal_all_stopped);
         assert!(!unrelated.active_execution_stopped);
-
         let active = reduce_stop_transition(Some(true), false, Some("2"), Some("2"), false);
         assert!(!active.terminal_all_stopped);
         assert!(active.active_execution_stopped);

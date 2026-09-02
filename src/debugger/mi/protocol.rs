@@ -70,23 +70,29 @@ impl GdbCapabilities {
 
     pub fn compatibility_summary(&self) -> String {
         let mut available = Vec::with_capacity(4);
+
         if self.mi_async {
             available.push("MI async");
         }
+
         if self.pretty_printing {
             available.push("pretty printers");
         }
+
         if self.rust_pretty_printing {
             available.push("Rust printers");
         }
+
         if self.features_known {
             available.push("feature list");
         }
+
         let support = if available.is_empty() {
             String::from("compatibility mode")
         } else {
             available.join(" · ")
         };
+
         if let Some(version) = self.version.as_ref() {
             format!("GDB {version} · {support}")
         } else {
@@ -98,6 +104,7 @@ impl GdbCapabilities {
         if component.is_empty() || !component.bytes().all(|byte| byte.is_ascii_digit()) {
             return;
         }
+
         if minor {
             if let Some(version) = self.version.as_mut() {
                 version.push('.');

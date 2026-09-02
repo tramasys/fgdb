@@ -37,6 +37,7 @@ pub fn launch_gdb(
         move |result| match result {
             Ok(pid) => {
                 terminal_for_callback.feed_child(format!("new-ui mi2 {mi_path}\n").as_bytes());
+
                 match u32::try_from(pid.0) {
                     Ok(pid) => spawn_event(SessionEvent::Spawned(pid)),
                     Err(_) => spawn_event(SessionEvent::Failed(String::from(

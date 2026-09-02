@@ -1,8 +1,13 @@
 use super::*;
 
 impl Ui {
+    pub(crate) fn source_index_snapshot(&self) -> Option<Arc<source::SourceIndex>> {
+        self.source_index.borrow().as_ref().cloned()
+    }
+
     pub(super) fn resolve_source_path(&self, reported_path: &str) -> Option<PathBuf> {
         let cache_key = reported_path.to_owned();
+
         if let Some(path) = self
             .resolved_source_paths
             .borrow_mut()
@@ -10,10 +15,39 @@ impl Ui {
         {
             return path;
         }
-        let path = source::resolve(reported_path, &self.source_roots.borrow());
+
+        let indexed = self
+            .source_index
+            .borrow()
+            .as_ref()
+            .map(|index| index.resolve(reported_path));
+
+        let path = match indexed {
+            Some(source::SourceResolution::Unique(path)) => path,
+            Some(source::SourceResolution::Ambiguous) => {
+                self.set_status(
+                    "Ambiguous source path",
+                    &format!(
+                        "More than one indexed file matches {reported_path}. Configure a source directory or substitute path"
+                    ),
+                    Some("status-error"),
+                );
+
+                return None;
+            }
+            Some(source::SourceResolution::Missing) | None => {
+                source::resolve(reported_path, &self.source_roots.borrow())?
+            }
+        };
+
         let mut cache = self.resolved_source_paths.borrow_mut();
-        let evicted = cache.insert(cache_key, path.clone());
+
+        // Missing files can appear after a build, debuginfod download, or a
+        // substitute-path change. Cache successful work, but never make a
+        // transient miss sticky for the rest of the session.
+        let evicted = cache.insert(cache_key, Some(path.clone()));
         drop(cache);
+
         if evicted {
             self.record_performance_notice(crate::performance::PerformanceNotice {
                 outcome: crate::performance::BudgetOutcome::Evicted,
@@ -24,7 +58,8 @@ impl Ui {
                 ),
             });
         }
-        path
+
+        Some(path)
     }
 
     pub fn show_source_locations(&self, symbol: &str, locations: &[SourceLocation]) {
@@ -33,6 +68,7 @@ impl Ui {
             .filter_map(|location| {
                 let path = self.resolve_source_path(location.source_path())?;
                 let score = source_location_score(symbol, location);
+
                 Some((score, path, location))
             })
             // Preserve the stable-sort behavior for equal scores by retaining
@@ -44,6 +80,7 @@ impl Ui {
                     candidate
                 }
             });
+
         let Some((_, path, location)) = candidate else {
             self.set_status(
                 "Source unavailable",
@@ -52,11 +89,14 @@ impl Ui {
                 ),
                 Some("status-error"),
             );
+
             return;
         };
+
         if !self.navigate_to_source(&path, location.line, true) {
             return;
         }
+
         self.set_status(
             "Source",
             &format!(
@@ -73,15 +113,18 @@ impl Ui {
         if !self.source_documents.borrow().is_empty() {
             return;
         }
+
         let Some(path) = self.resolve_source_path(source_file.source_path()) else {
             return;
         };
+
         let context = SourceOpenContext {
             notebook: &self.source_notebook,
             documents: &self.source_documents,
             theme: &self.source_theme,
             style_scheme: self.source_style_scheme.as_ref(),
             breakpoints: &self.breakpoints,
+            source_index: &self.source_index,
             insert_handler: &self.breakpoint_insert_handler,
             jump_handler: &self.source_jump_handler,
             delete_handler: &self.breakpoint_delete_handler,
@@ -90,10 +133,13 @@ impl Ui {
             closed_tabs: &self.closed_source_tabs,
             reopen_closed: &self.source_navigation.reopen_closed,
         };
+
         let Some(document) = open_source_document(&path, context) else {
             return;
         };
+
         scroll_source_document(&document, source_file.line);
+
         self.set_status(
             "Ready",
             &format!(
@@ -106,51 +152,66 @@ impl Ui {
 
     pub fn show_execution_location(&self, frame: &StackFrame) {
         self.selected_frame_level.set(frame.level);
+
         self.current_source_is_rust.set(
             frame
                 .source_path()
                 .and_then(|path| Path::new(path).extension())
                 .is_some_and(|extension| extension.eq_ignore_ascii_case("rs")),
         );
+
         if let Some(description) = frame.architecture.as_deref() {
             let architecture = TargetArchitecture::from_gdb_description(description);
+
             if architecture != TargetArchitecture::Unknown {
                 self.set_target_architecture(architecture);
             }
+
             if let Some(bits) =
                 TargetArchitecture::explicit_pointer_bits_from_gdb_description(description)
             {
                 self.set_target_pointer_bits(bits);
             }
+
             if let Some(endian) = TargetEndian::from_architecture_description(description) {
                 self.set_target_endian(Some(endian));
             }
         }
+
         update_selected_frame_buttons(&self.frame_buttons.borrow(), frame.level);
+
         let (Some(reported_path), Some(line)) = (frame.source_path(), frame.line) else {
             self.clear_execution_mark();
             return;
         };
+
         let path = self.resolve_source_path(reported_path);
+
         let Some(path) = path else {
             self.clear_execution_mark();
+
             self.status_detail.set_text(&format!(
                 "Paused in {} · source unavailable: {reported_path}",
                 frame.function
             ));
+
             return;
         };
+
         let same_location = self.execution_source_line.get() == Some(line)
             && self.execution_source_path.borrow().as_ref() == Some(&path);
+
         if !same_location {
             self.clear_execution_mark();
         }
+
         let context = SourceOpenContext {
             notebook: &self.source_notebook,
             documents: &self.source_documents,
             theme: &self.source_theme,
             style_scheme: self.source_style_scheme.as_ref(),
             breakpoints: &self.breakpoints,
+            source_index: &self.source_index,
             insert_handler: &self.breakpoint_insert_handler,
             jump_handler: &self.source_jump_handler,
             delete_handler: &self.breakpoint_delete_handler,
@@ -159,21 +220,27 @@ impl Ui {
             closed_tabs: &self.closed_source_tabs,
             reopen_closed: &self.source_navigation.reopen_closed,
         };
+
         let Some(document) = open_source_document(&path, context) else {
             self.clear_execution_mark();
+
             self.set_status(
                 "Source unavailable",
                 &format!("Could not read {}", path.display()),
                 Some("status-error"),
             );
+
             return;
         };
+
         document.tab.add_css_class("executing-source-tab");
+
         document.tab_label.set_tooltip_text(Some(&format!(
             "{}\n{} at line {line}",
             path.to_string_lossy(),
             frame.function
         )));
+
         let mark_present = i32::try_from(line.saturating_sub(1))
             .ok()
             .is_some_and(|line| {
@@ -182,23 +249,29 @@ impl Ui {
                     .source_marks_at_line(line, Some(EXECUTION_CATEGORY))
                     .is_empty()
             });
+
         if same_location && mark_present {
             return;
         }
+
         let Ok(line) = i32::try_from(line.saturating_sub(1)) else {
             return;
         };
+
         let Some(iter) = document.buffer.iter_at_line(line) else {
             return;
         };
+
         let mark = document
             .buffer
             .create_source_mark(None, EXECUTION_CATEGORY, &iter);
+
         self.execution_source_path.replace(Some(path));
         self.execution_source_line.set(frame.line);
         document.breakpoint_renderer.queue_draw();
         document.buffer.place_cursor(&iter);
         let source_view = document.view;
+
         gtk::glib::idle_add_local_once(move || {
             if mark
                 .buffer()
@@ -224,6 +297,7 @@ impl Ui {
         self.current_source_is_rust.set(false);
         self.execution_source_line.set(None);
         let path = self.execution_source_path.borrow();
+
         for document in self
             .source_documents
             .borrow()
@@ -238,6 +312,7 @@ impl Ui {
     fn clear_execution_mark(&self) {
         let path = self.execution_source_path.borrow_mut().take();
         self.execution_source_line.set(None);
+
         for document in self
             .source_documents
             .borrow()
@@ -247,6 +322,7 @@ impl Ui {
             remove_marks(&document.buffer, EXECUTION_CATEGORY);
             document.breakpoint_renderer.queue_draw();
             document.tab.remove_css_class("executing-source-tab");
+
             document
                 .tab_label
                 .set_tooltip_text(Some(&document.path.to_string_lossy()));
@@ -258,9 +334,11 @@ impl Ui {
         self.clear_thread_action_pending();
         self.defer_displayed_variable_object_deletions();
         let disassembly_handler = self.disassembly_handler.borrow().clone();
+
         if let Some(handler) = disassembly_handler {
             handler(DisassemblyRequest::Clear);
         }
+
         self.start_stop_refresh();
         self.start_thread_refresh();
         self.clear_execution_location();
@@ -279,8 +357,16 @@ impl Ui {
         self.memory_regions.borrow_mut().clear();
         self.memory_regions_generation.set(None);
         self.memory_regions_empty.set_visible(true);
+
+        self.memory_watch_container
+            .refresh_batch
+            .borrow_mut()
+            .clear();
+
+        update_memory_container_state(&self.memory_watch_container, false);
         self.clear_kernel_snapshot();
         self.clear_misc_snapshot();
+
         for watch in self.memory_watches.borrow().iter() {
             watch.status.remove_css_class("memory-watch-error");
             watch.status.set_text("target is not paused");
@@ -295,6 +381,7 @@ impl Ui {
 
     fn defer_displayed_variable_object_deletions(&self) {
         let mut deferred = self.deferred_variable_object_deletions.borrow_mut();
+
         deferred.extend(
             self.local_variable_objects()
                 .into_iter()
@@ -321,19 +408,23 @@ impl Ui {
 
     pub(super) fn connect_open_source(self: &Rc<Self>) {
         let weak_ui = Rc::downgrade(self);
+
         self.source_navigation.open_file.connect_clicked(move |_| {
             let dialog = gtk::FileDialog::builder()
                 .title("Open source files")
                 .modal(true)
                 .build();
+
             let source_filter = gtk::FileFilter::new();
             source_filter.set_name(Some("Source files"));
+
             for pattern in [
                 "*.c", "*.h", "*.cc", "*.cpp", "*.cxx", "*.hpp", "*.hh", "*.rs", "*.s", "*.S",
                 "*.asm", "*.inc", "*.inl", "*.m", "*.mm", "*.go", "*.zig",
             ] {
                 source_filter.add_pattern(pattern);
             }
+
             let all_filter = gtk::FileFilter::new();
             all_filter.set_name(Some("All files"));
             all_filter.add_pattern("*");
@@ -342,12 +433,15 @@ impl Ui {
             filters.append(&all_filter);
             dialog.set_filters(Some(&filters));
             dialog.set_default_filter(Some(&source_filter));
+
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
+
             if let Some(root) = ui.source_roots.borrow().first() {
                 dialog.set_initial_folder(Some(&gio::File::for_path(root)));
             }
+
             let window = ui.window.clone();
             let weak_ui = Rc::downgrade(&ui);
             drop(ui);
@@ -356,28 +450,35 @@ impl Ui {
                 let Ok(files) = dialog.open_multiple_future(Some(&window)).await else {
                     return;
                 };
+
                 let mut opened = 0_u32;
                 let mut failed = Vec::new();
+
                 for index in 0..files.n_items() {
                     let Some(file) = files.item(index).and_downcast::<gio::File>() else {
                         continue;
                     };
+
                     let Some(path) = file.path() else {
                         failed.push(String::from("non-local source"));
                         continue;
                     };
+
                     let Some(ui) = weak_ui.upgrade() else {
                         return;
                     };
+
                     if ui.navigate_to_source(&path, 1, true) {
                         opened += 1;
                     } else {
                         failed.push(path.display().to_string());
                     }
                 }
+
                 let Some(ui) = weak_ui.upgrade() else {
                     return;
                 };
+
                 if failed.is_empty() {
                     ui.set_status(
                         "Source",

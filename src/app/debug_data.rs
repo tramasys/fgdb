@@ -25,6 +25,7 @@ pub(super) fn handle_debug_data_action(
         DebugDataAction::Refresh => refresh_debug_data(ui, client),
         DebugDataAction::SetDebuginfodEnabled(enabled) => {
             let value = if enabled { "on" } else { "off" };
+
             run_console_setting(
                 ui,
                 client,
@@ -87,18 +88,24 @@ fn refresh_debug_data(ui: Weak<Ui>, client: Rc<MiClient>) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     let generation = current_ui.begin_debug_data_refresh();
     let refresh_printers = current_ui.debug_data_pretty_printers_were_requested();
+
     if !current_ui.gdb_capabilities().pretty_printing {
         current_ui.add_debug_data_warning(
-            "Pretty printing is disabled; raw values remain available in Locals and Arguments",
+            "Pretty printing is disabled. Raw values remain available in Locals and Arguments",
         );
     }
+
     drop(current_ui);
+
     if refresh_printers {
         request_pretty_printers(ui.clone(), Rc::clone(&client));
     }
+
     refresh_modules(&ui, &client);
+
     request_debuginfod_status(Rc::new(RefCell::new(DebugDataQuery {
         ui,
         client,
@@ -115,12 +122,14 @@ fn refresh_debug_data(ui: Weak<Ui>, client: Rc<MiClient>) {
 fn request_debuginfod_status(query: Rc<RefCell<DebugDataQuery>>) {
     let client = Rc::clone(&query.borrow().client);
     let query_for_response = Rc::clone(&query);
+
     if let Err(error) = client.request_console_when(
         "show debuginfod enabled",
         debug_data_query_guard(&query),
         move |_, record, output| {
             let mut query = query_for_response.borrow_mut();
             note_query_truncation(&mut query, &record, "Debuginfod status");
+
             if record.is_done() {
                 query.debuginfod_status = parse_debuginfod_status(&output);
             } else {
@@ -129,6 +138,7 @@ fn request_debuginfod_status(query: Rc<RefCell<DebugDataQuery>>) {
                     console_error(&record, &output)
                 ));
             }
+
             drop(query);
             request_debuginfod_urls(query_for_response);
         },
@@ -137,6 +147,7 @@ fn request_debuginfod_status(query: Rc<RefCell<DebugDataQuery>>) {
             .borrow_mut()
             .errors
             .push(format!("Debuginfod status: {error}"));
+
         request_debuginfod_urls(query);
     }
 }
@@ -144,12 +155,14 @@ fn request_debuginfod_status(query: Rc<RefCell<DebugDataQuery>>) {
 fn request_debuginfod_urls(query: Rc<RefCell<DebugDataQuery>>) {
     let client = Rc::clone(&query.borrow().client);
     let query_for_response = Rc::clone(&query);
+
     if let Err(error) = client.request_console_when(
         "show debuginfod urls",
         debug_data_query_guard(&query),
         move |_, record, output| {
             let mut query = query_for_response.borrow_mut();
             note_query_truncation(&mut query, &record, "Debuginfod URLs");
+
             if record.is_done() {
                 query.debuginfod_urls = parse_setting_tail(&output);
             } else {
@@ -158,6 +171,7 @@ fn request_debuginfod_urls(query: Rc<RefCell<DebugDataQuery>>) {
                     console_error(&record, &output)
                 ));
             }
+
             drop(query);
             request_source_directories(query_for_response);
         },
@@ -166,6 +180,7 @@ fn request_debuginfod_urls(query: Rc<RefCell<DebugDataQuery>>) {
             .borrow_mut()
             .errors
             .push(format!("Debuginfod URLs: {error}"));
+
         request_source_directories(query);
     }
 }
@@ -173,12 +188,14 @@ fn request_debuginfod_urls(query: Rc<RefCell<DebugDataQuery>>) {
 fn request_source_directories(query: Rc<RefCell<DebugDataQuery>>) {
     let client = Rc::clone(&query.borrow().client);
     let query_for_response = Rc::clone(&query);
+
     if let Err(error) = client.request_console_when(
         "show directories",
         debug_data_query_guard(&query),
         move |_, record, output| {
             let mut query = query_for_response.borrow_mut();
             note_query_truncation(&mut query, &record, "Source directories");
+
             if record.is_done() {
                 query.source_directories = parse_source_directories(&output);
             } else {
@@ -187,6 +204,7 @@ fn request_source_directories(query: Rc<RefCell<DebugDataQuery>>) {
                     console_error(&record, &output)
                 ));
             }
+
             drop(query);
             request_substitutions(query_for_response);
         },
@@ -195,6 +213,7 @@ fn request_source_directories(query: Rc<RefCell<DebugDataQuery>>) {
             .borrow_mut()
             .errors
             .push(format!("Source directories: {error}"));
+
         request_substitutions(query);
     }
 }
@@ -202,12 +221,14 @@ fn request_source_directories(query: Rc<RefCell<DebugDataQuery>>) {
 fn request_substitutions(query: Rc<RefCell<DebugDataQuery>>) {
     let client = Rc::clone(&query.borrow().client);
     let query_for_response = Rc::clone(&query);
+
     if let Err(error) = client.request_console_when(
         "show substitute-path",
         debug_data_query_guard(&query),
         move |_, record, output| {
             let mut query = query_for_response.borrow_mut();
             note_query_truncation(&mut query, &record, "Source substitutions");
+
             if record.is_done() {
                 query.substitutions = parse_substitutions(&output);
             } else {
@@ -216,6 +237,7 @@ fn request_substitutions(query: Rc<RefCell<DebugDataQuery>>) {
                     console_error(&record, &output)
                 ));
             }
+
             drop(query);
             finish_debug_data_query(query_for_response);
         },
@@ -224,6 +246,7 @@ fn request_substitutions(query: Rc<RefCell<DebugDataQuery>>) {
             .borrow_mut()
             .errors
             .push(format!("Substitute paths: {error}"));
+
         finish_debug_data_query(query);
     }
 }
@@ -232,12 +255,15 @@ fn request_pretty_printers(ui: Weak<Ui>, client: Rc<MiClient>) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     let Some(generation) = current_ui.begin_debug_data_pretty_printer_refresh() else {
         return;
     };
+
     drop(current_ui);
     let ui_for_guard = ui.clone();
     let ui_for_response = ui.clone();
+
     if let Err(error) = client.request_console_when(
         "info pretty-printer",
         move || {
@@ -249,12 +275,16 @@ fn request_pretty_printers(ui: Weak<Ui>, client: Rc<MiClient>) {
             let Some(ui) = ui_for_response.upgrade() else {
                 return;
             };
+
             if !ui.debug_data_pretty_printer_refresh_is_current(generation) {
                 return;
             }
+
             note_console_truncation(&ui, &record, "Pretty-printer list");
+
             let result = if record.is_done() {
                 let (printers, total) = parse_pretty_printers(&output);
+
                 if printers.len() < total {
                     ui.record_performance_notice(crate::performance::PerformanceNotice::count(
                         crate::performance::BudgetOutcome::Partial,
@@ -263,6 +293,7 @@ fn request_pretty_printers(ui: Weak<Ui>, client: Rc<MiClient>) {
                         total,
                     ));
                 }
+
                 Ok(printers)
             } else {
                 Err(format!(
@@ -270,13 +301,16 @@ fn request_pretty_printers(ui: Weak<Ui>, client: Rc<MiClient>) {
                     console_error(&record, &output)
                 ))
             };
+
             if let Err(error) = &result {
                 ui.add_debug_data_error(error.clone());
             }
+
             ui.finish_debug_data_pretty_printer_refresh(generation, result);
         },
     ) {
         let message = format!("Pretty-printers: {error}");
+
         if let Some(ui) = ui.upgrade() {
             ui.add_debug_data_error(message.clone());
             ui.finish_debug_data_pretty_printer_refresh(generation, Err(message));
@@ -288,6 +322,7 @@ fn debug_data_query_guard(query: &Rc<RefCell<DebugDataQuery>>) -> impl Fn() -> b
     let query = query.borrow();
     let ui = query.ui.clone();
     let generation = query.generation;
+
     move || {
         ui.upgrade()
             .is_some_and(|ui| ui.debug_data_refresh_is_current(generation))
@@ -296,42 +331,54 @@ fn debug_data_query_guard(query: &Rc<RefCell<DebugDataQuery>>) -> impl Fn() -> b
 
 fn finish_debug_data_query(query: Rc<RefCell<DebugDataQuery>>) {
     let query = query.borrow();
+
     let Some(ui) = query.ui.upgrade() else {
         return;
     };
+
     if !ui.debug_data_refresh_is_current(query.generation) {
         return;
     }
+
     ui.set_debug_data_debuginfod(
         query.generation,
         query.debuginfod_status.clone(),
         query.debuginfod_urls.clone(),
     );
+
     ui.set_debug_data_sources(
         query.generation,
         query.source_directories.clone(),
         query.substitutions.clone(),
     );
+
     for error in &query.errors {
         ui.add_debug_data_error(error.clone());
     }
+
     for notice in &query.notices {
         ui.add_debug_data_warning(notice.clone());
     }
+
     ui.finish_debug_data_refresh(query.generation);
 }
 
 fn run_console_setting(ui: Weak<Ui>, client: Rc<MiClient>, command: String, success: String) {
     let ui_for_response = ui.clone();
+
     if let Some(ui) = ui.upgrade() {
         ui.add_debug_data_progress(format!("Applying: {command}"));
     }
+
     let client_for_refresh = Rc::clone(&client);
+
     if let Err(error) = client.request_console(&command, move |_, record, output| {
         let Some(ui) = ui_for_response.upgrade() else {
             return;
         };
+
         note_console_truncation(&ui, &record, "Debugger setting output");
+
         if record.is_done() {
             ui.add_debug_data_success(success);
         } else {
@@ -340,6 +387,7 @@ fn run_console_setting(ui: Weak<Ui>, client: Rc<MiClient>, command: String, succ
                 console_error(&record, &output)
             ));
         }
+
         refresh_debug_data(ui_for_response, client_for_refresh);
     }) && let Some(ui) = ui.upgrade()
     {
@@ -351,6 +399,7 @@ fn run_console_setting(ui: Weak<Ui>, client: Rc<MiClient>, command: String, succ
 fn set_pretty_printing(ui: Weak<Ui>, client: Rc<MiClient>, enabled: bool) {
     let ui_for_response = ui.clone();
     let client_for_refresh = Rc::clone(&client);
+
     if client
         .set_pretty_printing(enabled, move |_, record| {
             if let Some(ui) = ui_for_response.upgrade() {
@@ -367,6 +416,7 @@ fn set_pretty_printing(ui: Weak<Ui>, client: Rc<MiClient>, enabled: bool) {
                     ));
                 }
             }
+
             refresh_debug_data(ui_for_response, client_for_refresh);
         })
         .is_err()
@@ -382,17 +432,22 @@ fn add_source_directory(ui: Weak<Ui>, client: Rc<MiClient>, path: PathBuf) {
         if let Some(ui) = ui.upgrade() {
             ui.add_debug_data_error("Source path is not valid UTF-8 for this GDB session");
         }
+
         return;
     };
+
     let Ok(path_argument) = crate::debugger::gdb_cli_string(path_text) else {
         return;
     };
+
     let command = format!("directory {path_argument}");
     let ui_for_response = ui.clone();
     let client_for_refresh = Rc::clone(&client);
+
     if let Err(error) = client.request_console(&command, move |_, record, output| {
         if let Some(ui) = ui_for_response.upgrade() {
             note_console_truncation(&ui, &record, "Source-directory command output");
+
             if record.is_done() {
                 ui.add_runtime_source_directory(path.clone());
                 ui.add_debug_data_success(format!("Added source directory {}", path.display()));
@@ -403,6 +458,7 @@ fn add_source_directory(ui: Weak<Ui>, client: Rc<MiClient>, path: PathBuf) {
                 ));
             }
         }
+
         refresh_debug_data(ui_for_response, client_for_refresh);
     }) && let Some(ui) = ui.upgrade()
     {
@@ -415,18 +471,22 @@ fn remove_source_directory(ui: Weak<Ui>, client: Rc<MiClient>, path: String) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     let directories = current_ui
         .source_directories_for_debug_data()
         .into_iter()
         .filter(|directory| directory != &path)
         .collect::<Vec<_>>();
+
     let command = format!("set directories {}", directories.join(":"));
     drop(current_ui);
     let ui_for_response = ui.clone();
     let client_for_refresh = Rc::clone(&client);
+
     if let Err(error) = client.request_console(&command, move |_, record, output| {
         if let Some(ui) = ui_for_response.upgrade() {
             note_console_truncation(&ui, &record, "Source-directory command output");
+
             if record.is_done() {
                 ui.remove_runtime_source_directory(&path);
                 ui.add_debug_data_success(format!("Removed source directory {path}"));
@@ -437,6 +497,7 @@ fn remove_source_directory(ui: Weak<Ui>, client: Rc<MiClient>, path: String) {
                 ));
             }
         }
+
         refresh_debug_data(ui_for_response, client_for_refresh);
     }) && let Some(ui) = ui.upgrade()
     {
@@ -452,6 +513,7 @@ fn set_substitution(ui: Weak<Ui>, client: Rc<MiClient>, from: String, to: String
     ) else {
         return;
     };
+
     run_console_setting(
         ui,
         client,
@@ -464,6 +526,7 @@ fn remove_substitution(ui: Weak<Ui>, client: Rc<MiClient>, from: String) {
     let Ok(from_arg) = crate::debugger::gdb_cli_string(&from) else {
         return;
     };
+
     run_console_setting(
         ui,
         client,
@@ -479,30 +542,37 @@ fn retry_symbols(ui: Weak<Ui>, client: Rc<MiClient>, module: Option<String>) {
         current_ui.add_debug_data_warning(
             "Symbol retry was not started: choose whether to enable or disable debuginfod first",
         );
+
         return;
     }
+
     let command = module.as_deref().map_or_else(
         || String::from("sharedlibrary"),
         |module| {
             let pattern = exact_gdb_regex(module);
+
             crate::debugger::gdb_cli_string(&pattern).map_or_else(
                 |_| String::from("sharedlibrary"),
                 |pattern| format!("sharedlibrary {pattern}"),
             )
         },
     );
+
     if let Some(ui) = ui.upgrade() {
         ui.add_debug_data_progress(module.as_deref().map_or_else(
             || String::from("Retrying symbols for all shared libraries…"),
             |module| format!("Retrying symbols for {module}…"),
         ));
     }
+
     let ui_for_response = ui.clone();
     let client_for_refresh = Rc::clone(&client);
+
     if let Err(error) = client.request_console(&command, move |_, record, output| {
         if let Some(ui) = ui_for_response.upgrade() {
             note_console_truncation(&ui, &record, "Symbol loading output");
             let detail = output.trim();
+
             if record.is_done() {
                 if detail.is_empty() {
                     ui.add_debug_data_success("Symbol loading completed");
@@ -518,6 +588,7 @@ fn retry_symbols(ui: Weak<Ui>, client: Rc<MiClient>, module: Option<String>) {
                 ));
             }
         }
+
         refresh_debug_data(ui_for_response, client_for_refresh);
     }) && let Some(ui) = ui.upgrade()
     {
@@ -529,7 +600,7 @@ fn retry_symbols(ui: Weak<Ui>, client: Rc<MiClient>, module: Option<String>) {
 fn note_query_truncation(query: &mut DebugDataQuery, record: &MiRecord, operation: &str) {
     if record.output_was_truncated() {
         query.notices.push(format!(
-            "{operation} exceeded the captured-output budget; values shown are partial"
+            "{operation} exceeded the captured-output budget. Values shown are partial"
         ));
     }
 }
@@ -537,7 +608,7 @@ fn note_query_truncation(query: &mut DebugDataQuery, record: &MiRecord, operatio
 fn note_console_truncation(ui: &Ui, record: &MiRecord, operation: &str) {
     if record.output_was_truncated() {
         ui.add_debug_data_warning(format!(
-            "{operation} exceeded the captured-output budget; values shown are partial"
+            "{operation} exceeded the captured-output budget. Values shown are partial"
         ));
     }
 }
@@ -573,6 +644,7 @@ fn parse_substitutions(output: &str) -> Vec<(String, String)> {
             let (from, rest) = quoted_gdb_value(line)?;
             let (_, rest) = rest.split_once("->")?;
             let (to, _) = quoted_gdb_value(rest)?;
+
             Some((from.to_owned(), to.to_owned()))
         })
         .collect()
@@ -580,21 +652,26 @@ fn parse_substitutions(output: &str) -> Vec<(String, String)> {
 
 fn quoted_gdb_value(input: &str) -> Option<(&str, &str)> {
     let (_, value) = input.split_once('`')?;
+
     value.split_once('\'')
 }
 
 fn parse_pretty_printers(output: &str) -> (Vec<String>, usize) {
     let mut printers = Vec::new();
     let mut total = 0_usize;
+
     for line in output.lines().map(str::trim_end) {
         if line.trim().is_empty() {
             continue;
         }
+
         total += 1;
+
         if printers.len() < MAX_PRETTY_PRINTER_ENTRIES {
             printers.push(line.to_owned());
         }
     }
+
     (printers, total)
 }
 
@@ -608,6 +685,7 @@ fn console_error<'a>(record: &'a crate::debugger::MiRecord, output: &'a str) -> 
 fn exact_gdb_regex(value: &str) -> String {
     let mut regex = String::with_capacity(value.len().saturating_add(2));
     regex.push('^');
+
     for character in value.chars() {
         if matches!(
             character,
@@ -615,9 +693,12 @@ fn exact_gdb_regex(value: &str) -> String {
         ) {
             regex.push('\\');
         }
+
         regex.push(character);
     }
+
     regex.push('$');
+
     regex
 }
 
@@ -631,10 +712,12 @@ mod tests {
             parse_debuginfod_status("Debuginfod functionality is currently set to \"ask\"."),
             "ask"
         );
+
         assert_eq!(
             parse_source_directories("Source directories searched: /src:$cdir:$cwd\n"),
             ["/src", "$cdir", "$cwd"]
         );
+
         assert_eq!(
             parse_substitutions("List:\n  `/rustc/hash' -> `/local/rust'.\n"),
             [(String::from("/rustc/hash"), String::from("/local/rust"))]
@@ -657,9 +740,9 @@ mod tests {
             .join("\n");
 
         let (printers, total) = parse_pretty_printers(&output);
-
         assert_eq!(printers.len(), MAX_PRETTY_PRINTER_ENTRIES);
         assert_eq!(total, MAX_PRETTY_PRINTER_ENTRIES + 7);
+
         assert_eq!(
             printers.last().unwrap(),
             &format!("Printer{}", MAX_PRETTY_PRINTER_ENTRIES - 1)

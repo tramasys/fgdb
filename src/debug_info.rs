@@ -65,6 +65,7 @@ impl ModuleDebugMetadata {
         let mut unavailable = Self::unavailable(path, error);
         unavailable.file_size = Some(metadata.len());
         unavailable.modified = metadata.modified().ok();
+
         unavailable
     }
 }
@@ -74,12 +75,14 @@ pub(crate) fn inspect_module(path: &Path) -> ModuleDebugMetadata {
         Ok(file) => file,
         Err(error) => {
             let message = format!("Cannot read host module: {error}");
+
             return match std::fs::metadata(path) {
                 Ok(metadata) => ModuleDebugMetadata::unavailable_for_file(path, message, &metadata),
                 Err(_) => ModuleDebugMetadata::unavailable(path, message),
             };
         }
     };
+
     let metadata = match file.metadata() {
         Ok(metadata) if metadata.is_file() => metadata,
         Ok(metadata) => {
@@ -96,12 +99,14 @@ pub(crate) fn inspect_module(path: &Path) -> ModuleDebugMetadata {
             );
         }
     };
+
     let elf = match inspect_elf_metadata(&mut file, metadata.len()) {
         Ok(elf) => elf,
         Err(error) => {
             return ModuleDebugMetadata::unavailable_for_file(path, error, &metadata);
         }
     };
+
     refresh_module_debug_file(ModuleDebugMetadata {
         path: path.to_path_buf(),
         build_id: elf.build_id,
@@ -126,8 +131,10 @@ struct ElfDebugMetadata {
 fn inspect_elf_metadata(file: &mut File, file_size: u64) -> Result<ElfDebugMetadata, String> {
     let header_bytes = read_file_range(file, 0, 64_u64.min(file_size), file_size, 64)
         .map_err(|error| format!("Cannot read ELF header: {error}"))?;
+
     let header = Elf::parse_header(&header_bytes)
         .map_err(|error| format!("Cannot parse ELF header: {error}"))?;
+
     if header.e_shoff == 0 {
         return Ok(ElfDebugMetadata {
             build_id: None,
@@ -136,6 +143,7 @@ fn inspect_elf_metadata(file: &mut File, file_size: u64) -> Result<ElfDebugMetad
             embedded_debug_info: false,
         });
     }
+
     let context = Ctx::new(
         header
             .container()
@@ -144,8 +152,10 @@ fn inspect_elf_metadata(file: &mut File, file_size: u64) -> Result<ElfDebugMetad
             .endianness()
             .map_err(|error| format!("Cannot parse ELF byte order: {error}"))?,
     );
+
     let section_size = SectionHeader::size(context);
     let section_entry_size = usize::from(header.e_shentsize);
+
     if section_entry_size < section_size {
         return Err(format!(
             "Unsupported ELF section-header size {} (expected {section_size})",
@@ -161,15 +171,18 @@ fn inspect_elf_metadata(file: &mut File, file_size: u64) -> Result<ElfDebugMetad
         section_entry_size,
         context,
     )?;
+
     let Some(null_section) = first_section.first() else {
         return Err(String::from("ELF section table is empty"));
     };
+
     let section_count = if header.e_shnum == 0 {
         usize::try_from(null_section.sh_size)
             .map_err(|_| String::from("ELF section count does not fit in memory"))?
     } else {
         usize::from(header.e_shnum)
     };
+
     if section_count == 0 {
         return Ok(ElfDebugMetadata {
             build_id: None,
@@ -178,11 +191,13 @@ fn inspect_elf_metadata(file: &mut File, file_size: u64) -> Result<ElfDebugMetad
             embedded_debug_info: false,
         });
     }
+
     if section_count > MAX_ELF_SECTIONS {
         return Err(format!(
             "ELF section count {section_count} exceeds the safety limit of {MAX_ELF_SECTIONS}"
         ));
     }
+
     let sections = read_section_headers(
         file,
         file_size,
@@ -191,6 +206,7 @@ fn inspect_elf_metadata(file: &mut File, file_size: u64) -> Result<ElfDebugMetad
         section_entry_size,
         context,
     )?;
+
     if header.e_shstrndx == 0 {
         return Ok(ElfDebugMetadata {
             build_id: None,
@@ -199,15 +215,18 @@ fn inspect_elf_metadata(file: &mut File, file_size: u64) -> Result<ElfDebugMetad
             embedded_debug_info: false,
         });
     }
+
     let string_index = if u32::from(header.e_shstrndx) == SHN_XINDEX {
         usize::try_from(null_section.sh_link)
             .map_err(|_| String::from("ELF section-name table index does not fit in memory"))?
     } else {
         usize::from(header.e_shstrndx)
     };
+
     let string_section = sections
         .get(string_index)
         .ok_or_else(|| String::from("ELF section-name table index is out of range"))?;
+
     let section_names = read_file_range(
         file,
         string_section.sh_offset,
@@ -216,10 +235,10 @@ fn inspect_elf_metadata(file: &mut File, file_size: u64) -> Result<ElfDebugMetad
         MAX_SECTION_NAME_BYTES,
     )
     .map_err(|error| format!("Cannot read ELF section names: {error}"))?;
-
     let mut embedded_debug_info = false;
     let mut build_id_section = None;
     let mut debuglink_section = None;
+
     for section in &sections {
         match section_name(&section_names, section.sh_name) {
             Some(".debug_info" | ".zdebug_info") => embedded_debug_info = true,
@@ -228,9 +247,11 @@ fn inspect_elf_metadata(file: &mut File, file_size: u64) -> Result<ElfDebugMetad
             _ => {}
         }
     }
+
     let build_id = if let Some(section) = build_id_section {
         let bytes = read_metadata_section(file, file_size, section)
             .map_err(|error| format!("Cannot read ELF build ID: {error}"))?;
+
         gnu_build_id(
             &bytes,
             context.is_little_endian(),
@@ -239,13 +260,16 @@ fn inspect_elf_metadata(file: &mut File, file_size: u64) -> Result<ElfDebugMetad
     } else {
         None
     };
+
     let (debuglink, debuglink_crc) = if let Some(section) = debuglink_section {
         let bytes = read_metadata_section(file, file_size, section)
             .map_err(|error| format!("Cannot read ELF debuglink: {error}"))?;
+
         gnu_debuglink(&bytes, context.is_little_endian()).unwrap_or_default()
     } else {
         (None, None)
     };
+
     Ok(ElfDebugMetadata {
         build_id,
         debuglink,
@@ -265,17 +289,21 @@ fn read_section_headers(
     let byte_count = entry_size
         .checked_mul(count)
         .ok_or_else(|| String::from("ELF section-table size overflow"))?;
+
     if byte_count > MAX_SECTION_HEADER_BYTES {
         return Err(format!(
             "ELF section table exceeds the {MAX_SECTION_HEADER_BYTES}-byte safety limit"
         ));
     }
+
     let bytes = read_file_range(file, offset, byte_count as u64, file_size, byte_count)
         .map_err(|error| format!("Cannot read ELF section table: {error}"))?;
+
     if entry_size == SectionHeader::size(context) {
         return SectionHeader::parse_from(&bytes, 0, count, context)
             .map_err(|error| format!("Cannot parse ELF section table: {error}"));
     }
+
     bytes
         .chunks_exact(entry_size)
         .map(|entry| {
@@ -310,28 +338,36 @@ fn read_file_range(
     limit: usize,
 ) -> Result<Vec<u8>, String> {
     let size = usize::try_from(size).map_err(|_| String::from("file range is too large"))?;
+
     if size > limit {
         return Err(format!("file range exceeds the {limit}-byte safety limit"));
     }
+
     let end = offset
         .checked_add(size as u64)
         .ok_or_else(|| String::from("file range overflows"))?;
+
     if end > file_size {
         return Err(String::from(
             "file range extends past the end of the module",
         ));
     }
+
     let mut bytes = vec![0_u8; size];
+
     file.seek(SeekFrom::Start(offset))
         .map_err(|error| error.to_string())?;
+
     file.read_exact(&mut bytes)
         .map_err(|error| error.to_string())?;
+
     Ok(bytes)
 }
 
 fn section_name(names: &[u8], offset: usize) -> Option<&str> {
     let name = names.get(offset..)?;
     let end = name.iter().position(|byte| *byte == 0)?;
+
     std::str::from_utf8(&name[..end]).ok()
 }
 
@@ -339,14 +375,17 @@ pub(crate) fn refresh_module_debug_file(mut metadata: ModuleDebugMetadata) -> Mo
     if metadata.error.is_some() {
         return metadata;
     }
+
     metadata.separate_debug_file = find_separate_debug_file(
         &metadata.path,
         metadata.debuglink.as_deref(),
         metadata.debuglink_crc,
         metadata.build_id.as_deref(),
     );
+
     metadata.suggestion = (!metadata.embedded_debug_info && metadata.separate_debug_file.is_none())
         .then(|| debug_package_suggestion(&metadata.path, metadata.build_id.as_deref()));
+
     metadata
 }
 
@@ -356,11 +395,15 @@ fn gnu_build_id(data: &[u8], little_endian: bool, alignment: usize) -> Option<St
     } else {
         4
     };
+
     let mut offset = 0_usize;
+
     while offset.checked_add(12)? <= data.len() {
         let name_size = read_elf_u32(data.get(offset..offset + 4)?, little_endian)? as usize;
+
         let description_size =
             read_elf_u32(data.get(offset + 4..offset + 8)?, little_endian)? as usize;
+
         let note_type = read_elf_u32(data.get(offset + 8..offset + 12)?, little_endian)?;
         let name_start = offset + 12;
         let name_end = name_start.checked_add(name_size)?;
@@ -369,11 +412,14 @@ fn gnu_build_id(data: &[u8], little_endian: bool, alignment: usize) -> Option<St
         let name = data.get(name_start..name_end)?;
         let name = name.strip_suffix(&[0]).unwrap_or(name);
         let description = data.get(description_start..description_end)?;
+
         if note_type == NT_GNU_BUILD_ID && name == b"GNU" {
             return Some(hexadecimal(description));
         }
+
         offset = align_up(description_end, alignment)?;
     }
+
     None
 }
 
@@ -382,14 +428,17 @@ fn gnu_debuglink(data: &[u8], little_endian: bool) -> Option<(Option<String>, Op
     let name = std::str::from_utf8(&data[..name_end]).ok()?.trim();
     let name = (!name.is_empty()).then(|| name.to_owned());
     let crc_start = name_end.checked_add(4)? & !3;
+
     let crc = data
         .get(crc_start..crc_start.checked_add(4)?)
         .and_then(|crc| read_elf_u32(crc, little_endian));
+
     Some((name, crc))
 }
 
 fn read_elf_u32(bytes: &[u8], little_endian: bool) -> Option<u32> {
     let bytes = <[u8; 4]>::try_from(bytes).ok()?;
+
     Some(if little_endian {
         u32::from_le_bytes(bytes)
     } else {
@@ -410,12 +459,15 @@ fn find_separate_debug_file(
     build_id: Option<&str>,
 ) -> Option<PathBuf> {
     let mut debuglink_candidates = Vec::new();
+
     if let Some(debuglink) = debuglink.filter(|debuglink| valid_debuglink(debuglink)) {
         let parent = module.parent().unwrap_or_else(|| Path::new("."));
         debuglink_candidates.push(parent.join(debuglink));
         debuglink_candidates.push(parent.join(".debug").join(debuglink));
+
         if module.is_absolute() {
             let relative_parent = parent.strip_prefix("/").unwrap_or(parent);
+
             debuglink_candidates.push(
                 Path::new("/usr/lib/debug")
                     .join(relative_parent)
@@ -423,14 +475,18 @@ fn find_separate_debug_file(
             );
         }
     }
+
     let mut build_id_candidates = Vec::new();
+
     if let Some(build_id) = build_id.filter(|build_id| build_id.len() > 2) {
         let (prefix, suffix) = build_id.split_at(2);
+
         build_id_candidates.push(
             Path::new("/usr/lib/debug/.build-id")
                 .join(prefix)
                 .join(format!("{suffix}.debug")),
         );
+
         if let Some(cache) = std::env::var_os("HOME") {
             build_id_candidates.push(
                 PathBuf::from(cache)
@@ -440,6 +496,7 @@ fn find_separate_debug_file(
             );
         }
     }
+
     select_separate_debug_file(debuglink_candidates, debuglink_crc, build_id_candidates)
 }
 
@@ -457,6 +514,7 @@ fn select_separate_debug_file(
             }
         }
     }
+
     build_id_candidates
         .into_iter()
         .find(|candidate| candidate.is_file())
@@ -468,13 +526,17 @@ fn gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
     let mut file = File::open(path)?;
     let mut buffer = [0_u8; DEBUGLINK_CRC_BUFFER_BYTES];
     let mut crc = u32::MAX;
+
     loop {
         let read = file.read(&mut buffer)?;
+
         if read == 0 {
             break;
         }
+
         crc = update_gnu_debuglink_crc(crc, &buffer[..read]);
     }
+
     Ok(!crc)
 }
 
@@ -492,6 +554,7 @@ struct DebuglinkFileIdentity {
 impl DebuglinkFileIdentity {
     fn read(path: &Path) -> io::Result<Self> {
         let metadata = std::fs::metadata(path)?;
+
         Ok(Self {
             path: path.to_owned(),
             size: metadata.len(),
@@ -522,9 +585,11 @@ impl DebuglinkCrcCache {
             .entries
             .iter()
             .position(|(cached, _)| cached == identity)?;
+
         let entry = self.entries.remove(index)?;
         let crc = entry.1;
         self.entries.push_back(entry);
+
         Some(crc)
     }
 
@@ -532,6 +597,7 @@ impl DebuglinkCrcCache {
         if self.capacity == 0 {
             return;
         }
+
         if let Some(index) = self
             .entries
             .iter()
@@ -539,7 +605,9 @@ impl DebuglinkCrcCache {
         {
             self.entries.remove(index);
         }
+
         self.entries.push_back((identity, crc));
+
         while self.entries.len() > self.capacity {
             self.entries.pop_front();
         }
@@ -548,11 +616,13 @@ impl DebuglinkCrcCache {
 
 fn debuglink_crc_cache() -> &'static Mutex<DebuglinkCrcCache> {
     static CACHE: OnceLock<Mutex<DebuglinkCrcCache>> = OnceLock::new();
+
     CACHE.get_or_init(|| Mutex::new(DebuglinkCrcCache::new(MAX_DEBUGLINK_CRC_CACHE_ENTRIES)))
 }
 
 fn cached_gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
     let before = DebuglinkFileIdentity::read(path)?;
+
     if let Some(crc) = debuglink_crc_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -560,17 +630,21 @@ fn cached_gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
     {
         return Ok(crc);
     }
+
     let crc = gnu_debuglink_crc(path)?;
     let after = DebuglinkFileIdentity::read(path)?;
+
     if before != after {
         return Err(io::Error::other(
             "debug file changed while its GNU debuglink CRC was calculated",
         ));
     }
+
     debuglink_crc_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(before, crc);
+
     Ok(crc)
 }
 
@@ -579,6 +653,7 @@ fn debuglink_crc_calculations_by_path() -> &'static Mutex<std::collections::Hash
 {
     static CALCULATIONS: OnceLock<Mutex<std::collections::HashMap<PathBuf, usize>>> =
         OnceLock::new();
+
     CALCULATIONS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -587,6 +662,7 @@ fn record_debuglink_crc_calculation(path: &Path) {
     let mut calculations = debuglink_crc_calculations_by_path()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     *calculations.entry(path.to_owned()).or_default() += 1;
 }
 
@@ -605,6 +681,7 @@ fn update_gnu_debuglink_crc(mut crc: u32, bytes: &[u8]) -> u32 {
         let index = ((crc ^ u32::from(*byte)) & 0xff) as usize;
         crc = GNU_DEBUGLINK_CRC_TABLE[index] ^ (crc >> 8);
     }
+
     crc
 }
 
@@ -622,14 +699,17 @@ const fn gnu_debuglink_crc_table() -> [u32; 256] {
             };
             bit += 1;
         }
+
         table[index] = value;
         index += 1;
     }
+
     table
 }
 
 fn valid_debuglink(debuglink: &str) -> bool {
     let path = Path::new(debuglink);
+
     !debuglink.is_empty()
         && path.file_name().is_some_and(|name| name == debuglink)
         && path.components().count() == 1
@@ -640,7 +720,9 @@ fn debug_package_suggestion(path: &Path, build_id: Option<&str>) -> String {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("this module");
+
     let distribution = distribution_id();
+
     match distribution {
         "arch" | "endeavouros" | "manjaro" => format!(
             "Enable the configured debuginfod service or install the debug package owning {module}"
@@ -663,6 +745,7 @@ fn debug_package_suggestion(path: &Path, build_id: Option<&str>) -> String {
 
 fn distribution_id() -> &'static str {
     static DISTRIBUTION_ID: OnceLock<String> = OnceLock::new();
+
     DISTRIBUTION_ID
         .get_or_init(|| {
             std::fs::read_to_string("/etc/os-release")
@@ -681,6 +764,7 @@ fn hexadecimal(bytes: &[u8]) -> String {
     for byte in bytes {
         let _ = write!(output, "{byte:02x}");
     }
+
     output
 }
 
@@ -754,7 +838,6 @@ mod tests {
         note.extend_from_slice(&NT_GNU_BUILD_ID.to_le_bytes());
         note.extend_from_slice(b"GNU\0");
         note.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
-
         assert_eq!(gnu_build_id(&note, true, 4).as_deref(), Some("deadbeef"));
     }
 
@@ -865,11 +948,9 @@ mod tests {
         let candidate = directory.path().join("cached.debug");
         std::fs::write(&candidate, b"first debug contents").unwrap();
         let calculations = debuglink_crc_calculations(&candidate);
-
         let first = cached_gnu_debuglink_crc(&candidate).unwrap();
         assert_eq!(cached_gnu_debuglink_crc(&candidate).unwrap(), first);
         assert_eq!(debuglink_crc_calculations(&candidate), calculations + 1);
-
         std::fs::write(&candidate, b"different debug contents with a new size").unwrap();
         let second = cached_gnu_debuglink_crc(&candidate).unwrap();
         assert_ne!(first, second);
@@ -927,13 +1008,14 @@ mod tests {
         {
             changed_inode.inode += 1;
         }
+
         #[cfg(not(unix))]
         {
             changed_inode.size += 1;
         }
+
         let mut cache = DebuglinkCrcCache::new(4);
         cache.insert(original, 42);
-
         assert_eq!(cache.get(&changed_time), None);
         assert_eq!(cache.get(&changed_inode), None);
     }

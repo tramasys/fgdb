@@ -6,7 +6,9 @@ impl Ui {
             gtk::IconTheme::for_display(&display)
                 .add_resource_path(&format!("{}/icons", crate::RESOURCE_PREFIX));
         }
+
         gtk::Window::set_default_icon_name(crate::APPLICATION_ID);
+
         let window = gtk::ApplicationWindow::builder()
             .application(application)
             .title("fgdb")
@@ -14,15 +16,14 @@ impl Ui {
             .default_width(1380)
             .default_height(820)
             .build();
+
         crate::install_window_icon(&window);
         window.add_css_class("fgdb-window");
-
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("debugger-root");
         let terminal = build_terminal(theme);
         let topbar = build_topbar(config, &window, &terminal);
         window.set_titlebar(Some(&topbar.root));
-
         let source_style_scheme = theme.source_style_scheme();
         let source_notebook = build_source_notebook(source_style_scheme.as_ref());
         let source_documents = Rc::new(RefCell::new(Vec::new()));
@@ -36,6 +37,7 @@ impl Ui {
         let remembered_disclosures = layout::remembered_disclosures();
         let target_pointer_bits = Rc::new(Cell::new(usize::BITS));
         let target_pointer_bits_known = Rc::new(Cell::new(false));
+
         let inspector_bindings = InspectorBindings {
             theme,
             variable_children_handler: &variable_children_handler,
@@ -58,6 +60,7 @@ impl Ui {
             &topbar.gef_tools_button,
             &inspector_bindings,
         );
+
         root.append(&workspace.root);
         let workspace_footer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         workspace_footer.add_css_class("workspace-footer");
@@ -73,16 +76,19 @@ impl Ui {
         topbar.terminal_toggle_button.set_active(terminal_visible);
         terminal_panel.set_visible(terminal_visible);
         let layout_for_terminal = layout.clone();
+
         topbar
             .terminal_toggle_button
             .connect_toggled(move |button| {
                 let visible = button.is_active();
                 terminal_panel.set_visible(visible);
                 layout_for_terminal.set_terminal_visible(visible);
+
                 if visible {
                     terminal_for_toggle.grab_focus();
                 }
             });
+
         window.set_child(Some(&root));
         kernel_section_handler.replace(Some(layout.disclosure_handler()));
         let initial_session = config.initial_session();
@@ -141,6 +147,7 @@ impl Ui {
             source_tree_roots: Rc::new(RefCell::new(source_tree_base_roots.clone())),
             source_tree_base_roots,
             source_tree_cache: Rc::new(RefCell::new(None)),
+            source_index: Rc::new(RefCell::new(None)),
             source_tree_indexing: Rc::new(Cell::new(false)),
             source_tree_generation: Arc::new(AtomicU64::new(0)),
             source_tree_render_generation: Arc::new(AtomicU64::new(0)),
@@ -192,10 +199,16 @@ impl Ui {
             thread_execution_exit_candidate: Rc::new(RefCell::new(None)),
             locals_store: workspace.locals_store,
             locals_selection: workspace.locals_selection,
+            variable_node_index: Rc::new(RefCell::new(VariableNodeIndex::default())),
+            local_variables: Rc::new(RefCell::new(LocalVariableCatalog::default())),
+            locals_render_limit: Rc::new(Cell::new(crate::performance::LOCALS_ROOT_PAGE_SIZE)),
+            locals_generation: Rc::new(Cell::new(None)),
             locals_view: workspace.locals_view,
             locals_empty: workspace.locals_empty,
             locals_summary: workspace.locals_summary,
             locals_edit_button: workspace.locals_edit_button,
+            locals_more_button: workspace.locals_more_button,
+            locals_filter: workspace.locals_filter,
             expression_watches_store: workspace.expression_watches_store,
             expression_watches_selection: workspace.expression_watches_selection,
             expression_watches_view: workspace.expression_watches_view,
@@ -319,6 +332,10 @@ impl Ui {
             debug_data_view: Rc::new(RefCell::new(None)),
             debug_data_state: Rc::new(RefCell::new(debug_data::DebugDataState::default())),
             performance_notice_times: Rc::new(RefCell::new(HashMap::new())),
+            adaptive_render_budgets: Rc::new(RefCell::new(
+                crate::performance::AdaptiveRenderBudgets::default(),
+            )),
+            terminal_synchronization: Rc::new(RefCell::new(TerminalSynchronization::default())),
             debug_data_generation: Rc::new(Cell::new(0)),
             debug_data_action_handler: Rc::new(RefCell::new(None)),
             session_handler: Rc::new(RefCell::new(None)),
@@ -356,6 +373,7 @@ impl Ui {
             thread_stop_reason: Rc::new(RefCell::new(None)),
             debugger_ready: Rc::new(Cell::new(false)),
         };
+
         ui.connect_instruction_activation();
         ui.connect_disassembly_controls();
         ui.connect_local_activation();
@@ -368,6 +386,7 @@ impl Ui {
         ui.connect_filtered_catchpoint_controls();
         ui.connect_keyboard_shortcuts();
         ui.update_session_display();
+
         ui
     }
 
@@ -377,6 +396,7 @@ impl Ui {
 
     pub fn connect_gdb_recovery_handler(&self, handler: impl Fn() + 'static) {
         let popover = self.session_popover.clone();
+
         self.restart_gdb_button.connect_clicked(move |_| {
             popover.popdown();
             handler();
@@ -385,6 +405,7 @@ impl Ui {
 
     pub fn connect_resynchronize_handler(&self, handler: impl Fn() + 'static) {
         let popover = self.session_popover.clone();
+
         self.resynchronize_button.connect_clicked(move |_| {
             popover.popdown();
             handler();
@@ -395,6 +416,7 @@ impl Ui {
         if self.gdb_recovery_available.replace(available) == available {
             return;
         }
+
         self.restart_gdb_button.set_visible(available);
         self.update_control_sensitivity();
     }
@@ -405,6 +427,7 @@ impl Ui {
 
     pub fn set_gdb_capabilities(&self, capabilities: GdbCapabilities) {
         let summary = capabilities.compatibility_summary();
+
         let feature_detail = if capabilities.features_known {
             if capabilities.features.is_empty() {
                 String::from("GDB returned an empty MI feature list")
@@ -414,13 +437,15 @@ impl Ui {
         } else {
             String::from("This GDB did not expose an MI feature list")
         };
+
         let printer_detail = if !capabilities.pretty_printing {
             "Dynamic pretty printing is unavailable in this GDB build"
         } else if capabilities.rust_pretty_printing {
             "The matching Rust toolchain pretty-printers are loaded"
         } else {
-            "Dynamic pretty printing is enabled; no Rust toolchain printer is currently loaded"
+            "Dynamic pretty printing is enabled. No Rust toolchain printer is currently loaded"
         };
+
         let tooltip = format!("{printer_detail}. {feature_detail}");
         self.gdb_capabilities_label.set_text(&summary);
         self.gdb_capabilities_label.set_tooltip_text(Some(&tooltip));
@@ -433,14 +458,17 @@ impl Ui {
 
     pub fn clear_gdb_capabilities(&self) {
         self.gdb_capabilities.replace(GdbCapabilities::default());
+
         self.gdb_capabilities_label
             .set_text("GDB capabilities unavailable");
+
         self.gdb_capabilities_label.set_tooltip_text(None);
     }
 
     pub fn prepare_full_resynchronization(&self) {
         self.debugger_state
             .set(self.debugger_state.get().with_resynchronizing(true));
+
         self.reset_target_abi();
         self.invalidate_allocator_probe_cache();
         self.previous_registers.borrow_mut().clear();
@@ -458,11 +486,13 @@ impl Ui {
         let state = self.debugger_state.get();
         let pending = state.resynchronizing();
         self.debugger_state.set(state.with_resynchronizing(false));
+
         if pending {
             self.update_control_sensitivity();
             self.update_thread_control_sensitivity();
             self.render_inferior_controls();
         }
+
         pending
     }
 
@@ -493,9 +523,12 @@ impl Ui {
             if let Some(bits) = architecture.pointer_bits() {
                 self.target_pointer_bits.set(bits);
             }
+
             architecture
         };
+
         let previous = self.target_architecture.replace(architecture);
+
         if previous != TargetArchitecture::Unknown
             && architecture != TargetArchitecture::Unknown
             && previous != architecture
@@ -523,6 +556,7 @@ impl Ui {
             let previous = self.target_architecture.get();
             let refined = previous.refine_for_pointer_bits(bits);
             self.target_architecture.set(refined);
+
             if previous != TargetArchitecture::Unknown && refined != previous {
                 self.cached_register_names.replace(None);
             }
@@ -559,21 +593,25 @@ impl Ui {
     pub fn connect_debug_controls(self: &Rc<Self>, client: &Rc<MiClient>) {
         let weak_ui = Rc::downgrade(self);
         let client_for_inspector = Rc::clone(client);
+
         self.inspector_notebook
             .connect_switch_page(move |_, _, page| {
                 if !matches!(page, 2 | 3 | 4 | 7) {
                     return;
                 }
+
                 // GTK can emit `switch-page` before `current_page()` exposes
                 // the new page. Enrichment checks visibility to avoid doing
                 // expensive pointer walks for hidden tabs, so defer it by one
                 // main-loop turn and verify that this page is still active.
                 let weak_ui = weak_ui.clone();
                 let client = Rc::clone(&client_for_inspector);
+
                 glib::idle_add_local_once(move || {
                     let Some(ui) = weak_ui.upgrade() else {
                         return;
                     };
+
                     if ui.inspector_notebook.current_page() == Some(page)
                         && ui.stopped_inspection_available()
                     {
@@ -585,17 +623,21 @@ impl Ui {
                     }
                 });
             });
+
         let weak_ui = Rc::downgrade(self);
         let client_for_tls = Rc::clone(client);
+
         self.kernel_view
             .pages
             .connect_visible_child_name_notify(move |_| {
                 let weak_ui = weak_ui.clone();
                 let client = Rc::clone(&client_for_tls);
+
                 glib::idle_add_local_once(move || {
                     let Some(ui) = weak_ui.upgrade() else {
                         return;
                     };
+
                     if ui.tls_details_visible() && ui.stopped_inspection_available() {
                         crate::app::refresh_cached_inspector_details(
                             &Rc::downgrade(&ui),
@@ -605,25 +647,31 @@ impl Ui {
                     }
                 });
             });
+
         let client_for_run = Rc::clone(client);
         let weak_ui = Rc::downgrade(self);
+
         self.run_button.connect_clicked(move |_| {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
+
             let debugger_state = ui.debugger_state.get();
+
             if debugger_state.inferior_running()
                 || ui.command_pending.get()
                 || debugger_state.transition_pending()
-                || debugger_state.state_stale()
+                || debugger_state.stopped_context_is_stale()
                 || ui.session_pending.get()
                 || ui.native_until_active.get()
                 || !ui.debugger_ready.get()
             {
                 return;
             }
+
             let (command, detail) = {
                 let session = ui.current_session.borrow();
+
                 if debugger_state.inferior_started() {
                     if session
                         .as_ref()
@@ -631,6 +679,7 @@ impl Ui {
                     {
                         return;
                     }
+
                     let command = if let Some(id) = ui.selected_inferior_id() {
                         let Some(id) = crate::debugger::thread_group_argument(&id) else {
                             ui.set_status(
@@ -638,12 +687,15 @@ impl Ui {
                                 "GDB reported an unsupported inferior identifier",
                                 Some("status-error"),
                             );
+
                             return;
                         };
+
                         format!("-exec-continue --thread-group {id}")
                     } else {
                         String::from("-exec-continue")
                     };
+
                     (command, "Continuing the selected inferior…")
                 } else if configured_target_can_start(
                     session.as_ref(),
@@ -654,14 +706,18 @@ impl Ui {
                     return;
                 }
             };
+
             issue_execution_command(&ui, &client_for_run, &command, detail);
         });
+
         let client_for_pause = Rc::clone(client);
         let weak_ui = Rc::downgrade(self);
+
         self.pause_button.connect_clicked(move |_| {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
+
             if ui.native_until_active() {
                 ui.cancel_native_until();
             } else if ui.debugger_ready.get()
@@ -678,12 +734,15 @@ impl Ui {
                             "GDB reported an unsupported inferior identifier",
                             Some("status-error"),
                         );
+
                         return;
                     };
+
                     format!("-exec-interrupt --thread-group {id}")
                 } else {
                     String::from("-exec-interrupt")
                 };
+
                 issue_execution_command(
                     &ui,
                     &client_for_pause,
@@ -692,6 +751,7 @@ impl Ui {
                 );
             }
         });
+
         connect_execution_button(
             &self.next_button,
             self,
@@ -699,6 +759,7 @@ impl Ui {
             "-exec-next",
             "Stepping over the current source line…",
         );
+
         connect_execution_button(
             &self.step_button,
             self,
@@ -706,6 +767,7 @@ impl Ui {
             "-exec-step",
             "Stepping into the current source line…",
         );
+
         connect_execution_button(
             &self.next_instruction_button,
             self,
@@ -713,6 +775,7 @@ impl Ui {
             "-exec-next-instruction",
             "Stepping over one machine instruction…",
         );
+
         connect_execution_button(
             &self.step_instruction_button,
             self,
@@ -720,6 +783,7 @@ impl Ui {
             "-exec-step-instruction",
             "Stepping into one machine instruction…",
         );
+
         connect_execution_button(
             &self.finish_button,
             self,
@@ -727,49 +791,63 @@ impl Ui {
             "-exec-finish",
             "Running until the current function returns…",
         );
+
         for (button, action) in &self.until_actions {
             let action = action.clone();
             let until_popover = self.until_popover.clone();
             let weak_ui = Rc::downgrade(self);
+
             button.connect_clicked(move |_| {
                 until_popover.popdown();
+
                 if let Some(ui) = weak_ui.upgrade() {
                     ui.request_native_until(action.clone());
                 }
             });
         }
+
         let condition_entry = self.until_condition_entry.clone();
         let until_popover = self.until_popover.clone();
         let weak_ui = Rc::downgrade(self);
+
         self.until_condition_button.connect_clicked(move |_| {
             let condition = condition_entry.text().trim().to_owned();
+
             if condition.is_empty() {
                 return;
             }
+
             until_popover.popdown();
+
             if let Some(ui) = weak_ui.upgrade() {
                 ui.request_native_until(UntilAction::Expression(condition));
             }
         });
+
         for (button, signal, _) in &self.signal_buttons {
             let signal = (*signal).to_owned();
             let weak_ui = Rc::downgrade(self);
+
             button.connect_clicked(move |_| {
                 if let Some(ui) = weak_ui.upgrade() {
                     request_signal_catchpoint_toggle(&ui, &signal);
                 }
             });
         }
+
         let signal_button = self.signal_add_button.clone();
+
         self.signal_entry.connect_activate(move |_| {
             if signal_button.is_sensitive() {
                 signal_button.emit_clicked();
             }
         });
+
         let signal_button = self.signal_add_button.clone();
         let ready = Rc::clone(&self.debugger_ready);
         let debugger_state = Rc::clone(&self.debugger_state);
         let pending = Rc::clone(&self.command_pending);
+
         self.signal_entry.connect_changed(move |entry| {
             signal_button.set_sensitive(
                 ready.get()
@@ -778,8 +856,10 @@ impl Ui {
                     && normalized_signal_name(&entry.text()).is_some(),
             );
         });
+
         let signal_entry = self.signal_entry.clone();
         let weak_ui = Rc::downgrade(self);
+
         self.signal_add_button.connect_clicked(move |_| {
             if let Some(ui) = weak_ui.upgrade() {
                 request_signal_catchpoint_toggle(&ui, &signal_entry.text());
@@ -816,14 +896,17 @@ impl Ui {
         let source_find_close = self.source_navigation.find_close.clone();
         let source_find_bar = self.source_navigation.find_bar.clone();
         let terminal = self.terminal.clone();
+
         keys.connect_key_pressed(move |_, key, _, state| {
             let control = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
             let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
             let alt = state.contains(gtk::gdk::ModifierType::ALT_MASK);
             let blocked = state.contains(gtk::gdk::ModifierType::SUPER_MASK);
+
             if blocked {
                 return gtk::glib::Propagation::Proceed;
             }
+
             let source_action = match (key, control, shift, alt) {
                 (gtk::gdk::Key::Left, false, false, true) => Some(&source_back),
                 (gtk::gdk::Key::Right, false, false, true) => Some(&source_forward),
@@ -846,13 +929,16 @@ impl Ui {
                 }
                 _ => None,
             };
+
             if terminal.has_focus() && source_action.is_some() {
                 return gtk::glib::Propagation::Proceed;
             }
+
             if let Some(button) = source_action.filter(|button| button.is_sensitive()) {
                 button.emit_clicked();
                 return gtk::glib::Propagation::Stop;
             }
+
             if key == gtk::gdk::Key::Escape
                 && !control
                 && !shift
@@ -863,13 +949,16 @@ impl Ui {
                 source_find_close.emit_clicked();
                 return gtk::glib::Propagation::Stop;
             }
+
             if alt {
                 return gtk::glib::Propagation::Proceed;
             }
+
             if key == gtk::gdk::Key::grave && control && !shift {
                 terminal_toggle.set_active(!terminal_toggle.is_active());
                 return gtk::glib::Propagation::Stop;
             }
+
             if matches!(key, gtk::gdk::Key::r | gtk::gdk::Key::R)
                 && control
                 && shift
@@ -878,6 +967,7 @@ impl Ui {
                 resynchronize.emit_clicked();
                 return gtk::glib::Propagation::Stop;
             }
+
             let button = match (key, control, shift) {
                 (gtk::gdk::Key::F5, false, false) => Some(&run),
                 (gtk::gdk::Key::F6, false, false) => Some(&pause),
@@ -888,24 +978,139 @@ impl Ui {
                 (gtk::gdk::Key::F11, false, true) => Some(&finish),
                 _ => None,
             };
+
             let Some(button) = button.filter(|button| button.is_sensitive()) else {
                 return gtk::glib::Propagation::Proceed;
             };
+
             button.emit_clicked();
+
             gtk::glib::Propagation::Stop
         });
+
         self.window.add_controller(keys);
+    }
+
+    pub(crate) fn connect_terminal_synchronization(self: &Rc<Self>) {
+        let synchronization = Rc::clone(&self.terminal_synchronization);
+
+        self.terminal.connect_contents_changed(move |_| {
+            synchronization.borrow_mut().note_activity(Instant::now());
+        });
+
+        let weak_ui = Rc::downgrade(self);
+
+        self.terminal.connect_commit(move |_, text, _| {
+            if text.bytes().any(|byte| matches!(byte, b'\r' | b'\n'))
+                && let Some(ui) = weak_ui.upgrade()
+            {
+                ui.begin_terminal_synchronization();
+            }
+        });
+
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak_ui = Rc::downgrade(self);
+
+        keys.connect_key_pressed(move |_, key, _, modifiers| {
+            if !matches!(key, gtk::gdk::Key::Return | gtk::gdk::Key::KP_Enter)
+                || modifiers.intersects(
+                    gtk::gdk::ModifierType::CONTROL_MASK
+                        | gtk::gdk::ModifierType::ALT_MASK
+                        | gtk::gdk::ModifierType::SUPER_MASK,
+                )
+            {
+                return gtk::glib::Propagation::Proceed;
+            }
+
+            let Some(ui) = weak_ui.upgrade() else {
+                return gtk::glib::Propagation::Proceed;
+            };
+
+            ui.begin_terminal_synchronization();
+
+            gtk::glib::Propagation::Proceed
+        });
+
+        self.terminal.add_controller(keys);
+    }
+
+    fn begin_terminal_synchronization(self: &Rc<Self>) {
+        const QUIET_PERIOD: Duration = Duration::from_millis(250);
+        const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+        let generation = self
+            .terminal_synchronization
+            .borrow_mut()
+            .begin(Instant::now());
+
+        let weak_ui = Rc::downgrade(self);
+
+        glib::timeout_add_local(POLL_INTERVAL, move || {
+            let Some(ui) = weak_ui.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+
+            match ui.terminal_synchronization.borrow().is_quiet(
+                generation,
+                Instant::now(),
+                QUIET_PERIOD,
+            ) {
+                None => return glib::ControlFlow::Break,
+                Some(false) => return glib::ControlFlow::Continue,
+                Some(true) => {}
+            }
+
+            if !ui.debugger_ready.get() || ui.gdb_recovery_available.get() {
+                ui.terminal_synchronization.borrow_mut().finish(generation);
+                return glib::ControlFlow::Break;
+            }
+
+            if !ui.terminal_waiting_at_prompt() {
+                return glib::ControlFlow::Continue;
+            }
+
+            if !ui.debugger_synchronization_available() {
+                return glib::ControlFlow::Continue;
+            }
+
+            ui.terminal_synchronization.borrow_mut().finish(generation);
+            ui.resynchronize_button.emit_clicked();
+
+            glib::ControlFlow::Break
+        });
+    }
+
+    fn terminal_waiting_at_prompt(&self) -> bool {
+        let (column, row) = self.terminal.cursor_position();
+
+        let (text, _) = self.terminal.text_range_format(
+            vte4::Format::Text,
+            row,
+            0,
+            row,
+            column.saturating_add(1),
+        );
+
+        text.as_deref()
+            .is_some_and(|text| self.terminal_synchronization.borrow().is_prompt(text))
+    }
+
+    pub(crate) fn set_terminal_prompt(&self, prompt: &str) {
+        self.terminal_synchronization
+            .borrow_mut()
+            .set_prompt(prompt);
     }
 
     pub fn set_status(&self, text: &str, detail: &str, class: Option<&str>) {
         self.status_visual_generation
             .set(self.status_visual_generation.get().wrapping_add(1));
+
         set_status_widgets(&self.status_label, &self.status_detail, text, detail, class);
     }
 
     pub fn set_execution_status(&self, text: &str, detail: &str) {
         const VISUAL_DELAY: Duration = Duration::from_millis(150);
-
         let generation = self.status_visual_generation.get().wrapping_add(1);
         self.status_visual_generation.set(generation);
         let current_generation = Rc::clone(&self.status_visual_generation);
@@ -913,6 +1118,7 @@ impl Ui {
         let detail_label = self.status_detail.clone();
         let text = text.to_owned();
         let detail = detail.to_owned();
+
         gtk::glib::timeout_add_local_once(VISUAL_DELAY, move || {
             if current_generation.get() == generation {
                 set_status_widgets(
@@ -930,15 +1136,28 @@ impl Ui {
         if !ready && self.native_until_active.get() {
             self.abort_native_until();
         }
+
         let changed = self.debugger_ready.replace(ready) != ready;
+
         if !ready {
+            self.terminal_synchronization.borrow_mut().cancel();
+
+            self.memory_watch_container
+                .refresh_batch
+                .borrow_mut()
+                .clear();
+
             self.cancel_running_context_render();
+
             self.debugger_state
                 .set(self.debugger_state.get().reset_backend());
+
             self.update_run_control_label();
             self.command_pending.set(false);
+
             self.execution_transition_generation
                 .set(self.execution_transition_generation.get().wrapping_add(1));
+
             self.session_pending.set(false);
             self.native_until_active.set(false);
             self.pending_execution_inferior.borrow_mut().take();
@@ -948,11 +1167,14 @@ impl Ui {
             self.thread_controls.action_pending.set(None);
             self.reset_thread_analysis();
         }
+
         if !changed && ready {
             return;
         }
+
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
+
         if !ready {
             self.render_inferior_controls();
         }
@@ -960,10 +1182,12 @@ impl Ui {
 
     pub fn set_controls_running(&self, running: bool) {
         let state = self.debugger_state.get();
+
         if state.inferior_running() == running {
             self.update_run_control_label();
             return;
         }
+
         let state = state.with_inferior_running(running);
         self.debugger_state.set(state);
         self.update_run_control_label();
@@ -1005,7 +1229,9 @@ impl Ui {
         if delta.changes_target() {
             self.reset_target_abi();
         }
+
         self.invalidate_allocator_probe_cache();
+
         if delta.clears_inferior() {
             self.set_thread_stop_reason(None);
             self.clear_inferiors();
@@ -1027,7 +1253,10 @@ impl Ui {
             && !self.session_pending.get()
             && !self.debugger_state.get().resynchronizing()
             && self.inferior_action_pending.get().is_none()
-            && self.thread_controls.action_pending.get().is_none()
+            && matches!(
+                self.thread_controls.action_pending.get(),
+                None | Some(ThreadActionPending::Analysis)
+            )
             && !self.debug_state_is_stale()
             && self
                 .current_session
@@ -1048,7 +1277,11 @@ impl Ui {
             && !self.debug_state_is_stale()
     }
 
-    pub(crate) fn stop_point_commands_available(&self) -> bool {
+    /// Whether a complete MI snapshot can be requested safely. Unlike normal
+    /// stopped inspection this deliberately permits a target-free or stale
+    /// state, because synchronization is what repairs changes made through the
+    /// interactive GDB terminal.
+    pub(crate) fn debugger_synchronization_available(&self) -> bool {
         self.debugger_ready.get()
             && !self.inferior_is_running()
             && !self.command_pending.get()
@@ -1056,7 +1289,21 @@ impl Ui {
             && !self.session_pending.get()
             && !self.native_until_active.get()
             && !self.debugger_state.get().resynchronizing()
-            && !self.debug_state_is_stale()
+            && self.inferior_action_pending.get().is_none()
+            && self.thread_controls.action_pending.get().is_none()
+    }
+
+    pub(crate) fn stop_point_commands_available(&self) -> bool {
+        let debugger_state = self.debugger_state.get();
+
+        self.debugger_ready.get()
+            && !debugger_state.inferior_running()
+            && !self.command_pending.get()
+            && !debugger_state.transition_pending()
+            && !self.session_pending.get()
+            && !self.native_until_active.get()
+            && !debugger_state.resynchronizing()
+            && !debugger_state.stopped_context_is_stale()
     }
 
     pub(crate) fn disassembly_commands_available(&self) -> bool {
@@ -1067,6 +1314,7 @@ impl Ui {
         if self.command_pending.replace(pending) == pending {
             return;
         }
+
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
         self.render_inferior_controls();
@@ -1076,6 +1324,7 @@ impl Ui {
         if self.session_pending.replace(pending) == pending {
             return;
         }
+
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
         self.render_inferior_controls();
@@ -1084,21 +1333,27 @@ impl Ui {
     pub(crate) fn begin_execution_transition(&self) -> u64 {
         let generation = self.execution_transition_generation.get().wrapping_add(1);
         self.execution_transition_generation.set(generation);
+
         self.debugger_state
             .set(self.debugger_state.get().with_transition_pending(true));
+
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
         self.render_inferior_controls();
+
         generation
     }
 
     pub(crate) fn finish_execution_transition(&self) {
         let state = self.debugger_state.get();
+
         if state.transition_pending() {
             self.debugger_state
                 .set(state.with_transition_pending(false));
+
             self.execution_transition_generation
                 .set(self.execution_transition_generation.get().wrapping_add(1));
+
             self.update_control_sensitivity();
             self.update_thread_control_sensitivity();
             self.render_inferior_controls();
@@ -1118,9 +1373,11 @@ impl Ui {
         if !self.debugger_state.get().transition_pending() {
             return false;
         }
+
         if all_stopped {
             return true;
         }
+
         super::controls::execution_event_matches_thread(
             self.active_thread_execution.borrow().as_deref(),
             thread_id,
@@ -1132,6 +1389,7 @@ impl Ui {
         if self.native_until_active() {
             self.abort_native_until();
         }
+
         self.set_active_thread_execution(None);
         self.set_thread_execution_exit_candidate(None);
         self.set_pending_execution_inferior(None);
@@ -1156,6 +1414,7 @@ impl Ui {
     fn set_gef_capabilities(&self, gef_available: bool, capabilities: &HashSet<&'static str>) {
         self.gef_available.set(gef_available);
         self.gef_capabilities.replace(capabilities.clone());
+
         let context_control = if !gef_available {
             GefContextControl::None
         } else if capabilities.contains("context off") && capabilities.contains("context on") {
@@ -1165,12 +1424,15 @@ impl Ui {
         } else {
             GefContextControl::None
         };
+
         self.gef_context_control.set(context_control);
+
         for control in &self.gef_tool_controls {
             control
                 .widget
                 .set_visible(gef_available && capabilities.contains(control.capability));
         }
+
         for group in &self.gef_tool_groups {
             group.widget.set_visible(
                 gef_available
@@ -1180,23 +1442,28 @@ impl Ui {
                         .any(|capability| capabilities.contains(capability)),
             );
         }
+
         let tools_available = gef_available
             && self
                 .gef_tool_controls
                 .iter()
                 .any(|control| capabilities.contains(control.capability));
+
         if !tools_available {
             self.gef_tools_button.set_active(false);
         }
+
         self.gef_tools_button.set_visible(tools_available);
         self.update_control_sensitivity();
     }
 
     pub fn set_debug_state_stale(&self, stale: bool) {
         let state = self.debugger_state.get();
+
         if state.state_stale() == stale {
             return;
         }
+
         self.debugger_state.set(state.with_state_stale(stale));
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
@@ -1211,13 +1478,17 @@ impl Ui {
         if !started {
             self.inferior_pid.set(None);
         }
+
         let state = self.debugger_state.get();
+
         if state.inferior_started() == started {
             self.update_run_control_label();
             return;
         }
+
         self.debugger_state
             .set(state.with_inferior_started(started));
+
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
         self.update_run_control_label();
@@ -1229,6 +1500,7 @@ impl Ui {
         } else {
             "Run"
         };
+
         if self.run_button.label().as_deref() != Some(label) {
             self.run_button.set_label(label);
         }
@@ -1239,36 +1511,50 @@ impl Ui {
         let debugger_state = self.debugger_state.get();
         let started = debugger_state.inferior_started();
         let running = debugger_state.inferior_running();
-        let stale = debugger_state.state_stale();
+        let stale = debugger_state.stopped_context_is_stale();
         let until_active = self.native_until_active.get();
-        let pending = self.command_pending.get()
+        let thread_pending = self.thread_controls.action_pending.get();
+        let analysis_pending = thread_pending == Some(ThreadActionPending::Analysis);
+
+        let execution_blocked = self.command_pending.get()
             || debugger_state.transition_pending()
             || self.session_pending.get()
             || debugger_state.resynchronizing()
             || self.inferior_action_pending.get().is_some()
-            || self.thread_controls.action_pending.get().is_some()
+            || (thread_pending.is_some() && !analysis_pending)
             || until_active;
+
+        let pending = execution_blocked || analysis_pending;
         let busy = running || pending;
         let session = self.current_session.borrow();
+
         let supports_execution = session
             .as_ref()
             .is_none_or(DebugSession::supports_execution);
+
         let can_start =
             configured_target_can_start(session.as_ref(), debugger_state.target_connection());
+
         let can_inspect = ready && started && !running && !pending && !stale;
-        let can_move = can_inspect && supports_execution;
+        let can_synchronize = self.debugger_synchronization_available();
+
+        let can_move =
+            ready && started && !running && !execution_blocked && !stale && supports_execution;
 
         let can_manage_watches = ready && !running && !pending;
         let expression = self.expression_watch_entry.text();
+
         let can_replace_session =
             !started || matches!(session.as_ref(), Some(DebugSession::CoreDump { .. }));
+
         let breakpoints = self.breakpoints.borrow();
         let can_edit_stop_points = ready && !running && !pending && !stale;
+
         let state = ControlState {
             busy,
             run: ready
                 && !running
-                && !pending
+                && !execution_blocked
                 && ((started && supports_execution) || (!started && can_start && !stale)),
             pause: ready
                 && started
@@ -1324,7 +1610,7 @@ impl Ui {
                 && !pending
                 && session.as_ref().is_some_and(DebugSession::supports_detach),
             restart_gdb: self.gdb_recovery_available.get() && !pending,
-            resynchronize: can_inspect,
+            resynchronize: can_synchronize,
             edit_stop_points: can_edit_stop_points,
             add_signal: can_edit_stop_points
                 && normalized_signal_name(&self.signal_entry.text()).is_some(),
@@ -1342,20 +1628,24 @@ impl Ui {
             delete_watchpoints: can_edit_stop_points
                 && breakpoints.iter().any(Breakpoint::is_watchpoint),
         };
+
         drop(breakpoints);
         drop(session);
         let previous_state = *self.applied_control_state.borrow();
+
         if previous_state.as_ref() == Some(&state) {
             return;
         }
-        self.applied_control_state.replace(Some(state));
 
+        self.applied_control_state.replace(Some(state));
         set_transient_execution_sensitive(&self.run_button, state.run, state.busy);
+
         self.update_pause_control(
             state.pause,
             state.busy,
             previous_state.is_some_and(|previous| previous.pause),
         );
+
         for button in [
             &self.next_button,
             &self.step_button,
@@ -1365,97 +1655,135 @@ impl Ui {
         ] {
             set_transient_execution_sensitive(button, state.move_target, state.busy);
         }
+
         set_transient_execution_sensitive(&self.until_button, state.move_target, state.busy);
+
         self.disassembly_controls
             .syntax_intel
             .set_sensitive(state.syntax);
+
         self.disassembly_controls
             .syntax_att
             .set_sensitive(state.syntax);
+
         set_transient_execution_sensitive(&self.gef_tools_button, state.gef_tools, state.busy);
         self.gef_tools_content.set_sensitive(state.gef_tools);
+
         self.misc_view
             .set_heap_inspector_sensitive(state.inspect, state.busy);
+
+        self.memory_watch_container
+            .commands_available
+            .set(state.inspect);
+
+        update_memory_container_state(
+            &self.memory_watch_container,
+            self.memory_watch_container
+                .refresh_batch
+                .borrow()
+                .is_pending(),
+        );
+
         set_execution_sensitive(&self.locals_edit_button, state.edit_local, state.busy);
+
         set_execution_sensitive(
             &self.expression_watch_entry,
             state.manage_watches,
             state.busy,
         );
+
         set_execution_sensitive(
             &self.expression_watch_add_button,
             state.add_watch,
             state.busy,
         );
+
         set_execution_sensitive(
             &self.expression_watch_remove_button,
             state.remove_watch,
             state.busy,
         );
+
         set_execution_sensitive(&self.memory_add_button, state.add_memory, state.busy);
         set_execution_sensitive(&self.watchpoint_add_button, state.inspect, state.busy);
         set_execution_sensitive(&self.watchpoint_mask, state.inspect, state.busy);
+
         // Keep the top-level session affordance visually stable during a
         // short execution transition. Its mutating actions remain genuinely
         // insensitive inside the popover until the debugger is ready again.
         set_transient_execution_sensitive(&self.session_button, state.session, state.busy);
         set_execution_sensitive(&self.new_session_button, state.new_session, state.busy);
+
         set_execution_sensitive(
             &self.restart_session_button,
             state.restart_session,
             state.busy,
         );
+
         set_execution_sensitive(&self.kill_session_button, state.kill_session, state.busy);
+
         set_execution_sensitive(
             &self.detach_session_button,
             state.detach_session,
             state.busy,
         );
+
         set_execution_sensitive(&self.restart_gdb_button, state.restart_gdb, state.busy);
         set_execution_sensitive(&self.resynchronize_button, state.resynchronize, state.busy);
+
         set_execution_sensitive(
             &self.add_breakpoint_button,
             state.edit_stop_points,
             state.busy,
         );
+
         for (button, _, _) in &self.signal_buttons {
             set_transient_execution_sensitive(button, state.edit_stop_points, state.busy);
         }
+
         for (button, _) in &self.event_catchpoint_buttons {
             set_execution_sensitive(button, state.edit_stop_points, state.busy);
         }
+
         set_execution_sensitive(
             &self.filtered_catchpoint.kind,
             state.edit_stop_points,
             state.busy,
         );
+
         set_execution_sensitive(
             &self.filtered_catchpoint.filter,
             state.edit_stop_points,
             state.busy,
         );
+
         set_execution_sensitive(
             &self.filtered_catchpoint.add,
             state.edit_stop_points,
             state.busy,
         );
+
         set_execution_sensitive(&self.signal_entry, state.edit_stop_points, state.busy);
         set_transient_execution_sensitive(&self.signal_add_button, state.add_signal, state.busy);
+
         set_transient_execution_sensitive(
             &self.delete_all_signal_catchpoints_button,
             state.delete_signal_catchpoints,
             state.busy,
         );
+
         set_execution_sensitive(
             &self.delete_all_catchpoints_button,
             state.delete_event_catchpoints,
             state.busy,
         );
+
         set_execution_sensitive(
             &self.delete_all_breakpoints_button,
             state.delete_breakpoints,
             state.busy,
         );
+
         set_execution_sensitive(
             &self.delete_all_watchpoints_button,
             state.delete_watchpoints,
@@ -1466,12 +1794,13 @@ impl Ui {
     fn update_pause_control(&self, sensitive: bool, busy: bool, was_sensitive: bool) {
         const VISUAL_DELAY: Duration = Duration::from_millis(150);
         const PENDING_CLASS: &str = "pause-availability-pending";
-
         set_transient_execution_sensitive(&self.pause_button, sensitive, busy);
+
         if sensitive {
             if was_sensitive {
                 return;
             }
+
             let generation = self.pause_visual_generation.get().wrapping_add(1);
             self.pause_visual_generation.set(generation);
             self.pause_button.add_css_class(PENDING_CLASS);
@@ -1482,12 +1811,14 @@ impl Ui {
             let command_pending = Rc::clone(&self.command_pending);
             let session_pending = Rc::clone(&self.session_pending);
             let until_active = Rc::clone(&self.native_until_active);
+
             gtk::glib::timeout_add_local_once(VISUAL_DELAY, move || {
                 let still_available = ready.get()
                     && debugger_state.get().inferior_started()
                     && !session_pending.get()
                     && (until_active.get()
                         || (debugger_state.get().inferior_running() && !command_pending.get()));
+
                 if current_generation.get() == generation
                     && still_available
                     && let Some(button) = button.upgrade()
@@ -1498,6 +1829,7 @@ impl Ui {
         } else if !busy {
             self.pause_visual_generation
                 .set(self.pause_visual_generation.get().wrapping_add(1));
+
             self.pause_button.remove_css_class(PENDING_CLASS);
         }
     }
@@ -1523,6 +1855,7 @@ impl Ui {
 
     fn request_native_until(&self, action: UntilAction) {
         let handler = self.until_action_handler.borrow().clone();
+
         if let Some(handler) = handler {
             handler(action);
         }
@@ -1530,6 +1863,7 @@ impl Ui {
 
     pub(crate) fn cancel_native_until(&self) {
         let handler = self.until_cancel_handler.borrow().clone();
+
         if let Some(handler) = handler {
             handler();
         }
@@ -1537,6 +1871,7 @@ impl Ui {
 
     pub(crate) fn abort_native_until(&self) {
         let handler = self.until_abort_handler.borrow().clone();
+
         if let Some(handler) = handler {
             handler();
         }
@@ -1549,6 +1884,7 @@ impl Ui {
         thread_id: Option<&str>,
     ) -> bool {
         let handler = self.until_stop_handler.borrow().clone();
+
         handler.is_some_and(|handler| handler(reason, address, thread_id))
     }
 
@@ -1580,6 +1916,7 @@ impl Ui {
         if self.native_until_active.replace(active) == active {
             return;
         }
+
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
         self.render_inferior_controls();
@@ -1604,6 +1941,7 @@ impl Ui {
 
     pub(crate) fn request_disassembly_for_stop(&self, pc: String, architecture: Option<String>) {
         let handler = self.disassembly_handler.borrow().clone();
+
         if let Some(handler) = handler {
             handler(DisassemblyRequest::Stopped { pc, architecture });
         }
@@ -1738,7 +2076,9 @@ impl Ui {
         if from == to {
             return;
         }
+
         let metadata = self.stop_point_metadata.borrow_mut().remove(from);
+
         if let Some(metadata) = metadata {
             self.stop_point_metadata
                 .borrow_mut()
@@ -1758,5 +2098,26 @@ impl Ui {
     pub fn set_thread_stop_reason(&self, reason: Option<&str>) {
         self.thread_stop_reason
             .replace(reason.map(stop_reason_label));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::known_gdb_prompt;
+
+    #[test]
+    fn terminal_barrier_waits_for_a_known_complete_prompt() {
+        for prompt in ["(gdb) ", "gef➤  ", "pwndbg> ", "(rr)"] {
+            assert!(known_gdb_prompt(prompt), "{prompt}");
+        }
+
+        for incomplete in [
+            "Continuing.",
+            ">",
+            "Quit anyway? (y or n)",
+            "(gdb) break main",
+        ] {
+            assert!(!known_gdb_prompt(incomplete), "{incomplete}");
+        }
     }
 }

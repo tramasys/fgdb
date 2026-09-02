@@ -6,9 +6,11 @@ pub(super) fn cleanup_viewer_variable_objects(
     owned: impl IntoIterator<Item = String>,
 ) {
     let owned = owned.into_iter().collect::<Vec<_>>();
+
     if owned.is_empty() {
         return;
     }
+
     if let Some(ui) = ui.upgrade() {
         if ui.inferior_is_running() {
             ui.defer_variable_object_deletions(owned);

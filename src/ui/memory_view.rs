@@ -1,5 +1,7 @@
 use super::*;
 
+static NEXT_MEMORY_WATCH_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Clone, Copy)]
 enum MemoryRowColumn {
     Address,
@@ -40,6 +42,7 @@ pub(super) fn add_memory_watch(
 ) -> bool {
     let existing = {
         let watches = watches.borrow();
+
         watches
             .iter()
             .find(|watch| {
@@ -49,22 +52,18 @@ pub(super) fn add_memory_watch(
             })
             .cloned()
     };
+
     if let Some(watch) = existing {
         select_memory_watch(container, &watch);
         request_memory_watch(&watch, handler);
         return true;
     }
+
     if watches.borrow().len() >= MAX_MEMORY_WATCHES {
         return false;
     }
 
-    let id = watches
-        .borrow()
-        .iter()
-        .map(|watch| watch.id)
-        .max()
-        .unwrap_or(0)
-        .wrapping_add(1);
+    let id = NEXT_MEMORY_WATCH_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.add_css_class("memory-watch-page");
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 3);
@@ -96,7 +95,6 @@ pub(super) fn add_memory_watch(
     toolbar.append(&refresh);
     toolbar.append(&remove);
     page.append(&toolbar);
-
     let summary = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     summary.add_css_class("memory-watch-summary");
     let status = gtk::Label::new(Some("reading…"));
@@ -104,26 +102,28 @@ pub(super) fn add_memory_watch(
     status.set_ellipsize(pango::EllipsizeMode::Middle);
     status.set_hexpand(true);
     enable_stable_text_selection(&status);
+
     let range = gtk::Label::new(Some(&format!(
         "{} · {}",
         format_memory_size(byte_count as u64),
         format.label()
     )));
+
     range.add_css_class("memory-watch-range");
     range.set_halign(gtk::Align::End);
     enable_stable_text_selection(&range);
     summary.append(&status);
     summary.append(&range);
     page.append(&summary);
-
     let (view, store, selection) = build_memory_watch_table();
+
     let scrolled = gtk::ScrolledWindow::builder()
         .child(&view)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
-    page.append(&scrolled);
 
+    page.append(&scrolled);
     let tab = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     tab.add_css_class("memory-watch-tab");
     let tab_label = gtk::Label::new(Some(&expression));
@@ -157,11 +157,12 @@ pub(super) fn add_memory_watch(
         previous_begin: Rc::new(Cell::new(None)),
         previous_bytes: Rc::new(RefCell::new(Vec::new())),
     };
+
     watches.borrow_mut().push(watch.clone());
     update_memory_container_state(container, false);
     select_memory_watch(container, &watch);
-
     let weak_follow = follow.downgrade();
+
     selection.connect_selected_notify(move |selection| {
         if let Some(follow) = weak_follow.upgrade() {
             follow.set_sensitive(selected_memory_pointer(selection).is_some());
@@ -170,21 +171,24 @@ pub(super) fn add_memory_watch(
 
     connect_memory_page_navigation(&previous, id, -(byte_count as i64), watches, handler);
     connect_memory_page_navigation(&next, id, byte_count as i64, watches, handler);
-
     let weak_watches = Rc::downgrade(watches);
     let handler_for_base = Rc::clone(handler);
+
     base.connect_clicked(move |button| {
         let Some(watches) = weak_watches.upgrade() else {
             return;
         };
+
         let watch = watches
             .borrow()
             .iter()
             .find(|watch| watch.id == id)
             .cloned();
+
         let Some(watch) = watch else {
             return;
         };
+
         watch.page_offset.set(0);
         update_memory_watch_offset(&watch);
         button.set_sensitive(false);
@@ -193,10 +197,12 @@ pub(super) fn add_memory_watch(
 
     let weak_watches = Rc::downgrade(watches);
     let handler_for_refresh = Rc::clone(handler);
+
     refresh.connect_clicked(move |_| {
         let Some(watches) = weak_watches.upgrade() else {
             return;
         };
+
         if let Some(watch) = watches
             .borrow()
             .iter()
@@ -210,8 +216,8 @@ pub(super) fn add_memory_watch(
     connect_memory_follow(&follow, id, container, watches, handler);
     connect_memory_remove(&remove, id, container, watches);
     connect_memory_remove(&tab_close, id, container, watches);
-
     request_memory_watch(&watch, handler);
+
     true
 }
 
@@ -219,6 +225,7 @@ fn memory_toolbar_button(label: &str, tooltip: &str) -> gtk::Button {
     let button = gtk::Button::with_label(label);
     button.add_css_class("inline-action");
     button.set_tooltip_text(Some(tooltip));
+
     button
 }
 
@@ -231,21 +238,26 @@ fn connect_memory_page_navigation(
 ) {
     let weak_watches = Rc::downgrade(watches);
     let handler = Rc::clone(handler);
+
     button.connect_clicked(move |_| {
         let Some(watches) = weak_watches.upgrade() else {
             return;
         };
+
         let watch = watches
             .borrow()
             .iter()
             .find(|watch| watch.id == id)
             .cloned();
+
         let Some(watch) = watch else {
             return;
         };
+
         let Some(offset) = watch.page_offset.get().checked_add(delta) else {
             return;
         };
+
         watch.page_offset.set(offset);
         update_memory_watch_offset(&watch);
         request_memory_watch(&watch, &handler);
@@ -264,7 +276,10 @@ fn connect_memory_follow(
     let weak_refresh_all = container.refresh_all.downgrade();
     let weak_clear_all = container.clear_all.downgrade();
     let weak_watches = Rc::downgrade(watches);
+    let refresh_batch = Rc::clone(&container.refresh_batch);
+    let commands_available = Rc::clone(&container.commands_available);
     let handler = Rc::clone(handler);
+
     button.connect_clicked(move |_| {
         let (Some(notebook), Some(empty), Some(refresh_all), Some(clear_all), Some(watches)) = (
             weak_notebook.upgrade(),
@@ -275,20 +290,26 @@ fn connect_memory_follow(
         ) else {
             return;
         };
+
         let pointer = watches
             .borrow()
             .iter()
             .find(|watch| watch.id == id)
             .and_then(|watch| selected_memory_pointer(&watch.selection));
+
         let Some(pointer) = pointer else {
             return;
         };
+
         let container = MemoryWatchContainer {
             notebook,
             empty,
             refresh_all,
             clear_all,
+            refresh_batch: Rc::clone(&refresh_batch),
+            commands_available: Rc::clone(&commands_available),
         };
+
         let _ = add_memory_watch(
             &container,
             &watches,
@@ -311,6 +332,9 @@ fn connect_memory_remove(
     let weak_refresh_all = container.refresh_all.downgrade();
     let weak_clear_all = container.clear_all.downgrade();
     let weak_watches = Rc::downgrade(watches);
+    let refresh_batch = Rc::clone(&container.refresh_batch);
+    let commands_available = Rc::clone(&container.commands_available);
+
     button.connect_clicked(move |_| {
         let (Some(notebook), Some(empty), Some(refresh_all), Some(clear_all), Some(watches)) = (
             weak_notebook.upgrade(),
@@ -321,25 +345,32 @@ fn connect_memory_remove(
         ) else {
             return;
         };
+
         let page = watches
             .borrow()
             .iter()
             .find(|watch| watch.id == id)
             .map(|watch| watch.page.clone());
+
         if let Some(page) = page
             && let Some(position) = notebook.page_num(&page)
         {
             notebook.remove_page(Some(position));
         }
+
         watches.borrow_mut().retain(|watch| watch.id != id);
+        let reading = refresh_batch.borrow_mut().remove(id);
+
         update_memory_container_state(
             &MemoryWatchContainer {
                 notebook,
                 empty,
                 refresh_all,
                 clear_all,
+                refresh_batch: Rc::clone(&refresh_batch),
+                commands_available: Rc::clone(&commands_available),
             },
-            false,
+            reading,
         );
     });
 }
@@ -351,7 +382,9 @@ pub(super) fn clear_memory_watches(
     while container.notebook.n_pages() > 0 {
         container.notebook.remove_page(Some(0));
     }
+
     watches.borrow_mut().clear();
+    container.refresh_batch.borrow_mut().clear();
     update_memory_container_state(container, false);
 }
 
@@ -359,7 +392,11 @@ pub(super) fn update_memory_container_state(container: &MemoryWatchContainer, re
     let has_watches = container.notebook.n_pages() > 0;
     container.notebook.set_visible(has_watches);
     container.empty.set_visible(!has_watches);
-    container.refresh_all.set_sensitive(has_watches && !reading);
+
+    container
+        .refresh_all
+        .set_sensitive(has_watches && !reading && container.commands_available.get());
+
     container.clear_all.set_sensitive(has_watches);
 }
 
@@ -375,6 +412,7 @@ pub(super) fn request_memory_watch(
 ) {
     set_memory_watch_reading(watch);
     let handler = handler.borrow().clone();
+
     if let Some(handler) = handler {
         handler(
             watch.id,
@@ -403,11 +441,13 @@ fn memory_watch_request_expression_at(expression: &str, offset: i64) -> String {
 
 fn update_memory_watch_offset(watch: &MemoryWatchView) {
     let offset = watch.page_offset.get();
+
     let text = match offset.cmp(&0) {
         std::cmp::Ordering::Less => format!("−0x{:x}", offset.unsigned_abs()),
         std::cmp::Ordering::Equal => String::from("base"),
         std::cmp::Ordering::Greater => format!("+0x{offset:x}"),
     };
+
     watch.offset.set_text(&text);
 }
 
@@ -420,6 +460,7 @@ pub(super) fn show_memory_watch_data(
 ) {
     let previous_begin = watch.previous_begin.get();
     let previous = watch.previous_bytes.borrow();
+
     let context = MemoryRenderContext {
         pointer_bits,
         endian,
@@ -427,33 +468,37 @@ pub(super) fn show_memory_watch_data(
         regions,
         previous: &previous,
     };
+
     let rows = format_memory_rows(memory.begin, &memory.bytes, watch.format, &context);
     let changed = rows.iter().filter(|row| row.changed).count();
     drop(previous);
+
     if replace_boxed_store_if_changed(&watch.store, rows) {
         watch.selection.set_selected(gtk::INVALID_LIST_POSITION);
         watch.follow_button.set_sensitive(false);
     }
+
     let byte_count = memory.bytes.len();
     watch.previous_begin.set(Some(memory.begin));
     watch.previous_bytes.replace(memory.bytes);
-
     let width = usize::try_from(pointer_bits / 4).unwrap_or(16).clamp(8, 16);
     let end = memory.begin.saturating_add(byte_count as u64);
-    let region = regions
-        .iter()
-        .find(|region| region.contains(memory.begin))
+
+    let region = memory_region_for_address(regions, memory.begin)
         .map(MemoryRegion::description)
         .unwrap_or_else(|| String::from("unmapped"));
+
     watch.status.remove_css_class("memory-watch-error");
     let status = format!("0x{:0width$x} · {region}", memory.begin);
     watch.status.set_text(&status);
     watch.status.set_tooltip_text(Some(&status));
+
     let change_text = if previous_begin == Some(memory.begin) {
         format!(" · {changed} changed row(s)")
     } else {
         String::new()
     };
+
     let range = format!(
         "[0x{:0width$x}, 0x{:0width$x}) · {} · {}{change_text}",
         memory.begin,
@@ -461,6 +506,7 @@ pub(super) fn show_memory_watch_data(
         format_memory_size(byte_count as u64),
         watch.format.label(),
     );
+
     watch.range.set_text(&range);
     watch.range.set_tooltip_text(Some(&range));
 }
@@ -492,6 +538,7 @@ fn build_memory_watch_table() -> (gtk::ColumnView, gio::ListStore, gtk::SingleSe
     view.add_css_class("memory-watch-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
+
     for (title, width, expand, column) in [
         ("ADDRESS", 180, false, MemoryRowColumn::Address),
         ("OFFSET", 75, false, MemoryRowColumn::Offset),
@@ -508,6 +555,7 @@ fn build_memory_watch_table() -> (gtk::ColumnView, gio::ListStore, gtk::SingleSe
             title, width, expand, column, &selection,
         ));
     }
+
     (view, store, selection)
 }
 
@@ -520,10 +568,12 @@ fn memory_watch_column(
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
     let selection = selection.clone();
+
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
         };
+
         let label = gtk::Label::new(None);
         label.add_css_class("debug-table-cell");
         label.add_css_class("memory-watch-cell");
@@ -533,35 +583,43 @@ fn memory_watch_column(
         let click = gtk::GestureClick::new();
         let weak_item = item.downgrade();
         let selection = selection.clone();
+
         click.connect_pressed(move |_, _, _, _| {
             if let Some(item) = weak_item.upgrade() {
                 selection.set_selected(item.position());
             }
         });
+
         label.add_controller(click);
         item.set_child(Some(&label));
     });
+
     factory.connect_bind(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
         };
+
         let (Some(label), Some(data)) = (
             item.child().and_downcast::<gtk::Label>(),
             item.item().and_downcast::<glib::BoxedAnyObject>(),
         ) else {
             return;
         };
+
         clear_label_selection(&label);
         reset_semantic_css(&label);
         label.remove_css_class("memory-row-changed");
         let row = data.borrow::<MemoryRowData>();
         label.add_css_class(memory_kind_css(row.kind));
+
         if row.changed {
             label.add_css_class("memory-row-changed");
         }
+
         let width = usize::try_from(row.pointer_bits / 4)
             .unwrap_or(16)
             .clamp(8, 16);
+
         let text = match column {
             MemoryRowColumn::Address => format!("0x{:0width$x}", row.address),
             MemoryRowColumn::Offset => format!("+0x{:04x}", row.offset),
@@ -569,13 +627,16 @@ fn memory_watch_column(
             MemoryRowColumn::Decoded => row.decoded.clone(),
             MemoryRowColumn::Interpretation => row.interpretation.clone(),
         };
+
         label.set_text(&text);
         label.set_tooltip_text(Some(&text));
     });
+
     let view_column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
     view_column.set_fixed_width(width);
     view_column.set_resizable(true);
     view_column.set_expand(expand);
+
     view_column
 }
 
@@ -596,27 +657,30 @@ fn format_memory_rows(
             .unwrap_or(8)
             .clamp(4, 8),
     };
+
     bytes
         .chunks(chunk_size)
         .enumerate()
         .map(|(index, chunk)| {
             let offset = index * chunk_size;
             let address = begin.saturating_add(offset as u64);
+
             let changed = context.previous_begin == Some(begin)
                 && context
                     .previous
                     .get(offset..offset.saturating_add(chunk.len()))
                     .is_some_and(|old| old != chunk);
+
             let pointer = (format == MemoryWatchFormat::Pointers)
                 .then(|| decode_memory_integer(chunk, context.endian))
                 .flatten();
+
             let value = format_memory_value(chunk, format, context.endian);
             let decoded = decode_memory_ascii(chunk);
-            let kind = context
-                .regions
-                .iter()
-                .find(|region| region.contains(address))
+
+            let kind = memory_region_for_address(context.regions, address)
                 .map_or(MemoryKind::None, |region| region.kind);
+
             let interpretation = memory_interpretation(
                 chunk,
                 format,
@@ -626,6 +690,7 @@ fn format_memory_rows(
                 address,
                 context.regions,
             );
+
             MemoryRowData {
                 address,
                 offset,
@@ -647,10 +712,12 @@ fn format_memory_value(bytes: &[u8], format: MemoryWatchFormat, endian: TargetEn
         push_hex_bytes(&mut value, bytes);
         return value;
     }
+
     decode_memory_integer(bytes, endian).map_or_else(
         || {
             let mut value = String::with_capacity(bytes.len() * 3);
             push_hex_bytes(&mut value, bytes);
+
             value
         },
         |value| format!("0x{value:0width$x}", width = bytes.len() * 2),
@@ -696,6 +763,7 @@ fn memory_interpretation(
     regions: &[MemoryRegion],
 ) -> String {
     let mut parts = Vec::new();
+
     match format {
         MemoryWatchFormat::Bytes => {}
         MemoryWatchFormat::U16 => {
@@ -725,9 +793,7 @@ fn memory_interpretation(
         }
         MemoryWatchFormat::Pointers => {
             if let Some(pointer) = pointer {
-                let target = regions
-                    .iter()
-                    .find(|region| region.contains(pointer))
+                let target = memory_region_for_address(regions, pointer)
                     .map(MemoryRegion::description)
                     .unwrap_or_else(|| {
                         if pointer == 0 {
@@ -736,18 +802,22 @@ fn memory_interpretation(
                             String::from("unmapped")
                         }
                     });
+
                 parts.push(format!("→ {target}"));
             }
         }
     }
+
     if format == MemoryWatchFormat::Bytes
-        && let Some(region) = regions.iter().find(|region| region.contains(address))
+        && let Some(region) = memory_region_for_address(regions, address)
     {
         parts.push(region.description());
     }
+
     if changed {
         parts.push(String::from("changed"));
     }
+
     parts.join(" · ")
 }
 
@@ -758,6 +828,7 @@ pub(super) fn push_hex_bytes(output: &mut String, bytes: &[u8]) {
         if index != 0 {
             output.push(' ');
         }
+
         let _ = write!(output, "{byte:02x}");
     }
 }
@@ -769,6 +840,7 @@ mod tests {
     #[test]
     fn formats_conventional_hex_rows_and_typed_values() {
         let bytes = (0_u8..20).collect::<Vec<_>>();
+
         let rows = format_memory_rows(
             0x1000,
             &bytes,
@@ -781,6 +853,7 @@ mod tests {
                 regions: &[],
             },
         );
+
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].address, 0x1000);
         assert_eq!(rows[0].value.split_whitespace().count(), 16);
@@ -797,6 +870,7 @@ mod tests {
                 regions: &[],
             },
         );
+
         assert!(typed[0].interpretation.contains("u32 4294967295"));
         assert!(typed[0].interpretation.contains("i32 -1"));
 
@@ -812,6 +886,7 @@ mod tests {
                 regions: &[],
             },
         );
+
         assert_eq!(float[0].interpretation, "f32 1.5");
     }
 
@@ -819,6 +894,7 @@ mod tests {
     fn reports_changes_only_for_the_same_address_range() {
         let current = [1, 2, 9, 4];
         let previous = [1, 2, 3, 4];
+
         let changed = format_memory_rows(
             0x1000,
             &current,
@@ -831,8 +907,10 @@ mod tests {
                 regions: &[],
             },
         );
+
         assert!(!changed[0].changed);
         assert!(changed[1].changed);
+
         let moved = format_memory_rows(
             0x2000,
             &current,
@@ -845,6 +923,7 @@ mod tests {
                 regions: &[],
             },
         );
+
         assert!(moved.iter().all(|row| !row.changed));
     }
 
@@ -854,10 +933,12 @@ mod tests {
             memory_watch_request_expression_at("$rsp", -128),
             "($rsp)-0x80"
         );
+
         assert_eq!(
             memory_watch_request_expression_at("$rsp", 128),
             "($rsp)+0x80"
         );
+
         assert_eq!(memory_watch_request_expression_at("$rsp", 0), "$rsp");
     }
 
@@ -871,6 +952,7 @@ mod tests {
             kind: MemoryKind::Writable,
             referenced_by: vec![String::from("$rsp")],
         };
+
         assert!(memory_region_matches_filter(&region, ""));
         assert!(memory_region_matches_filter(&region, "7fff1000"));
         assert!(memory_region_matches_filter(&region, "rw-p $rsp"));

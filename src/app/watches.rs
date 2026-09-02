@@ -9,6 +9,7 @@ pub(super) fn refresh_expression_watches(
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     let expressions = current_ui.expression_watch_expressions();
     drop(current_ui);
     refresh_expression_variable_objects(ui, client, generation, expressions, update_batch);

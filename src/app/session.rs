@@ -62,26 +62,32 @@ impl SessionController {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
+
         if self.busy.replace(true) {
             return;
         }
+
         let mut commands = cleanup_commands(
             ui.current_session().as_ref(),
             ui.target_connection(),
             ui.inferior_has_started(),
         );
+
         let Ok(setup_commands) = session_commands(&session, &self.configured_environment.borrow())
         else {
             self.fail_invalid_configuration(&ui);
             return;
         };
+
         commands.extend(setup_commands);
         ui.set_session_pending(true);
+
         ui.set_status(
             "Configuring session",
             &format!("Preparing {} target…", session.kind_label().to_lowercase()),
             None,
         );
+
         self.run_sequence(commands, SequenceCompletion::Configure(session));
     }
 
@@ -89,20 +95,25 @@ impl SessionController {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
+
         if self.busy.replace(true) {
             return;
         }
+
         self.configured_environment.borrow_mut().clear();
         ui.set_session_pending(true);
+
         ui.set_status(
             "Configuring startup session",
             &format!("Preparing {} target…", session.kind_label().to_lowercase()),
             None,
         );
+
         let Ok(commands) = session_commands(&session, &HashSet::new()) else {
             self.fail_invalid_configuration(&ui);
             return;
         };
+
         self.run_sequence(commands, SequenceCompletion::Configure(session));
     }
 
@@ -110,11 +121,14 @@ impl SessionController {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
+
         if self.busy.replace(true) {
             return;
         }
+
         self.configured_environment.borrow_mut().clear();
         ui.set_session_pending(true);
+
         ui.set_status(
             "Restoring session",
             &format!(
@@ -123,10 +137,12 @@ impl SessionController {
             ),
             None,
         );
+
         let Ok(commands) = session_commands(&session, &HashSet::new()) else {
             self.fail_invalid_configuration(&ui);
             return;
         };
+
         self.run_sequence(commands, SequenceCompletion::Configure(session));
     }
 
@@ -134,21 +150,26 @@ impl SessionController {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
+
         if self.busy.replace(true) {
             return;
         }
+
         if action == SessionAction::Restart {
             ui.set_session_pending(true);
+
             crate::ui::controls::issue_execution_command(
                 &ui,
                 &self.client,
                 "-exec-run",
                 "Restarting the configured inferior",
             );
+
             self.busy.set(false);
             ui.set_session_pending(false);
             return;
         }
+
         let (commands, completion, title, detail) = match action {
             SessionAction::Kill => (
                 vec![SessionCommand::with_state(
@@ -177,6 +198,7 @@ impl SessionController {
             ),
             SessionAction::Restart => unreachable!(),
         };
+
         ui.set_session_pending(true);
         ui.set_status(title, detail, None);
         self.run_sequence(commands, completion);
@@ -189,17 +211,20 @@ impl SessionController {
     ) {
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
+
         let sequence = Rc::new(CommandSequence {
             controller: Rc::clone(self),
             commands: RefCell::new(commands.into()),
             completion: RefCell::new(Some(completion)),
             generation,
         });
+
         run_next(sequence);
     }
 
     fn fail(&self, message: &str) {
         self.busy.set(false);
+
         if let Some(ui) = self.ui.upgrade() {
             ui.set_session_pending(false);
             ui.set_status("Session command failed", message, Some("status-error"));
@@ -209,6 +234,7 @@ impl SessionController {
     fn fail_invalid_configuration(&self, ui: &Ui) {
         self.busy.set(false);
         ui.set_session_pending(false);
+
         ui.set_status(
             "Invalid session value",
             "A GDB CLI setting contained a NUL or line break and was not sent.",
@@ -218,32 +244,41 @@ impl SessionController {
 
     fn finish(&self, completion: SequenceCompletion) {
         self.busy.set(false);
+
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
+
         ui.set_session_pending(false);
+
         match completion {
             SequenceCompletion::Configure(session) => {
                 self.client.refresh_pretty_printer_capabilities();
+
                 let environment = match &session {
                     DebugSession::Launch { environment, .. } => {
                         environment.iter().map(|(name, _)| name.clone()).collect()
                     }
+
                     DebugSession::Attach { .. }
                     | DebugSession::CoreDump { .. }
                     | DebugSession::Remote { .. } => HashSet::new(),
                 };
+
                 self.configured_environment.replace(environment);
                 ui.set_current_session(session.clone());
+
                 match session {
                     DebugSession::Launch { .. } => {
                         ui.set_debug_state_stale(false);
+
                         ui.set_status(
                             "Ready to launch",
                             "The executable, arguments, environment, and working directory are configured.",
                             Some("status-ready"),
                         );
                     }
+
                     DebugSession::Attach { .. }
                     | DebugSession::CoreDump { .. }
                     | DebugSession::Remote { .. } => {
@@ -252,6 +287,7 @@ impl SessionController {
                             "Refreshing target state…",
                             Some("status-ready"),
                         );
+
                         request_initial_source(&self.ui, &self.client);
                         refresh_breakpoints(&self.ui, &self.client);
                         refresh_inferiors(&self.ui, &self.client);
@@ -265,6 +301,7 @@ impl SessionController {
             SequenceCompletion::Kill => {
                 ui.set_debug_state_stale(false);
                 refresh_inferiors(&self.ui, &self.client);
+
                 ui.set_status(
                     "Inferior terminated",
                     "The debugged process was killed. The session remains configured and can be run again.",
@@ -274,6 +311,7 @@ impl SessionController {
             SequenceCompletion::Detach => {
                 ui.set_debug_state_stale(false);
                 refresh_inferiors(&self.ui, &self.client);
+
                 ui.set_status(
                     "Detached",
                     "GDB released the process. It normally continues running outside fgdb.",
@@ -286,11 +324,13 @@ impl SessionController {
 
 fn establish_session_target(ui: &Weak<Ui>, client: &MiClient, kind: &'static str) {
     let weak_ui = ui.clone();
+
     if client
         .request("-thread-info", move |client, record| {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
+
             if !record.is_done() {
                 ui.set_status(
                     "Session refresh failed",
@@ -299,11 +339,14 @@ fn establish_session_target(ui: &Weak<Ui>, client: &MiClient, kind: &'static str
                         .unwrap_or("Could not query the target threads"),
                     Some("status-error"),
                 );
+
                 return;
             }
+
             let threads = crate::debugger::threads(&record);
             let stopped = threads.iter().any(|thread| thread.state == "stopped");
             let running = !threads.is_empty() && !stopped;
+
             ui.apply_debugger_state_delta(if stopped {
                 DebuggerStateDelta::inferior_stopped()
             } else if running {
@@ -311,11 +354,14 @@ fn establish_session_target(ui: &Weak<Ui>, client: &MiClient, kind: &'static str
             } else {
                 DebuggerStateDelta::clear_inferior()
             });
+
             if !running {
                 ui.set_debug_state_stale(false);
             }
+
             if stopped {
                 ui.set_thread_stop_reason(Some("stopped"));
+
                 ui.set_status(
                     kind,
                     "The target is stopped and ready for inspection.",
@@ -323,6 +369,7 @@ fn establish_session_target(ui: &Weak<Ui>, client: &MiClient, kind: &'static str
                 );
             } else if running {
                 ui.set_thread_stop_reason(None);
+
                 ui.set_status(
                     kind,
                     "The target is running. Pause it to inspect debugger state.",
@@ -330,12 +377,14 @@ fn establish_session_target(ui: &Weak<Ui>, client: &MiClient, kind: &'static str
                 );
             } else {
                 ui.set_thread_stop_reason(None);
+
                 ui.set_status(
                     kind,
                     "Connected without a stopped inferior. Extended-remote targets can be started with Run when a remote executable is configured.",
                     Some("status-ready"),
                 );
             }
+
             detect_target_abi(&weak_ui, client);
         })
         .is_err()
@@ -354,11 +403,14 @@ fn run_next(sequence: Rc<CommandSequence>) {
         if let Some(completion) = sequence.completion.borrow_mut().take() {
             sequence.controller.finish(completion);
         }
+
         return;
     };
+
     let sequence_for_response = Rc::clone(&sequence);
     let sequence_for_guard = Rc::clone(&sequence);
     let state_after = command.state_after;
+
     if let Err(error) = sequence
         .controller
         .client
@@ -375,9 +427,11 @@ fn run_next(sequence: Rc<CommandSequence>) {
                 {
                     ui.apply_debugger_state_delta(delta);
                 }
+
                 run_next(sequence_for_response);
             } else if record.class == "timeout" {
                 sequence_for_response.controller.busy.set(false);
+
                 client.quarantine(
                     "GDB did not answer a session command within 30 seconds. The target and session state can no longer be determined safely.",
                 );
@@ -429,6 +483,7 @@ fn cleanup_commands(
         },
         TargetConnection::None => None,
     };
+
     command.map_or_else(Vec::new, |command| vec![command])
 }
 
@@ -444,6 +499,7 @@ pub(super) fn shutdown_cleanup_command(
             Some(DebugSession::Attach { .. }) if inferior_started => {
                 Some(String::from("-target-detach"))
             }
+
             Some(DebugSession::Launch { .. })
             | Some(DebugSession::Attach { .. })
             | Some(DebugSession::CoreDump { .. })
@@ -459,6 +515,7 @@ fn session_commands(
     old_environment: &HashSet<String>,
 ) -> Result<Vec<SessionCommand>, &'static str> {
     let mut commands = Vec::new();
+
     for name in old_environment {
         commands.push(SessionCommand::new(
             CliCommandBuilder::new("unset")
@@ -467,6 +524,7 @@ fn session_commands(
                 .finish(),
         ));
     }
+
     match session {
         DebugSession::Launch {
             executable,
@@ -479,10 +537,12 @@ fn session_commands(
                     .argument(&working_directory.to_string_lossy())
                     .finish(),
             ));
+
             commands.push(SessionCommand::with_state(
                 file_command(Some(executable)),
                 DebuggerStateDelta::replace_target_without_inferior(TargetConnection::Local),
             ));
+
             let argument_command = arguments
                 .iter()
                 .fold(
@@ -490,7 +550,9 @@ fn session_commands(
                     |command, argument| command.argument(argument),
                 )
                 .finish();
+
             commands.push(SessionCommand::new(argument_command));
+
             for (name, value) in environment {
                 // GDB's `set environment` treats the remainder of the line as
                 // the value. Quoting it would preserve quote characters in the
@@ -498,6 +560,7 @@ fn session_commands(
                 // obtains values one text line at a time; `console_command`
                 // still performs the required MI transport escaping.
                 let assignment = format!("{name}={value}");
+
                 commands.push(SessionCommand::new(
                     CliCommandBuilder::new("set")
                         .keyword("environment")
@@ -508,16 +571,19 @@ fn session_commands(
         }
         DebugSession::Attach { pid, executable } => {
             commands.push(SessionCommand::new(file_command(executable.as_deref())));
+
             commands.push(SessionCommand::with_state(
                 MiCommandBuilder::new("-target-attach").number(pid).finish(),
                 DebuggerStateDelta::establish_stopped_target(TargetConnection::Local),
             ));
         }
+
         DebugSession::CoreDump {
             executable,
             core_dump,
         } => {
             commands.push(SessionCommand::new(file_command(Some(executable))));
+
             commands.push(SessionCommand::with_state(
                 MiCommandBuilder::new("-target-select")
                     .keyword("core")
@@ -526,6 +592,7 @@ fn session_commands(
                 DebuggerStateDelta::establish_stopped_target(TargetConnection::Core),
             ));
         }
+
         DebugSession::Remote {
             endpoint,
             executable,
@@ -533,6 +600,7 @@ fn session_commands(
             remote_executable,
         } => {
             commands.push(SessionCommand::new(file_command(executable.as_deref())));
+
             if let Some(remote_executable) = remote_executable {
                 commands.push(SessionCommand::new(
                     CliCommandBuilder::new("set")
@@ -542,6 +610,7 @@ fn session_commands(
                         .finish(),
                 ));
             }
+
             commands.push(SessionCommand::with_state(
                 MiCommandBuilder::new("-target-select")
                     .keyword(if *extended {
@@ -555,6 +624,7 @@ fn session_commands(
             ));
         }
     }
+
     Ok(commands)
 }
 
@@ -598,29 +668,35 @@ mod tests {
             environment: vec![(String::from("MODE"), String::from("debug build"))],
             working_directory: PathBuf::from("/tmp/project"),
         };
+
         let commands = command_texts(
             session_commands(&session, &HashSet::from([String::from("OLD")])).unwrap(),
         );
+
         assert!(
             commands
                 .iter()
                 .any(|command| command == "-environment-cd \"/tmp/project\"")
         );
+
         assert!(
             commands
                 .iter()
                 .any(|command| command == "-file-exec-and-symbols \"/tmp/app with spaces\"")
         );
+
         assert!(
             commands
                 .iter()
                 .any(|command| command == "-exec-arguments \"first value\" \"--mode=test\"")
         );
+
         assert!(
             commands
                 .iter()
                 .any(|command| command.contains("unset environment OLD"))
         );
+
         assert!(
             commands
                 .iter()
@@ -634,30 +710,37 @@ mod tests {
             pid: 42,
             executable: None,
         };
+
         assert_eq!(
             command_texts(session_commands(&attach, &HashSet::new()).unwrap()),
             ["-file-exec-and-symbols", "-target-attach 42"]
         );
+
         let core = DebugSession::CoreDump {
             executable: PathBuf::from("/tmp/app"),
             core_dump: PathBuf::from("/tmp/core file"),
         };
+
         assert_eq!(
             session_commands(&core, &HashSet::new()).unwrap()[1].text,
             "-target-select core \"/tmp/core file\""
         );
+
         let remote = DebugSession::Remote {
             endpoint: String::from("localhost:1234"),
             executable: None,
             extended: true,
             remote_executable: Some(String::from("/srv/app")),
         };
+
         let commands = command_texts(session_commands(&remote, &HashSet::new()).unwrap());
+
         assert!(
             commands
                 .iter()
                 .any(|command| command.contains("set remote exec-file"))
         );
+
         assert_eq!(
             commands.last().unwrap(),
             "-target-select extended-remote \"localhost:1234\""
@@ -667,19 +750,24 @@ mod tests {
     #[test]
     fn remote_session_quotes_endpoints_and_remote_executable_paths() {
         let remote_path = "/srv/app \"debug\"\\bin";
+
         let session = DebugSession::Remote {
             endpoint: String::from("host name:1234"),
             executable: Some(PathBuf::from("/tmp/local \"symbols\"")),
             extended: true,
             remote_executable: Some(remote_path.to_owned()),
         };
+
         let commands = command_texts(session_commands(&session, &HashSet::new()).unwrap());
         let cli = format!("set remote exec-file {remote_path}");
+
         assert_eq!(
             commands[0],
             "-file-exec-and-symbols \"/tmp/local \\\"symbols\\\"\""
         );
+
         assert_eq!(commands[1], crate::debugger::console_command(&cli));
+
         assert_eq!(
             commands[2],
             "-target-select extended-remote \"host name:1234\""
@@ -692,6 +780,7 @@ mod tests {
             pid: 42,
             executable: None,
         };
+
         assert_eq!(
             command_texts(cleanup_commands(
                 Some(&attach),
@@ -700,12 +789,14 @@ mod tests {
             )),
             ["-target-detach"]
         );
+
         let remote = DebugSession::Remote {
             endpoint: String::from("host:1"),
             executable: None,
             extended: false,
             remote_executable: None,
         };
+
         assert_eq!(
             command_texts(cleanup_commands(
                 Some(&remote),
@@ -724,6 +815,7 @@ mod tests {
             extended: true,
             remote_executable: None,
         };
+
         let cleanup = cleanup_commands(Some(&remote), TargetConnection::Remote, true);
         let disconnected = apply_success(stopped_target(TargetConnection::Remote), &cleanup[0]);
 
@@ -741,9 +833,9 @@ mod tests {
             pid: 42,
             executable: None,
         };
+
         let cleanup = cleanup_commands(Some(&attach), TargetConnection::Local, true);
         let detached = apply_success(stopped_target(TargetConnection::Local), &cleanup[0]);
-
         assert_eq!(detached.target_connection(), TargetConnection::Local);
         assert!(!detached.inferior_started());
         assert!(!detached.inferior_running());
@@ -758,9 +850,9 @@ mod tests {
             environment: Vec::new(),
             working_directory: PathBuf::from("/tmp"),
         };
+
         let cleanup = cleanup_commands(Some(&launch), TargetConnection::Local, true);
         let killed = apply_success(stopped_target(TargetConnection::Local), &cleanup[0]);
-
         assert_eq!(killed.target_connection(), TargetConnection::Local);
         assert!(!killed.inferior_started());
         assert!(!killed.inferior_running());
@@ -775,6 +867,7 @@ mod tests {
             extended: true,
             remote_executable: Some(String::from("/srv/app")),
         };
+
         let commands = session_commands(&remote, &HashSet::new()).unwrap();
         let target_select = commands.last().unwrap();
         assert!(target_select.text.starts_with("-target-select "));
@@ -782,9 +875,11 @@ mod tests {
         let after_prep = commands[..commands.len() - 1]
             .iter()
             .fold(DebuggerState::default(), apply_success);
+
         assert_eq!(after_prep.target_connection(), TargetConnection::None);
         assert!(!after_prep.inferior_started());
         assert!(after_prep.state_stale());
+
         assert!(
             commands[..commands.len() - 1]
                 .iter()
@@ -796,6 +891,7 @@ mod tests {
         let connected = apply_success(after_prep, target_select);
         assert_eq!(connected.target_connection(), TargetConnection::Remote);
         assert!(!connected.inferior_started());
+
         assert_eq!(
             target_select.state_after.unwrap().connection_change(),
             Some(TargetConnection::Remote)
@@ -808,6 +904,7 @@ mod tests {
             pid: 42,
             executable: Some(PathBuf::from("/tmp/app")),
         };
+
         let attach_commands = session_commands(&attach, &HashSet::new()).unwrap();
         assert!(attach_commands[0].state_after.is_none());
         let attached = apply_success(DebuggerState::default(), &attach_commands[1]);
@@ -819,6 +916,7 @@ mod tests {
             executable: PathBuf::from("/tmp/app"),
             core_dump: PathBuf::from("/tmp/core"),
         };
+
         let core_commands = session_commands(&core, &HashSet::new()).unwrap();
         assert!(core_commands[0].state_after.is_none());
         let opened_core = apply_success(DebuggerState::default(), &core_commands[1]);
@@ -832,6 +930,7 @@ mod tests {
             environment: Vec::new(),
             working_directory: PathBuf::from("/tmp"),
         };
+
         let launch_commands = session_commands(&launch, &HashSet::new()).unwrap();
         assert!(launch_commands[0].state_after.is_none());
         let selected_exec = apply_success(DebuggerState::default(), &launch_commands[1]);
@@ -845,9 +944,9 @@ mod tests {
             executable: PathBuf::from("/tmp/app"),
             core_dump: PathBuf::from("/tmp/core"),
         };
+
         let cleanup = cleanup_commands(Some(&core), TargetConnection::Core, true);
         let closed = apply_success(stopped_target(TargetConnection::Core), &cleanup[0]);
-
         assert_eq!(closed.target_connection(), TargetConnection::None);
         assert!(!closed.inferior_started());
         assert!(closed.state_stale());
@@ -861,12 +960,14 @@ mod tests {
             extended: true,
             remote_executable: None,
         };
+
         let launch = DebugSession::Launch {
             executable: PathBuf::from("/tmp/next"),
             arguments: Vec::new(),
             environment: Vec::new(),
             working_directory: PathBuf::from("/tmp"),
         };
+
         let mut commands = cleanup_commands(Some(&remote), TargetConnection::Remote, false);
         commands.extend(session_commands(&launch, &HashSet::new()).unwrap());
         let texts = command_texts(commands);
@@ -875,6 +976,7 @@ mod tests {
             texts.first().map(String::as_str),
             Some("-target-disconnect")
         );
+
         assert!(
             texts
                 .iter()
@@ -890,25 +992,31 @@ mod tests {
             environment: Vec::new(),
             working_directory: PathBuf::from("/tmp"),
         };
+
         assert_eq!(
             shutdown_cleanup_command(Some(&launch), TargetConnection::Local, true).as_deref(),
             Some("-interpreter-exec console \"kill\"")
         );
+
         let attach = DebugSession::Attach {
             pid: 42,
             executable: None,
         };
+
         assert_eq!(
             shutdown_cleanup_command(Some(&attach), TargetConnection::Local, true).as_deref(),
             Some("-target-detach")
         );
+
         assert!(shutdown_cleanup_command(Some(&attach), TargetConnection::Local, false).is_none());
+
         let remote = DebugSession::Remote {
             endpoint: String::from("localhost:1234"),
             executable: None,
             extended: false,
             remote_executable: None,
         };
+
         assert_eq!(
             shutdown_cleanup_command(Some(&remote), TargetConnection::Remote, false).as_deref(),
             Some("-target-disconnect")

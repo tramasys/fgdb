@@ -15,13 +15,17 @@ pub(super) fn parse_any_stream_output(input: &str) -> Result<String, String> {
 
 fn parse_stream_output_with_kinds(input: &str, kinds: &[u8]) -> Result<String, String> {
     let mut parser = Parser::new(input);
+
     if !parser.next().is_some_and(|kind| kinds.contains(&kind)) {
         return Err(String::from("not a supported stream record"));
     }
+
     let output = parser.c_string()?;
+
     if parser.position != parser.input.len() {
         return Err(String::from("trailing console stream data"));
     }
+
     Ok(output)
 }
 
@@ -29,6 +33,7 @@ pub fn parse_record(input: &str) -> Result<MiRecord, String> {
     if input.len() > MAX_MI_RECORD_BYTES {
         return Err(String::from("MI record exceeds the parser byte limit"));
     }
+
     Parser::new(input).record()
 }
 
@@ -51,14 +56,17 @@ impl<'a> Parser<'a> {
 
     fn record(mut self) -> Result<MiRecord, String> {
         let token_start = self.position;
+
         while self.peek().is_some_and(|byte| byte.is_ascii_digit()) {
             self.position += 1;
         }
+
         let token = if self.position == token_start {
             None
         } else {
             let digits = std::str::from_utf8(&self.input[token_start..self.position])
                 .map_err(|error| error.to_string())?;
+
             Some(
                 digits
                     .parse()
@@ -67,17 +75,22 @@ impl<'a> Parser<'a> {
         };
 
         let kind = self.next().ok_or_else(|| String::from("empty MI record"))? as char;
+
         if !matches!(kind, '^' | '*' | '+' | '=') {
             return Err(format!("unsupported MI record kind {kind:?}"));
         }
+
         let class = self.identifier()?;
         let mut results = Vec::new();
+
         while self.consume(b',') {
             results.push(self.result()?);
         }
+
         if self.position != self.input.len() {
             return Err(String::from("trailing data in MI record"));
         }
+
         Ok(MiRecord {
             token,
             kind,
@@ -91,6 +104,7 @@ impl<'a> Parser<'a> {
         let name = self.identifier()?;
         self.expect(b'=')?;
         let value = self.value()?;
+
         Ok(MiResult { name, value })
     }
 
@@ -118,26 +132,34 @@ impl<'a> Parser<'a> {
         // own output. Keep ordinary `{name=value}` tuples unchanged.
         if self.peek() == Some(b'"') {
             let mut items = Vec::new();
+
             loop {
                 self.bump_item()?;
                 items.push(MiListItem::Value(self.value()?));
+
                 if self.consume(b'}') {
                     break;
                 }
+
                 self.expect(b',')?;
             }
+
             return Ok(MiValue::List(items));
         }
+
         let mut results = Vec::new();
+
         if !self.consume(b'}') {
             loop {
                 results.push(self.result()?);
                 if self.consume(b'}') {
                     break;
                 }
+
                 self.expect(b',')?;
             }
         }
+
         Ok(MiValue::Tuple(results))
     }
 
@@ -145,27 +167,34 @@ impl<'a> Parser<'a> {
         self.enter_container()?;
         let result = self.list_inner();
         self.depth -= 1;
+
         result
     }
 
     fn list_inner(&mut self) -> Result<MiValue, String> {
         self.expect(b'[')?;
         let mut items = Vec::new();
+
         if !self.consume(b']') {
             loop {
                 let item = if self.next_item_is_result() {
                     MiListItem::Result(self.result()?)
                 } else {
                     self.bump_item()?;
+
                     MiListItem::Value(self.value()?)
                 };
+
                 items.push(item);
+
                 if self.consume(b']') {
                     break;
                 }
+
                 self.expect(b',')?;
             }
         }
+
         Ok(MiValue::List(items))
     }
 
@@ -173,12 +202,15 @@ impl<'a> Parser<'a> {
         if self.depth >= MAX_MI_NESTING {
             return Err(String::from("MI value exceeds the nesting limit"));
         }
+
         self.depth += 1;
+
         Ok(())
     }
 
     fn bump_item(&mut self) -> Result<(), String> {
         self.items = self.items.saturating_add(1);
+
         if self.items > MAX_MI_ITEMS {
             Err(String::from("MI record exceeds the item limit"))
         } else {
@@ -188,6 +220,7 @@ impl<'a> Parser<'a> {
 
     fn next_item_is_result(&self) -> bool {
         let mut position = self.position;
+
         while self
             .input
             .get(position)
@@ -195,6 +228,7 @@ impl<'a> Parser<'a> {
         {
             position += 1;
         }
+
         position > self.position && self.input.get(position) == Some(&b'=')
     }
 
@@ -206,6 +240,7 @@ impl<'a> Parser<'a> {
                 b'"' => {
                     let end = self.position;
                     self.position += 1;
+
                     return Ok(std::str::from_utf8(&self.input[start..end])
                         .expect("MI parser input originates from a Rust string")
                         .to_owned());
@@ -214,9 +249,11 @@ impl<'a> Parser<'a> {
                 _ => self.position += 1,
             }
         }
+
         if self.peek().is_none() {
             return Err(String::from("unterminated MI string"));
         }
+
         let mut bytes = Vec::with_capacity(self.position.saturating_sub(start).saturating_add(16));
         bytes.extend_from_slice(&self.input[start..self.position]);
         loop {
@@ -227,6 +264,7 @@ impl<'a> Parser<'a> {
                 None => return Err(String::from("unterminated MI string")),
             }
         }
+
         Ok(String::from_utf8(bytes)
             .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned()))
     }
@@ -255,9 +293,11 @@ impl<'a> Parser<'a> {
                 while self.peek().is_some_and(|byte| byte.is_ascii_hexdigit()) {
                     self.position += 1;
                 }
+
                 if start == self.position {
                     return Err(String::from("empty hexadecimal MI escape"));
                 }
+
                 let digits = std::str::from_utf8(&self.input[start..self.position])
                     .map_err(|error| error.to_string())?;
                 let value = u32::from_str_radix(digits, 16).map_err(|error| error.to_string())?;
@@ -272,10 +312,12 @@ impl<'a> Parser<'a> {
                     self.position += 1;
                     value = value * 8 + u32::from(next - b'0');
                 }
+
                 output.push(value as u8);
             }
             other => output.push(other),
         }
+
         Ok(())
     }
 
@@ -287,9 +329,11 @@ impl<'a> Parser<'a> {
         {
             self.position += 1;
         }
+
         if start == self.position {
             return Err(String::from("expected MI identifier"));
         }
+
         Ok(String::from_utf8_lossy(&self.input[start..self.position]).into_owned())
     }
 
@@ -334,6 +378,7 @@ pub fn quote(argument: &str) -> String {
             other => quoted.push(other),
         }
     }
+
     quoted.push('"');
     quoted
 }

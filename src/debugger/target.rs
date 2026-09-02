@@ -20,6 +20,7 @@ pub enum TargetArchitecture {
 impl TargetArchitecture {
     pub fn from_gdb_description(description: &str) -> Self {
         let value = description.to_ascii_lowercase();
+
         if value.contains("i386:x86-64")
             || value.contains("i386:x64-32")
             || value.contains("x64-32")
@@ -71,12 +72,14 @@ impl TargetArchitecture {
     pub fn pointer_bits_from_gdb_description(description: &str) -> Option<u32> {
         Self::explicit_pointer_bits_from_gdb_description(description).or_else(|| {
             let value = description.to_ascii_lowercase();
+
             Self::from_gdb_description(&value).pointer_bits()
         })
     }
 
     pub fn explicit_pointer_bits_from_gdb_description(description: &str) -> Option<u32> {
         let value = description.to_ascii_lowercase();
+
         (value.contains("i386:x64-32")
             || value.contains("x64-32")
             || value.contains("ilp32")
@@ -122,36 +125,45 @@ impl TargetArchitecture {
         if bytes.get(..4)? != b"\x7fELF" {
             return None;
         }
+
         let (elf_class, pointer_bits) = match bytes.get(4)? {
             1 => (1, 32),
             2 => (2, 64),
             _ => return None,
         };
+
         let endian = match bytes.get(5)? {
             1 => TargetEndian::Little,
             2 => TargetEndian::Big,
             _ => return None,
         };
+
         let machine: [u8; 2] = bytes.get(18..20)?.try_into().ok()?;
+
         let machine = match endian {
             TargetEndian::Little => u16::from_le_bytes(machine),
             TargetEndian::Big => u16::from_be_bytes(machine),
         };
+
         let mut architecture = Self::from_elf(machine, elf_class);
+
         // MIPS n32 uses ELFCLASS32 pointers with a 64-bit ISA. Without the
         // ABI2 flag it is indistinguishable from o32 by class alone.
         if machine == 8 && elf_class == 1 {
             let flags = bytes.get(36..40).and_then(|bytes| {
                 let bytes: [u8; 4] = bytes.try_into().ok()?;
+
                 Some(match endian {
                     TargetEndian::Little => u32::from_le_bytes(bytes),
                     TargetEndian::Big => u32::from_be_bytes(bytes),
                 })
             });
+
             if flags.is_some_and(|flags| flags & 0x20 != 0) {
                 architecture = Self::Mips64;
             }
         }
+
         Some((architecture, endian, pointer_bits))
     }
 
@@ -181,6 +193,7 @@ impl TargetArchitecture {
         let mut badvaddr = false;
         let mut hi = false;
         let mut lo = false;
+
         for name in names {
             match name.as_ref() {
                 "rip" | "rax" => rip_or_rax = true,
@@ -203,6 +216,7 @@ impl TargetArchitecture {
                 _ => {}
             }
         }
+
         if rip_or_rax {
             Self::X86_64
         } else if eip_or_eax {
@@ -251,6 +265,7 @@ impl TargetArchitecture {
             Self::X86 | Self::Arm | Self::RiscV32 | Self::Mips32 | Self::PowerPc32 | Self::S390 => {
                 Some(32)
             }
+
             Self::X86_64
             | Self::AArch64
             | Self::RiscV64
@@ -490,6 +505,7 @@ impl TargetArchitecture {
         if matches!(name, "cs" | "ss" | "ds" | "es" | "fs" | "gs") {
             return 16;
         }
+
         if matches!(
             name,
             "cpsr"
@@ -506,22 +522,27 @@ impl TargetArchitecture {
         ) {
             return 32;
         }
+
         if matches!(self, Self::X86 | Self::X86_64)
             && (name.starts_with('e') && name.len() == 3 || name == "eip" || name == "eflags")
         {
             return 32;
         }
+
         if matches!(self, Self::Arm | Self::AArch64) && numbered(name, "s", 31) {
             return 32;
         }
+
         if self == Self::AArch64 && numbered(name, "w", 31) {
             return 32;
         }
+
         if matches!(self, Self::S390 | Self::S390x)
             && (numbered(name, "a", 15) || numbered(name, "acr", 15))
         {
             return 32;
         }
+
         self.pointer_bits().unwrap_or(pointer_bits).clamp(16, 128)
     }
 
@@ -563,6 +584,7 @@ impl TargetArchitecture {
         {
             return true;
         }
+
         match self {
             Self::Arm => is_one_of(name, &["lr", "r14"]),
             Self::AArch64 => name == "x30",
@@ -591,6 +613,7 @@ impl TargetArchitecture {
             Self::LoongArch64 => &["sp", "r3"],
             Self::Unknown => &["rsp", "esp", "sp"],
         };
+
         names.into_iter().find_map(|name| {
             candidates
                 .iter()
@@ -679,6 +702,7 @@ impl TargetArchitecture {
 
     pub fn syscall_name(self, number: u64) -> &'static str {
         let number = self.normalize_syscall_number(number);
+
         match self {
             Self::X86_64 => x86_64_syscall_name(number),
             Self::AArch64 | Self::RiscV32 | Self::RiscV64 | Self::LoongArch64 => {
@@ -985,12 +1009,15 @@ fn mips64_syscall_name(number: u64) -> &'static str {
     if !(5_000..7_000).contains(&number) {
         return "syscall";
     }
+
     let (base, abi) = if number >= 6_000 {
         (6_000, Mips64SyscallAbi::N32)
     } else {
         (5_000, Mips64SyscallAbi::N64)
     };
+
     let number = number.saturating_sub(base);
+
     match (abi, number) {
         (_, 0) => "read",
         (_, 1) => "write",
@@ -1104,30 +1131,37 @@ mod tests {
             TargetArchitecture::PowerPc64.stack_pointer(["r1", "r3"]),
             Some("r1")
         );
+
         assert_eq!(
             TargetArchitecture::S390x.stack_pointer(["r15", "pswa"]),
             Some("r15")
         );
+
         assert_eq!(
             TargetArchitecture::AArch64.syscall_registers().unwrap().0,
             "x8"
         );
+
         assert_eq!(
             TargetArchitecture::RiscV32.syscall_registers().unwrap().0,
             "a7"
         );
+
         assert_eq!(
             TargetArchitecture::X86_64.call_return_registers(),
             &["rax", "rdx"]
         );
+
         assert_eq!(
             TargetArchitecture::AArch64.call_return_registers(),
             &["x0", "x1"]
         );
+
         assert_eq!(
             TargetArchitecture::S390x.call_return_registers(),
             &["r2", "r3"]
         );
+
         assert_eq!(TargetArchitecture::X86.syscall_name(3), "read");
         assert_eq!(TargetArchitecture::AArch64.syscall_name(63), "read");
         assert_eq!(TargetArchitecture::Mips32.syscall_name(4_003), "read");
@@ -1138,6 +1172,7 @@ mod tests {
         assert_eq!(TargetArchitecture::PowerPc64.syscall_name(286), "openat");
         assert_eq!(TargetArchitecture::S390x.syscall_name(288), "openat");
         assert_eq!(TargetArchitecture::X86.syscall_name(295), "openat");
+
         assert_eq!(
             TargetArchitecture::X86_64.normalize_syscall_number(0x4000_0001),
             1
@@ -1151,6 +1186,7 @@ mod tests {
         i386[4] = 1;
         i386[5] = 1;
         i386[18..20].copy_from_slice(&3_u16.to_le_bytes());
+
         assert_eq!(
             TargetArchitecture::from_elf_ident(&i386),
             Some((TargetArchitecture::X86, TargetEndian::Little, 32))
@@ -1158,6 +1194,7 @@ mod tests {
 
         let mut x32 = i386;
         x32[18..20].copy_from_slice(&62_u16.to_le_bytes());
+
         assert_eq!(
             TargetArchitecture::from_elf_ident(&x32),
             Some((TargetArchitecture::X86_64, TargetEndian::Little, 32))
@@ -1165,6 +1202,7 @@ mod tests {
 
         let mut aarch64_ilp32 = i386;
         aarch64_ilp32[18..20].copy_from_slice(&183_u16.to_le_bytes());
+
         assert_eq!(
             TargetArchitecture::from_elf_ident(&aarch64_ilp32),
             Some((TargetArchitecture::AArch64, TargetEndian::Little, 32))
@@ -1175,6 +1213,7 @@ mod tests {
         s390x[4] = 2;
         s390x[5] = 2;
         s390x[18..20].copy_from_slice(&22_u16.to_be_bytes());
+
         assert_eq!(
             TargetArchitecture::from_elf_ident(&s390x),
             Some((TargetArchitecture::S390x, TargetEndian::Big, 64))
@@ -1186,6 +1225,7 @@ mod tests {
         mips_n32[5] = 2;
         mips_n32[18..20].copy_from_slice(&8_u16.to_be_bytes());
         mips_n32[36..40].copy_from_slice(&0x20_u32.to_be_bytes());
+
         assert_eq!(
             TargetArchitecture::from_elf_ident(&mips_n32),
             Some((TargetArchitecture::Mips64, TargetEndian::Big, 32))
@@ -1198,38 +1238,47 @@ mod tests {
             TargetArchitecture::pointer_bits_from_gdb_description("i386:x64-32"),
             Some(32)
         );
+
         assert_eq!(
             TargetArchitecture::pointer_bits_from_gdb_description("aarch64:ilp32"),
             Some(32)
         );
+
         assert_eq!(
             TargetArchitecture::pointer_bits_from_gdb_description("mips:isa64:n32"),
             Some(32)
         );
+
         assert_eq!(
             TargetArchitecture::explicit_pointer_bits_from_gdb_description("aarch64"),
             None
         );
+
         assert_eq!(
             TargetArchitecture::X86_64.refine_for_pointer_bits(32),
             TargetArchitecture::X86_64
         );
+
         assert_eq!(
             TargetArchitecture::Mips64.refine_for_pointer_bits(32),
             TargetArchitecture::Mips64
         );
+
         assert_eq!(
             TargetArchitecture::X86_64.scalar_register_bits("rax", 32),
             64
         );
+
         assert_eq!(
             TargetArchitecture::Mips64.scalar_register_bits("a0", 32),
             64
         );
+
         assert_eq!(
             TargetArchitecture::X86_64.scalar_register_bits("eax", 32),
             32
         );
+
         assert_eq!(
             TargetArchitecture::X86_64.scalar_register_bits("cs", 32),
             16
@@ -1242,18 +1291,22 @@ mod tests {
             TargetEndian::from_architecture_description("mips:isa32r2"),
             None
         );
+
         assert_eq!(
             TargetEndian::from_architecture_description("mipsel:isa32r2"),
             Some(TargetEndian::Little)
         );
+
         assert_eq!(
             TargetEndian::from_architecture_description("powerpc:common64be"),
             Some(TargetEndian::Big)
         );
+
         assert_eq!(
             TargetArchitecture::Unknown.stack_pointer(["r1", "r15"]),
             None
         );
+
         assert_eq!(
             TargetArchitecture::S390x.thread_pointer_candidates(),
             ["a0", "acr0"]
@@ -1269,6 +1322,7 @@ mod tests {
             ),
             TargetArchitecture::LoongArch64
         );
+
         assert!(!TargetArchitecture::Mips64.is_address_register("zero"));
         assert!(!TargetArchitecture::Mips64.is_address_register("r0"));
         assert!(!TargetArchitecture::LoongArch64.is_address_register("zero"));
@@ -1278,6 +1332,7 @@ mod tests {
         assert!(TargetArchitecture::RiscV64.is_vector_register("vtype"));
         assert!(TargetArchitecture::Mips64.is_vector_register("w31"));
         assert_eq!(TargetArchitecture::S390x.scalar_register_bits("a0", 64), 32);
+
         assert_eq!(
             TargetArchitecture::infer_from_register_names_with_bits(
                 ["x0", "x30", "sp", "pc", "pstate"],
@@ -1285,12 +1340,14 @@ mod tests {
             ),
             TargetArchitecture::AArch64
         );
+
         assert_eq!(
             TargetArchitecture::infer_from_register_names(&["badvaddr", "hi", "lo", "r31"]),
             TargetArchitecture::Unknown
         );
     }
 }
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TargetEndian {
     Little,
@@ -1300,6 +1357,7 @@ pub enum TargetEndian {
 impl TargetEndian {
     pub fn from_gdb_description(value: &str) -> Option<Self> {
         let value = value.to_ascii_lowercase();
+
         if value.contains("little endian") {
             Some(Self::Little)
         } else if value.contains("big endian") {
@@ -1314,6 +1372,7 @@ impl TargetEndian {
     /// disabling target-memory decoding until ELF/GDB supplies an answer.
     pub fn from_architecture_description(value: &str) -> Option<Self> {
         let value = value.to_ascii_lowercase();
+
         if value.contains("little endian")
             || value.contains("mipsel")
             || value.contains("aarch64:little")

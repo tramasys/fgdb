@@ -7,8 +7,10 @@ use std::{
 pub(crate) fn read_bytes(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
     let file = File::open(path)?;
     let mut bytes = Vec::with_capacity(initial_capacity(&file, maximum));
+
     file.take(u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1))
         .read_to_end(&mut bytes)?;
+
     if bytes.len() > maximum {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -18,6 +20,7 @@ pub(crate) fn read_bytes(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
             ),
         ));
     }
+
     Ok(bytes)
 }
 
@@ -29,8 +32,10 @@ pub(crate) fn read_string(path: &Path, maximum: usize) -> io::Result<String> {
 pub(crate) fn read_prefix(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
     let file = File::open(path)?;
     let mut bytes = Vec::with_capacity(initial_capacity(&file, maximum));
+
     file.take(u64::try_from(maximum).unwrap_or(u64::MAX))
         .read_to_end(&mut bytes)?;
+
     Ok(bytes)
 }
 
@@ -44,6 +49,7 @@ fn initial_capacity(file: &File, maximum: usize) -> usize {
     {
         return usize::try_from(length).unwrap_or(maximum).min(maximum);
     }
+
     maximum.min(SMALL_READ_CAPACITY)
 }
 
@@ -58,12 +64,15 @@ mod tests {
             std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ));
+
         std::fs::write(&path, b"12345").unwrap();
         assert_eq!(read_bytes(&path, 5).unwrap(), b"12345");
+
         assert_eq!(
             read_bytes(&path, 4).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+
         std::fs::remove_file(path).unwrap();
     }
 }

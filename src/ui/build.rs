@@ -8,7 +8,6 @@ pub(super) fn build_topbar(
     let topbar = gtk::HeaderBar::new();
     topbar.add_css_class("topbar");
     topbar.set_show_title_buttons(false);
-
     let title_group = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     title_group.add_css_class("titlebar-identity");
     let title = gtk::Label::new(Some("fgdb"));
@@ -25,7 +24,6 @@ pub(super) fn build_topbar(
     target_label.set_tooltip_text(Some(&target_name));
     title_group.append(&target_label);
     topbar.set_title_widget(Some(&title_group));
-
     let leading = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     leading.add_css_class("titlebar-actions");
     let session_popover = gtk::Popover::new();
@@ -58,18 +56,23 @@ pub(super) fn build_topbar(
     let detach_session_button = session_menu_action("Detach safely", "keep running");
     let resynchronize_button = session_menu_action("Refresh debugger state", "Ctrl+Shift+R");
     resynchronize_button.add_css_class("session-utility-action");
+
     resynchronize_button.set_tooltip_text(Some(
         "Re-read state after terminal commands or external debugger changes",
     ));
+
     let configuration_detail = config.configuration_report().menu_detail();
     let configuration_button = session_menu_action("Configuration", &configuration_detail);
     configuration_button.add_css_class("session-utility-action");
+
     configuration_button.set_tooltip_text(Some(
         "Show loaded files, configuration issues, and effective settings",
     ));
+
     if !config.configuration_report().issues().is_empty() {
         configuration_button.add_css_class("configuration-warning");
     }
+
     let restart_gdb_button = session_menu_action("Restart GDB", "recover backend");
     restart_gdb_button.add_css_class("session-primary-action");
     restart_gdb_button.set_visible(false);
@@ -90,15 +93,19 @@ pub(super) fn build_topbar(
     session_popover.set_child(Some(&session_menu));
     let session_button = header_popup_button("Session", &session_popover);
     session_button.add_css_class("toolbar-action");
+
     session_button.set_tooltip_text(Some(
         "Launch a program, attach to a process, inspect a core, connect remotely, restart, kill, or detach",
     ));
+
     leading.append(&session_button);
     let debug_data = gtk::Button::with_label("Debug data");
     debug_data.add_css_class("toolbar-action");
+
     debug_data.set_tooltip_text(Some(
         "Inspect debugger features, symbols, sources, and pretty-printers",
     ));
+
     leading.append(&debug_data);
     let terminal_toggle = gtk::ToggleButton::with_label("Terminal");
     terminal_toggle.add_css_class("toolbar-toggle");
@@ -107,28 +114,31 @@ pub(super) fn build_topbar(
     terminal_toggle.set_tooltip_text(Some("Show or hide the interactive GDB terminal · Ctrl+`"));
     let gef_tools = build_gef_tools_menu(terminal, &terminal_toggle);
     topbar.pack_start(&leading);
-
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     controls.add_css_class("execution-controls");
     let run = control_button("Run", "Start or continue the inferior · F5", true);
     let pause = control_button("Pause", "Interrupt the inferior · F6", false);
     let next = control_button("Next", "Step over the current source line · F10", false);
     let step = control_button("Step", "Step into the current source line · F11", false);
+
     let next_instruction = control_button(
         "Nexti",
         "Execute one machine instruction, stepping over calls · Ctrl+F10",
         false,
     );
+
     let step_instruction = control_button(
         "Stepi",
         "Execute one machine instruction, stepping into calls · Ctrl+F11",
         false,
     );
+
     let finish = control_button(
         "Finish",
         "Run until the current function returns · Shift+F11",
         false,
     );
+
     let until_popover = gtk::Popover::new();
     until_popover.set_autohide(true);
     let until_menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
@@ -171,11 +181,14 @@ pub(super) fn build_topbar(
         ("libc code", "mapping", UntilAction::LibcCode),
         ("Region change", "mapping", UntilAction::RegionChange),
     ];
+
     let mut until_actions = Vec::with_capacity(actions.len());
+
     for (index, (label, detail, action)) in actions.into_iter().enumerate() {
         if matches!(index, 2 | 8) {
             until_menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         }
+
         let button = session_menu_action(label, detail);
         button.add_css_class("until-action");
         until_menu.append(&button);
@@ -185,13 +198,16 @@ pub(super) fn build_topbar(
     until_menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     let condition_section = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     condition_section.add_css_class("until-condition");
+
     let until_condition_entry = gtk::Entry::builder()
         .placeholder_text("$rax == 0")
         .hexpand(true)
         .build();
+
     until_condition_entry.set_tooltip_text(Some(
         "Stop when this side-effect-free GDB expression becomes non-zero",
     ));
+
     condition_section.append(&until_condition_entry);
     let until_condition_button = gtk::Button::with_label("Run");
     until_condition_button.add_css_class("inline-action");
@@ -219,14 +235,13 @@ pub(super) fn build_topbar(
     trailing.append(&controls);
     let window_controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     window_controls.add_css_class("window-controls");
-
     let minimize = window_control_button("−", "Minimize", "minimize");
     let maximize = window_control_button("□", "Maximize or restore", "maximize");
     let close = window_control_button("×", "Close", "close");
-
     let controlled_window = window.clone();
     minimize.connect_clicked(move |_| controlled_window.minimize());
     let controlled_window = window.clone();
+
     maximize.connect_clicked(move |_| {
         if controlled_window.is_maximized() {
             controlled_window.unmaximize();
@@ -234,9 +249,9 @@ pub(super) fn build_topbar(
             controlled_window.maximize();
         }
     });
+
     let controlled_window = window.clone();
     close.connect_clicked(move |_| controlled_window.close());
-
     window_controls.append(&minimize);
     window_controls.append(&maximize);
     window_controls.append(&close);
@@ -293,6 +308,7 @@ fn session_menu_action(label: &str, detail: &str) -> gtk::Button {
     row.append(&detail);
     let button = gtk::Button::builder().child(&row).build();
     button.add_css_class("session-action");
+
     button
 }
 
@@ -308,6 +324,7 @@ pub(super) fn build_gef_tools_menu(
     tools.add_css_class("gef-tools-tabs");
     let mut controls = Vec::new();
     let mut groups = Vec::new();
+
     for (title, commands) in [
         (
             "Context",
@@ -385,34 +402,43 @@ pub(super) fn build_gef_tools_menu(
             .iter()
             .map(|(_, _, _, capability)| *capability)
             .collect();
+
         let (page, page_controls) =
             build_gef_tool_page(commands, terminal, terminal_toggle, &popover);
+
         page.set_visible(false);
         tools.append_page(&page, Some(&gtk::Label::new(Some(title))));
+
         groups.push(GefCapabilityGroup {
             widget: page.upcast(),
             capabilities,
         });
+
         controls.extend(page_controls);
     }
-    menu.append(&tools);
 
+    menu.append(&tools);
     let expression_section = gtk::Box::new(gtk::Orientation::Vertical, 0);
     expression_section.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     let expression_row = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+
     let expression = gtk::Entry::builder()
         .placeholder_text("address or expression")
         .hexpand(true)
         .build();
+
     expression.set_tooltip_text(Some(
         "Address, expression, or type for xinfo, telescope, and dt",
     ));
+
     let inspect = gtk::Button::with_label("xinfo");
     let telescope = gtk::Button::with_label("telescope");
     let data_type = gtk::Button::with_label("dt");
+
     for button in [&inspect, &telescope, &data_type] {
         button.add_css_class("inline-action");
     }
+
     expression_row.append(&expression);
     expression_row.append(&inspect);
     expression_row.append(&telescope);
@@ -420,6 +446,7 @@ pub(super) fn build_gef_tools_menu(
     expression_section.append(&expression_row);
     expression_section.set_visible(false);
     menu.append(&expression_section);
+
     for (button, capability) in [
         (&inspect, "xinfo"),
         (&telescope, "telescope"),
@@ -430,6 +457,7 @@ pub(super) fn build_gef_tools_menu(
             capability,
         });
     }
+
     groups.push(GefCapabilityGroup {
         widget: expression_section.upcast(),
         capabilities: vec!["xinfo", "telescope", "dt"],
@@ -440,12 +468,15 @@ pub(super) fn build_gef_tools_menu(
         let terminal_toggle = terminal_toggle.clone();
         let popover = popover.clone();
         let expression = expression.clone();
+
         Rc::new(move || {
             let expression = expression.text().replace(['\r', '\n'], " ");
             let expression = expression.trim();
+
             if expression.is_empty() {
                 return;
             }
+
             run_terminal_command(
                 &terminal,
                 &terminal_toggle,
@@ -454,6 +485,7 @@ pub(super) fn build_gef_tools_menu(
             );
         })
     };
+
     let inspect_submit = submit("xinfo");
     let submit_for_button = Rc::clone(&inspect_submit);
     inspect.connect_clicked(move |_| submit_for_button());
@@ -463,6 +495,7 @@ pub(super) fn build_gef_tools_menu(
     let data_type_submit = submit("dt");
     let submit_for_button = Rc::clone(&data_type_submit);
     data_type.connect_clicked(move |_| submit_for_button());
+
     expression.connect_activate(move |_| {
         if inspect.is_visible() {
             inspect_submit();
@@ -476,11 +509,14 @@ pub(super) fn build_gef_tools_menu(
     popover.set_child(Some(&menu));
     let button = header_popup_button("GEF tools", &popover);
     button.add_css_class("inline-action");
+
     button.set_tooltip_text(Some(
         "Run investigations supported by the active GEF installation",
     ));
+
     button.set_visible(false);
     button.set_sensitive(false);
+
     GefToolsMenu {
         button,
         content: menu,
@@ -497,15 +533,18 @@ pub(super) fn build_gef_tool_page(
 ) -> (gtk::Box, Vec<GefCapabilityControl>) {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let mut controls = Vec::with_capacity(commands.len());
+
     for (label, detail, command, capability) in commands {
         let button = gef_tool_button(label, detail);
         connect_gef_tool(&button, terminal, terminal_toggle, popover, command);
         page.append(&button);
+
         controls.push(GefCapabilityControl {
             widget: button.upcast(),
             capability,
         });
     }
+
     (page, controls)
 }
 
@@ -515,6 +554,7 @@ pub(super) fn header_popup_button(label: &str, popover: &gtk::Popover) -> gtk::T
     popover.set_parent(&button);
     popover.set_position(gtk::PositionType::Bottom);
     let popover_for_toggle = popover.clone();
+
     button.connect_toggled(move |button| {
         if button.is_active() {
             popover_for_toggle.popup();
@@ -522,7 +562,9 @@ pub(super) fn header_popup_button(label: &str, popover: &gtk::Popover) -> gtk::T
             popover_for_toggle.popdown();
         }
     });
+
     let weak_button = button.downgrade();
+
     popover.connect_closed(move |_| {
         if let Some(button) = weak_button.upgrade()
             && button.is_active()
@@ -530,6 +572,7 @@ pub(super) fn header_popup_button(label: &str, popover: &gtk::Popover) -> gtk::T
             button.set_active(false);
         }
     });
+
     button
 }
 
@@ -543,6 +586,7 @@ pub(super) fn gef_tool_button(label: &str, detail: &str) -> gtk::Button {
     detail.set_halign(gtk::Align::End);
     row.append(&label);
     row.append(&detail);
+
     gtk::Button::builder().child(&row).build()
 }
 
@@ -556,6 +600,7 @@ pub(super) fn connect_gef_tool(
     let terminal = terminal.clone();
     let terminal_toggle = terminal_toggle.clone();
     let popover = popover.clone();
+
     button.connect_clicked(move |_| {
         run_terminal_command(&terminal, &terminal_toggle, &popover, command);
     });
@@ -579,6 +624,7 @@ pub(super) fn window_control_button(label: &str, tooltip: &str, class: &str) -> 
     button.add_css_class(class);
     button.set_focus_on_click(false);
     button.set_tooltip_text(Some(tooltip));
+
     button
 }
 
@@ -599,7 +645,6 @@ pub(super) fn build_workspace(
     let inspector = build_inspector(inspector_bindings);
     workspace.set_end_child(Some(&inspector.root));
     connect_inspector_responsiveness(&workspace, &inspector);
-
     let navigation_and_editor = gtk::Paned::new(gtk::Orientation::Horizontal);
     navigation_and_editor.add_css_class("workspace-columns");
     navigation_and_editor.set_position(260);
@@ -609,7 +654,6 @@ pub(super) fn build_workspace(
     let source_editor = build_editor_panel(source_notebook);
     navigation_and_editor.set_start_child(Some(&left_sidebar.root));
     navigation_and_editor.set_end_child(Some(&source_editor.root));
-
     let main_and_terminal = gtk::Paned::new(gtk::Orientation::Vertical);
     main_and_terminal.set_position(515);
     main_and_terminal.set_shrink_start_child(false);
@@ -618,6 +662,7 @@ pub(super) fn build_workspace(
     let terminal_panel = build_terminal_panel(terminal, gef_tools_button);
     main_and_terminal.set_end_child(Some(&terminal_panel));
     workspace.set_start_child(Some(&main_and_terminal));
+
     let layout_panes = vec![
         layout::Pane::new("workspace_inspector", &workspace),
         layout::Pane::new("navigation_source", &navigation_and_editor),
@@ -646,6 +691,7 @@ pub(super) fn build_workspace(
             0.6,
         ),
     ];
+
     Workspace {
         root: workspace,
         layout_panes,
@@ -666,6 +712,8 @@ pub(super) fn build_workspace(
         locals_empty: inspector.locals_empty,
         locals_summary: inspector.locals_summary,
         locals_edit_button: inspector.locals_edit_button,
+        locals_more_button: inspector.locals_more_button,
+        locals_filter: inspector.locals_filter,
         expression_watches_store: inspector.expression_watches_store,
         expression_watches_selection: inspector.expression_watches_selection,
         expression_watches_view: inspector.expression_watches_view,
@@ -726,9 +774,11 @@ fn connect_inspector_responsiveness(workspace: &gtk::Paned, inspector: &Inspecto
     let misc_root = inspector.misc_view.root.clone();
     let misc_wide_subtabs = inspector.misc_view.wide_subtabs.clone();
     let misc_compact_subtabs = inspector.misc_view.compact_subtabs.clone();
+
     let update: Rc<dyn Fn(&gtk::Paned)> = Rc::new(move |workspace| {
         let width = workspace.width().saturating_sub(workspace.position());
         let compact = width > 0 && width < COMPACT_INSPECTOR_WIDTH;
+
         for root in [&kernel_root, &misc_root] {
             if compact {
                 root.add_css_class("inspector-compact");
@@ -736,6 +786,7 @@ fn connect_inspector_responsiveness(workspace: &gtk::Paned, inspector: &Inspecto
                 root.remove_css_class("inspector-compact");
             }
         }
+
         inspector_notebook.set_show_tabs(!compact);
         compact_inspector_tabs.set_visible(compact);
         kernel_wide_subtabs.set_visible(!compact);
@@ -743,11 +794,13 @@ fn connect_inspector_responsiveness(workspace: &gtk::Paned, inspector: &Inspecto
         misc_wide_subtabs.set_visible(!compact);
         misc_compact_subtabs.set_visible(compact);
     });
+
     let update_for_position = Rc::clone(&update);
     workspace.connect_position_notify(move |workspace| update_for_position(workspace));
     let update_for_allocation = Rc::clone(&update);
     workspace.connect_max_position_notify(move |workspace| update_for_allocation(workspace));
     let update_for_map = Rc::clone(&update);
+
     workspace.connect_map(move |workspace| {
         let workspace = workspace.clone();
         let update = Rc::clone(&update_for_map);
@@ -760,43 +813,54 @@ pub(super) fn build_left_sidebar() -> LeftSidebar {
     sidebar.add_css_class("sidebar");
     sidebar.set_size_request(190, -1);
     let call_stack_list = dynamic_list("Frames appear when the target is paused");
+
     let stack_scrolled = gtk::ScrolledWindow::builder()
         .child(&call_stack_list)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
+
     let thread_controls = build_thread_controls();
     let threads_list = thread_controls.list.clone();
     let modules_list = dynamic_list("Modules appear after the inferior starts");
+
     let modules_scrolled = gtk::ScrolledWindow::builder()
         .child(&modules_list)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
+
     let source_tree = build_source_tree_view();
     let inferior_controls = build_inferior_controls();
     let navigation = gtk::Notebook::new();
     navigation.add_css_class("sidebar-tabs");
     navigation.set_vexpand(true);
     navigation.set_scrollable(true);
+
     navigation.append_page(
         &inferior_controls.page,
         Some(&gtk::Label::new(Some("Inferiors"))),
     );
+
     navigation.append_page(&stack_scrolled, Some(&gtk::Label::new(Some("Call Stack"))));
+
     navigation.append_page(
         &thread_controls.root,
         Some(&gtk::Label::new(Some("Threads"))),
     );
+
     navigation.append_page(&modules_scrolled, Some(&gtk::Label::new(Some("Modules"))));
     navigation.append_page(&source_tree.root, Some(&gtk::Label::new(Some("Sources"))));
     let navigation_for_selection = navigation.clone();
+
     navigation.connect_switch_page(move |_, _, _| {
         let navigation = navigation_for_selection.clone();
         glib::idle_add_local_once(move || clear_label_selections(&navigation));
     });
+
     sidebar.append(&inferior_controls.summary);
     sidebar.append(&navigation);
+
     LeftSidebar {
         root: sidebar,
         navigation,
@@ -814,7 +878,6 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     notebook.set_size_request(0, 0);
     notebook.set_scrollable(true);
     notebook.add_css_class("panel");
-
     let state = gtk::Box::new(gtk::Orientation::Vertical, 5);
     state.add_css_class("sidebar");
     let detail = gtk::Label::new(Some("Waiting for the MI channel"));
@@ -829,6 +892,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     locals_changed.add_css_class("inline-action");
     locals_changed.add_css_class("locals-changed-filter");
     locals_changed.set_tooltip_text(Some("Show only values changed since the previous stop"));
+
     let (locals_view, locals_store, locals_selection) = build_locals_view(
         bindings.variable_children_handler,
         bindings.variable_viewer_handler,
@@ -836,6 +900,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         bindings.target_pointer_bits,
         Some((&locals_filter, &locals_changed)),
     );
+
     let (expression_watches_view, expression_watches_store, expression_watches_selection) =
         build_locals_view(
             bindings.variable_children_handler,
@@ -844,20 +909,26 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
             bindings.target_pointer_bits,
             None,
         );
+
     let locals_empty = empty_label("Values appear when the target is paused");
+
     let locals_scrolled = gtk::ScrolledWindow::builder()
         .child(&locals_view)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
+
     let (instructions_view, instructions_store, instructions_selection, source_column) =
         build_instruction_view();
+
     let instructions_empty = empty_label("Paused target required");
+
     let instructions_scrolled = gtk::ScrolledWindow::builder()
         .child(&instructions_view)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
+
     let context = gtk::Paned::new(gtk::Orientation::Vertical);
     context.add_css_class("context-split");
     context.set_vexpand(true);
@@ -876,15 +947,26 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     locals_header.append(&locals_title);
     let locals_summary = gtk::Label::new(Some("No values"));
     locals_summary.add_css_class("locals-summary");
+
     locals_summary.set_tooltip_text(Some(
         "Arguments and locals in the selected stack frame. Changed values are marked after each stop.",
     ));
+
     locals_header.append(&locals_summary);
     let locals_edit_button = gtk::Button::with_label("Edit");
     locals_edit_button.add_css_class("inline-action");
     locals_edit_button.set_tooltip_text(Some("Edit the selected value"));
     locals_edit_button.set_sensitive(false);
     locals_header.append(&locals_edit_button);
+    let locals_more_button = gtk::Button::with_label("Show more values");
+    locals_more_button.add_css_class("inline-action");
+    locals_more_button.set_halign(gtk::Align::Fill);
+    locals_more_button.set_visible(false);
+
+    locals_more_button.set_tooltip_text(Some(
+        "Render the next page of locals and arguments from the current frame",
+    ));
+
     locals_panel.append(&locals_header);
     let locals_tools = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     locals_tools.add_css_class("locals-toolbar");
@@ -893,6 +975,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     locals_panel.append(&locals_tools);
     locals_panel.append(&locals_empty);
     locals_panel.append(&locals_scrolled);
+    locals_panel.append(&locals_more_button);
     let instructions_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
     instructions_panel.set_vexpand(true);
     let instructions_title = section_title("INSTRUCTIONS");
@@ -918,21 +1001,26 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     let disassembly_forward = compact_instruction_button("›", "Forward in location history");
     let disassembly_previous = compact_instruction_button("‹ Prev", "Show the preceding function");
     let disassembly_next = compact_instruction_button("Next ›", "Show the following function");
+
     let disassembly_location = gtk::Entry::builder()
         .placeholder_text("Address, symbol, or expression")
         .hexpand(true)
         .build();
+
     disassembly_location.set_tooltip_text(Some(
         "Examples: $pc, 0x401000, main, malloc, or a register expression",
     ));
+
     let disassembly_go = compact_instruction_button(
         "Show",
         "Resolve the entered location and disassemble its containing function",
     );
+
     let disassembly_pc = compact_instruction_button(
         "Current PC",
         "Return to the instruction where execution is currently stopped",
     );
+
     let disassembly_mixed = gtk::ToggleButton::with_label("Source");
     disassembly_mixed.add_css_class("inline-action");
     disassembly_mixed.set_tooltip_text(Some("Toggle mixed source and assembly display"));
@@ -946,14 +1034,17 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     disassembly_syntax_att.add_css_class("disassembly-syntax");
     disassembly_syntax_att.set_tooltip_text(Some("Use AT&T assembly syntax"));
     disassembly_syntax_att.set_group(Some(&disassembly_syntax_intel));
+
     let disassembly_follow = compact_instruction_button(
         "Target",
         "Follow the selected direct or register-indirect call or branch target",
     );
+
     let disassembly_memory = compact_instruction_button(
         "Memory",
         "Open the selected instruction's effective address in Memory",
     );
+
     let history_group = disassembly_control_group(
         "HISTORY",
         &[
@@ -961,6 +1052,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
             disassembly_forward.clone().upcast(),
         ],
     );
+
     let location_group = disassembly_control_group(
         "LOCATION",
         &[
@@ -969,6 +1061,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
             disassembly_pc.clone().upcast(),
         ],
     );
+
     location_group.set_hexpand(true);
     disassembly_navigation.append(&history_group);
     disassembly_navigation.append(&location_group);
@@ -980,6 +1073,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
             disassembly_next.clone().upcast(),
         ],
     );
+
     let view_group = disassembly_control_group(
         "VIEW",
         &[
@@ -988,6 +1082,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
             disassembly_syntax_att.clone().upcast(),
         ],
     );
+
     let selected_group = disassembly_control_group(
         "SELECTED",
         &[
@@ -995,11 +1090,13 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
             disassembly_memory.clone().upcast(),
         ],
     );
+
     disassembly_actions.append(&function_group);
     disassembly_actions.append(&view_group);
     disassembly_actions.append(&selected_group);
     disassembly_browser.append(&disassembly_navigation);
     disassembly_browser.append(&disassembly_actions);
+
     let disassembly_controls = DisassemblyControls {
         back: disassembly_back,
         forward: disassembly_forward,
@@ -1021,6 +1118,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         syntax_applicable: Rc::new(Cell::new(false)),
         setting_syntax: Rc::new(Cell::new(false)),
     };
+
     instructions_panel.append(&disassembly_browser);
     let instruction_insight = gtk::Box::new(gtk::Orientation::Vertical, 2);
     instruction_insight.add_css_class("instruction-insight");
@@ -1039,18 +1137,20 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     context.set_start_child(Some(&locals_panel));
     context.set_end_child(Some(&instructions_panel));
     state.append(&context);
-
     let expression_watches_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
     expression_watches_page.add_css_class("sidebar");
     let expression_watch_header = gtk::Box::new(gtk::Orientation::Horizontal, 3);
     expression_watch_header.add_css_class("subpanel-header");
+
     let expression_watch_entry = gtk::Entry::builder()
         .placeholder_text("counter, *node, vec.len, …")
         .hexpand(true)
         .build();
+
     expression_watch_entry.set_tooltip_text(Some(
         "Any C, C++, Rust, or GDB expression that is valid in the selected frame",
     ));
+
     let expression_watch_add_button = gtk::Button::with_label("Add");
     expression_watch_add_button.add_css_class("inline-action");
     expression_watch_add_button.set_sensitive(false);
@@ -1062,49 +1162,54 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     expression_watch_header.append(&expression_watch_add_button);
     expression_watch_header.append(&expression_watch_remove_button);
     expression_watches_page.append(&expression_watch_header);
+
     let expression_watch_hint = gtk::Label::new(Some(
         "Structured values expand in place. Double-click a scalar value to edit it.",
     ));
+
     expression_watch_hint.add_css_class("muted");
     expression_watch_hint.set_halign(gtk::Align::Start);
     expression_watch_hint.set_wrap(true);
     expression_watches_page.append(&expression_watch_hint);
     let expression_watches_empty = empty_label("No watched expressions");
     expression_watches_page.append(&expression_watches_empty);
+
     let expression_watches_scrolled = gtk::ScrolledWindow::builder()
         .child(&expression_watches_view)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
-    expression_watches_page.append(&expression_watches_scrolled);
 
+    expression_watches_page.append(&expression_watches_scrolled);
     let registers_page = gtk::Box::new(gtk::Orientation::Vertical, 2);
     registers_page.add_css_class("sidebar");
     let (registers_view, register_groups) = build_register_view();
     let registers_empty = empty_label("Values appear when the target is paused");
+
     let registers_scrolled = gtk::ScrolledWindow::builder()
         .child(&registers_view)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
+
     registers_page.append(&registers_empty);
     registers_page.append(&registers_scrolled);
-
     let stack_page = gtk::Box::new(gtk::Orientation::Vertical, 2);
     stack_page.add_css_class("sidebar");
     stack_page.append(&build_context_legend());
     let (stack_view, stack_store, stack_word_inspector) = build_stack_view();
     let stack_empty = empty_label("Stack values appear when the target is paused");
+
     let stack_scrolled = gtk::ScrolledWindow::builder()
         .child(&stack_view)
         .min_content_height(1)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
+
     stack_page.append(&stack_empty);
     stack_page.append(&stack_scrolled);
     stack_page.append(&stack_word_inspector.root);
-
     let memory_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     memory_page.add_css_class("sidebar");
     let memory_controls = gtk::Box::new(gtk::Orientation::Vertical, 3);
@@ -1126,18 +1231,20 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     memory_command_header.append(&memory_clear_all);
     memory_controls.append(&memory_command_header);
     let expression_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+
     let memory_address_entry = gtk::Entry::builder()
         .placeholder_text("$rsp, ptr + 0x20, or 0x404000")
         .hexpand(true)
         .build();
+
     memory_address_entry
         .set_tooltip_text(Some("Any GDB expression that resolves to a memory address"));
+
     let memory_add_button = gtk::Button::with_label("Inspect");
     memory_add_button.add_css_class("inline-action");
     memory_add_button.set_sensitive(false);
     expression_row.append(&memory_address_entry);
     expression_row.append(&memory_add_button);
-
     let memory_options = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     memory_options.add_css_class("memory-watch-options");
     memory_options.append(&section_title("LENGTH"));
@@ -1153,6 +1260,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     memory_options.append(&memory_size_unit);
     memory_options.append(&memory_options_spacer);
     memory_options.append(&section_title("DISPLAY"));
+
     let memory_format = gtk::DropDown::from_strings(&[
         "Hex bytes",
         "u16 / i16",
@@ -1162,13 +1270,13 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         "f64",
         "Pointers",
     ]);
+
     memory_format.set_selected(0);
     memory_format.set_tooltip_text(Some("How to group and render the memory values"));
     memory_options.append(&memory_format);
     memory_controls.append(&expression_row);
     memory_controls.append(&memory_options);
     memory_page.append(&memory_controls);
-
     let memory_watch_section = gtk::Box::new(gtk::Orientation::Vertical, 0);
     memory_watch_section.add_css_class("memory-inspector-section");
     let memory_watch_header = gtk::Box::new(gtk::Orientation::Horizontal, 3);
@@ -1180,9 +1288,11 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     memory_watch_hint.add_css_class("muted");
     memory_watch_header.append(&memory_watch_hint);
     memory_watch_section.append(&memory_watch_header);
+
     let memory_watches_empty = empty_label(
         "No memory inspectors. Enter an address or expression above, or open a mapping below.",
     );
+
     memory_watches_empty.set_vexpand(true);
     memory_watches_empty.set_hexpand(true);
     memory_watches_empty.set_halign(gtk::Align::Fill);
@@ -1197,11 +1307,14 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     memory_watch_notebook.set_vexpand(true);
     memory_watch_notebook.set_visible(false);
     memory_watch_section.append(&memory_watch_notebook);
+
     let memory_watch_container = MemoryWatchContainer {
         notebook: memory_watch_notebook,
         empty: memory_watches_empty,
         refresh_all: memory_refresh_all,
         clear_all: memory_clear_all,
+        refresh_batch: Rc::new(RefCell::new(MemoryRefreshBatch::default())),
+        commands_available: Rc::new(Cell::new(false)),
     };
 
     let memory_map_section = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1214,28 +1327,35 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     let memory_map_hint = gtk::Label::new(Some("Double-click a mapping to inspect it"));
     memory_map_hint.add_css_class("muted");
     memory_map_header.append(&memory_map_hint);
+
     let memory_map_search = gtk::SearchEntry::builder()
         .placeholder_text("Filter mappings")
         .width_request(190)
         .build();
+
     memory_map_search.add_css_class("memory-map-search");
+
     memory_map_search.set_tooltip_text(Some(
         "Filter by address, permissions, register annotation, or backing path",
     ));
+
     memory_map_header.append(&memory_map_search);
     memory_map_section.append(&memory_map_header);
+
     let (memory_regions_view, memory_region_store) =
         build_memory_region_view(bindings.target_pointer_bits, &memory_map_search);
+
     let memory_regions_empty = empty_label("Mappings appear when the target is paused");
+
     let memory_regions_scrolled = gtk::ScrolledWindow::builder()
         .child(&memory_regions_view)
         .min_content_height(48)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
+
     memory_map_section.append(&memory_regions_empty);
     memory_map_section.append(&memory_regions_scrolled);
-
     let memory_split = gtk::Paned::new(gtk::Orientation::Vertical);
     memory_split.add_css_class("memory-inspector-split");
     memory_split.set_shrink_start_child(false);
@@ -1244,36 +1364,44 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     memory_split.set_start_child(Some(&memory_watch_section));
     memory_split.set_end_child(Some(&memory_map_section));
     memory_split.set_vexpand(true);
+
     memory_split.connect_position_notify(|split| {
         // GtkPaned otherwise lets the end child collapse completely. Keep the
         // map header, filter, and first table row reachable while still
         // allowing an actual 50/50 initial split on compact windows.
         const MINIMUM_MAP_HEIGHT: i32 = 92;
         let maximum = split.height().saturating_sub(MINIMUM_MAP_HEIGHT);
+
         if maximum > 0 && split.position() > maximum {
             split.set_position(maximum);
         }
     });
-    memory_page.append(&memory_split);
 
+    memory_page.append(&memory_split);
     let breakpoints_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
     breakpoints_page.add_css_class("sidebar");
+
     let hint = gtk::Label::new(Some(
         "Use the source gutter for line breakpoints, or Add breakpoint for advanced locations and behavior.",
     ));
+
     hint.add_css_class("muted");
     hint.set_halign(gtk::Align::Start);
     hint.set_wrap(true);
     breakpoints_page.append(&hint);
     let stop_point_filter_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+
     let stop_point_search = gtk::SearchEntry::builder()
         .placeholder_text("Search stop points, groups, or tags")
         .hexpand(true)
         .build();
+
     stop_point_search.add_css_class("stop-point-search");
+
     stop_point_search.set_tooltip_text(Some(
         "Search numbers, locations, conditions, commands, groups, and tags",
     ));
+
     let stop_point_kind = gtk::DropDown::from_strings(&[
         "All kinds",
         "Breakpoints",
@@ -1282,6 +1410,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         "Catchpoints",
         "Disabled",
     ]);
+
     stop_point_kind.set_selected(0);
     stop_point_kind.set_tooltip_text(Some("Filter the stop-point list by kind or state"));
     stop_point_filter_row.append(&stop_point_search);
@@ -1289,43 +1418,55 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     breakpoints_page.append(&stop_point_filter_row);
     let stop_point_filter_empty = empty_label("No stop points match this filter");
     stop_point_filter_empty.set_visible(false);
+
     let stop_point_filter = StopPointFilterControls {
         search: stop_point_search,
         kind: stop_point_kind,
         empty: stop_point_filter_empty,
     };
+
     let breakpoints_list = dynamic_list("No breakpoints, catchpoints, or watchpoints set");
+
     let breakpoints_scrolled = gtk::ScrolledWindow::builder()
         .child(&breakpoints_list)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
+
     let breakpoint_bulk_actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
     let add_breakpoint_button = gtk::Button::with_label("Add breakpoint");
     add_breakpoint_button.add_css_class("inline-action");
     add_breakpoint_button.add_css_class("primary-control");
+
     add_breakpoint_button.set_tooltip_text(Some(
         "Add a breakpoint by function, address, source line, or regular expression",
     ));
+
     add_breakpoint_button.set_sensitive(false);
     let delete_all_breakpoints_button = gtk::Button::with_label("Delete all BPs");
     delete_all_breakpoints_button.add_css_class("inline-action");
     delete_all_breakpoints_button.add_css_class("danger-action");
+
     delete_all_breakpoints_button
         .set_tooltip_text(Some("Delete all breakpoints, preserving watchpoints"));
+
     delete_all_breakpoints_button.set_sensitive(false);
     let delete_all_watchpoints_button = gtk::Button::with_label("Delete all WPs");
     delete_all_watchpoints_button.add_css_class("inline-action");
     delete_all_watchpoints_button.add_css_class("danger-action");
+
     delete_all_watchpoints_button
         .set_tooltip_text(Some("Delete all watchpoints, preserving breakpoints"));
+
     delete_all_watchpoints_button.set_sensitive(false);
     let delete_all_catchpoints_button = gtk::Button::with_label("Delete all CPs");
     delete_all_catchpoints_button.add_css_class("inline-action");
     delete_all_catchpoints_button.add_css_class("danger-action");
+
     delete_all_catchpoints_button.set_tooltip_text(Some(
         "Delete event catchpoints, preserving signal catchpoints",
     ));
+
     delete_all_catchpoints_button.set_sensitive(false);
     let breakpoint_bulk_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     breakpoint_bulk_spacer.set_hexpand(true);
@@ -1336,31 +1477,38 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     breakpoint_bulk_actions.append(&delete_all_catchpoints_button);
     breakpoints_page.append(&breakpoint_bulk_actions);
     breakpoints_page.append(&breakpoints_scrolled);
-
     let watchpoint_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
     watchpoint_section.add_css_class("breakpoint-tool-section");
     watchpoint_section.append(&section_title("ADD WATCHPOINT"));
     let watchpoint_controls = gtk::Box::new(gtk::Orientation::Horizontal, 3);
     watchpoint_controls.add_css_class("watchpoint-controls");
+
     let watchpoint_expression = gtk::Entry::builder()
         .placeholder_text("variable or address expression")
         .hexpand(true)
         .build();
+
     watchpoint_expression.set_tooltip_text(Some("Examples: counter, *pointer, *(int*)0x404040"));
+
     let watchpoint_access =
         gtk::DropDown::from_strings(&["Write", "Read", "Access", "Masked write"]);
+
     watchpoint_access.add_css_class("watchpoint-access");
     watchpoint_access.set_selected(0);
+
     watchpoint_access.set_tooltip_text(Some(
         "Stop on writes, reads, either kind of access, or a target-supported masked write",
     ));
+
     let watchpoint_mask = gtk::Entry::builder()
         .placeholder_text("mask, e.g. 0xffffff00")
         .width_chars(18)
         .build();
+
     watchpoint_mask.set_tooltip_text(Some(
         "Target-dependent hardware address mask. GDB will report when the target does not support masked watchpoints",
     ));
+
     watchpoint_mask.set_visible(false);
     let watchpoint_add_button = gtk::Button::with_label("Add");
     watchpoint_add_button.add_css_class("inline-action");
@@ -1373,15 +1521,16 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     watchpoint_controls.append(&watchpoint_add_button);
     watchpoint_section.append(&watchpoint_controls);
     breakpoints_page.append(&watchpoint_section);
-
     let catchpoint_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
     catchpoint_section.add_css_class("breakpoint-tool-section");
     catchpoint_section.append(&section_title("QUICK CATCHPOINTS"));
+
     let event_catchpoint_grid = gtk::Grid::builder()
         .column_spacing(3)
         .row_spacing(3)
         .column_homogeneous(true)
         .build();
+
     let event_catchpoint_buttons = EventCatchpoint::ALL
         .into_iter()
         .enumerate()
@@ -1392,22 +1541,29 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
             button.set_tooltip_text(Some(tooltip));
             button.set_sensitive(false);
             event_catchpoint_grid.attach(&button, (index % 3) as i32, (index / 3) as i32, 1, 1);
+
             (button, event)
         })
         .collect::<Vec<_>>();
+
     catchpoint_section.append(&event_catchpoint_grid);
     let filtered_catchpoint_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+
     let filtered_catchpoint_kind =
         gtk::DropDown::from_strings(&["Syscalls", "Library load", "Library unload"]);
+
     filtered_catchpoint_kind.set_selected(0);
     filtered_catchpoint_kind.set_tooltip_text(Some("Choose the filtered event to catch"));
+
     let filtered_catchpoint_filter = gtk::Entry::builder()
         .placeholder_text("syscall names or numbers")
         .hexpand(true)
         .build();
+
     filtered_catchpoint_filter.set_tooltip_text(Some(
         "Comma- or space-separated syscall names/numbers, or a GDB shared-library regular expression",
     ));
+
     let filtered_catchpoint_add = gtk::Button::with_label("Add filtered");
     filtered_catchpoint_add.add_css_class("inline-action");
     filtered_catchpoint_add.set_tooltip_text(Some("Add this filtered catchpoint"));
@@ -1416,13 +1572,14 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     filtered_catchpoint_row.append(&filtered_catchpoint_filter);
     filtered_catchpoint_row.append(&filtered_catchpoint_add);
     catchpoint_section.append(&filtered_catchpoint_row);
+
     let filtered_catchpoint = FilteredCatchpointControls {
         kind: filtered_catchpoint_kind,
         filter: filtered_catchpoint_filter,
         add: filtered_catchpoint_add,
     };
-    breakpoints_page.append(&catchpoint_section);
 
+    breakpoints_page.append(&catchpoint_section);
     let signals_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
     signals_content.add_css_class("sidebar");
     let current_signal_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
@@ -1435,7 +1592,6 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     signal_detail.set_xalign(0.0);
     current_signal_section.append(&signal_detail);
     signals_content.append(&current_signal_section);
-
     let common_signal_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
     common_signal_section.add_css_class("signal-tool-section");
     let signal_actions_header = gtk::Box::new(gtk::Orientation::Horizontal, 3);
@@ -1445,16 +1601,20 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     delete_all_signal_catchpoints_button.add_css_class("inline-action");
     delete_all_signal_catchpoints_button.add_css_class("danger-action");
     delete_all_signal_catchpoints_button.add_css_class("signal-clear-action");
+
     delete_all_signal_catchpoints_button.set_tooltip_text(Some(
         "Delete every signal catchpoint without affecting breakpoints or watchpoints",
     ));
+
     delete_all_signal_catchpoints_button.set_sensitive(false);
     signal_actions_header.append(&signal_actions_title);
     signal_actions_header.append(&delete_all_signal_catchpoints_button);
     common_signal_section.append(&signal_actions_header);
+
     let signal_hint = gtk::Label::new(Some(
         "Click a signal to add its catchpoint, active signals are green and click again removes them.",
     ));
+
     signal_hint.add_css_class("muted");
     signal_hint.set_halign(gtk::Align::Start);
     signal_hint.set_wrap(true);
@@ -1462,30 +1622,33 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     let (common_signal_grid, mut signal_buttons) = build_signal_grid(COMMON_SIGNALS);
     common_signal_section.append(&common_signal_grid);
     signals_content.append(&common_signal_section);
-
     let (more_signal_grid, mut more_signal_buttons) = build_signal_grid(MORE_SIGNALS);
     signal_buttons.append(&mut more_signal_buttons);
+
     let more_signal_section = build_disclosure(
         "MORE POSIX SIGNALS",
         &more_signal_grid,
         false,
         "signal-disclosure",
     );
+
     more_signal_section.add_css_class("signal-tool-section");
     signals_content.append(&more_signal_section);
-
     let custom_signal_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
     custom_signal_section.add_css_class("signal-tool-section");
     custom_signal_section.append(&section_title("CUSTOM SIGNAL"));
     let custom_signal_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
     custom_signal_row.add_css_class("custom-signal-controls");
+
     let signal_entry = gtk::Entry::builder()
         .placeholder_text("SIGRTMIN+1 or 35")
         .hexpand(true)
         .build();
+
     signal_entry.set_tooltip_text(Some(
         "Signal name or number. Names without the SIG prefix are normalized",
     ));
+
     let signal_add_button = gtk::Button::with_label("Toggle catch");
     signal_add_button.add_css_class("inline-action");
     signal_add_button.add_css_class("signal-toggle-action");
@@ -1494,14 +1657,15 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     custom_signal_row.append(&signal_add_button);
     custom_signal_section.append(&custom_signal_row);
     signals_content.append(&custom_signal_section);
+
     let signals_page = gtk::ScrolledWindow::builder()
         .child(&signals_content)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
+
     let kernel_view = build_kernel_view(&bindings.kernel);
     let misc_view = build_misc_view(bindings.theme);
-
     append_responsive_inspector_page(&notebook, &state, "Context");
     append_responsive_inspector_page(&notebook, &expression_watches_page, "Watches");
     append_responsive_inspector_page(&notebook, &registers_page, "Registers");
@@ -1509,32 +1673,39 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     append_responsive_inspector_page(&notebook, &memory_page, "Memory");
     append_responsive_inspector_page(&notebook, &breakpoints_page, "Breakpoints");
     append_responsive_inspector_page(&notebook, &signals_page, "Signals");
+
     let kernel_page =
         notebook.append_page(&kernel_view.root, Some(&gtk::Label::new(Some("Kernel"))));
+
     let misc_page = notebook.append_page(&misc_view.root, Some(&gtk::Label::new(Some("Misc"))));
     let compact_tabs = build_compact_inspector_navigation(&notebook);
     let notebook_for_selection = notebook.clone();
+
     notebook.connect_switch_page(move |_, _, _| {
         let notebook = notebook_for_selection.clone();
         glib::idle_add_local_once(move || clear_label_selections(&notebook));
     });
+
     connect_kernel_tab_visibility(
         &notebook,
         kernel_page,
         &kernel_view,
         bindings.kernel.refresh_handler,
     );
+
     connect_misc_tab_visibility(
         &notebook,
         misc_page,
         &misc_view,
         bindings.misc.refresh_handler,
     );
+
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_size_request(0, 0);
     root.set_vexpand(true);
     root.append(&compact_tabs);
     root.append(&notebook);
+
     Inspector {
         root,
         notebook,
@@ -1547,6 +1718,8 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         locals_empty,
         locals_summary,
         locals_edit_button,
+        locals_more_button,
+        locals_filter,
         expression_watches_store,
         expression_watches_selection,
         expression_watches_view,
@@ -1613,6 +1786,7 @@ fn append_responsive_inspector_page(
     viewport.set_hexpand(true);
     viewport.set_vexpand(true);
     viewport.set_child(Some(child));
+
     notebook.append_page(&viewport, Some(&gtk::Label::new(Some(title))))
 }
 
@@ -1628,6 +1802,7 @@ fn build_compact_inspector_navigation(notebook: &gtk::Notebook) -> gtk::Box {
         "Kernel",
         "Misc",
     ];
+
     let previous = gtk::Button::with_label("‹");
     previous.add_css_class("kernel-tab-nav-button");
     previous.set_tooltip_text(Some("Open the previous inspector"));
@@ -1647,34 +1822,43 @@ fn build_compact_inspector_navigation(notebook: &gtk::Notebook) -> gtk::Box {
     root.append(&selector);
     root.append(&next);
     root.set_visible(false);
-
     let notebook_for_selector = notebook.clone();
+
     selector.connect_selected_notify(move |selector| {
         let page = selector.selected();
+
         if page != gtk::INVALID_LIST_POSITION {
             notebook_for_selector.set_current_page(Some(page));
         }
     });
+
     let notebook_for_previous = notebook.clone();
+
     previous.connect_clicked(move |_| {
         let page = notebook_for_previous.current_page().unwrap_or(0);
         notebook_for_previous.set_current_page(Some(page.saturating_sub(1)));
     });
+
     let notebook_for_next = notebook.clone();
+
     next.connect_clicked(move |_| {
         let page = notebook_for_next.current_page().unwrap_or(0);
         notebook_for_next.set_current_page(Some((page + 1).min(PAGES.len() as u32 - 1)));
     });
+
     let selector_for_page = selector;
     let previous_for_page = previous;
     let next_for_page = next;
+
     let update = move |page: u32| {
         selector_for_page.set_selected(page);
         previous_for_page.set_sensitive(page > 0);
         next_for_page.set_sensitive(page + 1 < PAGES.len() as u32);
     };
+
     update(notebook.current_page().unwrap_or(0));
     notebook.connect_switch_page(move |_, _, page| update(page));
+
     root
 }
 
@@ -1682,6 +1866,7 @@ fn compact_instruction_button(label: &str, tooltip: &str) -> gtk::Button {
     let button = gtk::Button::with_label(label);
     button.add_css_class("inline-action");
     button.set_tooltip_text(Some(tooltip));
+
     button
 }
 
@@ -1691,8 +1876,10 @@ fn disassembly_control_group(label: &str, widgets: &[gtk::Widget]) -> gtk::Box {
     let caption = gtk::Label::new(Some(label));
     caption.add_css_class("disassembly-control-label");
     group.append(&caption);
+
     for widget in widgets {
         group.append(widget);
     }
+
     group
 }

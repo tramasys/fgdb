@@ -424,6 +424,7 @@ impl KernelSnapshot {
         self.mapping_changes.clear();
         self.mapping_summary.clear();
         self.comparison_ready = false;
+
         let Some(previous) = previous.filter(|old| {
             old.pid == self.pid && old.identity.is_some() && old.identity == self.identity
         }) else {
@@ -431,9 +432,12 @@ impl KernelSnapshot {
                 "Baseline",
                 "Captured. Values will be compared at the next stop or refresh",
             ));
+
             return;
         };
+
         self.comparison_ready = true;
+
         if let Some(elapsed_millis) = self
             .captured_at_millis
             .checked_sub(previous.captured_at_millis)
@@ -444,8 +448,10 @@ impl KernelSnapshot {
                 format_duration_ns(elapsed_millis.saturating_mul(1_000_000)),
             ));
         }
+
         let old = &previous.metrics;
         let new = &self.metrics;
+
         for (label, before, after, bytes) in [
             (
                 "Virtual address space",
@@ -534,10 +540,12 @@ impl KernelSnapshot {
             } else {
                 format_count_delta(before, after)
             };
+
             if delta != "—" {
                 self.changes.push(fact(label, delta));
             }
         }
+
         if old.schedstat_available && new.schedstat_available {
             for (label, before, after) in [
                 (
@@ -552,15 +560,19 @@ impl KernelSnapshot {
                 ),
             ] {
                 let delta = format_duration_delta(before, after, 1);
+
                 if delta != "—" {
                     self.changes.push(fact(label, delta));
                 }
             }
+
             let timeslices = format_count_delta(old.sched_timeslices, new.sched_timeslices);
+
             if timeslices != "—" {
                 self.changes
                     .push(fact("Main-thread scheduler timeslices", timeslices));
             }
+
             if let (Some(runtime), Some(wait)) = (
                 new.sched_runtime_ns.checked_sub(old.sched_runtime_ns),
                 new.sched_wait_ns.checked_sub(old.sched_wait_ns),
@@ -575,13 +587,16 @@ impl KernelSnapshot {
                 ));
             }
         }
+
         if old.cgroup_metrics_available && new.cgroup_metrics_available {
             if old.cgroup_memory_current_available && new.cgroup_memory_current_available {
                 let delta = format_byte_delta(old.cgroup_memory_current, new.cgroup_memory_current);
+
                 if delta != "—" {
                     self.cgroup_changes.push(fact("Cgroup memory usage", delta));
                 }
             }
+
             for (label, before, after) in [
                 (
                     "Cgroup memory.high events",
@@ -619,10 +634,12 @@ impl KernelSnapshot {
                 ),
             ] {
                 let delta = format_count_delta(before, after);
+
                 if delta != "—" {
                     self.cgroup_changes.push(fact(label, delta));
                 }
             }
+
             for (label, before, after) in [
                 (
                     "Cgroup CPU usage",
@@ -651,11 +668,13 @@ impl KernelSnapshot {
                 ),
             ] {
                 let delta = format_duration_delta(before, after, 1_000);
+
                 if delta != "—" {
                     self.cgroup_changes.push(fact(label, delta));
                 }
             }
         }
+
         if !self
             .changes
             .iter()
@@ -664,6 +683,7 @@ impl KernelSnapshot {
             self.changes
                 .push(fact("Process-wide counters", "No changes"));
         }
+
         self.mapping_changes = compare_mappings(&previous.mappings, &self.mappings);
         self.mapping_summary = summarize_mapping_changes(&self.mapping_changes);
     }
@@ -675,16 +695,19 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
         .iter()
         .filter(|mapping| mapping.permissions.contains('x'))
         .count();
+
     let writable_executable = snapshot
         .mappings
         .iter()
         .filter(|mapping| mapping.permissions.contains('w') && mapping.permissions.contains('x'))
         .count();
+
     let anonymous_executable = snapshot
         .mappings
         .iter()
         .filter(|mapping| mapping.path.is_none() && mapping.permissions.contains('x'))
         .count();
+
     snapshot.diagnostics.push(fact(
         "Executable mappings",
         format!(
@@ -694,11 +717,13 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
 
     if let Some(memory) = snapshot.memory_accounting.as_ref() {
         let not_referenced = memory.rss.saturating_sub(memory.referenced);
+
         let referenced_share = if memory.rss == 0 {
             0.0
         } else {
             memory.referenced as f64 / memory.rss as f64 * 100.0
         };
+
         snapshot.diagnostics.push(fact(
             "Working-set signal",
             format!(
@@ -707,11 +732,13 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
                 format_bytes(not_referenced),
             ),
         ));
+
         let swapped_mappings = snapshot
             .mappings
             .iter()
             .filter(|mapping| mapping.swap > 0)
             .count();
+
         snapshot.diagnostics.push(fact(
             "Reclaim / pinning",
             format!(
@@ -729,8 +756,10 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
             .flat_map(|mapping| [mapping.kernel_page_size, mapping.mmu_page_size])
             .filter(|size| *size > 0)
             .collect::<Vec<_>>();
+
         page_sizes.sort_unstable();
         page_sizes.dedup();
+
         snapshot.diagnostics.push(fact(
             "Page-size mix",
             format!(
@@ -766,12 +795,14 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
                     })
             })
             .collect::<Vec<_>>();
+
         if !allocation_categories.is_empty() {
             snapshot.diagnostics.push(fact(
                 "Allocation backing",
                 allocation_categories.join("  |  "),
             ));
         }
+
         if let Some(mapping) = snapshot
             .mappings
             .iter()
@@ -797,7 +828,9 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
         .iter()
         .find(|limit| limit.resource == "Max open files")
         .and_then(|limit| limit.soft.parse::<u64>().ok());
+
     let open_descriptors = snapshot.file_descriptors.len() as u64;
+
     snapshot.diagnostics.push(fact(
         "Open-file headroom",
         soft_fd_limit.map_or_else(
@@ -818,12 +851,14 @@ fn summarize_mapping_changes(changes: &[KernelMappingChange]) -> Vec<KernelFact>
     if changes.is_empty() {
         return Vec::new();
     }
+
     let count = |status: &str| {
         changes
             .iter()
             .filter(|change| change.status.split(" / ").any(|part| part == status))
             .count()
     };
+
     let mut facts = vec![fact(
         "VMA lifecycle",
         format!(
@@ -835,6 +870,7 @@ fn summarize_mapping_changes(changes: &[KernelMappingChange]) -> Vec<KernelFact>
             count("CHANGED"),
         ),
     )];
+
     let metrics: [MappingMetric; 8] = [
         ("Virtual mapping churn", |change: &KernelMappingChange| {
             change.size_delta
@@ -864,17 +900,20 @@ fn summarize_mapping_changes(changes: &[KernelMappingChange]) -> Vec<KernelFact>
             change.huge_delta
         }),
     ];
+
     for (label, value) in metrics {
         let gained = changes
             .iter()
             .map(value)
             .filter(|delta| *delta > 0)
             .sum::<i128>();
+
         let released = changes
             .iter()
             .map(value)
             .filter(|delta| *delta < 0)
             .sum::<i128>();
+
         if gained != 0 || released != 0 {
             facts.push(fact(
                 label,
@@ -887,6 +926,7 @@ fn summarize_mapping_changes(changes: &[KernelMappingChange]) -> Vec<KernelFact>
             ));
         }
     }
+
     facts
 }
 
@@ -898,9 +938,12 @@ fn compare_mappings(
         .iter()
         .map(|mapping| (baseline_mapping_key(mapping), mapping))
         .collect::<HashMap<_, _>>();
+
     let mut changes = Vec::new();
+
     for mapping in after {
         let old = previous.remove(&current_mapping_key(mapping));
+
         let status = match old {
             None => "NEW",
             Some(old) if old.end != mapping.end && old.permissions != mapping.permissions => {
@@ -910,18 +953,22 @@ fn compare_mappings(
             Some(old) if old.permissions != mapping.permissions => "PROTECTION",
             Some(_) => "CHANGED",
         };
+
         if let Some(change) = mapping_change(status, old, Some(mapping))
             && (old.is_none() || mapping_change_has_delta(&change))
         {
             changes.push(change);
         }
     }
+
     changes.extend(
         previous
             .into_values()
             .filter_map(|mapping| mapping_change("UNMAPPED", Some(mapping), None)),
     );
+
     changes.sort_by_key(|change| std::cmp::Reverse(change.impact()));
+
     changes
 }
 
@@ -961,6 +1008,7 @@ fn mapping_change(
         )
     } else {
         let mapping = before?;
+
         (
             mapping.start,
             mapping.end,
@@ -970,9 +1018,11 @@ fn mapping_change(
             mapping.path.as_deref(),
         )
     };
+
     let delta = |before: u64, after: u64| i128::from(after) - i128::from(before);
     let before_value = |value: fn(&KernelMappingBaseline) -> u64| before.map_or(0, value);
     let after_value = |value: fn(&KernelMapping) -> u64| after.map_or(0, value);
+
     Some(KernelMappingChange {
         status: status.to_owned(),
         start,
@@ -1034,6 +1084,7 @@ fn mapping_change_has_delta(change: &KernelMappingChange) -> bool {
 
 fn format_count_delta(before: u64, after: u64) -> String {
     let delta = i128::from(after) - i128::from(before);
+
     if delta > 0 {
         format!("+{delta}")
     } else if delta < 0 {
@@ -1055,7 +1106,9 @@ fn format_signed_bytes(bytes: i128) -> String {
     if bytes == 0 {
         return String::from("—");
     }
+
     let magnitude = u64::try_from(bytes.unsigned_abs()).unwrap_or(u64::MAX);
+
     format!(
         "{}{}",
         if bytes > 0 { "+" } else { "−" },
@@ -1092,6 +1145,7 @@ pub(crate) fn format_duration_ns(nanos: u64) -> String {
 pub(super) fn parse_proc_quantity(value: &str) -> Option<u64> {
     let mut fields = value.split_whitespace();
     let value = fields.next()?.parse::<u64>().ok()?;
+
     match fields.next() {
         Some("kB") | Some("KB") => value.checked_mul(1024),
         Some("mB") | Some("MB") => value.checked_mul(1024 * 1024),
@@ -1122,6 +1176,7 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
     const MIB: f64 = KIB * 1024.0;
     const GIB: f64 = MIB * 1024.0;
     let bytes_float = bytes as f64;
+
     if bytes_float >= GIB {
         format!("{:.2} GiB", bytes_float / GIB)
     } else if bytes_float >= MIB {
@@ -1144,12 +1199,14 @@ mod tests {
             identity: Some(7),
             ..KernelSnapshot::default()
         };
+
         old.metrics.rss = 8192;
         old.metrics.major_faults = 3;
         let mut new = old.clone();
         new.metrics.rss = 4096;
         new.metrics.major_faults = 5;
         new.compare_with(Some(&old));
+
         assert_eq!(
             new.changes
                 .iter()
@@ -1157,6 +1214,7 @@ mod tests {
                 .map(|fact| fact.value.as_str()),
             Some("−4.0 KiB")
         );
+
         assert!(
             new.changes
                 .iter()
@@ -1172,6 +1230,7 @@ mod tests {
             captured_at_millis: 1_000,
             ..KernelSnapshot::default()
         };
+
         old.metrics.cgroup_metrics_available = true;
         old.metrics.cgroup_cpu_usage_us = 100;
         let mut new = old.clone();
@@ -1184,16 +1243,19 @@ mod tests {
                 .iter()
                 .any(|fact| fact.label == "Snapshot interval" && fact.value == "250.000 ms")
         );
+
         assert!(
             new.changes
                 .iter()
                 .any(|fact| fact.label == "Process-wide counters" && fact.value == "No changes")
         );
+
         assert!(
             !new.changes
                 .iter()
                 .any(|fact| fact.label.starts_with("Cgroup"))
         );
+
         assert!(
             new.cgroup_changes
                 .iter()
@@ -1215,12 +1277,14 @@ mod tests {
             mmu_page_size: 4096,
             ..KernelMapping::default()
         };
+
         let mut old = KernelSnapshot {
             pid: 4,
             identity: Some(7),
             mappings: vec![original.clone()],
             ..KernelSnapshot::default()
         };
+
         old.metrics.mappings = 1;
         let mut grown = original;
         grown.end = 0x4000;
@@ -1228,23 +1292,26 @@ mod tests {
         grown.rss = 8 * 1024;
         grown.private_dirty = 8 * 1024;
         grown.referenced = 8 * 1024;
+
         let mut new = KernelSnapshot {
             pid: 4,
             identity: Some(7),
             mappings: vec![grown],
             ..KernelSnapshot::default()
         };
-        new.compare_with(Some(&old));
 
+        new.compare_with(Some(&old));
         assert!(new.comparison_ready);
         assert_eq!(new.mapping_changes.len(), 1);
         assert_eq!(new.mapping_changes[0].status, "RESIZED");
         assert_eq!(new.mapping_changes[0].size_delta, 8 * 1024);
         assert_eq!(new.mapping_changes[0].private_delta, 4 * 1024);
+
         assert!(new.mapping_summary.iter().any(|fact| {
             fact.label == "Virtual mapping churn"
                 && fact.value == "gained +8.0 KiB · released — · net +8.0 KiB"
         }));
+
         assert!(
             new.mapping_summary
                 .iter()
@@ -1277,6 +1344,7 @@ mod tests {
         assert_eq!(mapping.path.as_deref(), Some("[heap]"));
         assert_eq!(mapping.private_dirty, 4096);
         assert_eq!(mapping.private_rss, 4096);
+
         assert!(
             std::mem::size_of::<KernelMappingBaseline>() < std::mem::size_of::<KernelMapping>()
         );

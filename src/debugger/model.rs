@@ -29,6 +29,8 @@ pub struct Variable {
     pub varobj: Option<String>,
     pub num_children: usize,
     pub has_more: bool,
+    pub display_hint: Option<String>,
+    pub dynamic: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,6 +42,8 @@ pub struct VariableUpdate {
     pub new_type: Option<String>,
     pub new_num_children: Option<usize>,
     pub has_more: Option<bool>,
+    pub display_hint: Option<String>,
+    pub dynamic: Option<bool>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -75,6 +79,7 @@ pub struct ValueTypeMetadata {
 impl Variable {
     pub fn is_available(&self) -> bool {
         let value = self.value.trim();
+
         ![
             "<optimized out",
             "<out of scope",
@@ -89,25 +94,31 @@ impl Variable {
     pub fn is_pointer(&self) -> bool {
         self.type_name.as_deref().is_some_and(|type_name| {
             let type_name = type_name.trim();
+
             type_name.contains('*') || type_name.starts_with('&') || type_name.ends_with('&')
         })
     }
 
     pub fn can_expand(&self) -> bool {
         let value = self.value.trim();
-        self.is_available()
-            && (self.num_children > 0
-                || self.has_more
-                || (self.is_pointer() && !self.is_null_pointer() && !value.starts_with('<')))
+
+        (self.varobj.is_none() && value.starts_with("<not available"))
+            || (self.is_available()
+                && (self.num_children > 0
+                    || self.has_more
+                    || self.dynamic
+                    || (self.is_pointer() && !self.is_null_pointer() && !value.starts_with('<'))))
     }
 
     pub fn is_null_pointer(&self) -> bool {
         if !self.is_pointer() {
             return false;
         }
+
         if super::context::pointer_address(&self.value) == Some(0) {
             return true;
         }
+
         matches!(
             self.value.trim().to_ascii_lowercase().as_str(),
             "0" | "null" | "nullptr" | "none" | "nil" | "<null>"
@@ -380,6 +391,8 @@ pub fn variables(record: &MiRecord) -> Vec<Variable> {
                 varobj: None,
                 num_children: 0,
                 has_more: false,
+                display_hint: None,
+                dynamic: false,
             })
         })
         .collect()
@@ -405,6 +418,11 @@ pub fn variable_object(record: &MiRecord, display_name: &str) -> Option<Variable
             .and_then(|value| value.parse().ok())
             .unwrap_or(0),
         has_more: record.field("has_more").and_then(MiValue::as_const) == Some("1"),
+        display_hint: record
+            .field("displayhint")
+            .and_then(MiValue::as_const)
+            .map(str::to_owned),
+        dynamic: record.field("dynamic").and_then(MiValue::as_const) == Some("1"),
     })
 }
 
@@ -436,6 +454,7 @@ fn variable_update(tuple: &[MiResult]) -> Option<VariableUpdate> {
         Some("false" | "invalid") => Some(false),
         _ => None,
     };
+
     Some(VariableUpdate {
         varobj: constant(tuple, "name")?.to_owned(),
         value: owned_constant(tuple, "value"),
@@ -444,6 +463,8 @@ fn variable_update(tuple: &[MiResult]) -> Option<VariableUpdate> {
         new_type: owned_constant(tuple, "new_type"),
         new_num_children: constant(tuple, "new_num_children").and_then(|value| value.parse().ok()),
         has_more: constant(tuple, "has_more").map(|value| value == "1"),
+        display_hint: owned_constant(tuple, "displayhint"),
+        dynamic: constant(tuple, "dynamic").map(|value| value == "1"),
     })
 }
 
@@ -456,6 +477,7 @@ pub fn variable_children(record: &MiRecord) -> Vec<Variable> {
         .filter_map(tuple_from_item)
         .filter_map(|tuple| {
             let expression = constant(tuple, "exp").or_else(|| constant(tuple, "name"))?;
+
             Some(Variable {
                 name: variable_child_name(expression),
                 value: constant(tuple, "value")
@@ -468,6 +490,8 @@ pub fn variable_children(record: &MiRecord) -> Vec<Variable> {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(0),
                 has_more: constant(tuple, "has_more") == Some("1"),
+                display_hint: owned_constant(tuple, "displayhint"),
+                dynamic: constant(tuple, "dynamic") == Some("1"),
             })
         })
         .collect()
@@ -513,6 +537,7 @@ pub fn register_names(record: &MiRecord) -> Vec<String> {
 pub fn compact_register_numbers(names: &[String], architecture: TargetArchitecture) -> Vec<usize> {
     const MAX_REGISTER_VALUES: usize = 256;
     let architecture = architecture.effective_for_registers(names);
+
     if architecture == TargetArchitecture::Unknown {
         return names
             .iter()
@@ -525,9 +550,11 @@ pub fn compact_register_numbers(names: &[String], architecture: TargetArchitectu
             .take(MAX_REGISTER_VALUES)
             .collect();
     }
+
     let has_preferred = names
         .iter()
         .any(|name| architecture.is_core_register(name) || architecture.is_thread_pointer(name));
+
     if has_preferred {
         // Always keep a complete first-stop snapshot. On x86, request only
         // the widest advertised SIMD alias (ZMM, YMM, or XMM), rather than
@@ -544,6 +571,7 @@ pub fn compact_register_numbers(names: &[String], architecture: TargetArchitectu
             }
             _ => None,
         };
+
         return names
             .iter()
             .enumerate()
@@ -588,9 +616,11 @@ pub fn registers(record: &MiRecord, names: &[String]) -> Vec<Register> {
         .filter_map(|tuple| {
             let number = constant(tuple, "number")?.parse::<usize>().ok()?;
             let name = names.get(number)?.to_owned();
+
             if name.is_empty() {
                 return None;
             }
+
             Some(Register {
                 name,
                 value: constant(tuple, "value")
@@ -645,20 +675,25 @@ pub fn memory_block(record: &MiRecord) -> Option<MemoryBlock> {
         .and_then(MiValue::as_list)?
         .iter()
         .find_map(tuple_from_item)?;
+
     let begin = parse_hex(constant(tuple, "begin")?)?;
     let contents = constant(tuple, "contents")?;
     let (pairs, remainder) = contents.as_bytes().as_chunks::<2>();
+
     if !remainder.is_empty() {
         return None;
     }
+
     let bytes = pairs
         .iter()
         .map(|pair| {
             let high = hex_nibble(pair[0])?;
             let low = hex_nibble(pair[1])?;
+
             Some((high << 4) | low)
         })
         .collect::<Option<Vec<_>>>()?;
+
     Some(MemoryBlock { begin, bytes })
 }
 
@@ -679,6 +714,7 @@ pub fn threads(record: &MiRecord) -> Vec<ThreadInfo> {
     let current = record
         .field("current-thread-id")
         .and_then(MiValue::as_const);
+
     record
         .field("threads")
         .and_then(MiValue::as_list)
@@ -701,6 +737,7 @@ pub fn thread_id_argument(id: &str) -> Option<&str> {
 pub fn compare_thread_ids(left: &str, right: &str) -> std::cmp::Ordering {
     let mut left_parts = left.split('.');
     let mut right_parts = right.split('.');
+
     loop {
         match (left_parts.next(), right_parts.next()) {
             (Some(left_part), Some(right_part)) => {
@@ -708,6 +745,7 @@ pub fn compare_thread_ids(left: &str, right: &str) -> std::cmp::Ordering {
                     .parse::<u64>()
                     .unwrap_or(u64::MAX)
                     .cmp(&right_part.parse::<u64>().unwrap_or(u64::MAX));
+
                 if ordering != std::cmp::Ordering::Equal {
                     return ordering;
                 }
@@ -728,6 +766,7 @@ pub fn inferiors(record: &MiRecord, current_thread_id: Option<&str>) -> Vec<Infe
         .filter_map(tuple_from_item)
         .filter_map(|tuple| {
             let id = constant(tuple, "id")?.to_owned();
+
             let threads = result_field(tuple, "threads")
                 .and_then(MiValue::as_list)
                 .into_iter()
@@ -735,8 +774,10 @@ pub fn inferiors(record: &MiRecord, current_thread_id: Option<&str>) -> Vec<Infe
                 .filter_map(tuple_from_item)
                 .filter_map(|thread| thread_info(thread, current_thread_id, Some(&id)))
                 .collect::<Vec<_>>();
+
             let pid = constant(tuple, "pid").and_then(|pid| pid.parse().ok());
             let exit_code = owned_constant(tuple, "exit-code");
+
             let state = if threads.iter().any(|thread| thread.state == "running") {
                 InferiorState::Running
             } else if !threads.is_empty() {
@@ -748,6 +789,7 @@ pub fn inferiors(record: &MiRecord, current_thread_id: Option<&str>) -> Vec<Infe
             } else {
                 InferiorState::Unknown
             };
+
             Some(InferiorInfo {
                 id,
                 pid,
@@ -766,6 +808,7 @@ fn thread_info(
     group_id: Option<&str>,
 ) -> Option<ThreadInfo> {
     let id = constant(tuple, "id")?.to_owned();
+
     Some(ThreadInfo {
         current: current_thread_id == Some(id.as_str()),
         id,
@@ -785,9 +828,12 @@ pub fn instructions(record: &MiRecord) -> Vec<Instruction> {
     let Some(items) = record.field("asm_insns").and_then(MiValue::as_list) else {
         return Vec::new();
     };
+
     let mut instructions = Vec::new();
+
     for tuple in items.iter().filter_map(tuple_from_item) {
         let source = source_file(tuple);
+
         if let Some(nested) = result_field(tuple, "line_asm_insn").and_then(MiValue::as_list) {
             instructions.extend(
                 nested
@@ -799,6 +845,7 @@ pub fn instructions(record: &MiRecord) -> Vec<Instruction> {
             instructions.push(instruction);
         }
     }
+
     instructions
 }
 
@@ -837,6 +884,7 @@ pub fn shared_libraries(record: &MiRecord) -> Vec<SharedLibrary> {
                 .into_iter()
                 .flatten()
                 .find_map(tuple_from_item);
+
             Some(SharedLibrary {
                 target_name: constant(tuple, "target-name")?.to_owned(),
                 host_name: owned_constant(tuple, "host-name"),
@@ -852,6 +900,7 @@ pub fn breakpoints(record: &MiRecord) -> Vec<Breakpoint> {
     let Some(table) = record.field("BreakpointTable").and_then(MiValue::as_tuple) else {
         return Vec::new();
     };
+
     result_field(table, "body")
         .and_then(MiValue::as_list)
         .into_iter()
@@ -879,8 +928,10 @@ pub fn executable_source_lines(record: &MiRecord) -> Vec<u32> {
         .filter_map(|tuple| constant(tuple, "line")?.parse().ok())
         .filter(|line| *line > 0)
         .collect::<Vec<_>>();
+
     lines.sort_unstable();
     lines.dedup();
+
     lines
 }
 
@@ -888,6 +939,7 @@ pub fn source_locations(record: &MiRecord) -> Vec<SourceLocation> {
     let Some(symbols) = record.field("symbols").and_then(MiValue::as_tuple) else {
         return Vec::new();
     };
+
     result_field(symbols, "debug")
         .and_then(MiValue::as_list)
         .into_iter()
@@ -896,6 +948,7 @@ pub fn source_locations(record: &MiRecord) -> Vec<SourceLocation> {
         .flat_map(|file| {
             let filename = constant(file, "filename").unwrap_or("source").to_owned();
             let fullname = owned_constant(file, "fullname");
+
             result_field(file, "symbols")
                 .and_then(MiValue::as_list)
                 .into_iter()
@@ -929,8 +982,10 @@ pub fn source_files(record: &MiRecord) -> Vec<SourceFile> {
             })
         })
         .collect::<Vec<_>>();
+
     files.sort_unstable_by(|left, right| left.source_path().cmp(right.source_path()));
     files.dedup_by(|left, right| left.source_path() == right.source_path());
+
     files
 }
 
@@ -953,6 +1008,7 @@ fn expand_breakpoint(tuple: &[MiResult]) -> Vec<Breakpoint> {
     let Some(mut parent) = breakpoint(tuple) else {
         return Vec::new();
     };
+
     let mut locations: Vec<_> = result_field(tuple, "locations")
         .and_then(MiValue::as_list)
         .into_iter()
@@ -960,45 +1016,58 @@ fn expand_breakpoint(tuple: &[MiResult]) -> Vec<Breakpoint> {
         .filter_map(tuple_from_item)
         .filter_map(breakpoint)
         .collect();
+
     if locations.is_empty() {
         vec![parent]
     } else {
         parent.location_count = locations.len();
+
         for location in &mut locations {
             location.parent_number = Some(parent.number.clone());
+
             if location.condition.is_none() {
                 location.condition.clone_from(&parent.condition);
             }
+
             if location.original_location.is_none() {
                 location
                     .original_location
                     .clone_from(&parent.original_location);
             }
+
             if location.catch_type.is_none() {
                 location.catch_type.clone_from(&parent.catch_type);
             }
+
             if location.disposition.is_none() {
                 location.disposition.clone_from(&parent.disposition);
             }
+
             if location.hit_count == 0 {
                 location.hit_count = parent.hit_count;
             }
+
             if location.ignore_count == 0 {
                 location.ignore_count = parent.ignore_count;
             }
+
             if location.thread.is_none() {
                 location.thread.clone_from(&parent.thread);
             }
+
             if location.inferior.is_none() {
                 location.inferior.clone_from(&parent.inferior);
             }
+
             if location.commands.is_empty() {
                 location.commands.clone_from(&parent.commands);
             }
         }
+
         let mut expanded = Vec::with_capacity(locations.len() + 1);
         expanded.push(parent);
         expanded.extend(locations);
+
         expanded
     }
 }
@@ -1091,6 +1160,7 @@ mod tests {
             TargetEndian::from_gdb_description("auto (currently little endian)"),
             Some(TargetEndian::Little)
         );
+
         assert_eq!(
             TargetEndian::from_gdb_description("The target is set to big endian"),
             Some(TargetEndian::Big)
@@ -1128,7 +1198,6 @@ mod tests {
         .unwrap();
         assert!(has_exact_command_completion(&nested, "heap bins"));
         assert!(!has_exact_command_completion(&nested, "heap bins-simple"));
-
         let missing = parse_record(r#"3^done,matches=[],max_completions_reached="0""#).unwrap();
         assert!(!has_exact_command_completion(&missing, "future-calls"));
     }
@@ -1138,12 +1207,14 @@ mod tests {
         let frames = stack_frames(
             &parse_record(r#"1^done,stack=[frame={level="0",addr="0x12",func="main",file="a.c",fullname="/tmp/a.c",line="9"}]"#).unwrap(),
         );
+
         assert_eq!(frames[0].function, "main");
         assert_eq!(frames[0].line, Some(9));
 
         let locals = variables(
             &parse_record(r#"2^done,variables=[{name="answer",arg="1",value="42"}]"#).unwrap(),
         );
+
         assert_eq!(locals[0].value, "42");
         assert!(locals[0].argument);
         assert!(!locals[0].needs_variable_object());
@@ -1154,6 +1225,7 @@ mod tests {
             )
             .unwrap(),
         );
+
         assert!(
             expandable
                 .iter()
@@ -1162,11 +1234,14 @@ mod tests {
 
         let names =
             register_names(&parse_record(r#"3^done,register-names=["rax","rbx"]"#).unwrap());
+
         let values = registers(
             &parse_record(r#"4^done,register-values=[{number="1",value="0xff"}]"#).unwrap(),
             &names,
         );
+
         assert_eq!(values[0].name, "rbx");
+
         assert_eq!(
             compact_register_numbers(
                 &[
@@ -1180,6 +1255,7 @@ mod tests {
             ),
             [0, 1, 2]
         );
+
         assert_eq!(
             compact_register_numbers(
                 &[
@@ -1194,6 +1270,7 @@ mod tests {
             ),
             [0, 3, 4, 5]
         );
+
         assert_eq!(
             compact_register_numbers(
                 &[
@@ -1207,6 +1284,7 @@ mod tests {
             ),
             [0, 1, 2, 3, 4]
         );
+
         assert_eq!(
             compact_register_numbers(
                 &[String::from("pc"), String::from("v0"), String::from("f0")],
@@ -1214,6 +1292,7 @@ mod tests {
             ),
             [0, 1, 2]
         );
+
         let mut powerpc = (0..32).map(|index| format!("r{index}")).collect::<Vec<_>>();
         powerpc.extend((0..32).map(|index| format!("f{index}")));
         powerpc.extend((0..32).map(|index| format!("vr{index}")));
@@ -1222,11 +1301,9 @@ mod tests {
         let selected = compact_register_numbers(&powerpc, TargetArchitecture::PowerPc64);
         assert_eq!(selected.len(), 162);
         assert_eq!(selected.last(), Some(&161));
-
         let thread_list = threads(&parse_record(r#"5^done,threads=[{id="1",target-id="Thread 1",name="main",state="stopped",core="3",frame={level="0",addr="0x12",func="main"}}],current-thread-id="1""#).unwrap());
         assert!(thread_list[0].current);
         assert_eq!(thread_list[0].core.as_deref(), Some("3"));
-
         let disassembly = instructions(&parse_record(r#"6^done,asm_insns=[{address="0x12",func-name="main",offset="0",opcodes="90",inst="nop"}]"#).unwrap());
         assert_eq!(disassembly[0].text, "nop");
         assert!(disassembly[0].source.is_none());
@@ -1235,13 +1312,14 @@ mod tests {
             &parse_record(r#"6^done,asm_insns=[{address="0x13",opcodes="c3",inst="ret"}]"#)
                 .unwrap(),
         );
+
         assert_eq!(symbol_less[0].function, "??");
         assert!(symbol_less[0].offset.is_empty());
-
         let mixed = instructions(&parse_record(r#"7^done,asm_insns=[src_and_asm_line={line="42",file="main.c",fullname="/tmp/main.c",line_asm_insn=[{address="0x20",func-name="main",offset="4",opcodes="c3",inst="ret"}]}]"#).unwrap());
         assert_eq!(mixed.len(), 1);
         assert_eq!(mixed[0].address, "0x20");
         assert_eq!(mixed[0].source.as_ref().map(|source| source.line), Some(42));
+
         assert_eq!(
             mixed[0].source.as_ref().map(|source| source.source_path()),
             Some("/tmp/main.c")
@@ -1287,6 +1365,7 @@ mod tests {
         .unwrap();
         assert_eq!(memory.begin, 0x1000);
         assert_eq!(memory.bytes, [1, 2, 0xfe, 0xff]);
+
         let uppercase = memory_block(
             &parse_record(
                 r#"9^done,memory=[{begin="0x2000",offset="0x0",end="0x2002",contents="A0fF"}]"#,
@@ -1295,6 +1374,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(uppercase.bytes, [0xa0, 0xff]);
+
         assert!(
             memory_block(
                 &parse_record(
@@ -1317,28 +1397,26 @@ mod tests {
         assert_eq!(parsed_breakpoints[0].disposition.as_deref(), Some("keep"));
         assert_eq!(parsed_breakpoints[0].hit_count, 7);
         assert_eq!(parsed_breakpoints[0].thread.as_deref(), Some("2"));
+
         assert_eq!(
             parsed_breakpoints[0].condition.as_deref(),
             Some("count == 4")
         );
+
         let mut child_location = parsed_breakpoints[0].clone();
         child_location.number = String::from("4.2");
         assert_eq!(child_location.command_number(), "4");
-
         let watchpoints = breakpoints(&parse_record(r#"6^done,BreakpointTable={nr_rows="1",body=[bkpt={number="2",type="hw watchpoint",disp="keep",enabled="y",what="counter",cond="counter > 3"}]}"#).unwrap());
         assert!(watchpoints[0].is_watchpoint());
         assert!(!watchpoints[0].is_hardware_breakpoint());
         assert_eq!(watchpoints[0].original_location.as_deref(), Some("counter"));
         assert_eq!(watchpoints[0].condition.as_deref(), Some("counter > 3"));
-
         let hardware = breakpoints(&parse_record(r#"6^done,BreakpointTable={nr_rows="1",body=[bkpt={number="2",type="hw breakpoint",disp="keep",enabled="y",what="main"}]}"#).unwrap());
         assert!(hardware[0].is_hardware_breakpoint());
-
         let catchpoints = breakpoints(&parse_record(r#"7^done,BreakpointTable={body=[bkpt={number="3",type="catchpoint",enabled="y",what="exception throw",catch-type="throw"},bkpt={number="4",type="catchpoint",enabled="y",what="SIGSEGV",catch-type="signal"}]}"#).unwrap());
         assert_eq!(catchpoints[0].catch_type.as_deref(), Some("throw"));
         assert!(!catchpoints[0].is_signal_catchpoint());
         assert!(catchpoints[1].is_signal_catchpoint());
-
         let multi = breakpoints(&parse_record(r#"8^done,BreakpointTable={body=[bkpt={number="5",type="breakpoint",disp="keep",enabled="y",addr="<MULTIPLE>",times="2",ignore="3",script={"silent","printf \"hit\\n\"","continue"},original-location="Payload::Payload",locations=[{number="5.1",enabled="y",addr="0x10",func="Payload::Payload()",file="a.cpp",line="9"},{number="5.2",enabled="n",addr="0x20",func="Payload::Payload(Payload&&)",file="a.cpp",line="9"}]}]}"#).unwrap());
         assert_eq!(multi.len(), 3);
         assert_eq!(multi[0].location_count, 2);
@@ -1348,7 +1426,6 @@ mod tests {
         assert_eq!(multi[1].parent_number.as_deref(), Some("5"));
         assert_eq!(multi[2].parent_number.as_deref(), Some("5"));
         assert!(!multi[2].enabled);
-
         let pending = breakpoints(&parse_record(r#"9^done,BreakpointTable={body=[bkpt={number="6",type="breakpoint",disp="keep",enabled="y",addr="<PENDING>",pending="future_function",times="0",original-location="future_function"}]}"#).unwrap());
         assert_eq!(pending[0].pending.as_deref(), Some("future_function"));
         assert_eq!(pending[0].address.as_deref(), Some("<PENDING>"));
@@ -1362,6 +1439,7 @@ mod tests {
             )
             .unwrap(),
         );
+
         assert_eq!(inserted.len(), 1);
         assert_eq!(inserted[0].number, "3");
         assert_eq!(inserted[0].line, Some(12));
@@ -1407,7 +1485,7 @@ mod tests {
 
         let dynamic = variable_object(
             &parse_record(
-                r#"10^done,name="var3",numchild="0",value="std::vector of length 3",type="std::vector<int>",dynamic="1",has_more="1""#,
+                r#"10^done,name="var3",numchild="0",value="std::vector of length 3",type="std::vector<int>",dynamic="1",displayhint="array",has_more="1""#,
             )
             .unwrap(),
             "numbers",
@@ -1415,6 +1493,8 @@ mod tests {
         .unwrap();
         assert_eq!(dynamic.num_children, 0);
         assert!(dynamic.has_more);
+        assert!(dynamic.dynamic);
+        assert_eq!(dynamic.display_hint.as_deref(), Some("array"));
         assert!(dynamic.can_expand());
 
         let children_record = parse_record(
@@ -1435,9 +1515,10 @@ mod tests {
             )
             .unwrap(),
         );
-        assert_eq!(array_children[0].name, "[0]");
 
+        assert_eq!(array_children[0].name, "[0]");
         let path = parse_record(r#"12^done,path_expr="demo.next""#).unwrap();
+
         assert_eq!(
             variable_path_expression(&path).as_deref(),
             Some("demo.next")
@@ -1451,15 +1532,20 @@ mod tests {
             varobj: Some(String::from("var2")),
             num_children: 0,
             has_more: false,
+            display_hint: None,
+            dynamic: false,
         };
+
         assert!(!null_pointer.can_expand());
 
         let unavailable = super::Variable {
             value: String::from("<optimized out>"),
             ..lazy_reference
         };
+
         assert!(!unavailable.is_available());
         assert!(!unavailable.can_expand());
+
         for value in ["(Demo *) 0x0", "@0x0", "nullptr", "NULL"] {
             let mut null_pointer = null_pointer.clone();
             null_pointer.value = String::from(value);
@@ -1471,7 +1557,7 @@ mod tests {
     #[test]
     fn converts_incremental_variable_object_updates() {
         let record = parse_record(
-            r#"14^done,changelist=[{name="var1",value="std::vector of length 4",in_scope="true",type_changed="false",new_num_children="4",has_more="1"},{name="var2",in_scope="invalid",type_changed="true",new_type="long"}]"#,
+            r#"14^done,changelist=[{name="var1",value="std::vector of length 4",in_scope="true",type_changed="false",new_num_children="4",has_more="1",displayhint="array",dynamic="1"},{name="var2",in_scope="invalid",type_changed="true",new_type="long"}]"#,
         )
         .unwrap();
         let updates = variable_updates(&record);
@@ -1482,6 +1568,8 @@ mod tests {
         assert!(!updates[0].type_changed);
         assert_eq!(updates[0].new_num_children, Some(4));
         assert_eq!(updates[0].has_more, Some(true));
+        assert_eq!(updates[0].display_hint.as_deref(), Some("array"));
+        assert_eq!(updates[0].dynamic, Some(true));
         assert_eq!(updates[1].in_scope, Some(false));
         assert!(updates[1].type_changed);
         assert_eq!(updates[1].new_type.as_deref(), Some("long"));

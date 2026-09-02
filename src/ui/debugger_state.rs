@@ -144,6 +144,7 @@ impl DebuggerState {
     #[cfg(test)]
     pub(super) fn with_target_connection(mut self, connection: TargetConnection) -> Self {
         self.connection = connection;
+
         self
     }
 
@@ -151,14 +152,17 @@ impl DebuggerState {
         if let Some(connection) = delta.connection {
             self.connection = connection;
         }
+
         self.inferior = match delta.inferior {
             InferiorStateChange::Unchanged => self.inferior,
             InferiorStateChange::Clear => InferiorExecution::None,
             InferiorStateChange::Stopped => InferiorExecution::Stopped,
             InferiorStateChange::Running => InferiorExecution::Running,
         };
+
         self.transition = ExecutionTransition::Stable;
         self.freshness = DebugStateFreshness::Stale;
+
         self
     }
 
@@ -176,9 +180,11 @@ impl DebuggerState {
             (true, InferiorExecution::None) => InferiorExecution::Stopped,
             (true, state) => state,
         };
+
         if !started {
             self.freshness = DebugStateFreshness::Stale;
         }
+
         self
     }
 
@@ -188,9 +194,11 @@ impl DebuggerState {
             (false, InferiorExecution::Running) => InferiorExecution::Stopped,
             (false, state) => state,
         };
+
         if running {
             self.freshness = DebugStateFreshness::Stale;
         }
+
         self
     }
 
@@ -204,11 +212,19 @@ impl DebuggerState {
         } else {
             ExecutionTransition::Stable
         };
+
         self
     }
 
     pub(crate) fn state_stale(self) -> bool {
         self.freshness != DebugStateFreshness::Fresh
+    }
+
+    /// Stale frame, thread, and register data only blocks controls while an
+    /// inferior actually exists. A loaded executable without a process has no
+    /// stopped context to refresh, so target-level actions remain safe.
+    pub(crate) fn stopped_context_is_stale(self) -> bool {
+        self.inferior_started() && self.state_stale()
     }
 
     pub(super) fn with_state_stale(mut self, stale: bool) -> Self {
@@ -219,6 +235,7 @@ impl DebuggerState {
                 DebugStateFreshness::Fresh
             };
         }
+
         self
     }
 
@@ -234,6 +251,7 @@ impl DebuggerState {
         } else {
             self.freshness
         };
+
         self
     }
 
@@ -242,6 +260,7 @@ impl DebuggerState {
         self.transition = ExecutionTransition::Stable;
         self.freshness = DebugStateFreshness::Stale;
         self.connection = TargetConnection::None;
+
         self
     }
 }
@@ -256,7 +275,6 @@ mod tests {
         assert!(running.inferior_started());
         assert!(running.inferior_running());
         assert!(running.state_stale());
-
         let cleared = running.with_inferior_started(false);
         assert!(!cleared.inferior_started());
         assert!(!cleared.inferior_running());
@@ -267,6 +285,7 @@ mod tests {
         let connected = DebuggerState::default()
             .with_target_connection(TargetConnection::Remote)
             .with_inferior_started(false);
+
         assert_eq!(connected.target_connection(), TargetConnection::Remote);
         assert!(!connected.inferior_started());
     }
@@ -313,6 +332,7 @@ mod tests {
             .with_transition_pending(true)
             .with_resynchronizing(true)
             .with_state_stale(false);
+
         assert!(transitioning.transition_pending());
         assert!(transitioning.resynchronizing());
         assert!(transitioning.state_stale());
@@ -321,8 +341,21 @@ mod tests {
             .with_transition_pending(false)
             .with_resynchronizing(false)
             .with_state_stale(false);
+
         assert!(!synchronized.transition_pending());
         assert!(!synchronized.resynchronizing());
         assert!(!synchronized.state_stale());
+    }
+
+    #[test]
+    fn target_without_an_inferior_has_no_stale_stopped_context() {
+        let loaded_target = DebuggerState::default().applying(
+            DebuggerStateDelta::replace_target_without_inferior(TargetConnection::Local),
+        );
+
+        assert!(loaded_target.state_stale());
+        assert!(!loaded_target.stopped_context_is_stale());
+        let stopped = loaded_target.applying(DebuggerStateDelta::inferior_stopped());
+        assert!(stopped.stopped_context_is_stale());
     }
 }

@@ -201,11 +201,9 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     root.set_size_request(0, 0);
     root.add_css_class("sidebar");
     root.add_css_class("kernel-page");
-
     let warnings = gtk::Box::new(gtk::Orientation::Vertical, 2);
     warnings.add_css_class("kernel-warnings");
     warnings.set_visible(false);
-
     let pages = gtk::Stack::new();
     pages.set_size_request(0, 0);
     pages.set_vexpand(true);
@@ -215,22 +213,28 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     let page_switcher = gtk::StackSwitcher::new();
     page_switcher.add_css_class("kernel-tabs");
     page_switcher.set_stack(Some(&pages));
+
     let overview_section_handler: KernelSectionHandler = {
         let section_handler = Rc::clone(bindings.section_handler);
+
         Rc::new(move |section, expanded| {
             let Some(preference_key) = kernel_overview_preference_key(section) else {
                 return;
             };
+
             let handler = section_handler.borrow().clone();
+
             if let Some(handler) = handler {
                 handler(preference_key, expanded);
             }
         })
     };
+
     let (overview, overview_store) = build_overview(
         kernel_overview_collapsed(bindings.remembered_disclosures),
         Some(overview_section_handler),
     );
+
     pages.add_titled(&overview, Some("overview"), "Overview");
 
     let (
@@ -254,25 +258,22 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
         memory_empty,
         private_mapping_empty,
     ) = build_memory();
+
     pages.add_titled(&memory, Some("memory"), "Memory");
     pages.add_titled(&private_memory, Some("private-memory"), "Private memory");
 
     let (changes, change_store, mapping_change_store, mapping_change_count, mapping_changes_empty) =
         build_changes();
-    pages.add_titled(&changes, Some("changes"), "Changes");
 
+    pages.add_titled(&changes, Some("changes"), "Changes");
     let (mappings, mapping_store, mapping_count, mappings_empty) = build_mappings();
     pages.add_titled(&mappings, Some("mappings"), "Maps");
-
     let (resources, resource_store) = build_overview(HashSet::new(), None);
     pages.add_titled(&resources, Some("resources"), "Resources");
-
     let (threads, thread_store, thread_count, threads_empty) = build_threads();
     pages.add_titled(&threads, Some("threads"), "Threads");
-
     let (signals, signal_store, signal_count, signals_empty) = build_signals();
     pages.add_titled(&signals, Some("signals"), "Signals");
-
     let (descriptors, descriptor_store, descriptor_count, descriptors_empty) = build_descriptors();
     pages.add_titled(&descriptors, Some("file-descriptors"), "FDs");
     let (limits, limit_store, limit_count, limits_empty) = build_limits();
@@ -281,6 +282,7 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     pages.add_titled(&processes, Some("process-tree"), "Tree");
     pages.add_titled(&tls, Some("tls"), "TLS");
     page_switcher.set_hexpand(true);
+
     let navigation = build_subtab_navigation(
         &page_switcher,
         &pages,
@@ -288,6 +290,7 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
         "Scroll to earlier Kernel views",
         "Scroll to later Kernel views",
     );
+
     let page_switcher_scroll = navigation.scroll.clone();
     let previous_page = navigation.previous.clone();
     let next_page = navigation.next.clone();
@@ -303,6 +306,7 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     let tls_requested_for_page = Rc::clone(&tls_requested);
     let metadata_only_for_page = Rc::clone(&metadata_only_refresh);
     let refresh_for_page = Rc::clone(bindings.refresh_handler);
+
     pages.connect_visible_child_notify(move |pages| {
         if pages.visible_child_name().as_deref() == Some("tls")
             && !tls_requested_for_page.replace(true)
@@ -311,29 +315,35 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
             // execution stop. Preserve the existing Changes comparison when
             // a current procfs snapshot is already on screen.
             metadata_only_for_page.set(!needs_refresh_for_page.replace(true));
+
             if active_for_page.get() {
                 let handler = refresh_for_page.borrow().clone();
+
                 if let Some(handler) = handler {
                     handler();
                 }
             }
         }
+
         update_kernel_page_navigation(pages, &previous_for_page, &next_for_page, &scroll_for_page);
         let pages = pages.clone();
+
         glib::idle_add_local_once(move || {
             clear_label_selections(&pages);
+
             if let Some(child) = pages.visible_child() {
                 child.queue_resize();
                 child.queue_allocate();
                 child.queue_draw();
             }
+
             pages.queue_resize();
             pages.queue_allocate();
             pages.queue_draw();
         });
     });
-    update_kernel_page_navigation(&pages, &previous_page, &next_page, &page_switcher_scroll);
 
+    update_kernel_page_navigation(&pages, &previous_page, &next_page, &page_switcher_scroll);
     let tls_runtime = Rc::new(RefCell::new(KernelTlsRuntime::default()));
     replace_boxed_store_if_changed(&tls_runtime_store, tls_runtime_rows(&tls_runtime.borrow()));
 
@@ -400,11 +410,14 @@ pub(super) fn connect_kernel_tab_visibility(
     let active = Rc::clone(&view.active);
     let needs_refresh = Rc::clone(&view.needs_refresh);
     let handler = Rc::clone(refresh_handler);
+
     notebook.connect_switch_page(move |_, _, page| {
         let now_active = page == kernel_page;
         active.set(now_active);
+
         if now_active && needs_refresh.get() {
             let handler = handler.borrow().clone();
+
             if let Some(handler) = handler {
                 handler();
             }
@@ -458,17 +471,23 @@ pub(super) fn build_subtab_navigation(
     let adjustment = scroll.hadjustment();
     let previous_for_adjustment = previous.clone();
     let next_for_adjustment = next.clone();
+
     adjustment.connect_value_changed(move |adjustment| {
         update_subtab_arrows(adjustment, &previous_for_adjustment, &next_for_adjustment);
     });
+
     let previous_for_range = previous.clone();
     let next_for_range = next.clone();
+
     adjustment.connect_changed(move |adjustment| {
         update_subtab_arrows(adjustment, &previous_for_range, &next_for_range);
     });
+
     update_subtab_arrows(&adjustment, &previous, &next);
+
     let compact_root =
         build_compact_subtab_navigation(pages, page_specs, previous_tooltip, next_tooltip);
+
     SubtabNavigation {
         root,
         compact_root,
@@ -488,6 +507,7 @@ fn build_compact_subtab_navigation(
         .iter()
         .map(|(_, title)| *title)
         .collect::<Vec<_>>();
+
     let selector = gtk::DropDown::from_strings(&labels);
     selector.add_css_class("kernel-compact-tab-selector");
     selector.set_hexpand(true);
@@ -509,14 +529,16 @@ fn build_compact_subtab_navigation(
     root.append(&selector);
     root.append(&next);
     root.set_visible(false);
-
     let pages_for_selector = pages.clone();
+
     selector.connect_selected_notify(move |selector| {
         let index = selector.selected() as usize;
+
         if let Some((name, _)) = page_specs.get(index) {
             pages_for_selector.set_visible_child_name(name);
         }
     });
+
     let pages_for_previous = pages.clone();
     previous.connect_clicked(move |_| select_relative_subtab(&pages_for_previous, page_specs, -1));
     let pages_for_next = pages.clone();
@@ -524,14 +546,17 @@ fn build_compact_subtab_navigation(
     let selector_for_page = selector;
     let previous_for_page = previous;
     let next_for_page = next;
+
     let update = move |pages: &gtk::Stack| {
         let index = selected_subtab_index(pages, page_specs);
         selector_for_page.set_selected(index as u32);
         previous_for_page.set_sensitive(index > 0);
         next_for_page.set_sensitive(index + 1 < page_specs.len());
     };
+
     update(pages);
     pages.connect_visible_child_notify(update);
+
     root
 }
 
@@ -551,6 +576,7 @@ fn select_relative_subtab(pages: &gtk::Stack, page_specs: &[(&str, &str)], direc
     let current = selected_subtab_index(pages, page_specs);
     let last = page_specs.len().saturating_sub(1);
     let target = current.saturating_add_signed(direction).min(last);
+
     if let Some((name, _)) = page_specs.get(target) {
         pages.set_visible_child_name(name);
     }
@@ -569,6 +595,7 @@ fn update_subtab_arrows(adjustment: &gtk::Adjustment, previous: &gtk::Button, ne
     previous.set_visible(overflow);
     next.set_visible(overflow);
     previous.set_sensitive(overflow && adjustment.value() > adjustment.lower() + 1.0);
+
     next.set_sensitive(
         overflow && adjustment.value() + adjustment.page_size() < adjustment.upper() - 1.0,
     );
@@ -589,10 +616,12 @@ fn update_kernel_page_navigation(
                 .position(|(candidate, _)| *candidate == name)
         })
         .unwrap_or(0);
+
     let adjustment = scroll.hadjustment();
     update_subtab_arrows(&adjustment, previous, next);
     let previous = previous.clone();
     let next = next.clone();
+
     glib::idle_add_local_once(move || {
         let lower = adjustment.lower();
         let upper = adjustment.upper();
@@ -602,11 +631,13 @@ fn update_kernel_page_navigation(
         let tab_end = tab_start + approximate_tab_width;
         let visible_start = adjustment.value();
         let visible_end = visible_start + page_size;
+
         if tab_start < visible_start {
             adjustment.set_value(tab_start.max(lower));
         } else if tab_end > visible_end {
             adjustment.set_value((tab_end - page_size).min((upper - page_size).max(lower)));
         }
+
         update_subtab_arrows(&adjustment, &previous, &next);
     });
 }
@@ -622,6 +653,7 @@ fn kernel_overview_collapsed(remembered: &HashMap<String, bool>) -> HashSet<Stri
         .iter()
         .filter_map(|(section, key, default_expanded)| {
             let expanded = remembered.get(*key).copied().unwrap_or(*default_expanded);
+
             (!expanded).then(|| (*section).to_owned())
         })
         .collect()
@@ -634,13 +666,17 @@ fn build_overview(
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let collapsed = Rc::new(RefCell::new(initial_collapsed));
     let collapsed_for_filter = Rc::clone(&collapsed);
+
     let filter = gtk::CustomFilter::new(move |object| {
         let Some(data) = object.downcast_ref::<glib::BoxedAnyObject>() else {
             return false;
         };
+
         let row = data.borrow::<KernelOverviewRow>();
+
         row.section || !collapsed_for_filter.borrow().contains(&row.section_key)
     });
+
     let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
     let selection = gtk::SingleSelection::new(Some(filtered));
     selection.set_autoselect(false);
@@ -650,10 +686,12 @@ fn build_overview(
     let collapsed_for_setup = Rc::clone(&collapsed);
     let section_handler_for_setup = section_handler.clone();
     let fact_key_group_for_setup = fact_key_group;
+
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
         };
+
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
         row.add_css_class("kernel-fact-row");
         let key = gtk::Label::new(None);
@@ -678,29 +716,38 @@ fn build_overview(
         let collapsed = Rc::clone(&collapsed_for_setup);
         let filter = filter.clone();
         let section_handler = section_handler_for_setup.clone();
+
         click.connect_pressed(move |gesture, presses, _, _| {
             if presses != 1 {
                 return;
             }
+
             let Some(data) = item_for_click.item().and_downcast::<glib::BoxedAnyObject>() else {
                 return;
             };
+
             let data = data.borrow::<KernelOverviewRow>();
+
             if !data.section {
                 return;
             }
+
             let now_collapsed = {
                 let mut collapsed = collapsed.borrow_mut();
+
                 if collapsed.remove(&data.section_key) {
                     false
                 } else {
                     collapsed.insert(data.section_key.clone());
+
                     true
                 }
             };
+
             if let Some(handler) = section_handler.as_ref() {
                 handler(&data.section_key, !now_collapsed);
             }
+
             if let Some(row) = item_for_click.child().and_downcast::<gtk::Box>()
                 && let Some(key) = row.first_child().and_downcast::<gtk::Label>()
             {
@@ -711,6 +758,7 @@ fn build_overview(
                     row.remove_css_class("kernel-section-collapsed");
                     row.add_css_class("kernel-section-expanded");
                 }
+
                 key.set_text(&format!(
                     "{} {}",
                     if now_collapsed {
@@ -720,40 +768,52 @@ fn build_overview(
                     },
                     data.label
                 ));
+
                 key.set_tooltip_text(Some(if now_collapsed {
                     "Click to expand this section"
                 } else {
                     "Click to collapse this section"
                 }));
             }
+
             filter.changed(gtk::FilterChange::Different);
             gesture.set_state(gtk::EventSequenceState::Claimed);
         });
+
         row.add_controller(click);
         item.set_child(Some(&row));
     });
+
     let collapsed_for_bind = Rc::clone(&collapsed);
+
     factory.connect_bind(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
         };
+
         let (Some(row), Some(data)) = (
             item.child().and_downcast::<gtk::Box>(),
             item.item().and_downcast::<glib::BoxedAnyObject>(),
         ) else {
             return;
         };
+
         let data = data.borrow::<KernelOverviewRow>();
+
         let Some(key) = row.first_child().and_downcast::<gtk::Label>() else {
             return;
         };
+
         let Some(value) = key.next_sibling().and_downcast::<gtk::Label>() else {
             return;
         };
+
         clear_label_selection(&value);
+
         if data.section {
             row.add_css_class("kernel-section-heading");
             let collapsed = collapsed_for_bind.borrow().contains(&data.section_key);
+
             if collapsed {
                 row.remove_css_class("kernel-section-expanded");
                 row.add_css_class("kernel-section-collapsed");
@@ -761,6 +821,7 @@ fn build_overview(
                 row.remove_css_class("kernel-section-collapsed");
                 row.add_css_class("kernel-section-expanded");
             }
+
             key.remove_css_class("muted");
             key.add_css_class("section-title");
             key.set_width_chars(-1);
@@ -784,8 +845,10 @@ fn build_overview(
             value.set_visible(true);
             row.set_cursor_from_name(None);
         }
+
         if data.section {
             let collapsed = collapsed_for_bind.borrow().contains(&data.section_key);
+
             key.set_text(&format!(
                 "{} {}",
                 if collapsed {
@@ -795,6 +858,7 @@ fn build_overview(
                 },
                 data.label
             ));
+
             key.set_tooltip_text(Some(if collapsed {
                 "Click to expand this section"
             } else {
@@ -804,18 +868,23 @@ fn build_overview(
             key.set_text(&data.label);
             key.set_tooltip_text(Some(&data.label));
         }
+
         value.set_text(&data.value);
         value.set_tooltip_text(Some(&data.value));
     });
+
     let list = gtk::ListView::new(Some(selection), Some(factory));
     list.add_css_class("kernel-overview-list");
+
     let scrolled = gtk::ScrolledWindow::builder()
         .child(&list)
         .min_content_height(1)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
+
     configure_content_scroller(&scrolled);
+
     (scrolled, store)
 }
 
@@ -843,7 +912,6 @@ fn build_tls() -> (
     runtime.set_max_content_height(260);
     runtime.set_propagate_natural_height(true);
     runtime_page.append(&runtime);
-
     let modules_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
     let module_count = gtk::Label::new(Some("No snapshot"));
     module_count.add_css_class("kernel-table-summary");
@@ -861,6 +929,7 @@ fn build_tls() -> (
     module_view.add_css_class("kernel-tls-table");
     module_view.set_vexpand(true);
     module_view.set_reorderable(true);
+
     for (title, width, expand, column) in [
         ("ROLE", 125, false, TlsModuleColumn::Role),
         ("MODULE", 190, false, TlsModuleColumn::Module),
@@ -873,9 +942,9 @@ fn build_tls() -> (
     ] {
         module_view.append_column(&tls_module_column(title, width, expand, column));
     }
+
     let modules_empty = empty_label("No loaded ELF module declares a PT_TLS template");
     append_table(&modules_page, &module_view, &modules_empty);
-
     let symbols_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
     let symbol_controls = gtk::Box::new(gtk::Orientation::Horizontal, 8);
     symbol_controls.add_css_class("kernel-table-controls");
@@ -886,9 +955,11 @@ fn build_tls() -> (
     symbol_count.set_halign(gtk::Align::Start);
     make_responsive_label(&symbol_count, pango::EllipsizeMode::Middle);
     enable_stable_text_selection(&symbol_count);
+
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Filter TLS symbol, module, or path")
         .build();
+
     search.add_css_class("kernel-table-search");
     search.set_max_width_chars(34);
     symbol_controls.append(&symbol_count);
@@ -897,14 +968,18 @@ fn build_tls() -> (
     let symbol_store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let query = Rc::new(RefCell::new(String::new()));
     let query_for_filter = Rc::clone(&query);
+
     let filter = gtk::CustomFilter::new(move |object| {
         let Some(data) = object.downcast_ref::<glib::BoxedAnyObject>() else {
             return false;
         };
+
         let row = data.borrow::<KernelTlsSymbolRow>();
         let query = query_for_filter.borrow();
+
         query.is_empty() || tls_symbol_search_text(&row).contains(&*query)
     });
+
     let filtered = gtk::FilterListModel::new(Some(symbol_store.clone()), Some(filter.clone()));
     let symbol_selection = gtk::SingleSelection::new(Some(filtered));
     symbol_selection.set_autoselect(false);
@@ -914,6 +989,7 @@ fn build_tls() -> (
     symbol_view.add_css_class("kernel-tls-table");
     symbol_view.set_vexpand(true);
     symbol_view.set_reorderable(true);
+
     for (title, width, expand, column) in [
         ("MODULE", 190, false, TlsSymbolColumn::Module),
         ("SYMBOL", 260, false, TlsSymbolColumn::Name),
@@ -924,8 +1000,10 @@ fn build_tls() -> (
     ] {
         symbol_view.append_column(&tls_symbol_column(title, width, expand, column));
     }
+
     let symbols_empty = empty_label("No named TLS symbols are available");
     append_table(&symbols_page, &symbol_view, &symbols_empty);
+
     search.connect_search_changed(move |search| {
         query.replace(search.text().trim().to_ascii_lowercase());
         filter.changed(gtk::FilterChange::Different);
@@ -951,9 +1029,11 @@ fn build_tls() -> (
     let metadata_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     metadata_content.append(&metadata_header);
     metadata_content.append(&metadata_pages);
+
     let metadata_empty = empty_label(
         "No loaded ELF module declares a PT_TLS template\nRuntime thread-pointer information remains available above",
     );
+
     metadata_empty.add_css_class("kernel-tls-empty");
     metadata_empty.set_justify(gtk::Justification::Center);
     metadata_empty.set_halign(gtk::Align::Center);
@@ -970,6 +1050,7 @@ fn build_tls() -> (
     page.add_css_class("kernel-tls-split");
     page.append(&runtime_page);
     page.append(&metadata);
+
     (
         page,
         runtime_store,
@@ -998,8 +1079,8 @@ fn build_changes() -> (
     totals_title.set_xalign(0.0);
     totals_page.append(&totals_title);
     totals_page.append(&totals);
-
     let mappings_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+
     // Keep the detailed VMA delta table reachable even when an old persisted
     // divider position placed it at the very bottom of the window. The process
     // totals above are scrollable and can safely yield space first.
@@ -1011,9 +1092,11 @@ fn build_changes() -> (
     title.set_valign(gtk::Align::Center);
     title.set_ellipsize(pango::EllipsizeMode::End);
     title.set_tooltip_text(Some("MAPPING DELTAS"));
+
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Filter mapping changes")
         .build();
+
     search.add_css_class("kernel-table-search");
     search.add_css_class("kernel-change-search");
     search.set_max_width_chars(26);
@@ -1030,18 +1113,21 @@ fn build_changes() -> (
     controls.append(&search);
     controls.append(&count);
     mappings_page.append(&controls);
-
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let query = Rc::new(RefCell::new(String::new()));
     let query_for_filter = Rc::clone(&query);
+
     let filter = gtk::CustomFilter::new(move |object| {
         let Some(data) = object.downcast_ref::<glib::BoxedAnyObject>() else {
             return false;
         };
+
         let query = query_for_filter.borrow();
+
         query.is_empty()
             || mapping_change_search_text(&data.borrow::<KernelMappingChange>()).contains(&*query)
     });
+
     let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
     let selection = gtk::SingleSelection::new(Some(filtered));
     selection.set_autoselect(false);
@@ -1051,6 +1137,7 @@ fn build_changes() -> (
     view.add_css_class("kernel-change-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
+
     for (title, width, expand, column) in [
         ("STATUS", 115, false, MappingChangeColumn::Status),
         ("ADDRESS", 285, false, MappingChangeColumn::Address),
@@ -1073,6 +1160,7 @@ fn build_changes() -> (
     ] {
         view.append_column(&mapping_change_column(title, width, expand, column));
     }
+
     let empty = empty_label("Capture another snapshot to compare mappings");
     empty.add_css_class("kernel-change-empty");
     empty.set_halign(gtk::Align::Center);
@@ -1080,17 +1168,20 @@ fn build_changes() -> (
     empty.set_justify(gtk::Justification::Center);
     empty.set_margin_start(0);
     empty.set_margin_top(26);
+
     let table_scroll = gtk::ScrolledWindow::builder()
         .child(&view)
         .min_content_height(1)
         .vexpand(true)
         .build();
+
     configure_content_scroller(&table_scroll);
     let table_overlay = gtk::Overlay::new();
     table_overlay.set_vexpand(true);
     table_overlay.set_child(Some(&table_scroll));
     table_overlay.add_overlay(&empty);
     mappings_page.append(&table_overlay);
+
     search.connect_search_changed(move |search| {
         *query.borrow_mut() = search.text().trim().to_ascii_lowercase();
         filter.changed(gtk::FilterChange::Different);
@@ -1105,19 +1196,24 @@ fn build_changes() -> (
     split.set_shrink_end_child(false);
     split.set_start_child(Some(&totals_page));
     split.set_end_child(Some(&mappings_page));
+
     split.connect_map(|split| {
         let split = split.clone();
+
         glib::idle_add_local_once(move || {
             let maximum_top = split
                 .height()
                 .saturating_sub(MIN_MAPPING_DELTA_HEIGHT)
                 .max(split.min_position());
+
             if split.height() > MIN_MAPPING_DELTA_HEIGHT && split.position() > maximum_top {
                 split.set_position(maximum_top);
             }
+
             split.queue_allocate();
         });
     });
+
     (split, change_store, store, count, empty)
 }
 
@@ -1132,6 +1228,7 @@ fn build_threads() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     view.add_css_class("debug-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
+
     for (title, width, expand, column) in [
         ("TID", 80, false, ThreadColumn::Tid),
         ("NAME", 130, false, ThreadColumn::Name),
@@ -1154,8 +1251,10 @@ fn build_threads() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     ] {
         view.append_column(&thread_column(title, width, expand, column));
     }
+
     let empty = empty_label("No kernel thread information available");
     append_table(&page, &view, &empty);
+
     (page, store, count, empty)
 }
 
@@ -1172,21 +1271,25 @@ fn build_signals() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     let active_only = gtk::ToggleButton::with_label("Active only");
     active_only.add_css_class("kernel-signal-filter");
     active_only.set_active(false);
+
     active_only.set_tooltip_text(Some(
         "Show only signals that are pending, blocked, ignored, or caught",
     ));
+
     controls.append(&count);
     controls.append(&active_only);
     page.append(&controls);
-
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let filter_active = Rc::new(Cell::new(false));
     let filter_active_for_filter = Rc::clone(&filter_active);
+
     let filter = gtk::CustomFilter::new(move |object| {
         let Some(data) = object.downcast_ref::<glib::BoxedAnyObject>() else {
             return false;
         };
+
         let signal = data.borrow::<KernelSignal>();
+
         !filter_active_for_filter.get()
             || signal.pending_process
             || signal.pending_threads > 0
@@ -1194,6 +1297,7 @@ fn build_signals() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
             || signal.ignored
             || signal.caught
     });
+
     let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
     let selection = gtk::SingleSelection::new(Some(filtered));
     selection.set_autoselect(false);
@@ -1203,6 +1307,7 @@ fn build_signals() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     view.add_css_class("kernel-signals-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
+
     for (title, width, expand, column) in [
         ("#", 50, false, SignalColumn::Number),
         ("SIGNAL", 170, true, SignalColumn::Name),
@@ -1214,13 +1319,17 @@ fn build_signals() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     ] {
         view.append_column(&signal_column(title, width, expand, column));
     }
+
     let active_for_toggle = Rc::clone(&filter_active);
+
     active_only.connect_toggled(move |button| {
         active_for_toggle.set(button.is_active());
         filter.changed(gtk::FilterChange::Different);
     });
+
     let empty = empty_label("No signals match the current filter");
     append_table(&page, &view, &empty);
+
     (page, store, count, empty)
 }
 
@@ -1236,6 +1345,7 @@ fn build_processes() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     view.add_css_class("kernel-process-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
+
     for (title, width, expand, column) in [
         ("PID", 90, false, ProcessColumn::Pid),
         ("PPID", 90, false, ProcessColumn::Parent),
@@ -1246,8 +1356,10 @@ fn build_processes() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     ] {
         view.append_column(&process_column(title, width, expand, column));
     }
+
     let empty = empty_label("No process hierarchy available");
     append_table(&page, &view, &empty);
+
     (page, store, count, empty)
 }
 
@@ -1259,6 +1371,7 @@ fn table_summary(page: &gtk::Box) -> gtk::Label {
     make_responsive_label(&count, pango::EllipsizeMode::Middle);
     enable_stable_text_selection(&count);
     page.append(&count);
+
     count
 }
 
@@ -1271,11 +1384,13 @@ fn make_responsive_label(label: &gtk::Label, mode: pango::EllipsizeMode) {
 
 fn append_table(page: &gtk::Box, view: &gtk::ColumnView, empty: &gtk::Label) {
     page.append(empty);
+
     let scrolled = gtk::ScrolledWindow::builder()
         .child(view)
         .min_content_height(1)
         .vexpand(true)
         .build();
+
     configure_content_scroller(&scrolled);
     page.append(&scrolled);
 }
@@ -1287,11 +1402,13 @@ fn append_fixed_height_table(
     height: i32,
 ) {
     page.append(empty);
+
     let scrolled = gtk::ScrolledWindow::builder()
         .child(view)
         .min_content_height(1)
         .vexpand(false)
         .build();
+
     configure_content_scroller(&scrolled);
     scrolled.set_size_request(-1, height);
     page.append(&scrolled);
@@ -1325,10 +1442,10 @@ fn build_memory() -> (
     make_responsive_label(&meta, pango::EllipsizeMode::Middle);
     enable_stable_text_selection(&meta);
     summary_content.append(&meta);
-
     let unit_grid = gtk::Grid::new();
     unit_grid.add_css_class("kernel-memory-unit-grid");
     unit_grid.set_hexpand(true);
+
     for (column, (heading, width)) in [
         ("METRIC", 24),
         ("SOURCE", 13),
@@ -1346,10 +1463,13 @@ fn build_memory() -> (
             width,
             if column >= 2 { 1.0 } else { 0.0 },
         );
+
         heading.set_hexpand(column == 5);
         unit_grid.attach(&heading, column as i32, 0, 1, 1);
     }
+
     let mut rows = Vec::new();
+
     for (index, (metric, source)) in [
         ("HTOP VIRT", "/proc/statm"),
         ("HTOP RES", "/proc/statm"),
@@ -1378,11 +1498,13 @@ fn build_memory() -> (
     .enumerate()
     {
         let row = (index + 1) as i32;
+
         let row_class = if index % 2 == 0 {
             "kernel-memory-unit-even"
         } else {
             "kernel-memory-unit-odd"
         };
+
         unit_grid.attach(&memory_unit_label(metric, row_class, 24, 0.0), 0, row, 1, 1);
         let source = memory_unit_label(source, row_class, 13, 0.0);
         source.add_css_class("muted");
@@ -1396,6 +1518,7 @@ fn build_memory() -> (
         unit_grid.attach(&mib, 3, row, 1, 1);
         unit_grid.attach(&gib, 4, row, 1, 1);
         unit_grid.attach(&pages, 5, row, 1, 1);
+
         rows.push(KernelMemoryUnitRow {
             kib,
             mib,
@@ -1403,6 +1526,7 @@ fn build_memory() -> (
             pages,
         });
     }
+
     let unit_scroll = gtk::ScrolledWindow::new();
     unit_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
     unit_scroll.set_min_content_height(1);
@@ -1414,11 +1538,12 @@ fn build_memory() -> (
     unit_scroll.set_child(Some(&unit_grid));
     summary_content.append(&unit_scroll);
     summary_page.append(&summary_content);
-
     let private_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+
     let explanation = gtk::Label::new(Some(
         "USS = Private_Clean + Private_Dirty in /proc/<pid>/smaps.",
     ));
+
     explanation.add_css_class("kernel-memory-explanation");
     explanation.add_css_class("muted");
     explanation.set_halign(gtk::Align::Start);
@@ -1428,7 +1553,6 @@ fn build_memory() -> (
     private_page.append(&explanation);
     let (private_summary_grid, private_summary) = build_private_summary();
     private_page.append(&private_summary_grid);
-
     let category_content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     let category_title = section_title("SUMMARY BY MAPPING TYPE");
     category_title.add_css_class("kernel-memory-subtitle");
@@ -1445,6 +1569,7 @@ fn build_memory() -> (
     view.add_css_class("kernel-memory-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
+
     for (title, width, expand, column) in [
         ("TYPE", 190, false, MemoryColumn::Category),
         ("VMAs", 60, false, MemoryColumn::Mappings),
@@ -1457,7 +1582,9 @@ fn build_memory() -> (
     ] {
         view.append_column(&memory_column(title, width, expand, column));
     }
+
     let empty = empty_label("No process-private mapping types are available");
+
     append_fixed_height_table(
         &category_content,
         &view,
@@ -1473,9 +1600,11 @@ fn build_memory() -> (
     mapping_title.set_hexpand(true);
     mapping_title.set_ellipsize(pango::EllipsizeMode::End);
     mapping_title.set_tooltip_text(Some("PER-MAPPING PRIVATE MEMORY"));
+
     let mapping_search = gtk::SearchEntry::builder()
         .placeholder_text("Filter address, permissions, or backing")
         .build();
+
     mapping_search.add_css_class("kernel-table-search");
     mapping_search.set_max_width_chars(34);
     mapping_header.append(&mapping_title);
@@ -1484,19 +1613,24 @@ fn build_memory() -> (
     let private_mapping_store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let mapping_query = Rc::new(RefCell::new(String::new()));
     let query_for_filter = Rc::clone(&mapping_query);
+
     let mapping_filter = gtk::CustomFilter::new(move |object| {
         let Some(data) = object.downcast_ref::<glib::BoxedAnyObject>() else {
             return false;
         };
+
         let query = query_for_filter.borrow();
+
         query.is_empty()
             || private_mapping_search_text(&data.borrow::<KernelPrivateMappingRow>())
                 .contains(&*query)
     });
+
     let filtered = gtk::FilterListModel::new(
         Some(private_mapping_store.clone()),
         Some(mapping_filter.clone()),
     );
+
     let private_mapping_selection = gtk::SingleSelection::new(Some(filtered));
     private_mapping_selection.set_autoselect(false);
     private_mapping_selection.set_can_unselect(true);
@@ -1505,6 +1639,7 @@ fn build_memory() -> (
     private_mapping_view.add_css_class("kernel-memory-table");
     private_mapping_view.set_vexpand(true);
     private_mapping_view.set_reorderable(true);
+
     for (title, width, expand, column) in [
         ("ADDRESS", 285, false, PrivateMappingColumn::Address),
         ("PERM", 65, false, PrivateMappingColumn::Permissions),
@@ -1522,12 +1657,15 @@ fn build_memory() -> (
     ] {
         private_mapping_view.append_column(&private_mapping_column(title, width, expand, column));
     }
+
     let private_mapping_empty = empty_label("No process-private mappings are available");
+
     append_table(
         &mapping_content,
         &private_mapping_view,
         &private_mapping_empty,
     );
+
     mapping_search.connect_search_changed(move |search| {
         mapping_query.replace(search.text().trim().to_ascii_lowercase());
         mapping_filter.changed(gtk::FilterChange::Different);
@@ -1535,6 +1673,7 @@ fn build_memory() -> (
 
     private_page.append(&category_content);
     private_page.append(&mapping_content);
+
     (
         summary_page,
         private_page,
@@ -1559,7 +1698,9 @@ fn build_private_summary() -> (gtk::FlowBox, KernelPrivateSummaryView) {
         .column_spacing(1)
         .row_spacing(1)
         .build();
+
     summary.add_css_class("kernel-private-summary-grid");
+
     let add_value = |title: &str| {
         let cell = gtk::Box::new(gtk::Orientation::Vertical, 1);
         cell.add_css_class("kernel-private-summary-cell");
@@ -1575,12 +1716,15 @@ fn build_private_summary() -> (gtk::FlowBox, KernelPrivateSummaryView) {
         cell.append(&title);
         cell.append(&value);
         summary.insert(&cell, -1);
+
         value
     };
+
     let total = add_value("TOTAL USS");
     let clean = add_value("PRIVATE CLEAN");
     let dirty = add_value("PRIVATE DIRTY");
     let mappings = add_value("MAPPINGS");
+
     (
         summary,
         KernelPrivateSummaryView {
@@ -1601,6 +1745,7 @@ fn memory_unit_label(text: &str, class: &str, width: i32, xalign: f32) -> gtk::L
     label.set_halign(gtk::Align::Fill);
     label.set_xalign(xalign);
     enable_stable_text_selection(&label);
+
     label
 }
 
@@ -1608,10 +1753,12 @@ fn build_mappings() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 3);
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     controls.add_css_class("kernel-table-controls");
+
     let search = gtk::SearchEntry::builder()
         .placeholder_text("Filter address, path, permissions, or flags")
         .hexpand(true)
         .build();
+
     search.add_css_class("kernel-table-search");
     let count = gtk::Label::new(Some("No snapshot"));
     count.add_css_class("muted");
@@ -1620,18 +1767,21 @@ fn build_mappings() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     controls.append(&search);
     controls.append(&count);
     page.append(&controls);
-
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let query = Rc::new(RefCell::new(String::new()));
     let query_for_filter = Rc::clone(&query);
+
     let filter = gtk::CustomFilter::new(move |object| {
         let Some(data) = object.downcast_ref::<glib::BoxedAnyObject>() else {
             return false;
         };
+
         let query = query_for_filter.borrow();
+
         query.is_empty()
             || mapping_search_text(&data.borrow::<Rc<KernelMapping>>()).contains(&*query)
     });
+
     let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
     let selection = gtk::SingleSelection::new(Some(filtered));
     selection.set_autoselect(false);
@@ -1641,6 +1791,7 @@ fn build_mappings() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     view.add_css_class("kernel-mappings-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
+
     for (title, width, expand, column) in [
         ("ADDRESS RANGE", 420, false, MappingColumn::Address),
         ("PERM", 65, false, MappingColumn::Permissions),
@@ -1669,21 +1820,25 @@ fn build_mappings() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     ] {
         view.append_column(&mapping_column(title, width, expand, column));
     }
+
     let empty = empty_label("No detailed mappings available");
     page.append(&empty);
+
     let scrolled = gtk::ScrolledWindow::builder()
         .child(&view)
         .min_content_height(1)
         .vexpand(true)
         .build();
+
     configure_content_scroller(&scrolled);
     page.append(&scrolled);
-
     let query_for_search = Rc::clone(&query);
+
     search.connect_search_changed(move |search| {
         query_for_search.replace(search.text().trim().to_ascii_lowercase());
         filter.changed(gtk::FilterChange::Different);
     });
+
     (page, store, count, empty)
 }
 
@@ -1703,6 +1858,7 @@ fn build_descriptors() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     view.add_css_class("debug-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
+
     for (title, width, expand, column) in [
         ("FD", 55, false, DescriptorColumn::Number),
         ("KIND", 90, false, DescriptorColumn::Kind),
@@ -1714,15 +1870,19 @@ fn build_descriptors() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     ] {
         view.append_column(&descriptor_column(title, width, expand, column));
     }
+
     let empty = empty_label("No open file descriptors available");
     page.append(&empty);
+
     let scrolled = gtk::ScrolledWindow::builder()
         .child(&view)
         .min_content_height(1)
         .vexpand(true)
         .build();
+
     configure_content_scroller(&scrolled);
     page.append(&scrolled);
+
     (page, store, count, empty)
 }
 
@@ -1742,6 +1902,7 @@ fn build_limits() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     view.add_css_class("debug-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
+
     for (title, width, expand, column) in [
         ("RESOURCE", 260, true, LimitColumn::Resource),
         ("SOFT", 160, false, LimitColumn::Soft),
@@ -1750,15 +1911,19 @@ fn build_limits() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     ] {
         view.append_column(&limit_column(title, width, expand, column));
     }
+
     let empty = empty_label("No resource limits available");
     page.append(&empty);
+
     let scrolled = gtk::ScrolledWindow::builder()
         .child(&view)
         .min_content_height(1)
         .vexpand(true)
         .build();
+
     configure_content_scroller(&scrolled);
     page.append(&scrolled);
+
     (page, store, count, empty)
 }
 
@@ -1771,6 +1936,7 @@ fn memory_column(
     table_column(title, width, expand, move |object, label| {
         let row = object.borrow::<KernelMemoryRow>();
         let category = &row.category;
+
         let text = match column {
             MemoryColumn::Category => category.category.clone(),
             MemoryColumn::Mappings => category.mappings.to_string(),
@@ -1786,18 +1952,23 @@ fn memory_column(
             MemoryColumn::Virtual => format_memory_amount(category.virtual_bytes, row.page_size),
             MemoryColumn::Rss => format_memory_amount(category.rss, row.page_size),
         };
+
         if matches!(column, MemoryColumn::Category) {
             label.add_css_class("kernel-memory-category");
         }
+
         if matches!(column, MemoryColumn::Unique | MemoryColumn::UniquePercent) {
             label.add_css_class("kernel-memory-exclusive");
         }
+
         label.set_xalign(if matches!(column, MemoryColumn::Category) {
             0.0
         } else {
             1.0
         });
+
         label.set_text(&text);
+
         label.set_tooltip_text(Some(&format!(
             "{} · {} VMAs · VSS {} · RSS {} · private RSS (USS) {} · shared RSS {} · PSS {} · {}",
             category.category,
@@ -1824,6 +1995,7 @@ fn private_mapping_column(
         reset_semantic_css(label);
         label.remove_css_class("kernel-memory-exclusive");
         label.add_css_class(mapping_css(mapping));
+
         let text = match column {
             PrivateMappingColumn::Address => {
                 format!("0x{:016x}-0x{:016x}", mapping.start, mapping.end)
@@ -1853,12 +2025,14 @@ fn private_mapping_column(
                 .clone()
                 .unwrap_or_else(|| String::from("anonymous")),
         };
+
         if matches!(
             column,
             PrivateMappingColumn::Unique | PrivateMappingColumn::UniquePercent
         ) {
             label.add_css_class("kernel-memory-exclusive");
         }
+
         label.set_xalign(
             if matches!(
                 column,
@@ -1871,7 +2045,9 @@ fn private_mapping_column(
                 1.0
             },
         );
+
         label.set_text(&text);
+
         label.set_tooltip_text(Some(&format!(
             "0x{:016x}-0x{:016x} · {} · device {} · inode {} · private RSS (USS) {} · clean {} · dirty {} · RSS {} · VSS {} · PSS {} · anonymous {} · referenced {} · lazy-free {} · huge/PMD {} · {}",
             mapping.start,
@@ -1896,6 +2072,7 @@ fn private_mapping_column(
 
 fn private_mapping_search_text(row: &KernelPrivateMappingRow) -> String {
     let mapping = &row.mapping;
+
     format!(
         "0x{:x} 0x{:x} {} {} {} {}",
         mapping.start,
@@ -1914,6 +2091,7 @@ fn format_memory_amount(bytes: u64, page_size: u64) -> String {
     } else {
         bytes.div_ceil(page_size)
     };
+
     format!(
         "{} · {} pages",
         crate::kernel::format_bytes(bytes),
@@ -1940,12 +2118,15 @@ fn mapping_page_size(mapping: &KernelMapping) -> u64 {
 fn format_grouped_count(value: u64) -> String {
     let digits = value.to_string();
     let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+
     for (index, character) in digits.chars().enumerate() {
         if index > 0 && (digits.len() - index).is_multiple_of(3) {
             grouped.push(',');
         }
+
         grouped.push(character);
     }
+
     grouped
 }
 
@@ -1959,6 +2140,7 @@ fn mapping_column(
         let mapping = object.borrow::<Rc<KernelMapping>>();
         reset_semantic_css(label);
         label.add_css_class(mapping_css(&mapping));
+
         let text = match column {
             MappingColumn::Address => format!(
                 "0x{:016x}-0x{:016x}  +0x{:x}",
@@ -1998,12 +2180,15 @@ fn mapping_column(
             MappingColumn::Page => mapping.page_sample.clone(),
             MappingColumn::Flags => {
                 let mut flags = mapping.vm_flags.clone();
+
                 if mapping.thp_eligible {
                     flags.push_str(" · THP eligible");
                 }
+
                 flags
             }
         };
+
         label.set_xalign(
             if matches!(
                 column,
@@ -2020,7 +2205,9 @@ fn mapping_column(
                 1.0
             },
         );
+
         label.set_text(&text);
+
         label.set_tooltip_text(Some(&format!(
             "0x{:016x}-0x{:016x} · {} · device {} · inode {} · VSS {} · RSS {} · private RSS (USS) {} · shared RSS {} · PSS {} · anonymous {} · referenced {} · lazy-free {} · locked {} · huge/PMD {} · {}",
             mapping.start,
@@ -2052,6 +2239,7 @@ fn mapping_change_column(
     table_column(title, width, expand, move |object, label| {
         let change = object.borrow::<KernelMappingChange>();
         reset_mapping_change_css(label);
+
         let text = match column {
             MappingChangeColumn::Status => change.status.clone(),
             MappingChangeColumn::Address => {
@@ -2074,6 +2262,7 @@ fn mapping_change_column(
                 format!("{} / {}", change.device, change.inode)
             }
         };
+
         let delta = match column {
             MappingChangeColumn::Size => Some(change.size_delta),
             MappingChangeColumn::Rss => Some(change.rss_delta),
@@ -2085,6 +2274,7 @@ fn mapping_change_column(
             MappingChangeColumn::Swap => Some(change.swap_delta),
             _ => None,
         };
+
         if let Some(delta) = delta {
             label.add_css_class(if delta > 0 {
                 "kernel-change-growth"
@@ -2094,6 +2284,7 @@ fn mapping_change_column(
                 "kernel-change-idle"
             });
         }
+
         if matches!(column, MappingChangeColumn::Status) {
             label.add_css_class(match change.status.as_str() {
                 "NEW" => "kernel-change-new",
@@ -2102,6 +2293,7 @@ fn mapping_change_column(
                 _ => "kernel-change-modified",
             });
         }
+
         label.set_xalign(
             if matches!(
                 column,
@@ -2116,7 +2308,9 @@ fn mapping_change_column(
                 1.0
             },
         );
+
         label.set_text(&text);
+
         label.set_tooltip_text(Some(&format!(
             "{} · 0x{:016x}-0x{:016x} · {} · device {} · inode {} · ΔVSS {} · ΔRSS {} · ΔPSS {} · ΔUSS {} · {}",
             change.status,
@@ -2167,6 +2361,7 @@ fn descriptor_column(
 ) -> gtk::ColumnViewColumn {
     table_column(title, width, expand, move |object, label| {
         let descriptor = object.borrow::<KernelFileDescriptor>();
+
         label.set_text(&match column {
             DescriptorColumn::Number => descriptor.number.to_string(),
             DescriptorColumn::Kind => descriptor.kind.clone(),
@@ -2178,6 +2373,7 @@ fn descriptor_column(
             DescriptorColumn::Target => descriptor.target.clone(),
             DescriptorColumn::Details => descriptor.details.clone(),
         });
+
         label.set_xalign(
             if matches!(
                 column,
@@ -2188,6 +2384,7 @@ fn descriptor_column(
                 0.0
             },
         );
+
         label.set_tooltip_text(Some(&format!(
             "{} · {} · {} · {}",
             descriptor.target, descriptor.access, descriptor.flags, descriptor.details
@@ -2203,12 +2400,14 @@ fn limit_column(
 ) -> gtk::ColumnViewColumn {
     table_column(title, width, expand, move |object, label| {
         let limit = object.borrow::<KernelLimit>();
+
         label.set_text(match column {
             LimitColumn::Resource => &limit.resource,
             LimitColumn::Soft => &limit.soft,
             LimitColumn::Hard => &limit.hard,
             LimitColumn::Units => &limit.units,
         });
+
         label.set_xalign(if matches!(column, LimitColumn::Soft | LimitColumn::Hard) {
             1.0
         } else {
@@ -2226,6 +2425,7 @@ fn thread_column(
     table_column(title, width, expand, move |object, label| {
         let thread = object.borrow::<KernelThread>();
         reset_kernel_css(label);
+
         let text = match column {
             ThreadColumn::Tid => thread.tid.to_string(),
             ThreadColumn::Name => thread.name.clone(),
@@ -2247,6 +2447,7 @@ fn thread_column(
                 .timeslices
                 .map_or_else(|| String::from("—"), |value| value.to_string()),
         };
+
         if matches!(column, ThreadColumn::State) {
             if thread.state.starts_with('R') {
                 label.add_css_class("kernel-state-active");
@@ -2254,6 +2455,7 @@ fn thread_column(
                 label.add_css_class("kernel-state-warning");
             }
         }
+
         if matches!(
             column,
             ThreadColumn::Tid
@@ -2264,6 +2466,7 @@ fn thread_column(
         ) {
             label.add_css_class("kernel-numeric");
         }
+
         label.set_xalign(
             if matches!(
                 column,
@@ -2278,6 +2481,7 @@ fn thread_column(
                 0.0
             },
         );
+
         label.set_text(&text);
         label.set_tooltip_text(Some(&text));
     })
@@ -2292,6 +2496,7 @@ fn signal_column(
     table_column(title, width, expand, move |object, label| {
         let signal = object.borrow::<KernelSignal>();
         reset_kernel_css(label);
+
         let (text, active) = match column {
             SignalColumn::Number => (signal.number.to_string(), false),
             SignalColumn::Name => (signal.name.clone(), false),
@@ -2315,6 +2520,7 @@ fn signal_column(
             SignalColumn::Ignored => (mark(signal.ignored), signal.ignored),
             SignalColumn::Caught => (mark(signal.caught), signal.caught),
         };
+
         if active {
             label.add_css_class(
                 if matches!(
@@ -2327,11 +2533,13 @@ fn signal_column(
                 },
             );
         }
+
         label.set_xalign(if matches!(column, SignalColumn::Name) {
             0.0
         } else {
             1.0
         });
+
         label.set_text(&text);
     })
 }
@@ -2345,6 +2553,7 @@ fn process_column(
     table_column(title, width, expand, move |object, label| {
         let process = object.borrow::<KernelProcess>();
         reset_kernel_css(label);
+
         let text = match column {
             ProcessColumn::Pid => process.pid.to_string(),
             ProcessColumn::Parent => process.parent_pid.to_string(),
@@ -2353,15 +2562,18 @@ fn process_column(
             ProcessColumn::State => process.state.clone(),
             ProcessColumn::Threads => process.threads.clone(),
         };
+
         if process.relation == "Target" {
             label.add_css_class("kernel-process-target");
         }
+
         if matches!(
             column,
             ProcessColumn::Pid | ProcessColumn::Parent | ProcessColumn::Threads
         ) {
             label.add_css_class("kernel-numeric");
         }
+
         label.set_xalign(
             if matches!(
                 column,
@@ -2372,6 +2584,7 @@ fn process_column(
                 0.0
             },
         );
+
         label.set_text(&text);
         label.set_tooltip_text(Some(&text));
     })
@@ -2386,6 +2599,7 @@ fn tls_module_column(
     table_column(title, width, expand, move |object, label| {
         let module = object.borrow::<KernelTlsModule>();
         reset_kernel_css(label);
+
         let text = match column {
             TlsModuleColumn::Role => module.role.clone(),
             TlsModuleColumn::Module => module.module.clone(),
@@ -2396,6 +2610,7 @@ fn tls_module_column(
             TlsModuleColumn::Symbols => module.symbol_count.to_string(),
             TlsModuleColumn::Path => module.path.clone(),
         };
+
         if matches!(
             column,
             TlsModuleColumn::Template
@@ -2406,12 +2621,15 @@ fn tls_module_column(
         ) {
             label.add_css_class("kernel-numeric");
         }
+
         label.set_xalign(if matches!(column, TlsModuleColumn::Symbols) {
             1.0
         } else {
             0.0
         });
+
         label.set_text(&text);
+
         label.set_tooltip_text(Some(&format!(
             "{} · ELF PT_TLS template vaddr 0x{:x} · {} initialized / {} total · alignment {} · {} symbol(s)\n{}",
             module.module,
@@ -2434,6 +2652,7 @@ fn tls_symbol_column(
     table_column(title, width, expand, move |object, label| {
         let row = object.borrow::<KernelTlsSymbolRow>();
         reset_kernel_css(label);
+
         let text = match column {
             TlsSymbolColumn::Module => row.module.to_string(),
             TlsSymbolColumn::Name => row.symbol.name.clone(),
@@ -2442,11 +2661,14 @@ fn tls_symbol_column(
             TlsSymbolColumn::Binding => row.symbol.binding.clone(),
             TlsSymbolColumn::Path => row.path.to_string(),
         };
+
         if matches!(column, TlsSymbolColumn::Offset | TlsSymbolColumn::Size) {
             label.add_css_class("kernel-numeric");
         }
+
         label.set_xalign(0.0);
         label.set_text(&text);
+
         label.set_tooltip_text(Some(&format!(
             "{} · template-relative offset 0x{:x} · {} · {}\n{}",
             row.symbol.name,
@@ -2484,10 +2706,12 @@ fn table_column(
     bind: impl Fn(&glib::BoxedAnyObject, &gtk::Label) + Copy + 'static,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
+
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
         };
+
         let label = gtk::Label::new(None);
         label.add_css_class("debug-table-cell");
         label.set_halign(gtk::Align::Start);
@@ -2495,23 +2719,28 @@ fn table_column(
         enable_stable_text_selection(&label);
         item.set_child(Some(&label));
     });
+
     factory.connect_bind(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
         };
+
         let (Some(label), Some(data)) = (
             item.child().and_downcast::<gtk::Label>(),
             item.item().and_downcast::<glib::BoxedAnyObject>(),
         ) else {
             return;
         };
+
         clear_label_selection(&label);
         bind(&data, &label);
     });
+
     let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
     column.set_fixed_width(width);
     column.set_resizable(true);
     column.set_expand(expand);
+
     column
 }
 
@@ -2571,6 +2800,7 @@ impl KernelView {
         let limit_count = snapshot.limits.len();
         let process_count = snapshot.process_tree.len();
         let mapping_change_count = snapshot.mapping_changes.len();
+
         let active_signals = snapshot
             .signals
             .iter()
@@ -2582,22 +2812,27 @@ impl KernelView {
                     || signal.caught
             })
             .count();
+
         replace_boxed_store_if_changed(&self.overview_store, overview_rows(&snapshot));
         replace_boxed_store_if_changed(&self.resource_store, resource_rows(&snapshot));
         self.show_tls_metadata(&mut snapshot);
         replace_boxed_store_if_changed(&self.change_store, change_rows(&snapshot));
+
         replace_boxed_store_if_changed(
             &self.mapping_change_store,
             std::mem::take(&mut snapshot.mapping_changes),
         );
+
         if snapshot.comparison_ready {
             let summary = if mapping_change_count == 0 {
                 String::from("No changes")
             } else {
                 format!("{mapping_change_count} changed mappings · largest first")
             };
+
             self.mapping_change_count.set_text(&summary);
             self.mapping_change_count.set_tooltip_text(Some(&summary));
+
             self.mapping_changes_empty
                 .set_text(if mapping_change_count == 0 {
                     "No mapping changes since the previous snapshot"
@@ -2607,38 +2842,49 @@ impl KernelView {
         } else {
             self.mapping_change_count
                 .set_text("Capture another snapshot to compare mappings");
+
             self.mapping_change_count
                 .set_tooltip_text(Some("Capture another snapshot to compare mappings"));
+
             self.mapping_changes_empty
                 .set_text("Capture another snapshot to compare mappings");
         }
+
         self.mapping_changes_empty
             .set_visible(mapping_change_count == 0);
+
         let mapping_rows = std::mem::take(&mut snapshot.mappings)
             .into_iter()
             .map(Rc::new)
             .collect::<Vec<_>>();
+
         if let Some(accounting) = snapshot.memory_accounting.as_mut() {
             let total_unique = accounting.unique_rss();
+
             let mut private_mappings = mapping_rows
                 .iter()
                 .filter(|mapping| mapping.private_bytes() > 0)
                 .cloned()
                 .collect::<Vec<_>>();
+
             private_mappings.sort_by_key(|mapping| Reverse(mapping.private_bytes()));
             let private_mapping_count = private_mappings.len();
             let private_mappings_empty = private_mappings.is_empty();
+
             update_memory_summary(
                 &self.memory_summary,
                 accounting,
                 mapping_count,
                 private_mapping_count,
             );
+
             let mut categories = std::mem::take(&mut accounting.categories)
                 .into_iter()
                 .filter(|category| category.unique_rss() > 0)
                 .collect::<Vec<_>>();
+
             categories.sort_by_key(|category| Reverse(category.unique_rss()));
+
             replace_boxed_store_if_changed(
                 &self.memory_store,
                 categories.into_iter().map(|category| KernelMemoryRow {
@@ -2647,6 +2893,7 @@ impl KernelView {
                     total_unique,
                 }),
             );
+
             replace_boxed_store_if_changed(
                 &self.private_mapping_store,
                 private_mappings
@@ -2657,7 +2904,9 @@ impl KernelView {
                         total_unique,
                     }),
             );
+
             self.memory_empty.set_visible(total_unique == 0);
+
             self.private_mapping_empty
                 .set_visible(private_mappings_empty);
         } else {
@@ -2667,24 +2916,31 @@ impl KernelView {
             self.memory_empty.set_visible(true);
             self.private_mapping_empty.set_visible(true);
         }
+
         populate_warnings(&self.warnings, &snapshot.warnings);
         replace_boxed_store_if_changed(&self.thread_store, std::mem::take(&mut snapshot.threads));
         replace_boxed_store_if_changed(&self.signal_store, std::mem::take(&mut snapshot.signals));
         replace_boxed_store_if_changed(&self.mapping_store, mapping_rows);
+
         replace_boxed_store_if_changed(
             &self.descriptor_store,
             std::mem::take(&mut snapshot.file_descriptors),
         );
+
         replace_boxed_store_if_changed(&self.limit_store, std::mem::take(&mut snapshot.limits));
+
         replace_boxed_store_if_changed(
             &self.process_store,
             std::mem::take(&mut snapshot.process_tree),
         );
+
         self.thread_count
             .set_text(&format!("{thread_count} kernel threads"));
+
         self.signal_count.set_text(&format!(
             "{active_signals} active states · {signal_count} signals decoded",
         ));
+
         if let Some(accounting) = snapshot.memory_accounting.as_ref() {
             self.mapping_count.set_text(&format!(
                 "{} VMAs · VSS {} · RSS {} · USS {}",
@@ -2697,13 +2953,17 @@ impl KernelView {
             self.mapping_count
                 .set_text(&format!("{mapping_count} mappings"));
         }
+
         self.descriptor_count
             .set_text(&format!("{} open file descriptors", descriptor_count));
+
         self.limit_count
             .set_text(&format!("{limit_count} resource limits"));
+
         self.process_count.set_text(&format!(
             "{process_count} related processes · ancestors and up to 256 descendants",
         ));
+
         self.threads_empty.set_visible(thread_count == 0);
         self.signals_empty.set_visible(signal_count == 0);
         self.mappings_empty.set_visible(mapping_count == 0);
@@ -2714,37 +2974,47 @@ impl KernelView {
 
     fn show_tls_metadata(&self, snapshot: &mut KernelSnapshot) {
         let modules = std::mem::take(&mut snapshot.tls_modules);
+
         let known_tls_symbols = modules
             .iter()
             .map(|module| module.symbol_count)
             .sum::<usize>();
+
         let module_count = modules.len();
         let mut module_rows = Vec::with_capacity(module_count);
         let mut tls_symbols = Vec::new();
+
         for mut module in modules {
             let symbols = std::mem::take(&mut module.symbols);
             tls_symbols.reserve(symbols.len());
+
             {
                 let module_name = Rc::<str>::from(module.module.as_str());
                 let module_path = Rc::<str>::from(module.path.as_str());
+
                 tls_symbols.extend(symbols.into_iter().map(|symbol| KernelTlsSymbolRow {
                     module: Rc::clone(&module_name),
                     path: Rc::clone(&module_path),
                     symbol,
                 }));
             }
+
             // The module table displays only aggregate symbol metadata. The
             // symbol objects themselves now live exclusively in the filtered
             // symbol table instead of being retained twice.
             module_rows.push(module);
         }
+
         replace_boxed_store_if_changed(&self.tls_module_store, module_rows);
+
         self.tls_module_count.set_text(&format!(
             "{module_count} ELF module(s) with static TLS templates",
         ));
+
         self.tls_module_count.set_tooltip_text(Some(
             "ELF PT_TLS template addresses describe module metadata, not live per-thread addresses",
         ));
+
         self.tls_symbol_count
             .set_text(&if known_tls_symbols == tls_symbols.len() {
                 format!("{known_tls_symbols} named TLS symbol(s)")
@@ -2754,14 +3024,17 @@ impl KernelView {
                     tls_symbols.len()
                 )
             });
+
         self.tls_modules_empty.set_visible(module_count == 0);
         self.tls_symbols_empty.set_visible(tls_symbols.is_empty());
+
         self.tls_metadata
             .set_visible_child_name(if module_count == 0 {
                 "empty"
             } else {
                 "content"
             });
+
         replace_boxed_store_if_changed(&self.tls_symbol_store, tls_symbols);
     }
 
@@ -2769,11 +3042,14 @@ impl KernelView {
         let thread = threads.iter().find(|thread| thread.current).map(|thread| {
             let reported_name = thread.name.as_deref().unwrap_or("unnamed");
             let name = tls_thread_display_name(reported_name, executable_name, thread.id == "1");
+
             format!("GDB #{} · {} · {name}", thread.id, thread.target_id)
         });
+
         if self.tls_runtime.borrow().thread == thread {
             return;
         }
+
         self.tls_runtime.borrow_mut().thread = thread;
         self.rebuild_tls_runtime();
     }
@@ -2789,6 +3065,7 @@ impl KernelView {
     ) {
         let (architecture, endian, pointer_bits) = target;
         let current = self.tls_runtime.borrow();
+
         if current.architecture == architecture
             && current.endian == endian
             && current.pointer_bits == pointer_bits
@@ -2800,8 +3077,10 @@ impl KernelView {
         {
             return;
         }
+
         let thread = current.thread.clone();
         drop(current);
+
         let runtime = KernelTlsRuntime {
             thread,
             architecture,
@@ -2813,6 +3092,7 @@ impl KernelView {
             bytes: bytes.to_vec(),
             error: error.map(str::to_owned),
         };
+
         self.tls_runtime.replace(runtime);
         self.rebuild_tls_runtime();
     }
@@ -2850,8 +3130,10 @@ impl KernelView {
         self.tls_modules_empty.set_visible(true);
         self.tls_symbols_empty.set_visible(true);
         self.tls_metadata.set_visible_child_name("empty");
+
         self.mapping_change_count
             .set_text("Capture another snapshot to compare mappings");
+
         self.mapping_change_count.set_tooltip_text(None);
         clear_memory_summary(&self.memory_summary);
         self.signal_count.set_text("No snapshot");
@@ -2861,8 +3143,10 @@ impl KernelView {
         self.process_count.set_text("No snapshot");
         self.threads_empty.set_visible(true);
         self.mapping_changes_empty.set_visible(true);
+
         self.mapping_changes_empty
             .set_text("Capture another snapshot to compare mappings");
+
         self.memory_empty.set_visible(true);
         self.private_mapping_empty.set_visible(true);
         self.signals_empty.set_visible(true);
@@ -2892,12 +3176,14 @@ fn tls_thread_display_name<'a>(
 
 fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
     let section = String::from("SELECTED THREAD");
+
     let mut rows = vec![KernelOverviewRow {
         section: true,
         section_key: section.clone(),
         label: section.clone(),
         value: String::new(),
     }];
+
     rows.push(KernelOverviewRow {
         section: false,
         section_key: section.clone(),
@@ -2907,6 +3193,7 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
             .clone()
             .unwrap_or_else(|| String::from("Current GDB thread")),
     });
+
     let Some(register) = runtime.register.as_deref() else {
         rows.push(KernelOverviewRow {
             section: false,
@@ -2916,14 +3203,19 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
                 String::from("Waiting for a supported thread-pointer register at a stopped target")
             }),
         });
+
         return rows;
     };
+
     let base = runtime.base.unwrap_or_default();
+
     let pointer_bits = match runtime.pointer_bits {
         32 | 64 => runtime.pointer_bits,
         _ => runtime.architecture.pointer_bits().unwrap_or(64),
     };
+
     let address_width = usize::try_from(pointer_bits / 4).unwrap_or(16).clamp(8, 16);
+
     rows.extend([
         KernelOverviewRow {
             section: false,
@@ -2941,6 +3233,7 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
                 .unwrap_or_else(|| String::from("No readable mapping contains the thread pointer")),
         },
     ]);
+
     if let Some(error) = runtime.error.as_deref() {
         rows.push(KernelOverviewRow {
             section: false,
@@ -2948,8 +3241,10 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
             label: String::from("Live block"),
             value: error.to_owned(),
         });
+
         return rows;
     }
+
     if runtime.bytes.is_empty() {
         rows.push(KernelOverviewRow {
             section: false,
@@ -2957,17 +3252,20 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
             label: String::from("Live block"),
             value: String::from("No live TLS bytes available"),
         });
+
         return rows;
     }
 
     let Some(endian) = runtime.endian else {
         let raw_section = "RAW THREAD-POINTER BYTES";
+
         rows.push(KernelOverviewRow {
             section: true,
             section_key: String::from(raw_section),
             label: String::from(raw_section),
             value: String::new(),
         });
+
         for (index, bytes) in runtime.bytes.chunks(16).take(5).enumerate() {
             rows.push(KernelOverviewRow {
                 section: false,
@@ -2980,6 +3278,7 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
                     .join(" "),
             });
         }
+
         return rows;
     };
 
@@ -2992,12 +3291,14 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
     } else {
         "THREAD-POINTER WORDS"
     };
+
     rows.push(KernelOverviewRow {
         section: true,
         section_key: String::from(abi_section),
         label: String::from(abi_section),
         value: String::new(),
     });
+
     if abi_section == "GLIBC X86-64 TCB HEAD" {
         for (label, offset, size) in [
             ("TCB pointer", 0usize, 8usize),
@@ -3022,10 +3323,12 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
         }
     } else {
         let word_size = usize::try_from(pointer_bits / 8).unwrap_or(8).clamp(4, 8);
+
         for (index, bytes) in runtime.bytes.chunks_exact(word_size).take(10).enumerate() {
             let Some(value) = tls_value(bytes, 0, word_size, endian) else {
                 continue;
             };
+
             rows.push(KernelOverviewRow {
                 section: false,
                 section_key: String::from(abi_section),
@@ -3034,11 +3337,13 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
             });
         }
     }
+
     rows
 }
 
 fn tls_value(bytes: &[u8], offset: usize, size: usize, endian: TargetEndian) -> Option<u64> {
     let bytes = bytes.get(offset..offset.checked_add(size)?)?;
+
     match size {
         4 => Some(u64::from(endian.decode_u32(bytes.try_into().ok()?))),
         8 => Some(endian.decode_u64(bytes.try_into().ok()?)),
@@ -3053,6 +3358,7 @@ fn update_memory_summary(
     private_mapping_count: usize,
 ) {
     let not_resident = accounting.virtual_bytes.saturating_sub(accounting.rss);
+
     let values = [
         accounting.statm_virtual_bytes,
         accounting.statm_rss,
@@ -3077,33 +3383,41 @@ fn update_memory_summary(
         Some(accounting.page_tables),
         Some(accounting.pinned),
     ];
+
     debug_assert_eq!(view.rows.len(), values.len());
+
     for (row, value) in view.rows.iter().zip(values) {
         set_memory_unit_row(row, value, accounting.page_size);
     }
+
     view.meta.set_text(&format!(
         "{} VMAs  ·  base page {} ({} bytes)",
         format_grouped_count(mapping_count as u64),
         crate::kernel::format_bytes(accounting.page_size),
         format_grouped_count(accounting.page_size),
     ));
+
     let exclusive_categories = accounting
         .categories
         .iter()
         .filter(|category| category.unique_rss() > 0)
         .count();
+
     view.private_summary.total.set_text(&format_memory_amount(
         accounting.unique_rss(),
         accounting.page_size,
     ));
+
     view.private_summary.clean.set_text(&format_memory_amount(
         accounting.private_clean,
         accounting.page_size,
     ));
+
     view.private_summary.dirty.set_text(&format_memory_amount(
         accounting.private_dirty,
         accounting.page_size,
     ));
+
     view.private_summary.mappings.set_text(&format!(
         "{} mappings · {exclusive_categories} types",
         format_grouped_count(private_mapping_count as u64),
@@ -3116,20 +3430,27 @@ fn set_memory_unit_row(row: &KernelMemoryUnitRow, bytes: Option<u64>, page_size:
             label.set_text("—");
             label.set_tooltip_text(None);
         }
+
         return;
     };
+
     row.kib.set_text(&format_scaled_binary(bytes, 1024, 2));
+
     row.mib
         .set_text(&format_scaled_binary(bytes, 1024 * 1024, 3));
+
     row.gib
         .set_text(&format_scaled_binary(bytes, 1024 * 1024 * 1024, 6));
+
     row.pages
         .set_text(&format_page_equivalents(bytes, page_size));
+
     let tooltip = format!(
         "{} bytes · {}",
         format_grouped_count(bytes),
         crate::kernel::format_bytes(bytes)
     );
+
     for label in [&row.kib, &row.mib, &row.gib, &row.pages] {
         label.set_tooltip_text(Some(&tooltip));
     }
@@ -3147,6 +3468,7 @@ fn format_page_equivalents(bytes: u64, page_size: u64) -> String {
     if page_size == 0 {
         return String::from("—");
     }
+
     if bytes.is_multiple_of(page_size) {
         format_grouped_count(bytes / page_size)
     } else {
@@ -3156,9 +3478,11 @@ fn format_page_equivalents(bytes: u64, page_size: u64) -> String {
 
 fn clear_memory_summary(view: &KernelMemorySummaryView) {
     view.meta.set_text("No snapshot");
+
     for row in &view.rows {
         set_memory_unit_row(row, None, 0);
     }
+
     for label in [
         &view.private_summary.total,
         &view.private_summary.clean,
@@ -3171,6 +3495,7 @@ fn clear_memory_summary(view: &KernelMemorySummaryView) {
 
 fn overview_rows(snapshot: &KernelSnapshot) -> Vec<KernelOverviewRow> {
     let mut rows = Vec::new();
+
     for (section, facts) in [
         ("PROCESS", &snapshot.process),
         ("MEMORY ACCOUNTING", &snapshot.memory),
@@ -3183,12 +3508,14 @@ fn overview_rows(snapshot: &KernelSnapshot) -> Vec<KernelOverviewRow> {
         if facts.is_empty() {
             continue;
         }
+
         rows.push(KernelOverviewRow {
             section: true,
             section_key: section.to_owned(),
             label: section.to_owned(),
             value: String::new(),
         });
+
         rows.extend(facts.iter().map(|fact| KernelOverviewRow {
             section: false,
             section_key: section.to_owned(),
@@ -3196,11 +3523,13 @@ fn overview_rows(snapshot: &KernelSnapshot) -> Vec<KernelOverviewRow> {
             value: fact.value.clone(),
         }));
     }
+
     rows
 }
 
 fn resource_rows(snapshot: &KernelSnapshot) -> Vec<KernelOverviewRow> {
     let mut rows = Vec::new();
+
     for (section, facts) in [
         ("DEBUGGING SIGNALS", &snapshot.diagnostics),
         ("CGROUP / PROCESS CONSTRAINTS", &snapshot.constraints),
@@ -3209,12 +3538,14 @@ fn resource_rows(snapshot: &KernelSnapshot) -> Vec<KernelOverviewRow> {
         if facts.is_empty() {
             continue;
         }
+
         rows.push(KernelOverviewRow {
             section: true,
             section_key: section.to_owned(),
             label: section.to_owned(),
             value: String::new(),
         });
+
         rows.extend(facts.iter().map(|fact| KernelOverviewRow {
             section: false,
             section_key: section.to_owned(),
@@ -3222,6 +3553,7 @@ fn resource_rows(snapshot: &KernelSnapshot) -> Vec<KernelOverviewRow> {
             value: fact.value.clone(),
         }));
     }
+
     rows
 }
 
@@ -3232,18 +3564,21 @@ fn facts_to_overview_rows(
     if facts.is_empty() {
         return Vec::new();
     }
+
     let mut rows = vec![KernelOverviewRow {
         section: true,
         section_key: String::from(section),
         label: String::from(section),
         value: String::new(),
     }];
+
     rows.extend(facts.iter().map(|fact| KernelOverviewRow {
         section: false,
         section_key: String::from(section),
         label: fact.label.clone(),
         value: fact.value.clone(),
     }));
+
     rows
 }
 
@@ -3256,22 +3591,26 @@ fn change_rows(snapshot: &KernelSnapshot) -> Vec<KernelOverviewRow> {
             value: String::from("Refresh or stop again to compare with this snapshot"),
         }];
     }
+
     let mut rows = vec![KernelOverviewRow {
         section: true,
         section_key: String::from("PROCESS TOTALS"),
         label: String::from("PROCESS TOTALS"),
         value: String::new(),
     }];
+
     rows.extend(snapshot.changes.iter().map(|fact| KernelOverviewRow {
         section: false,
         section_key: String::from("PROCESS TOTALS"),
         label: fact.label.clone(),
         value: fact.value.clone(),
     }));
+
     rows.extend(facts_to_overview_rows(
         "ALLOCATION / MAPPING CHURN",
         &snapshot.mapping_summary,
     ));
+
     if !snapshot.cgroup_changes.is_empty() {
         rows.push(KernelOverviewRow {
             section: true,
@@ -3279,12 +3618,14 @@ fn change_rows(snapshot: &KernelSnapshot) -> Vec<KernelOverviewRow> {
             label: String::from("CGROUP DELTAS (GROUP-WIDE)"),
             value: String::new(),
         });
+
         rows.push(KernelOverviewRow {
             section: false,
             section_key: String::from("CGROUP DELTAS (GROUP-WIDE)"),
             label: String::from("Scope"),
             value: String::from("Includes activity from every process in the target cgroup"),
         });
+
         rows.extend(
             snapshot
                 .cgroup_changes
@@ -3297,12 +3638,14 @@ fn change_rows(snapshot: &KernelSnapshot) -> Vec<KernelOverviewRow> {
                 }),
         );
     }
+
     rows
 }
 
 fn populate_warnings(container: &gtk::Box, warnings: &[String]) {
     clear_box(container);
     container.set_visible(!warnings.is_empty());
+
     for warning in warnings {
         let label = gtk::Label::new(Some(warning));
         label.add_css_class("kernel-warning");
@@ -3327,6 +3670,7 @@ impl Ui {
         if !self.is_stop_refresh_current(generation) {
             return;
         }
+
         match result {
             Ok(memory) => self.kernel_view.set_tls_runtime(
                 target,
@@ -3372,9 +3716,11 @@ impl Ui {
         if !self.kernel_refresh_allowed() || self.kernel_view.in_flight.get() {
             return None;
         }
+
         let generation = self.kernel_refresh_generation.get().wrapping_add(1);
         self.kernel_refresh_generation.set(generation);
         self.kernel_view.in_flight.set(true);
+
         Some(generation)
     }
 
@@ -3383,21 +3729,29 @@ impl Ui {
             self.finish_stale_kernel_refresh();
             return;
         }
+
         self.kernel_view.in_flight.set(false);
+
         let metadata_only = self.kernel_view.metadata_only_refresh.replace(false)
             && self.kernel_view.previous_snapshot.borrow().is_some();
+
         if metadata_only {
             populate_warnings(&self.kernel_view.warnings, &snapshot.warnings);
             self.kernel_view.show_tls_metadata(&mut snapshot);
+
             self.kernel_view
                 .needs_refresh
                 .set(!snapshot.tls_metadata_scanned);
+
             self.refresh_kernel_after_stop();
             return;
         }
+
         snapshot.compare_with_baseline(self.kernel_view.previous_snapshot.borrow().as_ref());
+
         let needs_tls_refresh =
             self.kernel_view.tls_requested.get() && !snapshot.tls_metadata_scanned;
+
         let baseline = snapshot.baseline();
         self.kernel_view.previous_snapshot.replace(Some(baseline));
         self.kernel_view.show_snapshot(snapshot);
@@ -3414,11 +3768,14 @@ impl Ui {
             self.finish_stale_kernel_refresh();
             return;
         }
+
         self.kernel_view.in_flight.set(false);
         self.kernel_view.needs_refresh.set(true);
+
         if self.kernel_view.previous_snapshot.borrow().is_none() {
             self.kernel_view.clear();
         }
+
         populate_warnings(&self.kernel_view.warnings, &[error.to_owned()]);
     }
 
@@ -3428,6 +3785,7 @@ impl Ui {
             && self.kernel_refresh_allowed()
         {
             let handler = self.kernel_refresh_handler.borrow().clone();
+
             if let Some(handler) = handler {
                 handler();
             }
@@ -3437,6 +3795,7 @@ impl Ui {
     pub fn invalidate_kernel_refresh(&self) {
         self.kernel_refresh_generation
             .set(self.kernel_refresh_generation.get().wrapping_add(1));
+
         self.kernel_view.needs_refresh.set(true);
         self.kernel_view.metadata_only_refresh.set(false);
     }
@@ -3473,10 +3832,12 @@ mod memory_view_tests {
             tls_thread_display_name("c-misc-allocator", Some("c-misc-allocator-target"), true,),
             "c-misc-allocator-target"
         );
+
         assert_eq!(
             tls_thread_display_name("custom-worker-1", Some("custom-worker-1-target"), false),
             "custom-worker-1"
         );
+
         assert_eq!(
             tls_thread_display_name("worker", Some("worker-service"), true),
             "worker"
@@ -3493,6 +3854,7 @@ mod memory_view_tests {
             (String::from("kernel.overview.process"), false),
             (String::from("kernel.overview.scheduler"), true),
         ]);
+
         let restored = kernel_overview_collapsed(&remembered);
         assert!(restored.contains("PROCESS"));
         assert!(!restored.contains("SCHEDULER"));
@@ -3505,12 +3867,15 @@ mod memory_view_tests {
             format_memory_amount(1024 * 1024, 4096),
             "1.00 MiB · 256 pages"
         );
+
         assert_eq!(format_scaled_binary(3_076_096, 1024, 2), "3,004");
         assert_eq!(format_scaled_binary(3_076_096, 1024 * 1024, 3), "2.934");
+
         assert_eq!(
             format_scaled_binary(3_076_096, 1024 * 1024 * 1024, 6),
             "0.002865"
         );
+
         assert_eq!(format_page_equivalents(3072, 4096), "0.75");
         assert_eq!(format_grouped_count(1_234_567), "1,234,567");
         assert_eq!(ratio(1, 4), 0.25);
@@ -3523,6 +3888,7 @@ mod memory_view_tests {
         let mut bytes = vec![0_u8; 80];
         bytes[8..16].copy_from_slice(&0x1234_u64.to_le_bytes());
         bytes[40..48].copy_from_slice(&0xfeed_face_cafe_beef_u64.to_le_bytes());
+
         let runtime = KernelTlsRuntime {
             thread: Some(String::from("GDB #1")),
             architecture: TargetArchitecture::X86_64,
@@ -3536,9 +3902,11 @@ mod memory_view_tests {
         };
 
         let rows = tls_runtime_rows(&runtime);
+
         assert!(rows.iter().any(|row| {
             row.label == "Dynamic thread vector (DTV) (+0x8)" && row.value == "0x0000000000001234"
         }));
+
         assert!(rows.iter().any(|row| {
             row.label == "Stack canary (+0x28)" && row.value == "0xfeedfacecafebeef"
         }));
@@ -3559,10 +3927,12 @@ mod memory_view_tests {
         };
 
         let rows = tls_runtime_rows(&runtime);
+
         assert!(
             rows.iter()
                 .any(|row| { row.label == "Word +0x4" && row.value == "0x55667788" })
         );
+
         assert!(!rows.iter().any(|row| row.label.contains("canary")));
     }
 
@@ -3581,10 +3951,12 @@ mod memory_view_tests {
         };
 
         let rows = tls_runtime_rows(&runtime);
+
         assert!(
             rows.iter()
                 .any(|row| row.label == "RAW THREAD-POINTER BYTES")
         );
+
         assert!(!rows.iter().any(|row| row.label.starts_with("Word +")));
     }
 }

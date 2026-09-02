@@ -60,6 +60,7 @@ impl Theme {
     pub fn style_terminal(&self, terminal: &vte4::Terminal) {
         let foreground = rgba(self.colors.foreground);
         let background = rgba(self.colors.terminal_background);
+
         let palette = [
             rgba("#111111"),
             rgba("#b86f6f"),
@@ -78,6 +79,7 @@ impl Theme {
             rgba("#8bb5bb"),
             rgba("#eeeeee"),
         ];
+
         let palette_refs = palette.each_ref();
         terminal.set_colors(Some(&foreground), Some(&background), &palette_refs);
     }
@@ -86,6 +88,7 @@ impl Theme {
         let manager = sourceview5::StyleSchemeManager::default();
         manager.prepend_search_path(&format!("resource://{}/themes", crate::RESOURCE_PREFIX));
         manager.force_rescan();
+
         manager
             .scheme(self.source_scheme)
             .or_else(|| manager.scheme("Adwaita-dark"))
@@ -93,6 +96,7 @@ impl Theme {
 
     fn stylesheet(&self) -> String {
         let colors = &self.colors;
+
         format!(
             r#"
 @define-color app_bg {background};

@@ -21,16 +21,20 @@ pub(super) fn populate_register_group<'a>(
             pointer_bits,
         })
         .collect::<Vec<_>>();
+
     let count = rows.len() as i32;
     let previous_count = group.store.n_items();
     replace_boxed_store_if_changed(&group.store, rows);
     let visible = count != 0;
+
     if group.panel.is_visible() != visible {
         group.panel.set_visible(visible);
     }
+
     if count == 0 {
         return;
     }
+
     if previous_count != count as u32 {
         group.view.set_size_request(-1, 24 + count * 26);
     }
@@ -145,6 +149,7 @@ pub(super) fn register_text(
         if index > 0 {
             text.push_str("  →  ");
         }
+
         let value = if index == 0 {
             format_register_value_for_target(
                 &register.name,
@@ -159,6 +164,7 @@ pub(super) fn register_text(
         };
         text.push_str(&value);
     }
+
     text
 }
 
@@ -181,8 +187,10 @@ pub(super) fn register_details(
         if !details.is_empty() {
             details.push_str("  →  ");
         }
+
         details.push_str(&format_target_pointer_word(value, endian, pointer_bits));
     }
+
     details
 }
 
@@ -246,15 +254,18 @@ pub(super) fn format_register_value_for_target(
     if let Some(vector) = format_vector_register_value(register, value) {
         return vector;
     }
+
     if (vector_register_for_architecture(register, architecture)
         || floating_register_for_architecture(register, architecture))
         && value.trim_start().starts_with('{')
     {
         return compact_structured_register_value(value);
     }
+
     if value.starts_with('[') {
         return value.to_owned();
     }
+
     let Some(number) = hex_value(value) else {
         return value.lines().next().unwrap_or(value).to_owned();
     };
@@ -270,6 +281,7 @@ pub(super) fn format_register_value_for_target(
         formatted.push(' ');
         formatted.push_str(&annotation);
     }
+
     formatted
 }
 
@@ -284,15 +296,19 @@ fn compact_structured_register_value(value: &str) -> String {
             truncated = true;
             break;
         }
+
         if !compact.is_empty() {
             compact.push(' ');
         }
+
         compact.push_str(part);
         char_count += needed;
     }
+
     if truncated {
         compact.push_str(" …");
     }
+
     compact
 }
 
@@ -301,13 +317,16 @@ pub(super) fn format_vector_register_value(register: &str, value: &str) -> Optio
     if lanes.len() > 1 && lanes.iter().all(|lane| lane == &lanes[0]) {
         return Some(format!("q0…q{} = {}", lanes.len() - 1, lanes[0]));
     }
+
     let mut formatted = String::with_capacity(lanes.iter().map(String::len).sum::<usize>() + 8);
     for (index, lane) in lanes.iter().enumerate() {
         if index != 0 {
             formatted.push_str("  ·  ");
         }
+
         let _ = write!(formatted, "q{index}={lane}");
     }
+
     Some(formatted)
 }
 
@@ -365,6 +384,7 @@ fn visit_vector_field(
         if visited == lane_count {
             break;
         }
+
         let (lane, repeats) = if let Some((lane, repeats)) = part.split_once("<repeats") {
             let repeats = repeats
                 .split_whitespace()
@@ -379,8 +399,10 @@ fn visit_vector_field(
         if repeats != 0 && !visitor(lane, repeats) {
             return Some(false);
         }
+
         visited += repeats;
     }
+
     Some(visited == lane_count)
 }
 
@@ -427,17 +449,21 @@ pub(super) fn format_vector_lane(lane: &str, format: VectorLaneFormat) -> String
                 format_float(f64::from_bits(bits))
             };
         }
+
         return compact_whitespace(lane);
     }
+
     let width = format.lane_bytes() * 2;
     if let Some(hex) = lane.strip_prefix("0x")
         && let Ok(value) = u64::from_str_radix(hex, 16)
     {
         return format!("0x{value:0width$x}");
     }
+
     if let Ok(value) = lane.parse::<u64>() {
         return format!("0x{value:0width$x}");
     }
+
     if let Ok(value) = lane.parse::<i64>() {
         let bits = u32::try_from(format.lane_bytes() * 8).unwrap_or(64);
         let mask = if bits == 64 {
@@ -447,6 +473,7 @@ pub(super) fn format_vector_lane(lane: &str, format: VectorLaneFormat) -> String
         };
         return format!("0x{:0width$x}", (value as u64) & mask);
     }
+
     compact_whitespace(lane)
 }
 
@@ -456,8 +483,10 @@ fn compact_whitespace(value: &str) -> String {
         if !compact.is_empty() {
             compact.push(' ');
         }
+
         compact.push_str(part);
     }
+
     compact
 }
 
@@ -513,6 +542,7 @@ pub(super) fn ascii_annotation(
     if printable_len < 2 {
         return None;
     }
+
     let text = bytes[..printable_len]
         .iter()
         .flat_map(|byte| std::ascii::escape_default(*byte))
@@ -599,6 +629,7 @@ pub(super) fn build_context_legend() -> gtk::Box {
         item.append(&label);
         grid.attach(&item, (index % 2) as i32, (index / 2) as i32, 1, 1);
     }
+
     build_disclosure("LEGEND", &grid, false, "context-legend")
 }
 
@@ -670,6 +701,7 @@ pub(super) fn build_disclosure_with_content(
             button_for_click.remove_css_class("disclosure-expanded");
             button_for_click.add_css_class("disclosure-collapsed");
         }
+
         button_for_click.set_tooltip_text(Some(if reveal {
             "Collapse section"
         } else {
@@ -686,9 +718,11 @@ pub(super) fn stack_references(entry: &StackEntry) -> String {
     if !entry.value_registers.is_empty() {
         references.push(format_register_names(&entry.value_registers));
     }
+
     if let Some(frame) = entry.return_frame {
         references.push(format!("retaddr[{frame}]"));
     }
+
     references.join(" · ")
 }
 
@@ -700,15 +734,18 @@ pub(super) fn stack_word_role(entry: &StackEntry) -> String {
             format_register_names(&entry.address_registers)
         ));
     }
+
     if !entry.value_registers.is_empty() {
         roles.push(format!(
             "value held by {}",
             format_register_names(&entry.value_registers)
         ));
     }
+
     if let Some(frame) = entry.return_frame {
         roles.push(format!("return address for frame #{frame}"));
     }
+
     roles.join("  ·  ")
 }
 
@@ -765,6 +802,7 @@ pub(super) fn stack_entry_text(entry: &StackEntry) -> String {
         if index > 0 {
             text.push_str("  →  ");
         }
+
         text.push_str(&format_register_value_for_target(
             "sp",
             value,
@@ -774,6 +812,7 @@ pub(super) fn stack_entry_text(entry: &StackEntry) -> String {
             entry.pointer_bits,
         ));
     }
+
     text
 }
 
@@ -783,9 +822,11 @@ fn format_register_names(names: &[String]) -> String {
         if !formatted.is_empty() {
             formatted.push_str(", ");
         }
+
         formatted.push('$');
         formatted.push_str(name);
     }
+
     formatted
 }
 
@@ -810,6 +851,7 @@ pub(super) fn thread_os_id(target_id: &str) -> Option<String> {
     {
         return Some(lwp.to_owned());
     }
+
     if let Some(tid) = target_id
         .split_once("tid:")
         .map(|(_, suffix)| suffix)
@@ -817,6 +859,7 @@ pub(super) fn thread_os_id(target_id: &str) -> Option<String> {
     {
         return Some(tid.trim_end_matches([',', ']']).to_owned());
     }
+
     target_id
         .strip_prefix("process ")
         .and_then(|pid| pid.split_whitespace().next())
@@ -847,8 +890,10 @@ pub(super) fn thread_detail(thread: &ThreadInfo, stop_reason: Option<&str>) -> S
         } else {
             detail.push_str(", ");
         }
+
         detail.push_str(&metadata);
     }
+
     detail
 }
 
@@ -904,12 +949,14 @@ pub(super) fn update_thread_detail_widget(
             address.set_visible(false);
         }
     }
+
     let metadata_text = thread_metadata(thread, stop_reason);
     set_label_text(&metadata, &metadata_text);
     let metadata_visible = !metadata_text.is_empty();
     if metadata.is_visible() != metadata_visible {
         metadata.set_visible(metadata_visible);
     }
+
     true
 }
 
@@ -922,18 +969,23 @@ pub(super) fn thread_metadata(thread: &ThreadInfo, stop_reason: Option<&str>) ->
             metadata.push_str(&compact_function_name(&format!("<{}>", frame.function)));
         }
     }
+
     if let Some(core) = thread.core.as_deref() {
         if !metadata.is_empty() {
             metadata.push_str(", ");
         }
+
         let _ = write!(metadata, "core:{core}");
     }
+
     if let Some(reason) = stop_reason {
         if !metadata.is_empty() {
             metadata.push_str(", ");
         }
+
         let _ = write!(metadata, "reason: {reason}");
     }
+
     metadata
 }
 
@@ -1005,6 +1057,7 @@ pub(super) fn is_return_instruction(
     if mnemonic.starts_with("ret") {
         return true;
     }
+
     match architecture {
         TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
             mnemonic.starts_with("lret") || mnemonic.starts_with("iret")
@@ -1030,6 +1083,7 @@ pub(super) fn is_return_instruction(
             if mnemonic != "jirl" {
                 return false;
             }
+
             let operands = operands
                 .split(',')
                 .map(|operand| operand.trim().trim_start_matches('$'))
@@ -1052,9 +1106,11 @@ pub(super) fn call_abi_phase(
             target: instruction_flow_target(current, architecture),
         };
     }
+
     if is_return_instruction(&mnemonic, operands, architecture) {
         return CallAbiPhase::Returning;
     }
+
     let offset = current.offset.trim();
     let at_function_entry = offset
         .strip_prefix("0x")
@@ -1068,6 +1124,7 @@ pub(super) fn call_abi_phase(
             function: current.function.clone(),
         };
     }
+
     if let Some(previous) = previous.filter(|previous| instructions_are_adjacent(previous, current))
     {
         let (mnemonic, operands) = split_instruction(&previous.text);
@@ -1078,6 +1135,7 @@ pub(super) fn call_abi_phase(
             };
         }
     }
+
     CallAbiPhase::Sequential
 }
 
@@ -1258,6 +1316,7 @@ pub(crate) fn instruction_ends_linear_flow(
     {
         return true;
     }
+
     matches!(
         architecture,
         TargetArchitecture::X86 | TargetArchitecture::X86_64
@@ -1292,9 +1351,11 @@ pub(super) fn normalized_instruction_parts<'a>(
             if next.0.is_empty() {
                 break;
             }
+
             (mnemonic, operands) = next;
         }
     }
+
     let mnemonic = if mnemonic.bytes().any(|byte| byte.is_ascii_uppercase()) {
         Cow::Owned(mnemonic.to_ascii_lowercase())
     } else {
@@ -1323,6 +1384,7 @@ fn is_indirect_branch(mnemonic: &str, operands: &str, architecture: TargetArchit
     {
         return false;
     }
+
     let operand = operands.split(',').next_back().unwrap_or(operands).trim();
     match architecture {
         TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
@@ -1360,6 +1422,7 @@ fn instruction_accesses_memory(
     if operands.contains('[') || (operands.contains('(') && operands.contains(')')) {
         return true;
     }
+
     match architecture {
         TargetArchitecture::X86 | TargetArchitecture::X86_64 => {
             mnemonic.starts_with("push")
@@ -1379,6 +1442,7 @@ fn instruction_accesses_memory(
                 || mnemonic.starts_with("ldm")
                 || mnemonic.starts_with("stm")
         }
+
         TargetArchitecture::RiscV32
         | TargetArchitecture::RiscV64
         | TargetArchitecture::Mips32
@@ -1491,6 +1555,7 @@ pub(super) fn instruction_flow_target(
     {
         return None;
     }
+
     if let Some(address) = operands
         .split(|character: char| {
             character.is_whitespace() || matches!(character, ',' | '(' | ')' | '[' | ']')
@@ -1506,6 +1571,7 @@ pub(super) fn instruction_flow_target(
     {
         return Some(address.to_owned());
     }
+
     if let (Some(start), Some(end)) = (operands.find('<'), operands.rfind('>'))
         && start < end
     {
@@ -1514,6 +1580,7 @@ pub(super) fn instruction_flow_target(
             return Some(symbol.to_owned());
         }
     }
+
     let candidate = operands
         .split(',')
         .next_back()?
@@ -1524,6 +1591,7 @@ pub(super) fn instruction_flow_target(
     {
         return None;
     }
+
     let explicitly_register = candidate.starts_with(['$', '%']);
     let candidate = candidate.trim_start_matches(['$', '%']);
     candidate
@@ -1624,9 +1692,11 @@ pub(super) fn instruction_arguments_description(
         };
         return syscall_arguments_description(registers, syscall_architecture, encoded_number);
     }
+
     if !is_call_instruction(&mnemonic, operands, architecture) {
         return String::new();
     }
+
     let arguments = architecture
         .call_argument_registers()
         .iter()
@@ -1659,6 +1729,7 @@ pub(super) fn conditional_branch_taken(
     {
         mnemonic = format!("b{condition}");
     }
+
     if matches!(
         architecture,
         TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64
@@ -1669,6 +1740,7 @@ pub(super) fn conditional_branch_taken(
             architecture.pointer_bits().unwrap_or(64),
         );
     }
+
     let flags = if matches!(
         architecture,
         TargetArchitecture::Arm | TargetArchitecture::AArch64
@@ -1846,9 +1918,11 @@ pub(super) fn instruction_memory_expression(
     {
         return Some(address.trim_end_matches([',', ';']).to_owned());
     }
+
     if registers.is_empty() {
         return None;
     }
+
     let operand = if let Some(start) = instruction.text.find('[') {
         let start = start + 1;
         let end = instruction.text[start..].find(']')? + start;
@@ -1872,6 +1946,7 @@ pub(super) fn instruction_memory_expression(
         if bases.is_empty() {
             return None;
         }
+
         format!("{} + {displacement}", bases.join(" + "))
     }
     .replace(['$', '%'], "");
@@ -1881,6 +1956,7 @@ pub(super) fn instruction_memory_expression(
     {
         return None;
     }
+
     let register_names = registers
         .iter()
         .map(|register| register.name.as_str())
@@ -1891,9 +1967,11 @@ pub(super) fn instruction_memory_expression(
         if token.is_empty() {
             return;
         }
+
         if register_names.contains(&token.as_str()) {
             expression.push('$');
         }
+
         expression.push_str(token);
         token.clear();
     };
@@ -1905,6 +1983,7 @@ pub(super) fn instruction_memory_expression(
             expression.push(character);
         }
     }
+
     flush_token(&mut token, &mut expression);
     let expression = expression.trim().trim_end_matches('!').trim();
     (!expression.is_empty()).then(|| format!("({expression})"))
@@ -1934,6 +2013,7 @@ pub(super) fn instruction_symbol_full(instruction: &Instruction) -> String {
     if instruction.function == "??" {
         return String::new();
     }
+
     let offset = instruction.offset.parse::<u64>().unwrap_or(0);
     if offset == 0 {
         format!("<{}>", instruction.function)

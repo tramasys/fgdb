@@ -12,6 +12,7 @@ pub(crate) struct MiCommandBuilder {
 impl MiCommandBuilder {
     pub(crate) fn new(operation: &'static str) -> Self {
         debug_assert!(operation.starts_with('-'));
+
         Self {
             command: operation.to_owned(),
         }
@@ -20,16 +21,19 @@ impl MiCommandBuilder {
     pub(crate) fn keyword(mut self, keyword: &'static str) -> Self {
         debug_assert!(!keyword.chars().any(char::is_whitespace));
         self.push(keyword);
+
         self
     }
 
     pub(crate) fn argument(mut self, argument: &str) -> Self {
         self.push(&quote(argument));
+
         self
     }
 
     pub(crate) fn number(mut self, number: impl std::fmt::Display) -> Self {
         self.push(&number.to_string());
+
         self
     }
 
@@ -56,6 +60,7 @@ pub(crate) struct CliCommandBuilder {
 impl CliCommandBuilder {
     pub(crate) fn new(operation: &'static str) -> Self {
         debug_assert!(!operation.chars().any(char::is_whitespace));
+
         Self {
             command: operation.to_owned(),
         }
@@ -64,6 +69,7 @@ impl CliCommandBuilder {
     pub(crate) fn keyword(mut self, keyword: &'static str) -> Self {
         debug_assert!(!keyword.chars().any(char::is_whitespace));
         self.push(keyword);
+
         self
     }
 
@@ -77,7 +83,9 @@ impl CliCommandBuilder {
         {
             return Err("GDB CLI arguments cannot contain NUL or line breaks");
         }
+
         self.push(argument);
+
         Ok(self)
     }
 
@@ -105,14 +113,17 @@ pub(crate) fn gdb_cli_string(value: &str) -> Result<String, &'static str> {
     {
         return Err("GDB CLI strings cannot contain NUL or line breaks");
     }
+
     let mut quoted = String::with_capacity(value.len().saturating_add(2));
     quoted.push('"');
     for character in value.chars() {
         if matches!(character, '\\' | '"') {
             quoted.push('\\');
         }
+
         quoted.push(character);
     }
+
     quoted.push('"');
     Ok(quoted)
 }
@@ -136,16 +147,19 @@ mod tests {
     #[test]
     fn preserves_verbatim_cli_tails_but_rejects_command_boundaries() {
         let value = "/srv/app \"debug\"\\bin";
+
         let command = CliCommandBuilder::new("set")
             .keyword("remote")
             .keyword("exec-file")
             .verbatim_tail(value)
             .unwrap()
             .finish();
+
         assert_eq!(
             command,
             console_command(&format!("set remote exec-file {value}"))
         );
+
         assert!(
             CliCommandBuilder::new("rbreak")
                 .verbatim_tail("main\nkill")

@@ -65,6 +65,7 @@ mod imp {
 
         fn snapshot_line(&self, snapshot: &gtk::Snapshot, lines: &GutterLines, line: u32) {
             let renderer = self.obj();
+
             let Some(style) = renderer.buffer().and_then(|buffer| {
                 self.style_provider
                     .borrow()
@@ -73,8 +74,10 @@ mod imp {
             }) else {
                 return;
             };
+
             let (line_y, line_height) = lines.line_extent(line, GutterRendererAlignmentMode::Cell);
             let width = renderer.width() as f32;
+
             if let Some(background) = style.background {
                 snapshot.append_color(
                     &background,
@@ -107,21 +110,26 @@ impl BreakpointGutterRenderer {
         + 'static,
     ) -> Self {
         let renderer: Self = glib::Object::new();
+
         renderer
             .imp()
             .style_provider
             .replace(Some(Rc::new(style_provider)));
+
         renderer
             .imp()
             .activate_handler
             .replace(Some(Rc::new(activate_handler)));
+
         renderer.set_alignment_mode(GutterRendererAlignmentMode::Cell);
         renderer.add_css_class("breakpoint-gutter");
+
         renderer
     }
 
     pub(crate) fn activate_at(&self, iter: &gtk::TextIter, area: &gdk::Rectangle, button: u32) {
         let handler = self.imp().activate_handler.borrow().clone();
+
         if let Some(handler) = handler {
             handler(self, iter, area, button);
         }

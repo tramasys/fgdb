@@ -211,10 +211,12 @@ impl BreakpointSpec {
     pub(super) fn from_breakpoint(breakpoint: &Breakpoint) -> Self {
         let logpoint = breakpoint.is_logpoint();
         let mut commands = breakpoint.commands.clone();
+
         if logpoint {
             if commands.first().is_some_and(|command| command == "silent") {
                 commands.remove(0);
             }
+
             if commands
                 .last()
                 .is_some_and(|command| matches!(command.trim(), "continue" | "cont" | "c"))
@@ -222,6 +224,7 @@ impl BreakpointSpec {
                 commands.pop();
             }
         }
+
         Self {
             location: breakpoint
                 .original_location
@@ -246,7 +249,9 @@ impl BreakpointSpec {
         if !self.logpoint {
             return self.commands.clone();
         }
+
         let mut commands = Vec::with_capacity(self.commands.len() + 2);
+
         if !self
             .commands
             .first()
@@ -254,13 +259,16 @@ impl BreakpointSpec {
         {
             commands.push(String::from("silent"));
         }
+
         commands.extend(self.commands.iter().cloned());
+
         if !commands
             .last()
             .is_some_and(|command| matches!(command.trim(), "continue" | "cont" | "c"))
         {
             commands.push(String::from("continue"));
         }
+
         commands
     }
 }

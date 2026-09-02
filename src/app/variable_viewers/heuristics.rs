@@ -19,6 +19,7 @@ pub(super) fn compact_variable_type_name(type_name: Option<&str>) -> String {
 pub(super) fn compact_viewer_text(text: &str, max_chars: usize) -> String {
     let mut chars = text.chars();
     let compact = chars.by_ref().take(max_chars).collect::<String>();
+
     if chars.next().is_some() {
         format!("{compact}...")
     } else {
@@ -30,6 +31,7 @@ pub(super) fn viewer_value_is_null(value: &str) -> bool {
     if pointer_address(value) == Some(0) {
         return true;
     }
+
     matches!(
         value.trim().to_ascii_lowercase().as_str(),
         "0" | "null" | "nullptr" | "none" | "nil" | "<null>"
@@ -49,14 +51,17 @@ pub(super) fn transparent_index_wrapper(children: &[Variable]) -> Option<Variabl
         .iter()
         .filter_map(|child| {
             let name = normalize_member_name(&child.name);
+
             if !child.can_expand() {
                 return None;
             }
+
             let priority = match name.as_str() {
                 "_m_elems" | "__elems" | "__elems_" | "_elems" | "elems" | "elements" => 0,
                 "public" | "private" | "protected" => 1,
                 _ => return None,
             };
+
             Some((priority, child))
         })
         .min_by_key(|(priority, _)| *priority)
@@ -72,6 +77,7 @@ pub(super) fn transparent_link_wrapper(
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
+
     let preferred: &[&str] = if type_name.contains("option<") {
         &["some", "__0", "0"]
     } else if type_name.contains("rc<")
@@ -90,6 +96,7 @@ pub(super) fn transparent_link_wrapper(
     } else {
         return None;
     };
+
     preferred.iter().find_map(|preferred| {
         children
             .iter()

@@ -3,21 +3,24 @@ use super::*;
 pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let theme = Theme::graphite();
     theme.install();
-
     let ui = Rc::new(Ui::build(application, &launch_config, &theme));
+    ui.connect_terminal_synchronization();
+    ui.connect_local_paging();
     ui.set_controls_ready(false);
     ui.connect_inferior_controls();
     ui.connect_thread_controls();
-
     let ready_hook = Rc::new(RefCell::new(None::<Rc<dyn Fn()>>));
     let ready_hook_for_event = Rc::clone(&ready_hook);
     let weak_ui = Rc::downgrade(&ui);
+
     let mi_client = match MiClient::open(move |client, event| {
         let became_ready = matches!(&event, MiEvent::Ready(_));
         handle_mi_event(&weak_ui, client, event);
+
         let ready_handler = became_ready
             .then(|| ready_hook_for_event.borrow().as_ref().cloned())
             .flatten();
+
         if let Some(handler) = ready_handler {
             handler();
         }
@@ -29,10 +32,12 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 &format!("Could not allocate the MI pseudo-terminal: {error}"),
                 Some("status-error"),
             );
+
             ui.window.present();
             return;
         }
     };
+
     ui.connect_debug_controls(&mi_client);
     ui.connect_source_actions();
     ui.connect_session_actions();
@@ -40,11 +45,14 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     ui.connect_debug_data_actions();
     let weak_ui = Rc::downgrade(&ui);
     let client = Rc::clone(&mi_client);
+
     ui.set_debug_data_action_handler(move |action| {
         handle_debug_data_action(weak_ui.clone(), Rc::clone(&client), action);
     });
+
     let disassembly_controller =
         DisassemblyController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
+
     let controller = Rc::clone(&disassembly_controller);
     ui.set_disassembly_handler(move |request| controller.handle(request));
     let until_controller = NativeUntilController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
@@ -55,9 +63,11 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let controller = Rc::clone(&until_controller);
     ui.set_until_abort_handler(move || controller.abort());
     let controller = Rc::clone(&until_controller);
+
     ui.set_until_stop_handler(move |reason, address, thread_id| {
         controller.on_stopped(reason, address, thread_id)
     });
+
     let session_controller = SessionController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
     let controller = Rc::clone(&session_controller);
     ui.set_session_handler(move |session| controller.configure(session));
@@ -65,29 +75,38 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     ui.set_session_action_handler(move |action| controller.action(action));
     let weak_ui = Rc::downgrade(&ui);
     let client = Rc::clone(&mi_client);
+
     ui.set_inferior_action_handler(move |action| {
         handle_inferior_action(weak_ui.clone(), Rc::clone(&client), action);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let client = Rc::clone(&mi_client);
+
     ui.set_thread_action_handler(move |action| {
         handle_thread_action(weak_ui.clone(), Rc::clone(&client), action);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_frame_selection_handler(move |level| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
+
         let Some(current_ui) = weak_ui.upgrade() else {
             return;
         };
+
         if !current_ui.frame_selection_can_dispatch(level) {
             return;
         }
+
         current_ui.set_thread_action_pending(Some(ThreadActionPending::Selection));
         drop(current_ui);
         let weak_ui_for_error = weak_ui.clone();
+
         if client
             .request(
                 &format!("-stack-select-frame {level}"),
@@ -95,9 +114,11 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                     if let Some(ui) = weak_ui.upgrade() {
                         ui.clear_thread_action_pending();
                     }
+
                     if record.is_done()
                         && weak_ui.upgrade().is_some_and(|ui| {
                             ui.select_frame_in_view(level);
+
                             !ui.inferior_is_running()
                         })
                     {
@@ -119,6 +140,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             && let Some(ui) = weak_ui_for_error.upgrade()
         {
             ui.clear_thread_action_pending();
+
             ui.set_status(
                 "Frame selection failed",
                 "Could not queue the frame-selection command",
@@ -126,29 +148,37 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             );
         }
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_thread_selection_handler(move |id| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
+
         let Some(current_ui) = weak_ui.upgrade() else {
             return;
         };
+
         if !current_ui.thread_selection_can_dispatch(&id) {
             return;
         }
+
         let Some(selected_id) = crate::debugger::thread_id_argument(&id).map(str::to_owned) else {
             current_ui.set_status(
                 "Thread selection failed",
                 &format!("GDB reported an unsupported thread identifier: {id}"),
                 Some("status-error"),
             );
+
             return;
         };
+
         current_ui.set_thread_action_pending(Some(ThreadActionPending::Selection));
         drop(current_ui);
         let weak_ui_for_error = weak_ui.clone();
+
         if client
             .request(
                 &format!("-thread-select {selected_id}"),
@@ -156,11 +186,14 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                     if let Some(ui) = weak_ui.upgrade() {
                         ui.clear_thread_action_pending();
                     }
+
                     if record.is_done() {
                         let stopped = weak_ui.upgrade().is_some_and(|ui| {
                             ui.select_thread_in_view(&selected_id);
+
                             !ui.inferior_is_running()
                         });
+
                         if stopped {
                             refresh_stopped_state(&weak_ui, client);
                         }
@@ -179,6 +212,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             && let Some(ui) = weak_ui_for_error.upgrade()
         {
             ui.clear_thread_action_pending();
+
             ui.set_status(
                 "Thread selection failed",
                 "Could not queue the thread-selection command",
@@ -186,12 +220,15 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             );
         }
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_instruction_handler(move |address| {
         let (Some(client), Some(ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
             return;
         };
+
         let (command, detail) = ui.breakpoint_number_at_address(&address).map_or_else(
             || {
                 (
@@ -206,31 +243,44 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 )
             },
         );
+
         drop(ui);
         mutate_breakpoint(weak_ui.clone(), &client, command, detail);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_instruction_memory_handler(move |expression| {
         let (Some(client), Some(current_ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
             return;
         };
+
         let generation = current_ui.current_stop_refresh_generation();
+
         let command = format!(
             "-data-read-memory-bytes {} 32",
             crate::debugger::quote(&expression)
         );
+
         let Some(command) = current_ui
             .stop_context(generation)
             .map(|context| context.scope_frame(&command))
         else {
+            current_ui.show_instruction_memory(
+                &expression,
+                Err("Pause the target before reading memory"),
+            );
+
             return;
         };
+
         drop(current_ui);
         let weak_ui = weak_ui.clone();
         let expression_for_response = expression.clone();
         let weak_ui_for_response = weak_ui.clone();
         let weak_ui_for_guard = weak_ui.clone();
+
         if client
             .request_for_stop(
                 &command,
@@ -244,9 +294,11 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                     let Some(ui) = weak_ui_for_response.upgrade() else {
                         return;
                     };
+
                     if !ui.is_stop_refresh_current(generation) {
                         return;
                     }
+
                     if let Some(memory) = crate::debugger::memory_block(&record) {
                         ui.show_instruction_memory(&expression_for_response, Ok(&memory));
                     } else {
@@ -264,27 +316,35 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             ui.show_instruction_memory(&expression, Err("MI channel is unavailable"));
         }
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_memory_watch_handler(move |id, expression, byte_count| {
         let (Some(client), Some(current_ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
             return;
         };
+
         let generation = current_ui.current_stop_refresh_generation();
+
         let command = format!(
             "-data-read-memory-bytes {} {byte_count}",
             crate::debugger::quote(&expression)
         );
+
         let Some(command) = current_ui
             .stop_context(generation)
             .map(|context| context.scope_frame(&command))
         else {
+            current_ui.show_memory_watch(id, Err("Pause the target before reading memory"));
             return;
         };
+
         drop(current_ui);
         let weak_ui = weak_ui.clone();
         let weak_ui_for_response = weak_ui.clone();
         let weak_ui_for_guard = weak_ui.clone();
+
         if client
             .request_for_stop(
                 &command,
@@ -298,9 +358,11 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                     let Some(ui) = weak_ui_for_response.upgrade() else {
                         return;
                     };
+
                     if !ui.is_stop_refresh_current(generation) {
                         return;
                     }
+
                     if let Some(memory) = crate::debugger::memory_block(&record) {
                         ui.show_memory_watch(id, Ok(memory));
                     } else {
@@ -318,52 +380,70 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             ui.show_memory_watch(id, Err("MI channel is unavailable"));
         }
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_kernel_refresh_handler(move || {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
+
         request_kernel_refresh(weak_ui, client);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_misc_refresh_handler(move || {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
+
         request_misc_refresh(weak_ui, client);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_heap_inspection_handler(move |request| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
+
         request_heap_inspection(weak_ui, client, request);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_breakpoint_insert_handler(move |path, line| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         insert_source_breakpoint(weak_ui.clone(), &client, path, line);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_source_jump_handler(move |path, line| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         run_to_source_line(weak_ui.clone(), &client, path, line);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_breakpoint_delete_handler(move |number| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         mutate_breakpoint(
             weak_ui.clone(),
             &client,
@@ -371,20 +451,26 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             format!("Deleted breakpoint #{number}"),
         );
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_breakpoint_enabled_handler(move |number, enabled| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         let Some(ui) = weak_ui.upgrade() else {
             return;
         };
+
         if !ui.set_breakpoint_enabled_pending(&number, enabled) {
             return;
         }
+
         drop(ui);
         let action = if enabled { "enable" } else { "disable" };
+
         mutate_breakpoint(
             weak_ui.clone(),
             &client,
@@ -395,13 +481,17 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             ),
         );
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_breakpoint_bulk_delete_handler(move |numbers| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         let count = numbers.len();
+
         mutate_breakpoint(
             weak_ui.clone(),
             &client,
@@ -412,15 +502,19 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             ),
         );
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_signal_catchpoint_handler(move |signal, existing| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         let (command, detail) = existing.map_or_else(
             || {
                 let console_command = format!("catch signal {signal}");
+
                 (
                     crate::debugger::console_command(&console_command),
                     format!("Added a catchpoint for {signal}"),
@@ -433,14 +527,18 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 )
             },
         );
+
         mutate_breakpoint(weak_ui.clone(), &client, command, detail);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_event_catchpoint_handler(move |event, existing| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         let (command, detail) = existing.map_or_else(
             || {
                 let command = if event == EventCatchpoint::RustPanic {
@@ -448,6 +546,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 } else {
                     crate::debugger::console_command(event.command())
                 };
+
                 (command, format!("Added the {} stop point", event.label()))
             },
             |number| {
@@ -457,14 +556,18 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 )
             },
         );
+
         mutate_breakpoint(weak_ui.clone(), &client, command, detail);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_breakpoint_condition_handler(move |number, condition| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         let (command, detail) = condition.map_or_else(
             || {
                 (
@@ -482,88 +585,117 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 )
             },
         );
+
         mutate_breakpoint(weak_ui.clone(), &client, command, detail);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_breakpoint_editor_handler(move |request| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         edit_breakpoint(weak_ui.clone(), &client, request);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_watchpoint_insert_handler(move |request| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         let (command, detail) = match watchpoint_command(&request) {
             Ok(command) => command,
             Err(error) => {
                 if let Some(ui) = weak_ui.upgrade() {
                     ui.set_status("Watchpoint not added", error, Some("status-error"));
                 }
+
                 return;
             }
         };
+
         mutate_breakpoint(weak_ui.clone(), &client, command, detail);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_filtered_catchpoint_handler(move |request| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         let command = match filtered_catchpoint_command(&request) {
             Ok(command) => command,
             Err(error) => {
                 if let Some(ui) = weak_ui.upgrade() {
                     ui.set_status("Catchpoint not added", error, Some("status-error"));
                 }
+
                 return;
             }
         };
+
         let detail = format!("Added filtered {} catchpoint", request.kind.label());
         mutate_breakpoint(weak_ui.clone(), &client, command, detail);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_source_symbol_handler(move |symbol| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
+
         request_source_symbol(weak_ui, client, symbol, true);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_source_discovery_handler(move |request| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
+
         request_source_discovery(weak_ui, client, request);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_variable_editor_handler(move |variable| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
+
         request_value_type_metadata(weak_ui, client, variable);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_variable_object_assignment_handler(move |variable, value| {
         let (Some(client), Some(current_ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
             return;
         };
+
         let generation = current_ui.current_stop_refresh_generation();
+
         let Some(context) = current_ui.stop_context(generation) else {
             return;
         };
+
         let command = variable.varobj.as_deref().map_or_else(
             || {
                 let expression = assignment_expression(&variable.name, &value);
+
                 context.scope_frame(&format!(
                     "-data-evaluate-expression {}",
                     crate::debugger::quote(&expression)
@@ -577,11 +709,13 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 )
             },
         );
+
         drop(current_ui);
         let weak_ui = weak_ui.clone();
         let name = variable.name;
         let weak_ui_for_response = weak_ui.clone();
         let weak_ui_for_guard = weak_ui.clone();
+
         if let Err(error) = client.request_control_for_stop(
             &command,
             generation,
@@ -594,12 +728,14 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 let Some(ui) = weak_ui_for_response.upgrade() else {
                     return;
                 };
+
                 if record.is_done() {
                     ui.set_status(
                         "Paused",
                         &format!("Updated {name} to {value}"),
                         Some("status-ready"),
                     );
+
                     refresh_stopped_state(&weak_ui_for_response, client);
                 } else if record.class != "superseded" {
                     ui.set_status(
@@ -620,47 +756,61 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             );
         }
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_string_assignment_handler(move |variable, bytes, kind| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
+
         assign_string(weak_ui, client, variable, bytes, kind);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_float_assignment_handler(move |variable, raw_bytes| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
+
         assign_float_bytes(weak_ui, client, variable, raw_bytes);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_vector_assignment_handler(move |register, field, changes| {
         let (Some(client), Some(current_ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
             return;
         };
+
         let generation = current_ui.current_stop_refresh_generation();
+
         let Some(expression) = vector_assignment_expression(&register, &field, &changes) else {
             return;
         };
+
         let command = format!(
             "-data-evaluate-expression {}",
             crate::debugger::quote(&expression)
         );
+
         let Some(command) = current_ui
             .stop_context(generation)
             .map(|context| context.scope_frame(&command))
         else {
             return;
         };
+
         drop(current_ui);
         let weak_ui = weak_ui.clone();
         let register_for_response = register;
         let weak_ui_for_response = weak_ui.clone();
         let weak_ui_for_guard = weak_ui.clone();
+
         if let Err(error) = client.request_control_for_stop(
             &command,
             generation,
@@ -673,6 +823,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 let Some(ui) = weak_ui_for_response.upgrade() else {
                     return;
                 };
+
                 if record.is_done() {
                     ui.set_status(
                         "Paused",
@@ -683,6 +834,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                         ),
                         Some("status-ready"),
                     );
+
                     refresh_stopped_state(&weak_ui_for_response, client);
                 } else if record.class != "superseded" {
                     ui.set_status(
@@ -703,28 +855,37 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             );
         }
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_variable_children_handler(move |variable, from| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
+
         request_variable_children(weak_ui, client, variable, from);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_variable_viewer_handler(move |request| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         open_variable_viewer(weak_ui.clone(), client, request);
     });
+
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.set_expression_watch_refresh_handler(move || {
         let (Some(client), Some(ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
             return;
         };
+
         let generation = ui.current_stop_refresh_generation();
         drop(ui);
         let update_batch = variable_update_batch(&weak_ui, generation, 1);
@@ -733,10 +894,12 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
 
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
+
     ui.connect_resynchronize_handler(move || {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
+
         resynchronize_debugger_state(&weak_ui, &client);
     });
 
@@ -746,17 +909,21 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         Rc::clone(&session_controller),
         launch_config,
     );
+
     let weak_backend = Rc::downgrade(&backend);
+
     ready_hook.replace(Some(Rc::new(move || {
         if let Some(backend) = weak_backend.upgrade() {
             backend.on_ready();
         }
     })));
-    backend.install();
 
+    backend.install();
     ui.window.present();
+
     if ui.has_configuration_issues() {
         let weak_ui = Rc::downgrade(&ui);
+
         gtk::glib::idle_add_local_once(move || {
             if let Some(ui) = weak_ui.upgrade() {
                 ui.present_configuration_diagnostics();
@@ -768,6 +935,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     // only weak references to the aggregated UI state. Retain that state until
     // application shutdown without introducing a widget/signal reference cycle.
     let retained_application = Rc::new(RefCell::new(Some((ui, backend))));
+
     application.connect_shutdown(move |_| {
         if let Some((ui, _backend)) = retained_application.borrow_mut().take() {
             ui.save_layout();

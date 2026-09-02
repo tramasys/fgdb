@@ -17,29 +17,40 @@ impl Ui {
         if !self.is_stop_refresh_current(generation) {
             return;
         }
+
         let selected = root_variable_at(
             &self.expression_watches_selection,
             self.expression_watches_selection.selected(),
         )
         .map(|variable| variable.name);
         let changed = replace_variable_roots_if_changed(&self.expression_watches_store, variables);
+
+        if changed != VariableRootChange::Unchanged {
+            self.rebuild_variable_node_index();
+        }
+
         self.expression_watches_empty
             .set_visible(variables.is_empty());
+
         if changed == VariableRootChange::Unchanged {
             self.update_control_sensitivity();
             return;
         }
+
         if changed == VariableRootChange::Rebuilt && !variables.is_empty() {
             self.expression_watches_selection
                 .set_selected(gtk::INVALID_LIST_POSITION);
+
             let selected = selected
                 .as_deref()
                 .and_then(|name| {
                     root_variable_position(&self.expression_watches_selection, name, false)
                 })
                 .unwrap_or(0);
+
             self.expression_watches_selection.set_selected(selected);
         }
+
         self.update_control_sensitivity();
     }
 
@@ -52,7 +63,12 @@ impl Ui {
         if !self.is_stop_refresh_current(generation) {
             return;
         }
-        replace_variable_root(&self.expression_watches_store, index, variable, false);
+
+        let previous = variable_root_node(&self.expression_watches_store, index);
+
+        if replace_variable_root(&self.expression_watches_store, index, variable, false) {
+            self.reindex_variable_root(&self.expression_watches_store, index, previous.as_ref());
+        }
     }
 
     pub fn show_expression_watches_unavailable(&self, value: &str) {
@@ -68,8 +84,11 @@ impl Ui {
                 varobj: None,
                 num_children: 0,
                 has_more: false,
+                display_hint: None,
+                dynamic: false,
             })
             .collect::<Vec<_>>();
+
         self.show_expression_watches_for_refresh(
             self.current_stop_refresh_generation(),
             &variables,
@@ -78,6 +97,7 @@ impl Ui {
 
     pub(super) fn connect_expression_watch_controls(&self) {
         let add_button = self.expression_watch_add_button.clone();
+
         self.expression_watch_entry.connect_activate(move |_| {
             if add_button.is_sensitive() {
                 add_button.emit_clicked();
@@ -89,8 +109,10 @@ impl Ui {
         let ready = Rc::clone(&self.debugger_ready);
         let debugger_state = Rc::clone(&self.debugger_state);
         let pending = Rc::clone(&self.command_pending);
+
         self.expression_watch_entry.connect_changed(move |entry| {
             let expression = entry.text();
+
             button.set_sensitive(
                 ready.get()
                     && !debugger_state.get().inferior_running()
@@ -107,8 +129,10 @@ impl Ui {
         let entry = self.expression_watch_entry.clone();
         let expressions = Rc::clone(&self.expression_watches);
         let refresh = Rc::clone(&self.expression_watch_refresh_handler);
+
         self.expression_watch_add_button.connect_clicked(move |_| {
             let expression = entry.text().trim().to_owned();
+
             if expression.is_empty()
                 || expressions.borrow().len() >= MAX_EXPRESSION_WATCHES
                 || expressions
@@ -118,9 +142,11 @@ impl Ui {
             {
                 return;
             }
+
             expressions.borrow_mut().push(expression);
             entry.set_text("");
             let refresh = refresh.borrow().clone();
+
             if let Some(refresh) = refresh {
                 refresh();
             }
@@ -130,6 +156,7 @@ impl Ui {
         let ready = Rc::clone(&self.debugger_ready);
         let debugger_state = Rc::clone(&self.debugger_state);
         let pending = Rc::clone(&self.command_pending);
+
         self.expression_watches_selection
             .connect_selected_notify(move |selection| {
                 remove_button.set_sensitive(
@@ -143,15 +170,19 @@ impl Ui {
         let selection = self.expression_watches_selection.clone();
         let expressions = Rc::clone(&self.expression_watches);
         let refresh = Rc::clone(&self.expression_watch_refresh_handler);
+
         self.expression_watch_remove_button
             .connect_clicked(move |_| {
                 let Some(variable) = root_variable_at(&selection, selection.selected()) else {
                     return;
                 };
+
                 expressions
                     .borrow_mut()
                     .retain(|expression| expression != &variable.name);
+
                 let refresh = refresh.borrow().clone();
+
                 if let Some(refresh) = refresh {
                     refresh();
                 }
@@ -171,6 +202,7 @@ impl Ui {
         let debugger_state = Rc::clone(&self.debugger_state);
         let command_pending = Rc::clone(&self.command_pending);
         let session_pending = Rc::clone(&self.session_pending);
+
         self.expression_watches_view
             .connect_activate(move |_, position| {
                 if !debugger_ready.get()
@@ -181,9 +213,11 @@ impl Ui {
                 {
                     return;
                 }
+
                 let Some((row, node)) = variable_node_at(&selection, position) else {
                     return;
                 };
+
                 if node.load_more.is_some() {
                     request_next_variable_page_if_needed(&node, &children_handler);
                 } else if !node.placeholder {
@@ -192,6 +226,7 @@ impl Ui {
                     } else {
                         let variable = node.variable;
                         let editor_handler = editor_handler.borrow().clone();
+
                         if let Some(editor_handler) = editor_handler {
                             editor_handler(variable);
                         } else {

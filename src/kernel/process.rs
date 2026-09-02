@@ -39,6 +39,7 @@ pub(super) fn populate_process(
     push_status(&mut snapshot.process, status, "Name", "Name");
     push_status(&mut snapshot.process, status, "State", "State");
     snapshot.process.push(fact("PID", snapshot.pid.to_string()));
+
     for (source, label) in [
         ("Tgid", "Thread group"),
         ("PPid", "Parent PID"),
@@ -51,10 +52,13 @@ pub(super) fn populate_process(
     ] {
         push_status(&mut snapshot.process, status, source, label);
     }
+
     push_read_link(&mut snapshot.process, root, "exe", "Executable");
     push_read_link(&mut snapshot.process, root, "cwd", "Working directory");
+
     if let Ok(command_line) = crate::bounded::read_bytes(&root.join("cmdline"), 2 * 1024 * 1024) {
         let mut joined = String::with_capacity(command_line.len());
+
         for argument in command_line
             .split(|byte| *byte == 0)
             .filter(|argument| !argument.is_empty())
@@ -62,12 +66,15 @@ pub(super) fn populate_process(
             if !joined.is_empty() {
                 joined.push(' ');
             }
+
             joined.push_str(&String::from_utf8_lossy(argument));
         }
+
         if !joined.is_empty() {
             snapshot.process.push(fact("Command line", joined));
         }
     }
+
     if let Ok(syscall) = crate::bounded::read_string(&root.join("syscall"), MAX_PROC_TEXT_BYTES) {
         snapshot.process.push(fact(
             "Kernel syscall state",
@@ -89,18 +96,22 @@ pub(super) fn populate_scheduler(
         snapshot.metrics.sched_wait_ns = wait_ns;
         snapshot.metrics.sched_timeslices = timeslices;
         snapshot.metrics.schedstat_available = true;
+
         snapshot.scheduler.push(fact(
             "Main-thread CPU execution",
             format_duration_ns(runtime_ns),
         ));
+
         snapshot.scheduler.push(fact(
             "Main-thread run-queue wait",
             format_duration_ns(wait_ns),
         ));
+
         snapshot
             .scheduler
             .push(fact("Main-thread timeslices", timeslices.to_string()));
     }
+
     for (source, label) in [
         ("Cpus_allowed_list", "Allowed CPUs"),
         ("Mems_allowed_list", "Allowed NUMA nodes"),
@@ -109,25 +120,31 @@ pub(super) fn populate_scheduler(
     ] {
         push_status(&mut snapshot.scheduler, status, source, label);
     }
+
     snapshot.metrics.voluntary_switches = status
         .get("voluntary_ctxt_switches")
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
+
     snapshot.metrics.involuntary_switches = status
         .get("nonvoluntary_ctxt_switches")
         .and_then(|value| value.parse().ok())
         .unwrap_or(0);
+
     if let Some(stat) = stat {
         snapshot.scheduler.push(fact(
             "Current CPU",
             stat.processor
                 .map_or_else(|| String::from("unknown"), |cpu| cpu.to_string()),
         ));
+
         snapshot
             .scheduler
             .push(fact("Static priority", stat.priority.to_string()));
+
         snapshot.scheduler.push(fact("Nice", stat.nice.to_string()));
     }
+
     if let Ok(sched) = read_key_values(&root.join("sched")) {
         for (source, label) in [
             ("se.sum_exec_runtime", "CPU runtime"),
@@ -137,6 +154,7 @@ pub(super) fn populate_scheduler(
         ] {
             push_status(&mut snapshot.scheduler, &sched, source, label);
         }
+
         if let Some(policy) = sched.get("policy") {
             snapshot.scheduler.push(fact(
                 "Policy",
@@ -144,8 +162,10 @@ pub(super) fn populate_scheduler(
             ));
         }
     }
+
     if let Ok(wchan) = crate::bounded::read_string(&root.join("wchan"), MAX_PROC_TEXT_BYTES) {
         let wchan = wchan.trim();
+
         if !wchan.is_empty() && wchan != "0" {
             snapshot.scheduler.push(fact("Kernel wait channel", wchan));
         }
@@ -154,6 +174,7 @@ pub(super) fn populate_scheduler(
 
 fn parse_schedstat(input: &str) -> Option<(u64, u64, u64)> {
     let mut fields = input.split_whitespace();
+
     Some((
         fields.next()?.parse().ok()?,
         fields.next()?.parse().ok()?,
@@ -172,6 +193,7 @@ pub(super) fn populate_security(
         "NoNewPrivs",
         "No new privileges",
     );
+
     if let Some(seccomp) = status.get("Seccomp") {
         let mode = match seccomp.as_str() {
             "0" => "disabled",
@@ -179,16 +201,19 @@ pub(super) fn populate_security(
             "2" => "filter",
             _ => "unknown",
         };
+
         snapshot
             .security
             .push(fact("Seccomp", format!("{mode} ({seccomp})")));
     }
+
     push_status(
         &mut snapshot.security,
         status,
         "Seccomp_filters",
         "Seccomp filters",
     );
+
     for (source, label) in [
         ("CapInh", "Inheritable capabilities"),
         ("CapPrm", "Permitted capabilities"),
@@ -202,6 +227,7 @@ pub(super) fn populate_security(
                 .push(fact(label, decode_capabilities(capabilities)));
         }
     }
+
     for (source, label) in [
         ("CoreDumping", "Core dump in progress"),
         ("THP_enabled", "THP enabled"),
@@ -210,10 +236,12 @@ pub(super) fn populate_security(
     ] {
         push_status(&mut snapshot.security, status, source, label);
     }
+
     if let Ok(context) =
         crate::bounded::read_string(&root.join("attr/current"), MAX_PROC_TEXT_BYTES)
     {
         let context = context.trim();
+
         if !context.is_empty() {
             snapshot.security.push(fact("LSM context", context));
         }
@@ -224,6 +252,7 @@ pub(super) fn populate_io(snapshot: &mut KernelSnapshot, root: &Path) {
     let Ok(io) = read_key_values(&root.join("io")) else {
         return;
     };
+
     for (source, label, bytes) in [
         ("rchar", "Bytes returned by reads", true),
         ("wchar", "Bytes supplied to writes", true),
@@ -242,9 +271,11 @@ pub(super) fn populate_io(snapshot: &mut KernelSnapshot, root: &Path) {
             } else {
                 value.clone()
             };
+
             snapshot.io.push(fact(label, display));
         }
     }
+
     snapshot.metrics.read_characters = parse_u64(&io, "rchar");
     snapshot.metrics.write_characters = parse_u64(&io, "wchar");
     snapshot.metrics.read_bytes = parse_u64(&io, "read_bytes");
@@ -266,6 +297,7 @@ pub(super) fn populate_isolation(
     ] {
         push_status(&mut snapshot.isolation, status, source, label);
     }
+
     if let Ok(entries) = fs::read_dir(root.join("ns")) {
         let mut namespaces = entries
             .filter_map(Result::ok)
@@ -278,13 +310,16 @@ pub(super) fn populate_isolation(
                 })
             })
             .collect::<Vec<_>>();
+
         namespaces.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+
         snapshot.isolation.extend(
             namespaces
                 .into_iter()
                 .map(|(name, target)| fact(format!("{name} namespace"), target)),
         );
     }
+
     if let Ok(cgroups) = crate::bounded::read_string(&root.join("cgroup"), MAX_PROC_TEXT_BYTES) {
         snapshot.isolation.extend(
             cgroups
@@ -299,10 +334,12 @@ pub(super) fn populate_runtime(snapshot: &mut KernelSnapshot, root: &Path) {
     let elf = crate::bounded::read_prefix(&root.join("exe"), 64)
         .ok()
         .and_then(|bytes| parse_elf_identity(&bytes));
+
     if let Some(elf) = &elf {
         snapshot
             .runtime
             .push(fact("Executable format", &elf.description));
+
         snapshot.runtime.push(fact(
             "Position independent",
             if elf.pie {
@@ -312,6 +349,7 @@ pub(super) fn populate_runtime(snapshot: &mut KernelSnapshot, root: &Path) {
             },
         ));
     }
+
     if let Ok(value) = crate::bounded::read_string(
         &root
             .parent()
@@ -325,11 +363,13 @@ pub(super) fn populate_runtime(snapshot: &mut KernelSnapshot, root: &Path) {
             "2" => "full",
             _ => "unknown",
         };
+
         snapshot.runtime.push(fact(
             "Kernel ASLR policy",
             format!("{description} ({})", value.trim()),
         ));
     }
+
     if let Ok(personality) =
         crate::bounded::read_string(&root.join("personality"), MAX_PROC_TEXT_BYTES)
     {
@@ -338,6 +378,7 @@ pub(super) fn populate_runtime(snapshot: &mut KernelSnapshot, root: &Path) {
             format!("0x{}", personality.trim().trim_start_matches("0x")),
         ));
     }
+
     if let (Ok(auxv), Some(elf)) = (
         crate::bounded::read_bytes(&root.join("auxv"), 1024 * 1024),
         elf.as_ref(),
@@ -345,6 +386,7 @@ pub(super) fn populate_runtime(snapshot: &mut KernelSnapshot, root: &Path) {
         let word_size = elf.word_size;
         let endian = elf.endian;
         let address_width = word_size.saturating_mul(2);
+
         for (kind, value) in parse_auxv(&auxv, word_size, endian) {
             if let Some((label, pointer)) = auxv_label(kind) {
                 snapshot.runtime.push(fact(
@@ -366,52 +408,66 @@ pub(super) fn populate_threads_and_signals(
     process_status: &HashMap<String, String>,
 ) {
     const MAX_THREADS: usize = 8_192;
+
     let Ok(entries) = fs::read_dir(root.join("task")) else {
         populate_signals(snapshot, process_status, &[0; 64], &[0; 64]);
         return;
     };
+
     let architecture = executable_architecture(root);
     let deadline = Instant::now() + Duration::from_millis(500);
     let mut threads = Vec::new();
     let mut thread_pending = [0_usize; 64];
     let mut thread_blocked = [0_usize; 64];
+
     for (index, entry) in entries.filter_map(Result::ok).enumerate() {
         if index >= MAX_THREADS {
             snapshot.warnings.push(format!(
                 "Thread details were truncated at {MAX_THREADS} entries"
             ));
+
             break;
         }
+
         if Instant::now() >= deadline {
             snapshot.warnings.push(String::from(
                 "Thread details were truncated after the 500 ms snapshot budget",
             ));
+
             break;
         }
+
         let Some(tid) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
             continue;
         };
+
         let thread_root = entry.path();
+
         let Ok(status) = read_thread_status(&thread_root.join("status")) else {
             continue;
         };
+
         accumulate_signal_mask(&mut thread_pending, status.pending);
         accumulate_signal_mask(&mut thread_blocked, status.blocked);
         let stat = read_proc_stat(&thread_root.join("stat"));
         let policy = read_thread_policy(&thread_root.join("sched"));
+
         let wait_channel =
             crate::bounded::read_string(&thread_root.join("wchan"), MAX_PROC_TEXT_BYTES)
                 .unwrap_or_default()
                 .trim()
                 .to_owned();
+
         let syscall =
             crate::bounded::read_string(&thread_root.join("syscall"), MAX_PROC_TEXT_BYTES)
                 .map(|value| decode_syscall(value.trim(), architecture))
                 .unwrap_or_default();
+
         let schedstat =
             crate::bounded::read_string(&thread_root.join("schedstat"), MAX_PROC_TEXT_BYTES)
                 .ok()
                 .and_then(|value| parse_schedstat(&value));
+
         threads.push(KernelThread {
             tid,
             name: status.name,
@@ -437,6 +493,7 @@ pub(super) fn populate_threads_and_signals(
             timeslices: schedstat.map(|value| value.2),
         });
     }
+
     threads.sort_unstable_by_key(|thread| thread.tid);
     snapshot.threads = threads;
     populate_signals(snapshot, process_status, &thread_pending, &thread_blocked);
@@ -444,16 +501,20 @@ pub(super) fn populate_threads_and_signals(
 
 fn read_thread_status(path: &Path) -> io::Result<ThreadStatus> {
     let input = crate::bounded::read_string(path, 64 * 1024)?;
+
     let mut status = ThreadStatus {
         voluntary_switches: String::from("0"),
         involuntary_switches: String::from("0"),
         ..ThreadStatus::default()
     };
+
     for line in input.lines() {
         let Some((key, value)) = line.split_once(':') else {
             continue;
         };
+
         let value = value.trim();
+
         match key {
             "Name" => status.name = value.to_owned(),
             "State" => status.state = value.to_owned(),
@@ -465,6 +526,7 @@ fn read_thread_status(path: &Path) -> io::Result<ThreadStatus> {
             _ => {}
         }
     }
+
     Ok(status)
 }
 
@@ -474,6 +536,7 @@ fn read_thread_policy(path: &Path) -> String {
         .and_then(|input| {
             input.lines().find_map(|line| {
                 let (key, value) = line.split_once(':')?;
+
                 (key.trim() == "policy").then(|| scheduler_policy(value.trim()).to_owned())
             })
         })
@@ -519,36 +582,48 @@ pub(super) fn populate_hierarchy(
     status: &HashMap<String, String>,
 ) {
     const HIERARCHY_BUDGET: Duration = Duration::from_millis(250);
+
     let Some(proc_root) = root.parent() else {
         return;
     };
+
     let mut ancestors = Vec::new();
+
     let mut parent = status
         .get("PPid")
         .and_then(|value| value.parse::<u32>().ok())
         .unwrap_or(0);
+
     let mut visited = HashSet::new();
+
     for _ in 0..8 {
         if parent == 0 || !visited.insert(parent) {
             break;
         }
+
         let Some(info) = process_summary(proc_root, parent) else {
             break;
         };
+
         parent = info.parent_pid;
         ancestors.push(info);
     }
+
     ancestors.reverse();
     let ancestor_count = ancestors.len();
+
     for (depth, mut process) in ancestors.into_iter().enumerate() {
         process.depth = depth as u8;
+
         process.relation = if depth + 1 == ancestor_count {
             String::from("Parent")
         } else {
             String::from("Ancestor")
         };
+
         snapshot.process_tree.push(process);
     }
+
     snapshot.process_tree.push(KernelProcess {
         pid: snapshot.pid,
         parent_pid: status
@@ -561,24 +636,30 @@ pub(super) fn populate_hierarchy(
         state: status.get("State").cloned().unwrap_or_default(),
         threads: status.get("Threads").cloned().unwrap_or_default(),
     });
+
     let mut queue = VecDeque::from([(snapshot.pid, ancestor_count as u8 + 1)]);
     let mut seen = HashSet::from([snapshot.pid]);
     let deadline = Instant::now() + HIERARCHY_BUDGET;
+
     while let Some((parent, depth)) = queue.pop_front() {
         if snapshot.process_tree.len() >= 256 || Instant::now() >= deadline {
             break;
         }
+
         for child in child_processes(proc_root, parent, deadline) {
             if !seen.insert(child) {
                 continue;
             }
+
             if let Some(mut info) = process_summary(proc_root, child) {
                 info.depth = depth;
+
                 info.relation = if depth == ancestor_count as u8 + 1 {
                     String::from("Child")
                 } else {
                     String::from("Descendant")
                 };
+
                 snapshot.process_tree.push(info);
                 queue.push_back((child, depth.saturating_add(1)));
             }
@@ -604,6 +685,7 @@ pub(super) fn read_proc_stat(path: &Path) -> Option<ProcStat> {
     let mut nice = None;
     let mut start_time = None;
     let mut processor = None;
+
     for (index, value) in stat.rsplit_once(") ")?.1.split_whitespace().enumerate() {
         match index {
             7 => minor_faults = value.parse().ok(),
@@ -620,6 +702,7 @@ pub(super) fn read_proc_stat(path: &Path) -> Option<ProcStat> {
             _ => {}
         }
     }
+
     Some(ProcStat {
         minor_faults: minor_faults?,
         major_faults: major_faults?,
@@ -649,6 +732,7 @@ fn signal_mask(status: &HashMap<String, String>, key: &str) -> u64 {
 fn process_summary(proc_root: &Path, pid: u32) -> Option<KernelProcess> {
     let root = proc_root.join(pid.to_string());
     let status = read_key_values(&root.join("status")).ok()?;
+
     Some(KernelProcess {
         pid,
         parent_pid: status
@@ -665,22 +749,27 @@ fn process_summary(proc_root: &Path, pid: u32) -> Option<KernelProcess> {
 
 fn process_display_name(root: &Path, status: &HashMap<String, String>) -> String {
     let kernel_name = status.get("Name").cloned().unwrap_or_default();
+
     if kernel_name.len() < 15 {
         return kernel_name;
     }
+
     let argv0 = crate::bounded::read_prefix(&root.join("cmdline"), 64 * 1024)
         .ok()
         .and_then(|bytes| {
             let argument = bytes.split(|byte| *byte == 0).next()?;
             let argument = String::from_utf8_lossy(argument);
+
             Path::new(argument.as_ref())
                 .file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         });
+
     let executable = fs::read_link(root.join("exe")).ok().and_then(|path| {
         path.file_name()
             .map(|name| name.to_string_lossy().into_owned())
     });
+
     [argv0, executable]
         .into_iter()
         .flatten()
@@ -694,19 +783,24 @@ fn process_display_name(root: &Path, status: &HashMap<String, String>) -> String
 fn child_processes(proc_root: &Path, pid: u32, deadline: Instant) -> Vec<u32> {
     const MAX_CHILDREN: usize = 256;
     let task = proc_root.join(pid.to_string()).join("task");
+
     let Ok(entries) = fs::read_dir(task) else {
         return Vec::new();
     };
+
     let mut children = Vec::new();
     let mut seen = HashSet::new();
+
     'threads: for entry in entries.filter_map(Result::ok) {
         if Instant::now() >= deadline {
             break;
         }
+
         let Ok(list) = crate::bounded::read_string(&entry.path().join("children"), 64 * 1024)
         else {
             continue;
         };
+
         for child in list
             .split_whitespace()
             .filter_map(|pid| pid.parse::<u32>().ok())
@@ -714,12 +808,15 @@ fn child_processes(proc_root: &Path, pid: u32, deadline: Instant) -> Vec<u32> {
             if seen.insert(child) {
                 children.push(child);
             }
+
             if children.len() >= MAX_CHILDREN {
                 break 'threads;
             }
         }
     }
+
     children.sort_unstable();
+
     children
 }
 
@@ -744,24 +841,31 @@ fn scheduler_policy(policy: &str) -> &'static str {
 
 fn decode_syscall(value: &str, architecture: TargetArchitecture) -> String {
     let mut fields = value.split_whitespace();
+
     let Some(number) = fields.next() else {
         return String::new();
     };
+
     let Ok(number) = number.parse::<i64>() else {
         return value.to_owned();
     };
+
     if number < 0 {
         return String::from("not in a syscall");
     }
+
     let number = architecture.normalize_syscall_number(number as u64);
     let name = architecture.syscall_name(number);
     let mut arguments = String::new();
+
     for argument in fields.take(6) {
         if !arguments.is_empty() {
             arguments.push(' ');
         }
+
         arguments.push_str(argument);
     }
+
     if arguments.is_empty() {
         format!("{name} ({number})")
     } else {
@@ -828,15 +932,19 @@ fn parse_elf_identity(bytes: &[u8]) -> Option<ElfIdentity> {
     let (architecture, endian, pointer_bits) = TargetArchitecture::from_elf_ident(bytes)?;
     let word_size = usize::try_from(pointer_bits / 8).ok()?;
     let little = endian == TargetEndian::Little;
+
     let read_u16 = |offset| {
         let data: [u8; 2] = bytes.get(offset..offset + 2)?.try_into().ok()?;
+
         Some(if little {
             u16::from_le_bytes(data)
         } else {
             u16::from_be_bytes(data)
         })
     };
+
     let kind = read_u16(16)?;
+
     Some(ElfIdentity {
         description: format!(
             "ELF{} · {} · {} endian",
@@ -853,27 +961,35 @@ fn parse_elf_identity(bytes: &[u8]) -> Option<ElfIdentity> {
 
 fn parse_auxv(bytes: &[u8], word_size: usize, endian: TargetEndian) -> Vec<(u64, u64)> {
     let pair_size = word_size.saturating_mul(2);
+
     if !matches!(word_size, 4 | 8) {
         return Vec::new();
     }
+
     let read = |slice: &[u8]| match word_size {
         4 => Some(u64::from(endian.decode_u32(slice.try_into().ok()?))),
         8 => Some(endian.decode_u64(slice.try_into().ok()?)),
         _ => None,
     };
+
     let mut entries = Vec::new();
+
     for pair in bytes.chunks_exact(pair_size) {
         let Some(kind) = read(&pair[..word_size]) else {
             break;
         };
+
         if kind == 0 {
             break;
         }
+
         let Some(value) = read(&pair[word_size..]) else {
             break;
         };
+
         entries.push((kind, value));
     }
+
     entries
 }
 
@@ -948,15 +1064,18 @@ fn decode_capabilities(value: &str) -> String {
         "BPF",
         "CHECKPOINT_RESTORE",
     ];
+
     let Ok(mask) = u64::from_str_radix(value.trim_start_matches("0x"), 16) else {
         return value.to_owned();
     };
+
     let enabled = NAMES
         .iter()
         .enumerate()
         .filter(|(bit, _)| mask & (1_u64 << bit) != 0)
         .map(|(_, name)| *name)
         .collect::<Vec<_>>();
+
     if enabled.is_empty() {
         format!("0x{mask:x} · none")
     } else {
@@ -995,6 +1114,7 @@ mod tests {
         assert_eq!(signal_name(11), "SIGSEGV");
         assert_eq!(signal_name(34), "SIGRTMIN+0");
         assert!(decode_capabilities("0000000000002000").contains("NET_RAW"));
+
         assert_eq!(
             parse_schedstat("1200000 34000 8\n"),
             Some((1_200_000, 34_000, 8))
@@ -1012,7 +1132,6 @@ mod tests {
         let identity = parse_elf_identity(&arm).unwrap();
         assert_eq!(identity.architecture, TargetArchitecture::Arm);
         assert_eq!(identity.word_size, 4);
-
         let mut ppc64 = [0_u8; 64];
         ppc64[..4].copy_from_slice(b"\x7fELF");
         ppc64[4] = 2;
@@ -1038,10 +1157,12 @@ mod tests {
             0x1234_u32.to_be_bytes().to_vec(),
         ]
         .concat();
+
         assert_eq!(
             parse_auxv(&trailing_after_null, 4, TargetEndian::Big),
             [(6, 4096)]
         );
+
         assert!(parse_auxv(&trailing_after_null, 16, TargetEndian::Big).is_empty());
     }
 }

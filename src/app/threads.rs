@@ -2,12 +2,15 @@ use super::*;
 
 const MAX_BACKTRACE_THREADS: usize = 256;
 const MAX_BACKTRACE_FRAME: u32 = 31;
+const MAX_CONCURRENT_BACKTRACES: usize = 6;
 type ThreadActionContinuation = Box<dyn FnOnce(Weak<Ui>, Rc<MiClient>)>;
 
 struct BacktraceCollection {
     ui: Weak<Ui>,
     generation: u64,
-    remaining: usize,
+    pending: VecDeque<ThreadInfo>,
+    in_flight: usize,
+    finished: bool,
     traces: Vec<ThreadBacktrace>,
 }
 
@@ -39,8 +42,10 @@ pub(super) fn refresh_thread_policy(ui: &Weak<Ui>, client: &MiClient) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     let generation = current_ui.start_thread_policy_refresh();
     drop(current_ui);
+
     let refresh = Rc::new(RefCell::new(ThreadPolicyRefresh {
         ui: ui.clone(),
         generation,
@@ -50,6 +55,7 @@ pub(super) fn refresh_thread_policy(ui: &Weak<Ui>, client: &MiClient) {
     }));
 
     let refresh_for_response = Rc::clone(&refresh);
+
     if client
         .request("-gdb-show scheduler-locking", move |_, record| {
             let value = record
@@ -58,6 +64,7 @@ pub(super) fn refresh_thread_policy(ui: &Weak<Ui>, client: &MiClient) {
                 .flatten()
                 .and_then(|value| value.as_const())
                 .and_then(parse_scheduler_locking);
+
             complete_thread_policy_refresh(&refresh_for_response, Some(value), None);
         })
         .is_err()
@@ -66,6 +73,7 @@ pub(super) fn refresh_thread_policy(ui: &Weak<Ui>, client: &MiClient) {
     }
 
     let refresh_for_response = Rc::clone(&refresh);
+
     if client
         .request("-gdb-show non-stop", move |_, record| {
             let value = record
@@ -74,6 +82,7 @@ pub(super) fn refresh_thread_policy(ui: &Weak<Ui>, client: &MiClient) {
                 .flatten()
                 .and_then(|value| value.as_const())
                 .and_then(parse_on_off);
+
             complete_thread_policy_refresh(&refresh_for_response, None, Some(value));
         })
         .is_err()
@@ -89,13 +98,17 @@ fn complete_thread_policy_refresh(
 ) {
     let finished = {
         let mut refresh = refresh.borrow_mut();
+
         if let Some(scheduler) = scheduler {
             refresh.scheduler = scheduler;
         }
+
         if let Some(non_stop) = non_stop {
             refresh.non_stop = non_stop;
         }
+
         refresh.remaining = refresh.remaining.saturating_sub(1);
+
         (refresh.remaining == 0).then(|| {
             (
                 refresh.ui.clone(),
@@ -105,9 +118,11 @@ fn complete_thread_policy_refresh(
             )
         })
     };
+
     let Some((ui, generation, scheduler, non_stop)) = finished else {
         return;
     };
+
     if let Some(ui) = ui
         .upgrade()
         .filter(|ui| ui.is_thread_policy_refresh_current(generation))
@@ -123,10 +138,12 @@ pub(super) fn handle_thread_action(ui: Weak<Ui>, client: Rc<MiClient>, action: T
     {
         return;
     }
+
     match action {
         ThreadAction::Refresh => {
             refresh_thread_policy(&ui, &client);
             refresh_inferiors(&ui, &client);
+
             if ui.upgrade().is_some_and(|ui| !ui.inferior_is_running()) {
                 refresh_threads(&ui, &client);
             }
@@ -141,6 +158,7 @@ pub(super) fn handle_thread_action(ui: Weak<Ui>, client: Rc<MiClient>, action: T
         ThreadAction::Backtraces { generation } => {
             request_all_backtraces(ui, client, generation);
         }
+
         ThreadAction::Compare {
             generation,
             left,
@@ -161,23 +179,28 @@ fn set_scheduler_locking(
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     current_ui.set_thread_action_pending(Some(ThreadActionPending::Setting));
     drop(current_ui);
     let command = format!("-gdb-set scheduler-locking {}", mode.gdb_value());
     let weak_ui = ui.clone();
     let weak_ui_for_error = ui;
     let client_for_response = Rc::clone(&client);
+
     if client
         .request(&command, move |_, record| {
             let Some(current_ui) = weak_ui.upgrade() else {
                 return;
             };
+
             if !record.is_done() {
                 current_ui.clear_thread_action_pending();
+
                 current_ui.set_thread_control_policy(
                     current_ui.scheduler_locking_mode(),
                     current_ui.non_stop_mode(),
                 );
+
                 current_ui.set_status(
                     "Scheduler locking failed",
                     record
@@ -185,14 +208,18 @@ fn set_scheduler_locking(
                         .unwrap_or("GDB rejected the scheduler-locking mode"),
                     Some("status-error"),
                 );
+
                 return;
             }
+
             current_ui.set_thread_control_policy(Some(mode), current_ui.non_stop_mode());
+
             if let Some(next) = then {
                 drop(current_ui);
                 next(weak_ui.clone(), Rc::clone(&client_for_response));
             } else {
                 current_ui.clear_thread_action_pending();
+
                 current_ui.set_status(
                     "Scheduler locking updated",
                     &format!("Scheduler locking is now {}", mode.gdb_value()),
@@ -204,6 +231,7 @@ fn set_scheduler_locking(
         && let Some(ui) = weak_ui_for_error.upgrade()
     {
         ui.clear_thread_action_pending();
+
         ui.set_status(
             "Scheduler locking failed",
             "Could not queue the GDB setting command",
@@ -216,31 +244,39 @@ fn set_non_stop(ui: Weak<Ui>, client: Rc<MiClient>, enabled: bool) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     if current_ui.inferior_has_started() {
         current_ui.set_thread_control_policy(
             current_ui.scheduler_locking_mode(),
             current_ui.non_stop_mode(),
         );
+
         current_ui.set_status(
             "Non-stop mode unchanged",
             "GDB can change non-stop mode only before starting or attaching to a target",
             Some("status-error"),
         );
+
         return;
     }
+
     current_ui.set_thread_action_pending(Some(ThreadActionPending::Setting));
     drop(current_ui);
     let command = format!("-gdb-set non-stop {}", if enabled { "on" } else { "off" });
     let weak_ui = ui.clone();
     let weak_ui_for_error = ui;
+
     if client
         .request(&command, move |_, record| {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
+
             ui.clear_thread_action_pending();
+
             if record.is_done() {
                 ui.set_thread_control_policy(ui.scheduler_locking_mode(), Some(enabled));
+
                 ui.set_status(
                     "Thread-control mode updated",
                     if enabled {
@@ -252,6 +288,7 @@ fn set_non_stop(ui: Weak<Ui>, client: Rc<MiClient>, enabled: bool) {
                 );
             } else {
                 ui.set_thread_control_policy(ui.scheduler_locking_mode(), ui.non_stop_mode());
+
                 ui.set_status(
                     "Thread-control mode failed",
                     record
@@ -266,6 +303,7 @@ fn set_non_stop(ui: Weak<Ui>, client: Rc<MiClient>, enabled: bool) {
     {
         ui.clear_thread_action_pending();
         ui.set_thread_control_policy(ui.scheduler_locking_mode(), ui.non_stop_mode());
+
         ui.set_status(
             "Thread-control mode failed",
             "Could not queue the GDB non-stop setting",
@@ -278,14 +316,17 @@ fn run_only(ui: Weak<Ui>, client: Rc<MiClient>, id: String) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     let Some(thread) = crate::debugger::thread_id_argument(&id).map(str::to_owned) else {
         current_ui.set_status(
             "Thread execution unavailable",
             &format!("GDB reported an unsupported thread identifier: {id}"),
             Some("status-error"),
         );
+
         return;
     };
+
     if current_ui.non_stop_mode() == Some(true)
         || current_ui.scheduler_locking_mode() == Some(SchedulerLockingMode::On)
     {
@@ -293,8 +334,10 @@ fn run_only(ui: Weak<Ui>, client: Rc<MiClient>, id: String) {
         resume_thread(ui, client, thread, "Running only the selected thread");
         return;
     }
+
     drop(current_ui);
     let thread_for_resume = thread;
+
     set_scheduler_locking(
         ui,
         client,
@@ -314,7 +357,9 @@ fn resume_thread(ui: Weak<Ui>, client: Rc<MiClient>, id: String, detail: &'stati
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     current_ui.set_thread_action_pending(Some(ThreadActionPending::Execution));
+
     if !crate::ui::controls::issue_execution_command(
         &current_ui,
         &client,
@@ -329,23 +374,29 @@ fn control_non_stop_thread(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resum
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     if current_ui.non_stop_mode() != Some(true) {
         current_ui.set_status(
             "Individual thread control unavailable",
             "Freeze and thaw require GDB non-stop mode, which must be enabled before the target starts",
             Some("status-error"),
         );
+
         return;
     }
+
     let Some(thread) = crate::debugger::thread_id_argument(&id) else {
         current_ui.set_status(
             "Individual thread control unavailable",
             &format!("GDB reported an unsupported thread identifier: {id}"),
             Some("status-error"),
         );
+
         return;
     };
+
     current_ui.set_thread_action_pending(Some(ThreadActionPending::Execution));
+
     let command = format!(
         "{} --thread {thread}",
         if resume {
@@ -354,6 +405,7 @@ fn control_non_stop_thread(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resum
             "-exec-interrupt"
         }
     );
+
     if !crate::ui::controls::issue_execution_command(
         &current_ui,
         &client,
@@ -372,68 +424,124 @@ fn request_all_backtraces(ui: Weak<Ui>, client: Rc<MiClient>, generation: u64) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     let threads = current_ui
         .thread_snapshot()
         .into_iter()
         .filter(|thread| thread.state == "stopped")
         .take(MAX_BACKTRACE_THREADS)
         .collect::<Vec<_>>();
+
     if threads.is_empty() {
         current_ui.show_thread_analysis_error(
             generation,
             "No stopped threads are available for backtracing",
         );
+
         return;
     }
+
     current_ui.set_thread_action_pending(Some(ThreadActionPending::Analysis));
     drop(current_ui);
+    let thread_count = threads.len();
+
     let collection = Rc::new(RefCell::new(BacktraceCollection {
         ui,
         generation,
-        remaining: threads.len(),
-        traces: Vec::with_capacity(threads.len()),
+        pending: threads.into(),
+        in_flight: 0,
+        finished: false,
+        traces: Vec::with_capacity(thread_count),
     }));
-    for thread in threads {
+
+    pump_backtraces(&collection, &client);
+}
+
+fn pump_backtraces(collection: &Rc<RefCell<BacktraceCollection>>, client: &MiClient) {
+    loop {
+        let thread = {
+            let mut state = collection.borrow_mut();
+
+            let current = state.ui.upgrade().is_some_and(|ui| {
+                ui.is_thread_analysis_current(state.generation) && !ui.inferior_is_running()
+            });
+
+            if !current {
+                state.pending.clear();
+                return;
+            }
+
+            if state.in_flight >= MAX_CONCURRENT_BACKTRACES {
+                return;
+            }
+
+            let Some(thread) = state.pending.pop_front() else {
+                drop(state);
+                finish_backtraces(collection);
+                return;
+            };
+
+            state.in_flight += 1;
+
+            thread
+        };
+
         let Some(id) = crate::debugger::thread_id_argument(&thread.id).map(str::to_owned) else {
-            complete_backtrace(
-                &collection,
+            record_backtrace(
+                collection,
                 ThreadBacktrace {
                     thread,
                     frames: Vec::new(),
                     error: Some(String::from("Unsupported GDB thread identifier")),
                 },
             );
+
             continue;
         };
+
         let command = format!("-stack-list-frames --thread {id} 0 {MAX_BACKTRACE_FRAME}");
-        let collection_for_response = Rc::clone(&collection);
+        let collection_for_response = Rc::clone(collection);
         let thread_for_response = thread.clone();
+        let collection_for_guard = Rc::clone(collection);
+
         if client
-            .request(&command, move |_, record| {
-                let trace = if record.is_done() {
-                    ThreadBacktrace {
-                        thread: thread_for_response,
-                        frames: crate::debugger::stack_frames(&record),
-                        error: None,
-                    }
-                } else {
-                    ThreadBacktrace {
-                        thread: thread_for_response,
-                        frames: Vec::new(),
-                        error: Some(
-                            record
-                                .error_message()
-                                .unwrap_or("GDB could not read this thread stack")
-                                .to_owned(),
-                        ),
-                    }
-                };
-                complete_backtrace(&collection_for_response, trace);
-            })
+            .request_when(
+                &command,
+                move || {
+                    let collection = collection_for_guard.borrow();
+
+                    collection.ui.upgrade().is_some_and(|ui| {
+                        ui.is_thread_analysis_current(collection.generation)
+                            && !ui.inferior_is_running()
+                    })
+                },
+                move |client, record| {
+                    let trace = if record.is_done() {
+                        ThreadBacktrace {
+                            thread: thread_for_response,
+                            frames: crate::debugger::stack_frames(&record),
+                            error: None,
+                        }
+                    } else {
+                        ThreadBacktrace {
+                            thread: thread_for_response,
+                            frames: Vec::new(),
+                            error: Some(
+                                record
+                                    .error_message()
+                                    .unwrap_or("GDB could not read this thread stack")
+                                    .to_owned(),
+                            ),
+                        }
+                    };
+
+                    complete_backtrace(&collection_for_response, client, trace);
+                },
+            )
             .is_err()
         {
-            complete_backtrace(
-                &collection,
+            record_backtrace(
+                collection,
                 ThreadBacktrace {
                     thread,
                     frames: Vec::new(),
@@ -444,27 +552,49 @@ fn request_all_backtraces(ui: Weak<Ui>, client: Rc<MiClient>, generation: u64) {
     }
 }
 
-fn complete_backtrace(collection: &Rc<RefCell<BacktraceCollection>>, trace: ThreadBacktrace) {
-    let finished = {
+fn complete_backtrace(
+    collection: &Rc<RefCell<BacktraceCollection>>,
+    client: &MiClient,
+    trace: ThreadBacktrace,
+) {
+    record_backtrace(collection, trace);
+    pump_backtraces(collection, client);
+}
+
+fn record_backtrace(collection: &Rc<RefCell<BacktraceCollection>>, trace: ThreadBacktrace) {
+    {
         let mut collection = collection.borrow_mut();
         collection.traces.push(trace);
-        collection.remaining = collection.remaining.saturating_sub(1);
-        collection.remaining == 0
+        collection.in_flight = collection.in_flight.saturating_sub(1);
+    }
+}
+
+fn finish_backtraces(collection: &Rc<RefCell<BacktraceCollection>>) {
+    let ready = {
+        let collection = collection.borrow();
+
+        !collection.finished && collection.pending.is_empty() && collection.in_flight == 0
     };
-    if !finished {
+
+    if !ready {
         return;
     }
+
     let (ui, generation, mut traces) = {
         let mut collection = collection.borrow_mut();
+        collection.finished = true;
+
         (
             collection.ui.clone(),
             collection.generation,
             std::mem::take(&mut collection.traces),
         )
     };
+
     traces.sort_by(|left, right| {
         crate::debugger::compare_thread_ids(&left.thread.id, &right.thread.id)
     });
+
     if let Some(ui) = ui
         .upgrade()
         .filter(|ui| ui.finish_thread_analysis_action(generation))
@@ -483,30 +613,38 @@ fn request_thread_comparison(
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     let threads = current_ui.thread_snapshot();
     let left = threads.iter().find(|thread| thread.id == left_id).cloned();
     let right = threads.iter().find(|thread| thread.id == right_id).cloned();
+
     let (Some(left), Some(right)) = (left, right) else {
         current_ui.show_thread_analysis_error(generation, "The selected threads no longer exist");
         return;
     };
+
     if left.state != "stopped" || right.state != "stopped" {
         current_ui.show_thread_analysis_error(
             generation,
             "Both threads must be stopped before frames and registers can be compared",
         );
+
         return;
     }
+
     current_ui.set_thread_action_pending(Some(ThreadActionPending::Analysis));
+
     if let Some(names) = current_ui.cached_register_names() {
         drop(current_ui);
         start_thread_comparison(ui, client, generation, left, right, names);
         return;
     }
+
     drop(current_ui);
     let weak_ui = ui.clone();
     let weak_ui_for_error = ui;
     let client_for_response = Rc::clone(&client);
+
     if client
         .request("-data-list-register-names", move |_, record| {
             if !record.is_done() {
@@ -521,9 +659,12 @@ fn request_thread_comparison(
                             .unwrap_or("GDB could not list target registers"),
                     );
                 }
+
                 return;
             }
+
             let names = Rc::new(crate::debugger::register_names(&record));
+
             if let Some(ui) = weak_ui
                 .upgrade()
                 .filter(|ui| ui.is_thread_analysis_current(generation))
@@ -532,6 +673,7 @@ fn request_thread_comparison(
             } else {
                 return;
             }
+
             start_thread_comparison(
                 weak_ui.clone(),
                 Rc::clone(&client_for_response),
@@ -564,6 +706,7 @@ fn start_thread_comparison(
         right: right.clone(),
         results: ComparisonResults::default(),
     }));
+
     request_comparison_frames(&client, &collection, left, true);
     request_comparison_frames(&client, &collection, right, false);
 
@@ -572,6 +715,7 @@ fn start_thread_comparison(
         .ui
         .upgrade()
         .map_or(TargetArchitecture::Unknown, |ui| ui.target_architecture());
+
     let numbers = crate::debugger::compact_register_numbers(&names, architecture);
     request_comparison_registers(&client, &collection, names.clone(), numbers.clone(), true);
     request_comparison_registers(&client, &collection, names, numbers, false);
@@ -585,15 +729,19 @@ fn request_comparison_frames(
 ) {
     let result = crate::debugger::thread_id_argument(&thread.id)
         .map(|id| format!("-stack-list-frames --thread {id} 0 {MAX_BACKTRACE_FRAME}"));
+
     let Some(command) = result else {
         complete_comparison_frames(
             collection,
             left,
             Err(String::from("Unsupported GDB thread identifier")),
         );
+
         return;
     };
+
     let collection_for_response = Rc::clone(collection);
+
     if client
         .request(&command, move |_, record| {
             let frames = if record.is_done() {
@@ -604,6 +752,7 @@ fn request_comparison_frames(
                     .unwrap_or("GDB could not read the thread stack")
                     .to_owned())
             };
+
             complete_comparison_frames(&collection_for_response, left, frames);
         })
         .is_err()
@@ -626,6 +775,7 @@ fn complete_comparison_frames(
     } else {
         collection.borrow_mut().results.right_frames = Some(result);
     }
+
     finish_comparison_if_ready(collection);
 }
 
@@ -641,23 +791,30 @@ fn request_comparison_registers(
     } else {
         collection.borrow().right.id.clone()
     };
+
     let Some(thread) = crate::debugger::thread_id_argument(&thread).map(str::to_owned) else {
         complete_comparison_registers(
             collection,
             left,
             Err(String::from("Unsupported GDB thread identifier")),
         );
+
         return;
     };
+
     if numbers.is_empty() {
         complete_comparison_registers(collection, left, Ok(Vec::new()));
         return;
     }
+
     let mut command = format!("-data-list-register-values --thread {thread} x");
+
     for number in numbers {
         let _ = write!(command, " {number}");
     }
+
     let collection_for_response = Rc::clone(collection);
+
     if client
         .request(&command, move |_, record| {
             let registers = if record.is_done() {
@@ -668,6 +825,7 @@ fn request_comparison_registers(
                     .unwrap_or("GDB could not read the thread registers")
                     .to_owned())
             };
+
             complete_comparison_registers(&collection_for_response, left, registers);
         })
         .is_err()
@@ -690,22 +848,27 @@ fn complete_comparison_registers(
     } else {
         collection.borrow_mut().results.right_registers = Some(result);
     }
+
     finish_comparison_if_ready(collection);
 }
 
 fn finish_comparison_if_ready(collection: &Rc<RefCell<ComparisonCollection>>) {
     let ready = {
         let collection = collection.borrow();
+
         collection.results.left_frames.is_some()
             && collection.results.right_frames.is_some()
             && collection.results.left_registers.is_some()
             && collection.results.right_registers.is_some()
     };
+
     if !ready {
         return;
     }
+
     let (ui, generation, left, right, results) = {
         let mut collection = collection.borrow_mut();
+
         (
             collection.ui.clone(),
             collection.generation,
@@ -714,6 +877,7 @@ fn finish_comparison_if_ready(collection: &Rc<RefCell<ComparisonCollection>>) {
             std::mem::take(&mut collection.results),
         )
     };
+
     let ComparisonResults {
         left_frames: Some(left_frames),
         right_frames: Some(right_frames),
@@ -730,14 +894,18 @@ fn finish_comparison_if_ready(collection: &Rc<RefCell<ComparisonCollection>>) {
                 "Thread comparison completed with an incomplete result",
             );
         }
+
         return;
     };
+
     let mut warnings = Vec::new();
     let left_frames = unwrap_comparison_result(left_frames, "Left stack", &mut warnings);
     let right_frames = unwrap_comparison_result(right_frames, "Right stack", &mut warnings);
     let left_registers = unwrap_comparison_result(left_registers, "Left registers", &mut warnings);
+
     let right_registers =
         unwrap_comparison_result(right_registers, "Right registers", &mut warnings);
+
     let comparison = ThreadComparison {
         left,
         right,
@@ -745,6 +913,7 @@ fn finish_comparison_if_ready(collection: &Rc<RefCell<ComparisonCollection>>) {
         registers: compare_registers(&left_registers, &right_registers),
         warnings,
     };
+
     if let Some(ui) = ui
         .upgrade()
         .filter(|ui| ui.finish_thread_analysis_action(generation))
@@ -762,6 +931,7 @@ fn unwrap_comparison_result<T>(
         Ok(values) => values,
         Err(error) => {
             warnings.push(format!("{label}: {error}"));
+
             Vec::new()
         }
     }
@@ -769,12 +939,14 @@ fn unwrap_comparison_result<T>(
 
 fn compare_frames(left: &[StackFrame], right: &[StackFrame]) -> Vec<ThreadComparisonRow> {
     let count = left.len().max(right.len());
+
     (0..count)
         .map(|index| {
             let left_frame = left.get(index);
             let right_frame = right.get(index);
             let left = left_frame.map_or_else(|| String::from("<no frame>"), format_frame);
             let right = right_frame.map_or_else(|| String::from("<no frame>"), format_frame);
+
             ThreadComparisonRow {
                 item: format!("Frame #{index}"),
                 different: left != right,
@@ -790,6 +962,7 @@ fn format_frame(frame: &StackFrame) -> String {
         || frame.address.clone(),
         |(path, line)| format!("{path}:{line}"),
     );
+
     format!("{} at {location}", frame.function)
 }
 
@@ -798,18 +971,22 @@ fn compare_registers(left: &[Register], right: &[Register]) -> Vec<ThreadCompari
         .iter()
         .map(|register| (register.name.as_str(), register.value.as_str()))
         .collect::<HashMap<_, _>>();
+
     let right = right
         .iter()
         .map(|register| (register.name.as_str(), register.value.as_str()))
         .collect::<HashMap<_, _>>();
+
     let mut names = left.keys().chain(right.keys()).copied().collect::<Vec<_>>();
     names.sort_unstable();
     names.dedup();
+
     names
         .into_iter()
         .map(|name| {
             let left = left.get(name).copied().unwrap_or("<unavailable>");
             let right = right.get(name).copied().unwrap_or("<unavailable>");
+
             ThreadComparisonRow {
                 item: name.to_owned(),
                 left: left.to_owned(),
@@ -824,21 +1001,26 @@ fn select_thread_frame(ui: Weak<Ui>, client: Rc<MiClient>, thread: String, frame
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     if !current_ui.thread_is_stopped(&thread) {
         current_ui.set_status(
             "Frame selection unavailable",
             "The thread is no longer stopped",
             Some("status-error"),
         );
+
         return;
     }
+
     let Some(thread) = crate::debugger::thread_id_argument(&thread).map(str::to_owned) else {
         return;
     };
+
     current_ui.set_thread_action_pending(Some(ThreadActionPending::Setting));
     drop(current_ui);
     let weak_ui = ui.clone();
     let weak_ui_for_error = ui;
+
     if client
         .request(
             &format!("-thread-select {thread}"),
@@ -846,16 +1028,20 @@ fn select_thread_frame(ui: Weak<Ui>, client: Rc<MiClient>, thread: String, frame
                 if !record.is_done() {
                     if let Some(ui) = weak_ui.upgrade() {
                         ui.clear_thread_action_pending();
+
                         ui.set_status(
                             "Thread selection failed",
                             record.error_message().unwrap_or("GDB rejected the thread"),
                             Some("status-error"),
                         );
                     }
+
                     return;
                 }
+
                 let weak_ui_for_frame = weak_ui.clone();
                 let weak_ui_for_frame_error = weak_ui.clone();
+
                 if client
                     .request(
                         &format!("-stack-select-frame {frame}"),
@@ -863,6 +1049,7 @@ fn select_thread_frame(ui: Weak<Ui>, client: Rc<MiClient>, thread: String, frame
                             if let Some(ui) = weak_ui_for_frame.upgrade() {
                                 ui.clear_thread_action_pending();
                             }
+
                             if record.is_done() {
                                 refresh_stopped_state(&weak_ui_for_frame, client);
                             } else if let Some(ui) = weak_ui_for_frame.upgrade() {
@@ -878,6 +1065,7 @@ fn select_thread_frame(ui: Weak<Ui>, client: Rc<MiClient>, thread: String, frame
                     && let Some(ui) = weak_ui_for_frame_error.upgrade()
                 {
                     ui.clear_thread_action_pending();
+
                     ui.set_status(
                         "Frame selection failed",
                         "Could not queue the frame-selection command",
@@ -890,6 +1078,7 @@ fn select_thread_frame(ui: Weak<Ui>, client: Rc<MiClient>, thread: String, frame
         && let Some(ui) = weak_ui_for_error.upgrade()
     {
         ui.clear_thread_action_pending();
+
         ui.set_status(
             "Thread selection failed",
             "Could not queue the thread-selection command",
@@ -946,6 +1135,7 @@ mod tests {
             &[frame(0, "worker", "0x10"), frame(1, "main", "0x20")],
             &[frame(0, "worker", "0x10"), frame(1, "poll", "0x30")],
         );
+
         assert_eq!(rows.len(), 2);
         assert!(!rows[0].different);
         assert!(rows[1].different);
@@ -957,6 +1147,7 @@ mod tests {
             &[register("pc", "0x10"), register("sp", "0x20")],
             &[register("pc", "0x11"), register("fp", "0x30")],
         );
+
         assert_eq!(rows.len(), 3);
         assert!(rows.iter().all(|row| row.different));
         assert_eq!(rows[0].item, "fp");
@@ -968,6 +1159,7 @@ mod tests {
             parse_scheduler_locking("step"),
             Some(SchedulerLockingMode::Step)
         );
+
         assert_eq!(parse_scheduler_locking("invalid"), None);
         assert_eq!(parse_on_off("on"), Some(true));
     }

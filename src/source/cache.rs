@@ -27,7 +27,9 @@ impl CachedSource {
             Ok(contents) => contents,
             Err(error) => String::from_utf8_lossy(error.as_bytes()).into_owned(),
         });
+
         let line_ranges = source_line_ranges(&contents).map(Arc::from);
+
         Self {
             contents,
             line_ranges,
@@ -90,6 +92,7 @@ struct SourceFileIdentity {
 impl SourceFileIdentity {
     fn read(path: &Path) -> io::Result<Self> {
         let metadata = std::fs::metadata(path)?;
+
         Ok(Self {
             path: path.to_owned(),
             size: metadata.len(),
@@ -130,18 +133,23 @@ impl SourceFileCache {
             .entries
             .iter()
             .position(|entry| entry.identity == *identity)?;
+
         let entry = self.entries.remove(index)?;
         let source = entry.source.clone();
         self.entries.push_back(entry);
+
         Some(source)
     }
 
     fn insert(&mut self, identity: SourceFileIdentity, source: CachedSource) {
         let weight = source.weight();
+
         if self.max_files == 0 || weight > self.max_bytes {
             return;
         }
+
         let mut index = 0;
+
         while index < self.entries.len() {
             if self.entries[index].identity.path == identity.path {
                 if let Some(entry) = self.entries.remove(index) {
@@ -151,16 +159,20 @@ impl SourceFileCache {
                 index += 1;
             }
         }
+
         self.bytes = self.bytes.saturating_add(weight);
+
         self.entries.push_back(SourceCacheEntry {
             identity,
             source,
             weight,
         });
+
         while self.entries.len() > self.max_files || self.bytes > self.max_bytes {
             let Some(entry) = self.entries.pop_front() else {
                 break;
             };
+
             self.bytes = self.bytes.saturating_sub(entry.weight);
         }
     }
@@ -168,6 +180,7 @@ impl SourceFileCache {
 
 fn source_cache() -> &'static Mutex<SourceFileCache> {
     static CACHE: OnceLock<Mutex<SourceFileCache>> = OnceLock::new();
+
     CACHE.get_or_init(|| {
         Mutex::new(SourceFileCache::new(
             MAX_CACHED_SOURCE_FILES,
@@ -178,9 +191,11 @@ fn source_cache() -> &'static Mutex<SourceFileCache> {
 
 pub(super) fn searchable_source(path: &Path) -> Option<CachedSource> {
     let before = SourceFileIdentity::read(path).ok()?;
+
     if before.size > MAX_SEARCHABLE_SOURCE_BYTES as u64 {
         return None;
     }
+
     if let Some(source) = source_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -193,12 +208,14 @@ pub(super) fn searchable_source(path: &Path) -> Option<CachedSource> {
     record_source_file_read(path);
     let bytes = crate::bounded::read_bytes(path, MAX_SEARCHABLE_SOURCE_BYTES).ok()?;
     let source = CachedSource::from_bytes(bytes);
+
     if SourceFileIdentity::read(path).ok().as_ref() == Some(&before) {
         source_cache()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(before, source.clone());
     }
+
     Some(source)
 }
 
@@ -206,30 +223,38 @@ fn source_line_ranges(contents: &str) -> Option<Vec<(usize, usize)>> {
     let bytes = contents.as_bytes();
     let mut ranges = Vec::new();
     let mut start = 0;
+
     for (position, byte) in bytes.iter().enumerate() {
         if *byte != b'\n' {
             continue;
         }
+
         let end = if position > start && bytes[position - 1] == b'\r' {
             position - 1
         } else {
             position
         };
+
         ranges.push((start, end));
+
         if ranges.len() >= MAX_CACHED_LINE_RANGES {
             return None;
         }
+
         start = position + 1;
     }
+
     if start < bytes.len() {
         ranges.push((start, bytes.len()));
     }
+
     Some(ranges)
 }
 
 #[cfg(test)]
 fn source_file_reads_by_path() -> &'static Mutex<std::collections::HashMap<PathBuf, usize>> {
     static READS: OnceLock<Mutex<std::collections::HashMap<PathBuf, usize>>> = OnceLock::new();
+
     READS.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -238,6 +263,7 @@ fn record_source_file_read(path: &Path) {
     let mut reads = source_file_reads_by_path()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     *reads.entry(path.to_owned()).or_default() += 1;
 }
 
@@ -261,12 +287,15 @@ mod tests {
     impl TestDirectory {
         fn new() -> Self {
             static NEXT: AtomicU64 = AtomicU64::new(0);
+
             let path = std::env::temp_dir().join(format!(
                 "fgdb-source-cache-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
+
             std::fs::create_dir_all(&path).unwrap();
+
             Self(path)
         }
     }
@@ -283,16 +312,16 @@ mod tests {
         let path = directory.0.join("cached.c");
         std::fs::write(&path, "first\n").unwrap();
         let reads = source_file_reads(&path);
-
         assert_eq!(&*searchable_source(&path).unwrap().contents, "first\n");
         assert_eq!(&*searchable_source(&path).unwrap().contents, "first\n");
         assert_eq!(source_file_reads(&path), reads + 1);
-
         std::fs::write(&path, "second value\n").unwrap();
+
         assert_eq!(
             &*searchable_source(&path).unwrap().contents,
             "second value\n"
         );
+
         assert_eq!(source_file_reads(&path), reads + 2);
     }
 
@@ -302,6 +331,7 @@ mod tests {
         let path = directory.0.join("later.c");
         assert!(searchable_source(&path).is_none());
         std::fs::write(&path, "available later\n").unwrap();
+
         assert_eq!(
             &*searchable_source(&path).unwrap().contents,
             "available later\n"
@@ -311,6 +341,7 @@ mod tests {
     #[test]
     fn cache_enforces_file_and_byte_bounds() {
         let directory = TestDirectory::new();
+
         let identity = |name: &str| SourceFileIdentity {
             path: directory.0.join(name),
             size: 1,
@@ -320,6 +351,7 @@ mod tests {
             #[cfg(unix)]
             inode: name.len() as u64,
         };
+
         let source = |text: &str| CachedSource::from_bytes(text.as_bytes().to_vec());
         let mut cache = SourceFileCache::new(2, 128);
         cache.insert(identity("a"), source("a"));
@@ -328,7 +360,6 @@ mod tests {
         assert_eq!(cache.entries.len(), 2);
         assert!(cache.get(&identity("a")).is_none());
         assert!(cache.get(&identity("bb")).is_some());
-
         let mut tiny = SourceFileCache::new(4, 1);
         tiny.insert(identity("large"), source("too large"));
         assert!(tiny.entries.is_empty());
@@ -337,6 +368,7 @@ mod tests {
     #[test]
     fn cache_identity_includes_size_and_modification_time() {
         let directory = TestDirectory::new();
+
         let original = SourceFileIdentity {
             path: directory.0.join("identity.c"),
             size: 1,
@@ -346,13 +378,13 @@ mod tests {
             #[cfg(unix)]
             inode: 2,
         };
+
         let mut changed_size = original.clone();
         changed_size.size = 2;
         let mut changed_time = original.clone();
         changed_time.modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
         let mut cache = SourceFileCache::new(4, 1024);
         cache.insert(original, CachedSource::from_bytes(b"source".to_vec()));
-
         assert!(cache.get(&changed_size).is_none());
         assert!(cache.get(&changed_time).is_none());
     }
@@ -367,7 +399,6 @@ mod tests {
     #[test]
     fn pathological_line_counts_fall_back_to_bounded_scanning_storage() {
         let source = CachedSource::from_bytes(vec![b'\n'; MAX_CACHED_LINE_RANGES]);
-
         assert!(source.line_ranges.is_none());
         assert_eq!(source.lines().count(), MAX_CACHED_LINE_RANGES);
     }

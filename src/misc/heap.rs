@@ -128,6 +128,7 @@ impl GlibcLayout {
             64 => 8,
             other => return Err(format!("Unsupported {other}-bit glibc target")),
         };
+
         let special_32 = pointer_size == 4
             && matches!(
                 architecture,
@@ -135,11 +136,13 @@ impl GlibcLayout {
                     | TargetArchitecture::RiscV32
                     | TargetArchitecture::PowerPc32
             );
+
         let malloc_alignment = if pointer_size == 8 || (special_32 && version.at_least(26)) {
             16
         } else {
             8
         };
+
         let num_fastbins = if version.at_least(43) {
             0
         } else if special_32 && version.at_least(26) {
@@ -147,7 +150,9 @@ impl GlibcLayout {
         } else {
             10
         };
+
         let flags = 4_u64;
+
         let fastbins = (!version.at_least(43)).then(|| {
             if version.at_least(27) {
                 align_up(12, pointer_size)
@@ -155,17 +160,21 @@ impl GlibcLayout {
                 8
             }
         });
+
         let top = fastbins.map_or(flags + 4, |offset| {
             offset + pointer_size * u64::try_from(num_fastbins).unwrap_or(0)
         });
+
         let last_remainder = top + pointer_size;
         let bins = last_remainder + pointer_size;
         let binmap = bins + pointer_size * 254;
         let next = binmap + 16;
         let next_free = version.at_least(19).then_some(next + pointer_size);
+
         let attached_threads = version
             .at_least(23)
             .then(|| next_free.unwrap_or(next) + pointer_size);
+
         let system_mem = if let Some(offset) = attached_threads {
             offset + pointer_size
         } else if let Some(offset) = next_free {
@@ -173,8 +182,10 @@ impl GlibcLayout {
         } else {
             next + pointer_size
         };
+
         let max_system_mem = system_mem + pointer_size;
         let arena_size = max_system_mem + pointer_size;
+
         Ok(Self {
             version,
             architecture,
@@ -204,6 +215,7 @@ impl GlibcLayout {
                     | TargetArchitecture::RiscV32
                     | TargetArchitecture::PowerPc32
             );
+
         u64::from(special_32 && self.version.at_least(26)) * 8
     }
 
@@ -217,6 +229,7 @@ impl GlibcLayout {
 
     fn tcache_struct_size(self) -> u64 {
         let bins = u64::try_from(self.tcache_bin_count()).unwrap_or(0);
+
         bins * (self.tcache_count_size() + self.pointer_size)
     }
 
@@ -337,8 +350,10 @@ impl<'a> MemoryReader<'a> {
         let pointer_size = usize::try_from(pointer_bits / 8)
             .unwrap_or_default()
             .clamp(4, 8);
+
         let file = File::open(root.join("mem"))
             .map_err(|error| format!("Cannot read the traced process memory: {error}"))?;
+
         Ok(Self {
             file,
             mappings,
@@ -353,6 +368,7 @@ impl<'a> MemoryReader<'a> {
             .mappings
             .partition_point(|mapping| mapping.start <= address)
             .checked_sub(1)?;
+
         self.mappings
             .get(index)
             .filter(|mapping| mapping.permissions.starts_with('r') && address < mapping.end)
@@ -362,9 +378,11 @@ impl<'a> MemoryReader<'a> {
         let Ok(length) = u64::try_from(length) else {
             return false;
         };
+
         let Some(end) = address.checked_add(length) else {
             return false;
         };
+
         self.mapping(address)
             .is_some_and(|mapping| end <= mapping.end)
     }
@@ -376,30 +394,38 @@ impl<'a> MemoryReader<'a> {
                 bytes.len()
             ));
         }
+
         self.bytes_read = self
             .bytes_read
             .checked_add(bytes.len())
             .ok_or_else(|| String::from("Heap read accounting overflowed"))?;
+
         if self.bytes_read > MAX_HEAP_READ_BYTES {
             return Err(format!(
                 "Heap inspection exceeded its {} MiB memory-read budget",
                 MAX_HEAP_READ_BYTES / (1024 * 1024)
             ));
         }
+
         let mut done = 0_usize;
+
         while done < bytes.len() {
             let offset = address
                 .checked_add(u64::try_from(done).unwrap_or(u64::MAX))
                 .ok_or_else(|| String::from("Heap read address overflowed"))?;
+
             let read = self
                 .file
                 .read_at(&mut bytes[done..], offset)
                 .map_err(|error| format!("Cannot read inferior memory at 0x{offset:x}: {error}"))?;
+
             if read == 0 {
                 return Err(format!("Short read from inferior memory at 0x{offset:x}"));
             }
+
             done += read;
         }
+
         Ok(())
     }
 
@@ -407,6 +433,7 @@ impl<'a> MemoryReader<'a> {
         let mut bytes = [0_u8; 8];
         let size = self.pointer_size;
         self.read(address, &mut bytes[..size])?;
+
         read_word(&bytes[..size], self.endian)
             .ok_or_else(|| format!("Cannot decode target word at 0x{address:x}"))
     }
@@ -414,6 +441,7 @@ impl<'a> MemoryReader<'a> {
     fn u16(&mut self, address: u64) -> Result<u16, String> {
         let mut bytes = [0_u8; 2];
         self.read(address, &mut bytes)?;
+
         Ok(match self.endian {
             TargetEndian::Little => u16::from_le_bytes(bytes),
             TargetEndian::Big => u16::from_be_bytes(bytes),
@@ -423,6 +451,7 @@ impl<'a> MemoryReader<'a> {
     fn u8(&mut self, address: u64) -> Result<u8, String> {
         let mut byte = [0_u8; 1];
         self.read(address, &mut byte)?;
+
         Ok(byte[0])
     }
 }
@@ -445,12 +474,15 @@ pub(crate) fn inspect_native_heap(
 ) -> Result<HeapInspectionSnapshot, String> {
     let root = crate::kernel::verified_proc_root(request.pid, request.debugger_pid)?;
     let (mappings, mappings_capped) = read_maps(&root.join("maps"))?;
+
     if mappings_capped {
         return Err(String::from(
             "The process has more mappings than the native heap reader can safely index",
         ));
     }
+
     let version = detect_glibc_version(&root, &mappings)?;
+
     if version.major != 2
         || version.minor < MIN_SUPPORTED_GLIBC_MINOR
         || version.minor > MAX_SUPPORTED_GLIBC_MINOR
@@ -459,12 +491,15 @@ pub(crate) fn inspect_native_heap(
             "Native ptmalloc decoding supports glibc 2.{MIN_SUPPORTED_GLIBC_MINOR} through 2.{MAX_SUPPORTED_GLIBC_MINOR}. Target uses {version}"
         ));
     }
+
     let layout = GlibcLayout::new(version, request.architecture, request.pointer_bits)?;
     let reader = MemoryReader::new(&root, &mappings, request.endian, request.pointer_bits)?;
+
     let main_heap = mappings
         .iter()
         .find(|mapping| mapping.path == "[heap]" && mapping.permissions.starts_with('r'))
         .map(|mapping| (mapping.start, mapping.end));
+
     let mut locator = Inspector {
         reader,
         mappings: &mappings,
@@ -477,12 +512,13 @@ pub(crate) fn inspect_native_heap(
         rows: Vec::new(),
         truncated: false,
     };
+
     locator.main_arena = locator.locate_main_arena(&request.discovery)?;
     locator.run(request.query)?;
     crate::kernel::verified_proc_root(request.pid, request.debugger_pid)?;
-
     let bytes_read = locator.reader.bytes_read;
     let summary = native_heap_summary(request.query, version, &locator.rows, bytes_read);
+
     Ok(HeapInspectionSnapshot {
         command: request.query.title().to_owned(),
         summary,
@@ -495,6 +531,7 @@ pub(crate) fn inspect_native_heap(
 impl Inspector<'_> {
     fn run(&mut self, query: NativeHeapQuery) -> Result<(), String> {
         let arenas = self.arenas()?;
+
         match query {
             NativeHeapQuery::Arenas => self.show_arenas(&arenas),
             NativeHeapQuery::Arena => self.show_arena(
@@ -518,6 +555,7 @@ impl Inspector<'_> {
             | NativeHeapQuery::SmallBins
             | NativeHeapQuery::LargeBins => self.show_bins(&arenas, query)?,
         }
+
         Ok(())
     }
 
@@ -527,6 +565,7 @@ impl Inspector<'_> {
         {
             return Ok(address);
         }
+
         if !self.version.at_least(34)
             && let Some(hook) = discovery.malloc_hook
             && let Some(address) = self.arena_from_malloc_hook(hook)
@@ -534,6 +573,7 @@ impl Inspector<'_> {
         {
             return Ok(address);
         }
+
         for tls in self
             .tls_bases
             .iter()
@@ -545,6 +585,7 @@ impl Inspector<'_> {
                     Some(distance) => distance,
                     None => break,
                 };
+
                 for slot in [tls.checked_sub(distance), tls.checked_add(distance)]
                     .into_iter()
                     .flatten()
@@ -552,15 +593,18 @@ impl Inspector<'_> {
                     let Ok(candidate) = self.reader.word(slot) else {
                         continue;
                     };
+
                     if candidate == 0 || !self.plausible_main_arena_mapping(candidate) {
                         continue;
                     }
+
                     if self.valid_arena_ring(candidate, true) {
                         return Ok(candidate);
                     }
                 }
             }
         }
+
         Err(String::from(
             "Cannot locate glibc main_arena. Install matching libc debuginfo or stop on a thread whose TLS base GDB exposes. fgdb will not guess an unvalidated arena address.",
         ))
@@ -597,13 +641,16 @@ impl Inspector<'_> {
     fn valid_arena_ring(&mut self, start: u64, main: bool) -> bool {
         let mut current = start;
         let mut visited = HashSet::with_capacity(4);
+
         for _ in 0..MAX_ARENAS {
             if !visited.insert(current) {
                 return current == start;
             }
+
             let Ok(arena) = self.read_arena(current, main && current == start) else {
                 return false;
             };
+
             if arena.system_mem < 4096
                 || arena.top == 0
                 || !arena.top.is_multiple_of(self.layout.arena_alignment())
@@ -615,9 +662,11 @@ impl Inspector<'_> {
             {
                 return false;
             }
+
             if arena.next == start {
                 return true;
             }
+
             if arena.next == 0
                 || !self
                     .reader
@@ -625,8 +674,10 @@ impl Inspector<'_> {
             {
                 return false;
             }
+
             current = arena.next;
         }
+
         false
     }
 
@@ -644,15 +695,18 @@ impl Inspector<'_> {
             else {
                 return false;
             };
+
             let Some(head) = pair.checked_sub(self.layout.pointer_size * 2) else {
                 return false;
             };
+
             let (Ok(forward), Ok(backward)) = (
                 self.reader.word(pair),
                 self.reader.word(pair + self.layout.pointer_size),
             ) else {
                 return false;
             };
+
             for pointer in [forward, backward] {
                 if pointer == 0
                     || (pointer != head
@@ -663,6 +717,7 @@ impl Inspector<'_> {
                 }
             }
         }
+
         true
     }
 
@@ -670,29 +725,35 @@ impl Inspector<'_> {
         let mut arenas = Vec::new();
         let mut visited = HashSet::with_capacity(4);
         let mut current = self.main_arena;
+
         while visited.insert(current) {
             if arenas.len() == MAX_ARENAS {
                 return Err(format!(
                     "Arena ring exceeds the {MAX_ARENAS}-arena safety limit"
                 ));
             }
+
             let arena = self.read_arena(current, current == self.main_arena)?;
             current = arena.next;
             arenas.push(arena);
+
             if current == self.main_arena {
                 break;
             }
+
             if current == 0 {
                 return Err(String::from(
                     "ptmalloc arena ring contains a null next pointer",
                 ));
             }
         }
+
         if current != self.main_arena {
             return Err(format!(
                 "ptmalloc arena ring loops at 0x{current:x} instead of main_arena"
             ));
         }
+
         Ok(arenas)
     }
 
@@ -701,25 +762,33 @@ impl Inspector<'_> {
             base.checked_add(offset)
                 .ok_or_else(|| String::from("Arena field address overflowed"))
         };
+
         let top = self.reader.word(field(address, self.layout.top)?)?;
+
         let last_remainder = self
             .reader
             .word(field(address, self.layout.last_remainder)?)?;
+
         let next = self.reader.word(field(address, self.layout.next)?)?;
+
         let next_free = self
             .layout
             .next_free
             .map(|offset| self.reader.word(field(address, offset)?))
             .transpose()?;
+
         let attached_threads = self
             .layout
             .attached_threads
             .map(|offset| self.reader.word(field(address, offset)?))
             .transpose()?;
+
         let system_mem = self.reader.word(field(address, self.layout.system_mem)?)?;
+
         let max_system_mem = self
             .reader
             .word(field(address, self.layout.max_system_mem)?)?;
+
         let heap_base = if main {
             self.main_heap
                 .map(|(start, _)| start + self.layout.main_heap_start_adjustment())
@@ -731,6 +800,7 @@ impl Inspector<'_> {
                 self.layout.arena_alignment(),
             ))
         };
+
         Ok(Arena {
             address,
             main,
@@ -781,6 +851,7 @@ impl Inspector<'_> {
                 self.layout.arena_size
             ),
         );
+
         for (name, value) in [
             ("address", Some(arena.address)),
             ("heap_base", arena.heap_base),
@@ -800,6 +871,7 @@ impl Inspector<'_> {
                 "",
             );
         }
+
         if let Some(fastbins) = self.layout.fastbins {
             self.push_row(
                 "Arena field",
@@ -817,6 +889,7 @@ impl Inspector<'_> {
                 "Fastbins were removed from this malloc_state layout",
             );
         }
+
         self.push_row(
             "Arena field",
             "bins",
@@ -832,15 +905,19 @@ impl Inspector<'_> {
     fn show_top(&mut self, arena: &Arena) -> Result<(), String> {
         let chunk = self.read_chunk(arena.top)?;
         self.push_chunk(&chunk, "Top", &[String::from("top chunk")], false);
+
         Ok(())
     }
 
     fn show_chunks(&mut self, arenas: &[Arena], include_links: bool) -> Result<(), String> {
         let free = self.freelist_index(arenas)?;
+
         for arena in arenas {
             let chunks = self.chunks(arena)?;
+
             for chunk in chunks {
                 let tags = free.get(&chunk.base).cloned().unwrap_or_default();
+
                 let state = if chunk.base == arena.top {
                     "Top"
                 } else if !tags.is_empty() {
@@ -852,18 +929,22 @@ impl Inspector<'_> {
                 } else {
                     "Freed"
                 };
+
                 self.push_chunk(&chunk, state, &tags, include_links);
             }
         }
+
         Ok(())
     }
 
     fn show_target_chunk(&mut self, arenas: &[Arena], address: u64) -> Result<(), String> {
         let free = self.freelist_index(arenas)?;
+
         for arena in arenas {
             for chunk in self.chunks(arena)? {
                 if address >= chunk.base && address < chunk.base.saturating_add(chunk.size) {
                     let tags = free.get(&chunk.base).cloned().unwrap_or_default();
+
                     let state = if chunk.base == arena.top {
                         "Top"
                     } else if !tags.is_empty() {
@@ -873,7 +954,9 @@ impl Inspector<'_> {
                     } else {
                         "Freed"
                     };
+
                     self.push_chunk(&chunk, state, &tags, true);
+
                     self.push_row(
                         "Address",
                         &format_address(address),
@@ -881,10 +964,12 @@ impl Inspector<'_> {
                         "inside chunk",
                         &format!("user payload begins at {}", format_address(chunk.user)),
                     );
+
                     return Ok(());
                 }
             }
         }
+
         for base in [
             address,
             address.saturating_sub(self.layout.pointer_size * 2),
@@ -895,15 +980,18 @@ impl Inspector<'_> {
                 && address < chunk.base.saturating_add(chunk.size)
             {
                 let tags = free.get(&chunk.base).cloned().unwrap_or_default();
+
                 self.push_chunk(
                     &chunk,
                     if tags.is_empty() { "Unknown" } else { "Freed" },
                     &tags,
                     true,
                 );
+
                 return Ok(());
             }
         }
+
         Err(format!(
             "0x{address:x} is not inside a bounded, structurally valid ptmalloc chunk"
         ))
@@ -913,6 +1001,7 @@ impl Inspector<'_> {
         let Some(mut current) = arena.heap_base else {
             return Err(String::from("The ptmalloc heap is not initialized"));
         };
+
         if current > arena.top {
             return Err(format!(
                 "Arena heap base {} is above top {}",
@@ -920,38 +1009,49 @@ impl Inspector<'_> {
                 format_address(arena.top)
             ));
         }
+
         let mut chunks = Vec::new();
         let mut seen = HashSet::new();
+
         while current <= arena.top {
             if chunks.len() == MAX_CHUNKS {
                 self.truncated = true;
                 break;
             }
+
             if !seen.insert(current) {
                 return Err(format!("Chunk traversal loops at 0x{current:x}"));
             }
+
             let chunk = self.read_chunk(current)?;
+
             if !self.plausible_chunk(&chunk) {
                 return Err(format!(
                     "Invalid chunk size 0x{:x} at 0x{:x}",
                     chunk.size, current
                 ));
             }
+
             chunks.push(chunk);
+
             if current == arena.top || chunk.size == 0 {
                 break;
             }
+
             let next = current
                 .checked_add(chunk.size)
                 .ok_or_else(|| String::from("Chunk address overflowed"))?;
+
             if next <= current || next > arena.top {
                 return Err(format!(
                     "Chunk at 0x{current:x} advances beyond arena.top {}",
                     format_address(arena.top)
                 ));
             }
+
             current = next;
         }
+
         Ok(chunks)
     }
 
@@ -959,11 +1059,14 @@ impl Inspector<'_> {
         let size_address = base
             .checked_add(self.layout.pointer_size)
             .ok_or_else(|| String::from("Chunk size address overflowed"))?;
+
         let previous_size = self.reader.word(base)?;
         let raw_size = self.reader.word(size_address)?;
+
         let user = base
             .checked_add(self.layout.pointer_size * 2)
             .ok_or_else(|| String::from("Chunk user address overflowed"))?;
+
         Ok(Chunk {
             base,
             user,
@@ -986,6 +1089,7 @@ impl Inspector<'_> {
         let Some(next) = chunk.base.checked_add(chunk.size) else {
             return false;
         };
+
         self.reader
             .word(next.saturating_add(self.layout.pointer_size))
             .is_ok_and(|raw| raw & 1 != 0)
@@ -993,38 +1097,47 @@ impl Inspector<'_> {
 
     fn push_chunk(&mut self, chunk: &Chunk, state: &str, tags: &[String], include_links: bool) {
         let mut flags = Vec::new();
+
         if chunk.previous_in_use() {
             flags.push("PREV_INUSE");
         }
+
         if chunk.mapped() {
             flags.push("IS_MMAPPED");
         }
+
         if chunk.non_main() {
             flags.push("NON_MAIN_ARENA");
         }
+
         let usable = if chunk.mapped() {
             chunk.size.saturating_sub(self.layout.pointer_size * 2)
         } else {
             chunk.size.saturating_sub(self.layout.pointer_size)
         };
+
         let mut details = format!(
             "user {}  ·  usable 0x{:x}  ·  prev_size 0x{:x}",
             format_address(chunk.user),
             usable,
             chunk.previous_size
         );
+
         if !flags.is_empty() {
             details.push_str("  ·  ");
             details.push_str(&flags.join(" | "));
         }
+
         if !tags.is_empty() {
             details.push_str("  ·  ");
             details.push_str(&tags.join(", "));
         }
+
         if include_links && state == "Freed" {
             if let Ok(forward) = self.reader.word(chunk.user) {
                 details.push_str(&format!("  ·  fd/raw {}", format_address(forward)));
             }
+
             if let Ok(backward) = self
                 .reader
                 .word(chunk.user.saturating_add(self.layout.pointer_size))
@@ -1032,6 +1145,7 @@ impl Inspector<'_> {
                 details.push_str(&format!("  ·  bk/key {}", format_address(backward)));
             }
         }
+
         self.push_inspectable_row(
             "Chunk",
             &format_address(chunk.base),
@@ -1044,8 +1158,10 @@ impl Inspector<'_> {
 
     fn show_bins(&mut self, arenas: &[Arena], query: NativeHeapQuery) -> Result<(), String> {
         let mut total_nodes = 0_usize;
+
         for arena in arenas {
             let bins = self.collect_bins(arena, &mut total_nodes)?;
+
             for bin in bins {
                 let matches = match query {
                     NativeHeapQuery::CompactBins | NativeHeapQuery::AllBins => true,
@@ -1056,10 +1172,13 @@ impl Inspector<'_> {
                     NativeHeapQuery::LargeBins => bin.kind == BinKind::Large,
                     _ => false,
                 };
+
                 let occupied = !bin.chunks.is_empty() || bin.warning.is_some();
+
                 if !matches || (query == NativeHeapQuery::CompactBins && !occupied) {
                     continue;
                 }
+
                 let name = match bin.kind {
                     BinKind::Tcache => "Tcache bin",
                     BinKind::Fast => "Fastbin",
@@ -1067,11 +1186,14 @@ impl Inspector<'_> {
                     BinKind::Small => "Small bin",
                     BinKind::Large => "Large bin",
                 };
+
                 let parsed_count = bin.chunks.len();
+
                 let metric = bin.declared_count.map_or_else(
                     || format!("{} chunk{}", parsed_count, plural(parsed_count)),
                     |declared| format!("{parsed_count} parsed  ·  {declared} declared"),
                 );
+
                 let details = if bin.chunks.is_empty() {
                     bin.warning.clone().unwrap_or_default()
                 } else {
@@ -1081,12 +1203,14 @@ impl Inspector<'_> {
                         .map(|address| format_address(*address))
                         .collect::<Vec<_>>()
                         .join(" → ");
+
                     if let Some(warning) = bin.warning.as_ref() {
                         format!("{addresses}  ·  {warning}")
                     } else {
                         addresses
                     }
                 };
+
                 self.push_inspectable_row(
                     name,
                     &format!("index {}", bin.index),
@@ -1103,6 +1227,7 @@ impl Inspector<'_> {
                 );
             }
         }
+
         if self.rows.is_empty() {
             self.push_row(
                 "Info",
@@ -1112,12 +1237,14 @@ impl Inspector<'_> {
                 "No bins in this category are present in the target glibc layout",
             );
         }
+
         Ok(())
     }
 
     fn freelist_index(&mut self, arenas: &[Arena]) -> Result<HashMap<u64, Vec<String>>, String> {
         let mut index = HashMap::<u64, Vec<String>>::new();
         let mut total_nodes = 0_usize;
+
         for arena in arenas {
             for bin in self.collect_bins(arena, &mut total_nodes)? {
                 let label = format!(
@@ -1131,11 +1258,13 @@ impl Inspector<'_> {
                     },
                     bin.index
                 );
+
                 for chunk in bin.chunks {
                     index.entry(chunk).or_default().push(label.clone());
                 }
             }
         }
+
         Ok(index)
     }
 
@@ -1145,11 +1274,13 @@ impl Inspector<'_> {
         total_nodes: &mut usize,
     ) -> Result<Vec<BinRecord>, String> {
         let mut bins = self.tcache_bins(arena, total_nodes)?;
+
         if let Some(offset) = self.layout.fastbins {
             for index in 0..self.layout.num_fastbins.min(7) {
                 if !self.layout.fastbin_index_used(index) {
                     continue;
                 }
+
                 let head_address = arena
                     .address
                     .checked_add(offset)
@@ -1157,8 +1288,10 @@ impl Inspector<'_> {
                         address.checked_add(u64::try_from(index).ok()? * self.layout.pointer_size)
                     })
                     .ok_or_else(|| String::from("Fastbin address overflowed"))?;
+
                 let head = self.reader.word(head_address)?;
                 let (chunks, warning) = self.walk_singly(head, false, total_nodes)?;
+
                 bins.push(BinRecord {
                     kind: BinKind::Fast,
                     index,
@@ -1169,6 +1302,7 @@ impl Inspector<'_> {
                 });
             }
         }
+
         for index in 0_usize..127 {
             let pair = arena
                 .address
@@ -1177,12 +1311,15 @@ impl Inspector<'_> {
                     address.checked_add(u64::try_from(index).ok()? * self.layout.pointer_size * 2)
                 })
                 .ok_or_else(|| String::from("Bin address overflowed"))?;
+
             let head = pair
                 .checked_sub(self.layout.pointer_size * 2)
                 .ok_or_else(|| String::from("Bin head address underflowed"))?;
+
             let forward = self.reader.word(pair)?;
             let backward = self.reader.word(pair + self.layout.pointer_size)?;
             let (chunks, warning) = self.walk_double(forward, backward, head, total_nodes)?;
+
             let kind = if index == 0 {
                 BinKind::Unsorted
             } else if index < 63 {
@@ -1190,6 +1327,7 @@ impl Inspector<'_> {
             } else {
                 BinKind::Large
             };
+
             bins.push(BinRecord {
                 kind,
                 index,
@@ -1199,6 +1337,7 @@ impl Inspector<'_> {
                 warning,
             });
         }
+
         Ok(bins)
     }
 
@@ -1210,6 +1349,7 @@ impl Inspector<'_> {
         if !self.version.at_least(26) || !arena.main {
             return Ok(Vec::new());
         }
+
         let Some(tcache) = self.locate_tcache(arena)? else {
             return Ok(vec![BinRecord {
                 kind: BinKind::Tcache,
@@ -1222,45 +1362,57 @@ impl Inspector<'_> {
                 )),
             }]);
         };
+
         let count = self.layout.tcache_bin_count();
         let count_size = self.layout.tcache_count_size();
+
         let entries = tcache
             .checked_add(u64::try_from(count).unwrap_or(0) * count_size)
             .ok_or_else(|| String::from("Tcache entries address overflowed"))?;
+
         let mut raw_counts = Vec::with_capacity(count);
         let mut heads = Vec::with_capacity(count);
+
         for index in 0..count {
             let index = u64::try_from(index).unwrap_or(0);
             let count_address = tcache + index * count_size;
+
             raw_counts.push(if count_size == 1 {
                 usize::from(self.reader.u8(count_address)?)
             } else {
                 usize::from(self.reader.u16(count_address)?)
             });
+
             heads.push(
                 self.reader
                     .word(entries + index * self.layout.pointer_size)?,
             );
         }
+
         let fill_count = if self.version.at_least(42) {
             raw_counts.iter().copied().max().unwrap_or(0)
         } else {
             0
         };
+
         let mut bins = Vec::with_capacity(count);
+
         for index in 0..count {
             let declared = if self.version.at_least(42) {
                 fill_count.saturating_sub(raw_counts[index])
             } else {
                 raw_counts[index]
             };
+
             let (chunks, mut warning) = self.walk_singly(heads[index], true, total_nodes)?;
+
             if warning.is_none() && declared != chunks.len() {
                 warning = Some(format!(
                     "metadata says {declared} entries, traversal found {}",
                     chunks.len()
                 ));
             }
+
             bins.push(BinRecord {
                 kind: BinKind::Tcache,
                 index,
@@ -1270,6 +1422,7 @@ impl Inspector<'_> {
                 warning,
             });
         }
+
         Ok(bins)
     }
 
@@ -1280,22 +1433,29 @@ impl Inspector<'_> {
         {
             return Ok(Some(candidate));
         }
+
         if !self.version.at_least(42)
             && let Some(heap_base) = arena.heap_base
         {
             let mut first = [0_u8; 8];
+
             if self.reader.read(heap_base, &mut first).is_ok() {
                 let candidate = heap_base + if first == [0; 8] { 0x10 } else { 0x8 };
+
                 if self.valid_tcache(candidate) {
                     return Ok(Some(candidate));
                 }
             }
         }
+
         let expected = self.layout.tcache_chunk_size();
+
         for tls in self.tls_bases.iter().copied() {
             let mut arena_slot = None;
+
             for index in 1_u64..=500 {
                 let distance = index * self.layout.pointer_size;
+
                 for slot in [tls.checked_sub(distance), tls.checked_add(distance)]
                     .into_iter()
                     .flatten()
@@ -1309,15 +1469,19 @@ impl Inspector<'_> {
                         break;
                     }
                 }
+
                 if arena_slot.is_some() {
                     break;
                 }
             }
+
             let Some(arena_slot) = arena_slot else {
                 continue;
             };
+
             for index in 1_u64..=20 {
                 let distance = index * self.layout.pointer_size;
+
                 for slot in [
                     arena_slot.checked_sub(distance),
                     arena_slot.checked_add(distance),
@@ -1328,7 +1492,9 @@ impl Inspector<'_> {
                     let Ok(candidate) = self.reader.word(slot) else {
                         continue;
                     };
+
                     let size_address = candidate.checked_sub(self.layout.pointer_size);
+
                     if size_address
                         .and_then(|address| self.reader.word(address).ok())
                         .is_some_and(|raw| raw & !7 == expected)
@@ -1339,6 +1505,7 @@ impl Inspector<'_> {
                 }
             }
         }
+
         Ok(None)
     }
 
@@ -1347,12 +1514,15 @@ impl Inspector<'_> {
             Ok(size) => size,
             Err(_) => return false,
         };
+
         if !self.reader.readable(address, size) || !address.is_multiple_of(self.layout.pointer_size)
         {
             return false;
         }
+
         let bins = self.layout.tcache_bin_count();
         let count_bytes = self.layout.tcache_count_size() * u64::try_from(bins).unwrap_or(0);
+
         for index in 0..bins {
             let Ok(head) = self.reader.word(
                 address
@@ -1361,6 +1531,7 @@ impl Inspector<'_> {
             ) else {
                 return false;
             };
+
             if head != 0
                 && (!self.reader.readable(head, self.reader.pointer_size)
                     || head % self.layout.pointer_size != 0)
@@ -1368,6 +1539,7 @@ impl Inspector<'_> {
                 return false;
             }
         }
+
         true
     }
 
@@ -1379,14 +1551,17 @@ impl Inspector<'_> {
     ) -> Result<(Vec<u64>, Option<String>), String> {
         let mut chunks = Vec::new();
         let mut seen = HashSet::new();
+
         while current != 0 {
             if chunks.len() == MAX_NODES_PER_BIN || *total_nodes == MAX_FREELIST_NODES {
                 self.truncated = true;
                 return Ok((chunks, Some(String::from("freelist traversal capped"))));
             }
+
             if !seen.insert(current) {
                 return Ok((chunks, Some(format!("loop at {}", format_address(current)))));
             }
+
             let base = if user_pointer {
                 match current.checked_sub(self.layout.pointer_size * 2) {
                     Some(base) => base,
@@ -1395,14 +1570,17 @@ impl Inspector<'_> {
             } else {
                 current
             };
+
             if !self.reader.readable(current, self.reader.pointer_size) {
                 return Ok((
                     chunks,
                     Some(format!("unreadable node {}", format_address(current))),
                 ));
             }
+
             chunks.push(base);
             *total_nodes += 1;
+
             let link_address = if user_pointer {
                 current
             } else {
@@ -1411,16 +1589,19 @@ impl Inspector<'_> {
                     None => return Ok((chunks, Some(String::from("link address overflow")))),
                 }
             };
+
             let raw = match self.reader.word(link_address) {
                 Ok(raw) => raw,
                 Err(error) => return Ok((chunks, Some(error))),
             };
+
             current = if self.version.at_least(32) {
                 reveal_safe_link(raw, link_address)
             } else {
                 raw
             };
         }
+
         Ok((chunks, None))
     }
 
@@ -1434,35 +1615,43 @@ impl Inspector<'_> {
         if forward == 0 && backward == 0 {
             return Ok((Vec::new(), Some(String::from("null bin head pointers"))));
         }
+
         if forward == head && backward == head {
             return Ok((Vec::new(), None));
         }
+
         let mut chunks = Vec::new();
         let mut seen = HashSet::new();
         let mut previous = head;
+
         while forward != head {
             if chunks.len() == MAX_NODES_PER_BIN || *total_nodes == MAX_FREELIST_NODES {
                 self.truncated = true;
                 return Ok((chunks, Some(String::from("bin traversal capped"))));
             }
+
             if forward == 0 || !seen.insert(forward) {
                 return Ok((
                     chunks,
                     Some(format!("invalid or looping fd {}", format_address(forward))),
                 ));
             }
+
             let user = match forward.checked_add(self.layout.pointer_size * 2) {
                 Some(user) => user,
                 None => return Ok((chunks, Some(String::from("bin node overflow")))),
             };
+
             let next = match self.reader.word(user) {
                 Ok(next) => next,
                 Err(error) => return Ok((chunks, Some(error))),
             };
+
             let back = match self.reader.word(user + self.layout.pointer_size) {
                 Ok(back) => back,
                 Err(error) => return Ok((chunks, Some(error))),
             };
+
             if back != previous {
                 return Ok((
                     chunks,
@@ -1474,17 +1663,20 @@ impl Inspector<'_> {
                     )),
                 ));
             }
+
             chunks.push(forward);
             *total_nodes += 1;
             previous = forward;
             forward = next;
         }
+
         if previous != backward {
             return Ok((
                 chunks,
                 Some(String::from("bin tail does not match head.bk")),
             ));
         }
+
         Ok((chunks, None))
     }
 
@@ -1510,6 +1702,7 @@ impl Inspector<'_> {
                     + u64::try_from(index).unwrap_or(0) * self.layout.malloc_alignment
             );
         }
+
         let first = if self.layout.pointer_size == 8 {
             0x420
         } else if matches!(
@@ -1520,7 +1713,9 @@ impl Inspector<'_> {
         } else {
             0x210
         };
+
         let shift = u32::try_from(index.saturating_sub(64)).unwrap_or(u32::MAX);
+
         let min = if shift == 0 {
             first
         } else {
@@ -1528,7 +1723,9 @@ impl Inspector<'_> {
                 .checked_shl(shift.saturating_sub(1))
                 .unwrap_or(u64::MAX)
         };
+
         let max = 0x800_u64.checked_shl(shift).unwrap_or(u64::MAX);
+
         format!("size 0x{min:x}-0x{max:x}")
     }
 
@@ -1549,6 +1746,7 @@ impl Inspector<'_> {
             self.truncated = true;
             return;
         }
+
         let mut row = heap_inspection_row(kind, location, metric, state, details);
         row.inspect_address = inspect_address;
         self.rows.push(row);
@@ -1565,6 +1763,7 @@ fn native_heap_summary(
         NativeHeapQuery::Arenas => {
             let arenas = rows.iter().filter(|row| row.kind == "Arena").count();
             let threads = rows.iter().filter(|row| row.state == "thread").count();
+
             format!(
                 "{arenas} arena{}  ·  {threads} thread arena{}",
                 plural(arenas),
@@ -1573,6 +1772,7 @@ fn native_heap_summary(
         }
         NativeHeapQuery::Arena => {
             let fields = rows.iter().filter(|row| row.kind == "Arena field").count();
+
             format!("{fields} arena field{}", plural(fields))
         }
         NativeHeapQuery::Top | NativeHeapQuery::Chunk(_) => {
@@ -1585,17 +1785,20 @@ fn native_heap_summary(
             let chunks = rows.iter().filter(|row| row.kind == "Chunk").count();
             let used = rows.iter().filter(|row| row.state == "Used").count();
             let freed = rows.iter().filter(|row| row.state == "Freed").count();
+
             let bytes = rows
                 .iter()
                 .filter(|row| row.kind == "Chunk")
                 .filter_map(|row| parse_hex_u64(&row.metric))
                 .fold(0_u64, u64::saturating_add);
+
             format!(
                 "{chunks} chunk{}  ·  {used} used  ·  {freed} free  ·  {} total",
                 plural(chunks),
                 crate::kernel::format_bytes(bytes)
             )
         }
+
         NativeHeapQuery::CompactBins
         | NativeHeapQuery::AllBins
         | NativeHeapQuery::TcacheBins
@@ -1606,6 +1809,7 @@ fn native_heap_summary(
             let bins = rows.iter().filter(|row| row.kind.contains("bin")).count();
             let occupied = rows.iter().filter(|row| row.state == "occupied").count();
             let warnings = rows.iter().filter(|row| row.state == "warning").count();
+
             format!(
                 "{bins} bin{}  ·  {occupied} occupied  ·  {warnings} warning{}",
                 plural(bins),
@@ -1613,6 +1817,7 @@ fn native_heap_summary(
             )
         }
     };
+
     format!(
         "glibc {version} ptmalloc  ·  {detail}  ·  {} read",
         crate::kernel::format_bytes(u64::try_from(bytes_read).unwrap_or(u64::MAX))
@@ -1625,21 +1830,26 @@ fn parse_hex_u64(value: &str) -> Option<u64> {
 
 fn detect_glibc_version(root: &Path, mappings: &[ProcessMapping]) -> Result<GlibcVersion, String> {
     let mut paths = HashSet::new();
+
     for mapping in mappings {
         let path = mapping
             .path
             .strip_suffix(" (deleted)")
             .unwrap_or(&mapping.path);
+
         if !path.starts_with('/') || !path.contains("libc") || !paths.insert(path.to_owned()) {
             continue;
         }
+
         if let Some(version) = version_from_path(path) {
             return Ok(version);
         }
+
         if let Some(version) = version_from_mapping_file(root, mapping, path) {
             return Ok(version);
         }
     }
+
     // A statically linked glibc has no separate libc VMA. Only use the main
     // executable as a fallback when there was no libc mapping at all, and
     // still require glibc's embedded version marker before selecting a layout.
@@ -1652,8 +1862,10 @@ fn detect_glibc_version(root: &Path, mappings: &[ProcessMapping]) -> Result<Glib
                     && !mapping.path.contains("ld-linux")
             })
             .map(|mapping| mapping.path.clone());
+
         if let Some(executable) = executable {
             let path = executable.strip_suffix(" (deleted)").unwrap_or(&executable);
+
             if let Some(mapping) = mappings.iter().find(|mapping| mapping.path == executable)
                 && let Some(version) = version_from_mapping_file(root, mapping, path)
             {
@@ -1661,6 +1873,7 @@ fn detect_glibc_version(root: &Path, mappings: &[ProcessMapping]) -> Result<Glib
             }
         }
     }
+
     Err(String::from(
         "No supported glibc image/version was found in the inferior mappings, native ptmalloc decoding is not applicable",
     ))
@@ -1672,12 +1885,15 @@ fn version_from_mapping_file(
     target_path: &str,
 ) -> Option<GlibcVersion> {
     let rooted = root.join("root").join(target_path.trim_start_matches('/'));
+
     if let Ok(Some(version)) = version_from_file(&rooted) {
         return Some(version);
     }
+
     let map_file = root
         .join("map_files")
         .join(format!("{:x}-{:x}", mapping.start, mapping.end));
+
     version_from_file(&map_file).ok().flatten()
 }
 
@@ -1685,24 +1901,31 @@ fn version_from_file(path: &Path) -> std::io::Result<Option<GlibcVersion>> {
     const CHUNK_BYTES: usize = 64 * 1024;
     const OVERLAP_BYTES: usize = 32;
     let file = File::open(path)?;
+
     if file.metadata()?.len() > u64::try_from(MAX_LIBC_BYTES).unwrap_or(u64::MAX) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "mapped libc image exceeds the native heap reader's 64 MiB limit",
         ));
     }
+
     let mut file = file.take(u64::try_from(MAX_LIBC_BYTES).unwrap_or(u64::MAX));
     let mut buffer = vec![0_u8; CHUNK_BYTES + OVERLAP_BYTES];
     let mut retained = 0_usize;
+
     loop {
         let read = file.read(&mut buffer[retained..])?;
+
         if read == 0 {
             return Ok(version_from_bytes(&buffer[..retained]));
         }
+
         let available = retained + read;
+
         if let Some(version) = version_from_bytes(&buffer[..available]) {
             return Ok(Some(version));
         }
+
         retained = available.min(OVERLAP_BYTES);
         buffer.copy_within(available - retained..available, 0);
     }
@@ -1716,11 +1939,13 @@ fn version_from_path(path: &str) -> Option<GlibcVersion> {
             return Some(version);
         }
     }
+
     None
 }
 
 fn version_from_bytes(bytes: &[u8]) -> Option<GlibcVersion> {
     let marker = b"glibc ";
+
     bytes
         .windows(marker.len())
         .enumerate()
@@ -1734,17 +1959,22 @@ fn parse_version_prefix(value: &str) -> Option<GlibcVersion> {
 
 fn parse_version_prefix_bytes(bytes: &[u8]) -> Option<GlibcVersion> {
     let major_end = bytes.iter().position(|byte| !byte.is_ascii_digit())?;
+
     if bytes.get(major_end) != Some(&b'.') {
         return None;
     }
+
     let minor_bytes = bytes.get(major_end + 1..)?;
+
     let minor_end = minor_bytes
         .iter()
         .position(|byte| !byte.is_ascii_digit())
         .unwrap_or(minor_bytes.len());
+
     if major_end == 0 || minor_end == 0 {
         return None;
     }
+
     Some(GlibcVersion {
         major: std::str::from_utf8(&bytes[..major_end])
             .ok()?
@@ -1771,6 +2001,7 @@ const fn request_to_chunk_size(
         .saturating_add(pointer_size)
         .saturating_add(alignment.saturating_sub(1))
         & !alignment.saturating_sub(1);
+
     if size < minimum { minimum } else { size }
 }
 
@@ -1800,6 +2031,7 @@ mod tests {
                 minor: 44
             })
         );
+
         assert_eq!(
             version_from_path("/lib/libc-2.39.so"),
             Some(GlibcVersion {
@@ -1807,6 +2039,7 @@ mod tests {
                 minor: 39
             })
         );
+
         assert_eq!(version_from_bytes(b"glibc two.forty"), None);
     }
 
@@ -1823,6 +2056,7 @@ mod tests {
         .unwrap();
         assert_eq!(old.fastbins, Some(16));
         assert_eq!(old.top, 96);
+
         let current = GlibcLayout::new(
             GlibcVersion {
                 major: 2,
@@ -1851,6 +2085,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(v29.tcache_struct_size(), 576);
+
         let v44 = GlibcLayout::new(
             GlibcVersion {
                 major: 2,
@@ -1880,12 +2115,14 @@ mod tests {
         assert_eq!(layout.num_fastbins, 11);
         assert_eq!(layout.fastbins, Some(8));
         assert_eq!(layout.top, 52);
+
         assert_eq!(
             (0..7)
                 .filter(|index| layout.fastbin_index_used(*index))
                 .collect::<Vec<_>>(),
             [0, 2, 4, 6]
         );
+
         assert_eq!(layout.fastbin_size(6), 0x40);
     }
 
@@ -1902,6 +2139,7 @@ mod tests {
     fn reads_a_live_stripped_style_ptmalloc_heap_via_tls() {
         let fixture = Path::new("target/debug-fixtures/c-misc-allocator-target");
         assert!(fixture.exists(), "build the C debug fixtures first");
+
         let mut gdb = Command::new("gdb")
             .args(["-q", "-nx", "--interpreter=mi2"])
             .arg(fixture)
@@ -1910,6 +2148,7 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("start GDB");
+
         let debugger_pid = gdb.id();
         let mut input = gdb.stdin.take().expect("GDB stdin");
         let mut output = BufReader::new(gdb.stdout.take().expect("GDB stdout"));
@@ -1939,16 +2178,17 @@ mod tests {
                 ..HeapDiscovery::default()
             },
         };
+
         let arenas = inspect_native_heap(request(NativeHeapQuery::Arenas)).unwrap();
         assert!(arenas.rows.iter().any(|row| row.state == "main"));
         let chunks = inspect_native_heap(request(NativeHeapQuery::Chunks)).unwrap();
         assert!(chunks.rows.iter().filter(|row| row.kind == "Chunk").count() >= 3);
         let bins = inspect_native_heap(request(NativeHeapQuery::AllBins)).unwrap();
         assert!(bins.rows.iter().any(|row| row.kind.contains("bin")));
-
         writeln!(input, "6-exec-continue").unwrap();
         wait_for_mi(&mut output, "*stopped");
         let tcache = inspect_native_heap(request(NativeHeapQuery::TcacheBins)).unwrap();
+
         assert!(
             tcache
                 .rows
@@ -1962,14 +2202,18 @@ mod tests {
 
     fn wait_for_mi(reader: &mut impl BufRead, needle: &str) -> String {
         let mut captured = String::new();
+
         loop {
             let mut line = String::new();
+
             assert_ne!(
                 reader.read_line(&mut line).unwrap(),
                 0,
                 "GDB exited: {captured}"
             );
+
             captured.push_str(&line);
+
             if line.contains(needle) {
                 return captured;
             }

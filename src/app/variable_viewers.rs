@@ -25,18 +25,22 @@ pub(super) fn open_variable_viewer(
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     let generation = current_ui.current_stop_refresh_generation();
     let session = current_ui.begin_variable_viewer(&request);
+
     if current_ui.inferior_is_running() {
         session.fail("Pause the target before opening a variable viewer");
         return;
     }
+
     drop(current_ui);
 
     if request.variable.varobj.is_none() {
         create_viewer_root(ui, client, generation, session, request);
         return;
     }
+
     start_variable_viewer_plan(ui, client, generation, session, request, None);
 }
 
@@ -48,20 +52,24 @@ fn create_viewer_root(
     request: VariableViewerRequest,
 ) {
     let varobj_name = next_variable_object_name();
+
     let command = format!(
         "-var-create {varobj_name} * {}",
         crate::debugger::quote(&request.variable.name)
     );
+
     let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
         session.finish(STALE_VIEWER_MESSAGE);
         return;
     };
+
     let ui_for_guard = ui.clone();
     let session_for_guard = Rc::clone(&session);
     let ui_for_response = ui;
     let session_for_response = Rc::clone(&session);
     let client_for_response = Rc::clone(&client);
     let varobj_for_response = varobj_name;
+
     if let Err(error) = client.request_with_print_limit_for_stop(
         &command,
         AUTOMATIC_PRINT_ELEMENTS,
@@ -74,11 +82,14 @@ fn create_viewer_root(
                     &client_for_response,
                     Some(varobj_for_response),
                 );
+
                 if session_for_response.is_open() {
                     session_for_response.finish(STALE_VIEWER_MESSAGE);
                 }
+
                 return;
             }
+
             let Some(mut variable) = record
                 .is_done()
                 .then(|| crate::debugger::variable_object(&record, &request.variable.name))
@@ -89,6 +100,7 @@ fn create_viewer_root(
                     &client_for_response,
                     Some(varobj_for_response),
                 );
+
                 if session_for_response.is_open() {
                     session_for_response.fail(
                         record
@@ -96,21 +108,28 @@ fn create_viewer_root(
                             .unwrap_or("GDB could not prepare this value for inspection"),
                     );
                 }
+
                 return;
             };
+
             variable.argument = request.variable.argument;
             let owned = Some(varobj_for_response);
+
             if !viewer_is_current(&ui_for_response, &session_for_response, generation) {
                 cleanup_viewer_variable_objects(&ui_for_response, &client_for_response, owned);
+
                 if session_for_response.is_open() {
                     session_for_response.finish(STALE_VIEWER_MESSAGE);
                 }
+
                 return;
             }
+
             let request = VariableViewerRequest {
                 descriptor: request.descriptor,
                 variable,
             };
+
             start_variable_viewer_plan(
                 ui_for_response,
                 client_for_response,
@@ -190,6 +209,7 @@ mod tests {
     fn recognizes_indexed_children_and_safe_array_wrappers() {
         assert_eq!(indexed_child_ordinal("[17]"), Some(17));
         assert_eq!(indexed_child_ordinal("public"), None);
+
         let wrapper = Variable {
             name: String::from("_M_elems"),
             value: String::from("{...}"),
@@ -198,7 +218,10 @@ mod tests {
             varobj: Some(String::from("var1.public._M_elems")),
             num_children: 2,
             has_more: false,
+            display_hint: None,
+            dynamic: false,
         };
+
         assert_eq!(
             transparent_index_wrapper(std::slice::from_ref(&wrapper)),
             Some(wrapper.clone())
@@ -209,6 +232,7 @@ mod tests {
             varobj: Some(String::from("var1.public")),
             ..wrapper.clone()
         };
+
         assert_eq!(
             transparent_index_wrapper(&[access_group, wrapper.clone()]),
             Some(wrapper)
@@ -225,9 +249,13 @@ mod tests {
             varobj: Some(format!("var1.{name}")),
             num_children: 1,
             has_more: false,
+            display_hint: None,
+            dynamic: false,
         };
+
         let option = child("next", "core::option::Option<alloc::rc::Rc<Node>>");
         let some = child("Some", "core::option::Option<alloc::rc::Rc<Node>>::Some");
+
         assert_eq!(
             transparent_link_wrapper(&option, std::slice::from_ref(&some)),
             Some(some)
@@ -235,6 +263,7 @@ mod tests {
 
         let user = child("wrapper", "crate::UserWrapper<Node>");
         let value = child("value", "Node");
+
         assert_eq!(
             transparent_link_wrapper(&user, std::slice::from_ref(&value)),
             None

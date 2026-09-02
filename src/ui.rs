@@ -21,6 +21,10 @@ mod configuration;
 mod debug_data;
 pub(crate) use debug_data::DebugDataAction;
 mod debugger_state;
+mod domain;
+use domain::{
+    LocalVariableCatalog, MemoryRefreshBatch, TerminalSynchronization, VariableNodeIndex,
+};
 mod layout;
 mod source_navigation;
 mod value;
@@ -48,7 +52,8 @@ use crate::{
         Breakpoint, GdbCapabilities, InferiorInfo, InferiorState, Instruction, MemoryBlock,
         MemoryKind, MiClient, Register, SharedLibrary, SourceFile, SourceLocation, StackEntry,
         StackFrame, TargetArchitecture, TargetEndian, ThreadInfo, ValueTypeKind, ValueTypeMetadata,
-        Variable, VariableUpdate, context::MemoryRegion,
+        Variable, VariableUpdate,
+        context::{MemoryRegion, memory_region_for_address},
     },
     kernel::{
         KernelBaseline, KernelFileDescriptor, KernelLimit, KernelMapping, KernelMappingChange,
@@ -71,8 +76,13 @@ const MAX_MEMORY_WATCHES: usize = 256;
 const DISCLOSURE_EXPANDED_ICON: &str = "▾";
 const DISCLOSURE_COLLAPSED_ICON: &str = "›";
 
+fn known_gdb_prompt(text: &str) -> bool {
+    matches!(text.trim(), "(gdb)" | "(rr)" | "gef➤" | "gef>" | "pwndbg>")
+}
+
 fn set_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive: bool, busy: bool) {
     let widget = widget.upcast_ref::<gtk::Widget>();
+
     if !busy || sensitive {
         if widget.has_css_class("execution-interlocked") {
             widget.remove_css_class("execution-interlocked");
@@ -82,6 +92,7 @@ fn set_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive: bool, bus
         // made an otherwise available control insensitive.
         widget.add_css_class("execution-interlocked");
     }
+
     if widget.is_sensitive() != sensitive {
         widget.set_sensitive(sensitive);
     }
@@ -93,9 +104,11 @@ fn set_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive: bool, bus
 /// remain insensitive.
 fn set_transient_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive: bool, busy: bool) {
     let widget = widget.upcast_ref::<gtk::Widget>();
+
     if widget.has_css_class("execution-interlocked") {
         widget.remove_css_class("execution-interlocked");
     }
+
     if (!busy || sensitive || !widget.is_sensitive()) && widget.is_sensitive() != sensitive {
         widget.set_sensitive(sensitive);
     }
@@ -300,6 +313,7 @@ impl RefreshGate {
     fn begin(&self) -> bool {
         if self.in_flight.replace(true) {
             self.queued.set(true);
+
             false
         } else {
             true
@@ -308,6 +322,7 @@ impl RefreshGate {
 
     fn finish(&self) -> bool {
         self.in_flight.set(false);
+
         self.queued.replace(false)
     }
 
@@ -568,6 +583,7 @@ struct RegisterRowData {
 #[derive(Clone)]
 struct VariableNode {
     variable: Variable,
+    search_text: Rc<str>,
     children: gio::ListStore,
     children_loaded: Rc<Cell<bool>>,
     children_loading: Rc<Cell<bool>>,
@@ -579,8 +595,11 @@ struct VariableNode {
 
 impl VariableNode {
     fn new(variable: Variable) -> Self {
+        let search_text = variable_search_text(&variable).into();
+
         Self {
             variable,
+            search_text,
             children: gio::ListStore::new::<glib::BoxedAnyObject>(),
             children_loaded: Rc::new(Cell::new(false)),
             children_loading: Rc::new(Cell::new(false)),
@@ -592,16 +611,21 @@ impl VariableNode {
     }
 
     fn placeholder(name: &str, value: &str) -> Self {
+        let variable = Variable {
+            name: name.to_owned(),
+            value: value.to_owned(),
+            type_name: None,
+            argument: false,
+            varobj: None,
+            num_children: 0,
+            has_more: false,
+            display_hint: None,
+            dynamic: false,
+        };
+
         Self {
-            variable: Variable {
-                name: name.to_owned(),
-                value: value.to_owned(),
-                type_name: None,
-                argument: false,
-                varobj: None,
-                num_children: 0,
-                has_more: false,
-            },
+            search_text: variable_search_text(&variable).into(),
+            variable,
             children: gio::ListStore::new::<glib::BoxedAnyObject>(),
             children_loaded: Rc::new(Cell::new(true)),
             children_loading: Rc::new(Cell::new(false)),
@@ -614,6 +638,7 @@ impl VariableNode {
 
     fn load_more(parent: Variable, next: usize) -> Self {
         let remaining = parent.num_children.saturating_sub(next);
+
         let detail = if remaining == 0 {
             String::from("more children are available")
         } else {
@@ -622,16 +647,22 @@ impl VariableNode {
                 if remaining == 1 { "" } else { "ren" }
             )
         };
+
+        let variable = Variable {
+            name: String::from("Load more…"),
+            value: detail,
+            type_name: None,
+            argument: false,
+            varobj: None,
+            num_children: 0,
+            has_more: false,
+            display_hint: None,
+            dynamic: false,
+        };
+
         Self {
-            variable: Variable {
-                name: String::from("Load more…"),
-                value: detail,
-                type_name: None,
-                argument: false,
-                varobj: None,
-                num_children: 0,
-                has_more: false,
-            },
+            search_text: variable_search_text(&variable).into(),
+            variable,
             children: gio::ListStore::new::<glib::BoxedAnyObject>(),
             children_loaded: Rc::new(Cell::new(true)),
             children_loading: Rc::new(Cell::new(false)),
@@ -646,6 +677,7 @@ impl VariableNode {
         let mut node = Self::load_more(parent, next);
         node.variable.name = String::from("Retry loading more…");
         node.variable.value = error.to_owned();
+
         node
     }
 
@@ -653,6 +685,7 @@ impl VariableNode {
         let mut node = Self::load_more(parent, 0);
         node.variable.name = String::from("Retry expansion…");
         node.variable.value = error.to_owned();
+
         node
     }
 
@@ -660,13 +693,16 @@ impl VariableNode {
         let structure_unchanged = self.variable.varobj == variable.varobj
             && self.variable.type_name == variable.type_name
             && self.variable.num_children == variable.num_children
-            && self.variable.has_more == variable.has_more;
+            && self.variable.has_more == variable.has_more
+            && self.variable.dynamic == variable.dynamic;
+
         Self {
             changed: if mark_changed {
                 self.variable.value != variable.value
             } else {
                 self.changed
             },
+            search_text: variable_search_text(&variable).into(),
             variable,
             children: if structure_unchanged {
                 self.children.clone()
@@ -690,18 +726,35 @@ impl VariableNode {
     }
 
     fn has_changes(&self) -> bool {
-        self.changed
-            || (0..self.children.n_items()).any(|position| {
-                self.children
-                    .item(position)
-                    .and_downcast::<glib::BoxedAnyObject>()
-                    .is_some_and(|item| item.borrow::<VariableNode>().has_changes())
-            })
+        if self.changed {
+            return true;
+        }
+
+        let mut pending = vec![self.children.clone()];
+
+        while let Some(store) = pending.pop() {
+            for position in 0..store.n_items() {
+                let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+                    continue;
+                };
+
+                let node = item.borrow::<VariableNode>();
+
+                if node.changed {
+                    return true;
+                }
+
+                pending.push(node.children.clone());
+            }
+        }
+
+        false
     }
 
     fn without_change_marker(&self) -> Self {
         Self {
             variable: self.variable.clone(),
+            search_text: Rc::clone(&self.search_text),
             children: self.children.clone(),
             children_loaded: Rc::clone(&self.children_loaded),
             children_loading: Rc::clone(&self.children_loading),
@@ -951,6 +1004,8 @@ struct MemoryWatchContainer {
     empty: gtk::Label,
     refresh_all: gtk::Button,
     clear_all: gtk::Button,
+    refresh_batch: Rc<RefCell<MemoryRefreshBatch>>,
+    commands_available: Rc<Cell<bool>>,
 }
 
 #[derive(Clone)]
@@ -1176,6 +1231,7 @@ struct SourceOpenContext<'a> {
     theme: &'a Theme,
     style_scheme: Option<&'a sourceview5::StyleScheme>,
     breakpoints: &'a Rc<RefCell<Vec<Breakpoint>>>,
+    source_index: &'a Rc<RefCell<Option<Arc<source::SourceIndex>>>>,
     insert_handler: &'a Rc<RefCell<Option<BreakpointInsertHandler>>>,
     jump_handler: &'a Rc<RefCell<Option<SourceJumpHandler>>>,
     delete_handler: &'a Rc<RefCell<Option<StringSelectionHandler>>>,
@@ -1247,6 +1303,7 @@ impl VectorLaneFormat {
 
     fn field(self, register_bytes: usize) -> String {
         let lane_count = register_bytes / self.lane_bytes();
+
         match self {
             Self::Float32 => format!("v{lane_count}_float"),
             Self::Float64 => format!("v{lane_count}_double"),
@@ -1408,6 +1465,7 @@ pub struct Ui {
     source_tree_base_roots: Vec<PathBuf>,
     source_tree_roots: Rc<RefCell<Vec<PathBuf>>>,
     source_tree_cache: Rc<RefCell<Option<Arc<Vec<PathBuf>>>>>,
+    source_index: Rc<RefCell<Option<Arc<source::SourceIndex>>>>,
     source_tree_indexing: Rc<Cell<bool>>,
     source_tree_generation: Arc<AtomicU64>,
     source_tree_render_generation: Arc<AtomicU64>,
@@ -1458,10 +1516,16 @@ pub struct Ui {
     thread_execution_exit_candidate: Rc<RefCell<Option<String>>>,
     locals_store: gio::ListStore,
     locals_selection: gtk::SingleSelection,
+    variable_node_index: Rc<RefCell<VariableNodeIndex>>,
+    local_variables: Rc<RefCell<LocalVariableCatalog>>,
+    locals_render_limit: Rc<Cell<usize>>,
+    locals_generation: Rc<Cell<Option<u64>>>,
     locals_view: gtk::ColumnView,
     locals_empty: gtk::Label,
     locals_summary: gtk::Label,
     locals_edit_button: gtk::Button,
+    locals_more_button: gtk::Button,
+    locals_filter: gtk::Entry,
     expression_watches_store: gio::ListStore,
     expression_watches_selection: gtk::SingleSelection,
     expression_watches_view: gtk::ColumnView,
@@ -1581,6 +1645,8 @@ pub struct Ui {
     debug_data_view: Rc<RefCell<Option<debug_data::DebugDataView>>>,
     debug_data_state: Rc<RefCell<debug_data::DebugDataState>>,
     performance_notice_times: Rc<RefCell<HashMap<String, Instant>>>,
+    adaptive_render_budgets: Rc<RefCell<crate::performance::AdaptiveRenderBudgets>>,
+    terminal_synchronization: Rc<RefCell<TerminalSynchronization>>,
     debug_data_generation: Rc<Cell<u64>>,
     debug_data_action_handler: Rc<RefCell<Option<DebugDataActionHandler>>>,
     session_handler: Rc<RefCell<Option<DebugSessionHandler>>>,
@@ -1675,6 +1741,8 @@ struct Workspace {
     locals_empty: gtk::Label,
     locals_summary: gtk::Label,
     locals_edit_button: gtk::Button,
+    locals_more_button: gtk::Button,
+    locals_filter: gtk::Entry,
     expression_watches_store: gio::ListStore,
     expression_watches_selection: gtk::SingleSelection,
     expression_watches_view: gtk::ColumnView,
@@ -1736,6 +1804,8 @@ struct Inspector {
     locals_empty: gtk::Label,
     locals_summary: gtk::Label,
     locals_edit_button: gtk::Button,
+    locals_more_button: gtk::Button,
+    locals_filter: gtk::Entry,
     expression_watches_store: gio::ListStore,
     expression_watches_selection: gtk::SingleSelection,
     expression_watches_view: gtk::ColumnView,
@@ -1853,9 +1923,9 @@ mod tests {
         signal_catchpoint_command_number, signal_catchpoint_command_numbers, source_location_score,
         source_symbol_at_offset, source_tab_title, stop_reason_label, string_edit,
         terminal_clipboard_action, thread_os_id, variable_boolean_value, variable_character_format,
-        variable_details, variable_integer_format, variable_is_address, variable_matches_filter,
-        variable_node_matches_filter, variable_value_parts, vector_field_values,
-        without_generic_arguments,
+        variable_details, variable_integer_format, variable_is_address,
+        variable_node_matches_filter, variable_search_text, variable_value_parts,
+        vector_field_values, without_generic_arguments,
     };
     use crate::debugger::{
         Breakpoint, Instruction, Register, SourceLocation, TargetArchitecture, TargetEndian,
@@ -1869,6 +1939,7 @@ mod tests {
             .iter()
             .copied()
             .collect::<HashSet<_>>();
+
         assert_eq!(unique.len(), GEF_COMMAND_CAPABILITIES.len());
     }
 
@@ -1885,6 +1956,7 @@ mod tests {
             Some(&session),
             TargetConnection::None
         ));
+
         assert!(configured_target_can_start(
             Some(&session),
             TargetConnection::Remote
@@ -1897,31 +1969,39 @@ mod tests {
 
         let control = ModifierType::CONTROL_MASK;
         let shift = ModifierType::SHIFT_MASK;
+
         assert_eq!(
             terminal_clipboard_action(Key::v, control, false),
             Some(TerminalClipboardAction::Paste)
         );
+
         assert_eq!(
             terminal_clipboard_action(Key::V, control | shift, false),
             Some(TerminalClipboardAction::Paste)
         );
+
         assert_eq!(
             terminal_clipboard_action(Key::Insert, shift, false),
             Some(TerminalClipboardAction::Paste)
         );
+
         assert_eq!(
             terminal_clipboard_action(Key::KP_Insert, control, false),
             Some(TerminalClipboardAction::Copy)
         );
+
         assert_eq!(
             terminal_clipboard_action(Key::c, control, true),
             Some(TerminalClipboardAction::Copy)
         );
+
         assert_eq!(terminal_clipboard_action(Key::c, control, false), None);
+
         assert_eq!(
             terminal_clipboard_action(Key::C, control | shift, false),
             Some(TerminalClipboardAction::Copy)
         );
+
         assert_eq!(
             terminal_clipboard_action(Key::v, control | ModifierType::ALT_MASK, false),
             None
@@ -1938,31 +2018,37 @@ mod tests {
             text: text.to_owned(),
             source: None,
         };
+
         assert!(instruction_matches_until(
             &UntilAction::NextCall,
             &instruction("call 0x402000 <worker>"),
             TargetArchitecture::X86_64,
         ));
+
         assert!(instruction_matches_until(
             &UntilAction::NextIndirectBranch,
             &instruction("call *%rax"),
             TargetArchitecture::X86_64,
         ));
+
         assert!(!instruction_matches_until(
             &UntilAction::NextIndirectBranch,
             &instruction("call 0x402000 <worker>"),
             TargetArchitecture::X86_64,
         ));
+
         assert!(instruction_matches_until(
             &UntilAction::MemoryAccess,
             &instruction("mov 0x10(%rsp),%rax"),
             TargetArchitecture::X86_64,
         ));
+
         assert!(instruction_matches_until(
             &UntilAction::NextSyscall,
             &instruction("svc #0"),
             TargetArchitecture::AArch64,
         ));
+
         assert!(instruction_matches_until(
             &UntilAction::NextControlFlow,
             &instruction("jalr ra,a0,0"),
@@ -1990,6 +2076,7 @@ mod tests {
             format_register_value("r12", "0x61732f656d6f682f", true),
             "0x61732f656d6f682f '/home/sa…'"
         );
+
         assert_eq!(
             format_register_value("rip", "0x40116f <main+15>", false),
             "0x000000000040116f <main+15>"
@@ -2002,6 +2089,7 @@ mod tests {
             variable_value_parts(r#"0x555555559010 "YUU\005""#),
             ("0x555555559010", r#""YUU\005""#)
         );
+
         assert_eq!(
             variable_value_parts(
                 "0x7ffff7ac2010 <error: Cannot access memory at address 0x7ffff7ac2010>"
@@ -2011,11 +2099,14 @@ mod tests {
                 "<error: Cannot access memory at address 0x7ffff7ac2010>"
             )
         );
+
         assert_eq!(variable_value_parts("65 'A'"), ("65", "'A'"));
+
         assert_eq!(
             variable_value_parts("{x = 1, y = 2}"),
             ("{x = 1, y = 2}", "")
         );
+
         assert_eq!(variable_value_parts("0x1"), ("0x1", ""));
 
         let integer = |type_name: &str, value: &str| Variable {
@@ -2026,24 +2117,33 @@ mod tests {
             varobj: None,
             num_children: 0,
             has_more: false,
+            display_hint: None,
+            dynamic: false,
         };
+
         let details = |variable: &Variable, value: &str, annotation: &str| {
             variable_details(variable, value, annotation, 64)
         };
+
         assert_eq!(details(&integer("int", "0x2a"), "0x2a", ""), "42");
+
         assert_eq!(
             details(&integer("char", "0x41 'A'"), "0x41", "'A'"),
             "65  ·  'A'"
         );
+
         assert_eq!(details(&integer("pid_t", "-0x1"), "-0x1", ""), "-1");
+
         assert_eq!(
             details(&integer("int", "0xffffffff"), "0xffffffff", ""),
             "-1"
         );
+
         assert_eq!(
             details(&integer("unsigned int", "0xffffffff"), "0xffffffff", ""),
             "4294967295"
         );
+
         assert_eq!(details(&integer("int", "0xff"), "0xff", ""), "255");
         assert_eq!(details(&integer("i8", "0xff"), "0xff", ""), "-1");
         assert_eq!(details(&integer("void *", "0x2a"), "0x2a", ""), "");
@@ -2058,12 +2158,14 @@ mod tests {
             ),
             "const std::string"
         );
+
         assert_eq!(
             compact_variable_type(
                 "core::option::Option<alloc::boxed::Box<demo::Node, alloc::alloc::Global>>"
             ),
             "Option<Box<demo::Node>>"
         );
+
         assert_eq!(
             compact_variable_type(
                 "std::collections::hash::map::HashMap<alloc::string::String, usize, std::hash::random::RandomState, alloc::alloc::Global>"
@@ -2082,11 +2184,17 @@ mod tests {
             varobj: None,
             num_children: 0,
             has_more: false,
+            display_hint: None,
+            dynamic: false,
         };
-        assert!(variable_matches_filter(&variable, "state payload"));
-        assert!(variable_matches_filter(&variable, "option packet"));
-        assert!(!variable_matches_filter(&variable, "vector"));
-        assert!(variable_matches_filter(&variable, "argument"));
+
+        let search_text = variable_search_text(&variable);
+        assert!(search_text.contains("state"));
+        assert!(search_text.contains("payload"));
+        assert!(search_text.contains("option"));
+        assert!(search_text.contains("packet"));
+        assert!(search_text.contains("argument"));
+        assert!(!search_text.contains("vector"));
 
         let root = VariableNode::new(Variable {
             name: String::from("fixture"),
@@ -2096,9 +2204,13 @@ mod tests {
             varobj: Some(String::from("var1")),
             num_children: 1,
             has_more: false,
+            display_hint: None,
+            dynamic: false,
         });
+
         root.children
             .append(&gtk::glib::BoxedAnyObject::new(VariableNode::new(variable)));
+
         assert!(variable_node_matches_filter(&root, "packet payload"));
     }
 
@@ -2113,7 +2225,10 @@ mod tests {
                 varobj: None,
                 num_children: 0,
                 has_more: false,
+                display_hint: None,
+                dynamic: false,
             };
+
             integer_decimal_value(&variable, value, pointer_bits)
         };
 
@@ -2121,43 +2236,54 @@ mod tests {
             decimal("i128", "0xffffffffffffffffffffffffffffffff", 64),
             Some("-1".into())
         );
+
         assert_eq!(
             decimal("u128", "0xffffffffffffffffffffffffffffffff", 64),
             Some("340282366920938463463374607431768211455".into())
         );
+
         assert_eq!(
             decimal("usize", "0xffffffffffffffff", 64),
             Some("18446744073709551615".into())
         );
+
         assert_eq!(decimal("isize", "0xffffffff", 32), Some("-1".into()));
+
         assert_eq!(
             decimal("const signed short int", "0xffff", 64),
             Some("-1".into())
         );
+
         assert_eq!(
             decimal("long unsigned int", "0xffffffffffffffff", 64),
             Some("18446744073709551615".into())
         );
+
         assert_eq!(
             decimal("std::uint_least16_t", "0xffff", 64),
             Some("65535".into())
         );
+
         assert_eq!(
             decimal("int_fast16_t", "0xffffffffffffffff", 64),
             Some("-1".into())
         );
+
         assert_eq!(
             decimal("unsigned __int64", "0xffffffffffffffff", 64),
             Some("18446744073709551615".into())
         );
+
         assert_eq!(
             decimal("__int128", "0xffffffffffffffffffffffffffffffff", 64),
             Some("-1".into())
         );
+
         assert_eq!(
             decimal("unsigned _BitInt(17)", "0x1ffff", 64),
             Some("131071".into())
         );
+
         assert_eq!(decimal("_BitInt(17)", "0x1ffff", 64), Some("-1".into()));
     }
 
@@ -2165,30 +2291,36 @@ mod tests {
     fn parses_and_converts_type_aware_editor_values() {
         let signed = IntegerFormat::signed(32);
         let unsigned = IntegerFormat::unsigned(16);
+
         assert_eq!(
             parse_integer_input("-1", signed, IntegerRadix::Decimal),
             Ok(0xffff_ffff)
         );
+
         assert_eq!(
             parse_integer_input("0xffffffff", signed, IntegerRadix::Hexadecimal),
             Ok(0xffff_ffff)
         );
+
         assert_eq!(
             parse_integer_input("1111_1111", unsigned, IntegerRadix::Binary),
             Ok(255)
         );
+
         assert_eq!(
             parse_integer_input("0o177", unsigned, IntegerRadix::Decimal),
             Ok(127)
         );
+
         assert!(
             parse_integer_input("32768", IntegerFormat::signed(16), IntegerRadix::Decimal).is_err()
         );
-        assert!(parse_integer_input("-1", unsigned, IntegerRadix::Decimal).is_err());
 
+        assert!(parse_integer_input("-1", unsigned, IntegerRadix::Decimal).is_err());
         assert_eq!(parse_character_input("'A'", unsigned), Ok(65));
         assert_eq!(parse_character_input("\\n", unsigned), Ok(10));
         assert!(parse_character_input("AB", unsigned).is_err());
+
         assert_eq!(
             parse_string_input(r"line\nA\101\x42\\"),
             Ok(b"line\nAAB\\".to_vec())
@@ -2205,11 +2337,15 @@ mod tests {
             varobj: None,
             num_children: 0,
             has_more: false,
+            display_hint: None,
+            dynamic: false,
         };
+
         assert_eq!(
             variable_integer_format(&variable("count", "std::uint32_t", "0x2a"), 64, None),
             Some(IntegerFormat::unsigned(32))
         );
+
         assert_eq!(
             variable_character_format(
                 &variable("separator", "char16_t", "65 'A'"),
@@ -2219,39 +2355,49 @@ mod tests {
             ),
             Some(IntegerFormat::unsigned(16))
         );
+
         assert_eq!(
             variable_character_format(&variable("letter", "char", "'🦀'"), 64, true, None),
             Some(IntegerFormat::unsigned(32))
         );
+
         assert!(variable_is_address(
             &variable("data", "char *", "0x1000 \"x\""),
             TargetArchitecture::X86_64,
         ));
+
         assert!(register_integer_format("$rax", 64, TargetArchitecture::X86_64).is_some());
+
         assert_eq!(
             register_integer_format("$rax", 32, TargetArchitecture::X86_64),
             Some(IntegerFormat::unsigned(64))
         );
+
         assert_eq!(
             register_integer_format("$a0", 32, TargetArchitecture::Mips64),
             Some(IntegerFormat::unsigned(64))
         );
+
         assert!(register_integer_format("$rsp", 64, TargetArchitecture::X86_64).is_none());
         assert!(register_integer_format("$r29", 32, TargetArchitecture::Mips32).is_none());
+
         assert_eq!(
             variable_boolean_value(&variable("enabled", "bool", "true"), None),
             Some(true)
         );
+
         assert_eq!(
             variable_boolean_value(&variable("enabled", "const _Bool", "0"), None),
             Some(false)
         );
+
         assert_eq!(
             variable_boolean_value(&variable("enabled", "core::ffi::c_bool", "0x1"), None),
             Some(true)
         );
 
         let c_buffer = string_edit(&variable("text", "char[8]", r#""hello""#)).unwrap();
+
         assert_eq!(
             c_buffer.storage,
             StringStorage::Buffer {
@@ -2259,6 +2405,7 @@ mod tests {
                 pointer: false
             }
         );
+
         let cpp = string_edit(&variable("text", "std::string &", r#""hello""#)).unwrap();
         assert_eq!(cpp.storage, StringStorage::CppString);
         let rust = string_edit(&variable("text", "alloc::string::String", r#""hello""#)).unwrap();
@@ -2269,16 +2416,19 @@ mod tests {
     #[test]
     fn formats_pretty_printed_vector_registers_as_u64_lanes() {
         let ymm = "{\n  v16_half = {0 <repeats 16 times>},\n  v4_int64 = {\n    [0x0] = 0x1,\n    [0x1] = 0x2,\n    [0x2] = 0x3,\n    [0x3] = 0x4\n  },\n  v2_int128 = {0, 0}\n}";
+
         assert_eq!(
             format_register_value("ymm0", ymm, false),
             "q0=0x0000000000000001  ·  q1=0x0000000000000002  ·  q2=0x0000000000000003  ·  q3=0x0000000000000004"
         );
 
         let zero_ymm = "{v4_int64 = {[0x0] = 0x0, [0x1] = 0x0, [0x2] = 0x0, [0x3] = 0x0}}";
+
         assert_eq!(
             format_register_value("ymm1", zero_ymm, false),
             "q0…q3 = 0x0000000000000000"
         );
+
         assert_eq!(
             register_value_css(
                 &Register {
@@ -2294,6 +2444,7 @@ mod tests {
         );
 
         let mixed_ymm = "{v4_int64 = {[0x0] = 0x0 <repeats 3 times>, [0x3] = 0x1}}";
+
         assert_eq!(
             register_value_css(
                 &Register {
@@ -2312,10 +2463,12 @@ mod tests {
     #[test]
     fn interprets_vector_union_fields_for_editing() {
         let value = "{ v8_float = {[0x0] = 0x3fc00000, [0x1] = 0xc0000000, [0x2] = 0x0 <repeats 6 times>}, v4_int64 = {[0x0] = 0x1 <repeats 4 times>} }";
+
         assert_eq!(
             vector_field_values(value, "v8_float", 8, VectorLaneFormat::Float32).unwrap(),
             ["1.5", "-2", "0", "0", "0", "0", "0", "0"]
         );
+
         assert_eq!(
             vector_field_values(value, "v4_int64", 4, VectorLaneFormat::Int64).unwrap(),
             [
@@ -2327,6 +2480,7 @@ mod tests {
         );
 
         let oversized_repeat = "{v4_int64 = {0 <repeats 1000000 times>}}";
+
         assert_eq!(
             vector_field_values(oversized_repeat, "v4_int64", 4, VectorLaneFormat::Int64,).unwrap(),
             ["0x0000000000000000"; 4]
@@ -2346,11 +2500,13 @@ mod tests {
     fn keeps_full_addresses_and_colors_register_roles() {
         assert_eq!(full_address("0x55555555516f", 64), "0x000055555555516f");
         assert_eq!(full_address("0x8048123", 32), "0x08048123");
+
         let register = |name: &str, chain: &[&str]| Register {
             name: name.to_owned(),
             value: String::from("0x7fffffffcf40"),
             pointer_chain: chain.iter().map(|value| (*value).to_owned()).collect(),
         };
+
         assert_eq!(
             register_value_css(
                 &register("rip", &[]),
@@ -2360,6 +2516,7 @@ mod tests {
             ),
             "memory-code"
         );
+
         assert_eq!(
             register_value_css(
                 &register("rsp", &[]),
@@ -2369,6 +2526,7 @@ mod tests {
             ),
             "memory-stack"
         );
+
         assert_eq!(
             register_value_css(
                 &register("rsi", &["0x1", "0x61732f656d6f682f"]),
@@ -2378,6 +2536,7 @@ mod tests {
             ),
             "memory-string"
         );
+
         assert_eq!(
             register_details(
                 &register("rax", &["0x123456789", "0x8048123"]),
@@ -2395,6 +2554,7 @@ mod tests {
             thread_os_id("Thread 0x7ffff7c00740 (LWP 90140)").as_deref(),
             Some("90140")
         );
+
         assert_eq!(stop_reason_label("breakpoint-hit"), "BREAKPOINT");
         assert_eq!(stop_reason_label("end-stepping-range"), "STEP");
     }
@@ -2417,6 +2577,7 @@ mod tests {
             text: String::from("call 0x402000 <mmap@plt>"),
             source: None,
         };
+
         let registers = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
             .iter()
             .enumerate()
@@ -2426,12 +2587,15 @@ mod tests {
                 pointer_chain: Vec::new(),
             })
             .collect::<Vec<_>>();
+
         assert_eq!(
             instruction_flow_description(&instruction, &registers, TargetArchitecture::X86_64,),
             "CALL  ▶  0x402000 <mmap@plt>"
         );
+
         let arguments =
             instruction_arguments_description(&instruction, &registers, TargetArchitecture::X86_64);
+
         assert!(arguments.contains("$rdi=0x0000000000000000"));
         assert!(arguments.contains("$r9=0x0000000000000005"));
 
@@ -2439,12 +2603,15 @@ mod tests {
             text: String::from("mov rax,QWORD PTR [rbp-0x10]"),
             ..instruction.clone()
         };
+
         let mut with_rbp = registers;
+
         with_rbp.push(Register {
             name: String::from("rbp"),
             value: String::from("0x7fff0000"),
             pointer_chain: Vec::new(),
         });
+
         assert_eq!(
             instruction_memory_expression(
                 &memory_instruction,
@@ -2466,6 +2633,7 @@ mod tests {
             text: String::from("call 0x402000 <worker>"),
             source: None,
         };
+
         assert_eq!(
             call_abi_phase(&call, None, TargetArchitecture::X86_64),
             CallAbiPhase::OutgoingCall {
@@ -2481,6 +2649,7 @@ mod tests {
             text: String::from("push rbp"),
             source: None,
         };
+
         assert_eq!(
             call_abi_phase(&entry, None, TargetArchitecture::X86_64),
             CallAbiPhase::IncomingEntry {
@@ -2496,12 +2665,14 @@ mod tests {
             text: String::from("mov rbx,rax"),
             source: None,
         };
+
         assert_eq!(
             call_abi_phase(&after_call, Some(&call), TargetArchitecture::X86_64),
             CallAbiPhase::Returned {
                 target: Some(String::from("0x402000")),
             }
         );
+
         assert_eq!(
             call_abi_phase(
                 &Instruction {
@@ -2525,10 +2696,12 @@ mod tests {
             text: String::from("call 0x402000 <worker>"),
             source: None,
         };
+
         assert_eq!(
             instruction_flow_target(&instruction, TargetArchitecture::X86_64).as_deref(),
             Some("0x402000")
         );
+
         assert_eq!(
             instruction_flow_target(
                 &Instruction {
@@ -2540,6 +2713,7 @@ mod tests {
             .as_deref(),
             Some("$rax")
         );
+
         assert_eq!(
             instruction_flow_target(
                 &Instruction {
@@ -2551,6 +2725,7 @@ mod tests {
             .as_deref(),
             Some("worker")
         );
+
         assert!(
             instruction_flow_target(
                 &Instruction {
@@ -2573,11 +2748,13 @@ mod tests {
             text: String::from("jne 0x40100c <main+0x1c>"),
             source: None,
         };
+
         let flags = Register {
             name: String::from("eflags"),
             value: String::from("0x246"),
             pointer_chain: Vec::new(),
         };
+
         assert_eq!(
             instruction_flow_description(
                 &branch,
@@ -2591,6 +2768,7 @@ mod tests {
             text: String::from("syscall"),
             ..branch
         };
+
         let registers = [
             ("rax", "0x1"),
             ("rdi", "0x2"),
@@ -2602,8 +2780,10 @@ mod tests {
             value: value.to_owned(),
             pointer_chain: Vec::new(),
         });
+
         let arguments =
             instruction_arguments_description(&syscall, &registers, TargetArchitecture::X86_64);
+
         assert!(arguments.starts_with("SYSCALL  #1 write("));
         assert!(arguments.contains("fd=0x0000000000000002"));
         assert!(arguments.contains("count=0x0000000000000020"));
@@ -2613,11 +2793,13 @@ mod tests {
             value: String::from("0x1"),
             pointer_chain: Vec::new(),
         };
+
         for (mnemonic, expected) in [("jbe 0x10", Some(true)), ("ja 0x10", Some(false))] {
             let conditional = Instruction {
                 text: mnemonic.to_owned(),
                 ..syscall.clone()
             };
+
             assert_eq!(
                 conditional_branch_taken(
                     &conditional,
@@ -2640,27 +2822,33 @@ mod tests {
             value: value.to_owned(),
             pointer_chain: Vec::new(),
         });
+
         let int80 = Instruction {
             text: String::from("int 0x80"),
             ..syscall
         };
+
         let arguments =
             instruction_arguments_description(&int80, &i386_registers, TargetArchitecture::X86);
+
         assert!(arguments.starts_with("SYSCALL  #4 write("));
         assert!(arguments.contains("fd=0x00000001"));
 
         let arguments =
             instruction_arguments_description(&int80, &i386_registers, TargetArchitecture::X86_64);
+
         assert!(arguments.starts_with("SYSCALL  #4 write("));
 
         let trap = Instruction {
             text: String::from("int3"),
             ..int80
         };
+
         assert!(
             !instruction_flow_description(&trap, &i386_registers, TargetArchitecture::X86_64,)
                 .contains("SYSCALL")
         );
+
         assert!(
             instruction_arguments_description(&trap, &i386_registers, TargetArchitecture::X86_64,)
                 .is_empty()
@@ -2673,6 +2861,7 @@ mod tests {
             format_register_value_for_architecture("r8", "0x1234", false, TargetArchitecture::Arm,),
             "0x00001234"
         );
+
         assert_eq!(
             format_register_value_for_architecture(
                 "r8",
@@ -2691,6 +2880,7 @@ mod tests {
             text: String::from("svc #0"),
             source: None,
         };
+
         let aarch64_registers = [
             ("x8", "0x40"),
             ("x0", "0x1"),
@@ -2702,11 +2892,13 @@ mod tests {
             value: value.to_owned(),
             pointer_chain: Vec::new(),
         });
+
         let arguments = instruction_arguments_description(
             &svc,
             &aarch64_registers,
             TargetArchitecture::AArch64,
         );
+
         assert!(arguments.starts_with("SYSCALL  #64 write("));
         assert!(arguments.contains("fd=0x0000000000000001"));
 
@@ -2714,11 +2906,13 @@ mod tests {
             text: String::from("beq a0,a1,0x1010"),
             ..svc.clone()
         };
+
         let riscv_registers = [("a0", "0x2a"), ("a1", "0x2a")].map(|(name, value)| Register {
             name: name.to_owned(),
             value: value.to_owned(),
             pointer_chain: Vec::new(),
         });
+
         assert_eq!(
             instruction_flow_description(&branch, &riscv_registers, TargetArchitecture::RiscV32,),
             "BRANCH · TAKEN  ▶  a0,a1,0x1010"
@@ -2728,23 +2922,28 @@ mod tests {
             text: String::from("ldr x3,[x0, #0x10]"),
             ..svc
         };
+
         assert_eq!(
             instruction_memory_expression(&load, &aarch64_registers, TargetArchitecture::AArch64,)
                 .as_deref(),
             Some("($x0 + 0x10)")
         );
+
         let arm_return = Instruction {
             text: String::from("bx lr"),
             ..load.clone()
         };
+
         assert_eq!(
             instruction_flow_description(&arm_return, &[], TargetArchitecture::Arm),
             "RETURN  ▶  return to caller"
         );
+
         let aarch64_return = Instruction {
             text: String::from("br x30"),
             ..load.clone()
         };
+
         assert_eq!(
             instruction_flow_description(&aarch64_return, &[], TargetArchitecture::AArch64),
             "RETURN  ▶  return to caller"
@@ -2754,12 +2953,14 @@ mod tests {
             text: String::from("svc 4"),
             ..load
         };
+
         let s390_registers =
             [("r2", "0x1"), ("r3", "0x2000"), ("r4", "0x8")].map(|(name, value)| Register {
                 name: name.to_owned(),
                 value: value.to_owned(),
                 pointer_chain: Vec::new(),
             });
+
         assert!(
             instruction_arguments_description(
                 &s390_svc,
@@ -2783,6 +2984,7 @@ mod tests {
             ),
             "0x54455854 'TEXT…'"
         );
+
         let vector = format_register_value_for_target(
             "v0",
             "{ uint128 = 0x1, u = { 0x1, 0x2 } }",
@@ -2791,6 +2993,7 @@ mod tests {
             Some(TargetEndian::Little),
             64,
         );
+
         assert!(vector.contains("uint128 = 0x1"));
         assert_ne!(vector, "{");
     }
@@ -2798,40 +3001,50 @@ mod tests {
     #[test]
     fn finds_ctrl_click_source_symbols() {
         let rust = "let values = Vec::new();";
+
         assert_eq!(
             source_symbol_at_offset(rust, rust.find("new").unwrap() + 1).as_deref(),
             Some("Vec::new")
         );
+
         assert_eq!(
             source_symbol_at_offset(rust, rust.find("values").unwrap() + 2),
             None
         );
+
         let c = "void *region = mmap(NULL, size, 0, 0, -1, 0);";
+
         assert_eq!(
             source_symbol_at_offset(c, c.find("mmap").unwrap() + 2).as_deref(),
             Some("mmap")
         );
+
         assert_eq!(
             source_symbol_at_offset(c, c.find("region").unwrap() + 2),
             None
         );
+
         assert_eq!(
             source_symbol_at_offset(c, c.find("size").unwrap() + 1),
             None
         );
-        assert_eq!(source_symbol_at_offset(c, c.find('*').unwrap()), None);
 
+        assert_eq!(source_symbol_at_offset(c, c.find('*').unwrap()), None);
         let generic = "let value = factory::build::<Vec<u8>> (input);";
+
         assert_eq!(
             source_symbol_at_offset(generic, generic.find("build").unwrap() + 2).as_deref(),
             Some("factory::build")
         );
+
         let control = "if (ready) { worker.run(); }";
         assert_eq!(source_symbol_at_offset(control, 1), None);
+
         assert_eq!(
             source_symbol_at_offset(control, control.find("run").unwrap() + 1).as_deref(),
             Some("run")
         );
+
         assert_eq!(
             source_symbol_at_offset(control, control.find("ready").unwrap() + 1),
             None
@@ -2846,26 +3059,33 @@ mod tests {
             fullname: None,
             line: 1,
         };
+
         let vec = location(
             "alloc::vec::Vec<u8, alloc::alloc::Global>::new<u8>",
             "vec/mod.rs",
         );
+
         let small_vec = location("smallvec::SmallVec<[u8; 16]>::new<[u8; 16]>", "smallvec.rs");
+
         assert_eq!(
             without_generic_arguments(&vec.function),
             "alloc::vec::Vec::new"
         );
+
         assert!(
             source_location_score("Vec::new", &vec) > source_location_score("Vec::new", &small_vec)
         );
+
         let malloc = location("__GI___libc_malloc", "malloc.c");
         let cleanup = location("__malloc_arena_thread_freeres", "arena.c");
+
         assert!(
             source_location_score("malloc", &malloc) > source_location_score("malloc", &cleanup)
         );
 
         let verbose =
             "alloc::vec::Vec<alloc::boxed::Box<dyn core::fmt::Debug>, alloc::alloc::Global>::push";
+
         assert_eq!(compact_function_name(verbose), "alloc::vec::Vec<…>::push");
         assert_eq!(compact_function_name("core::ptr::read"), "core::ptr::read");
     }
@@ -2894,6 +3114,7 @@ mod tests {
             parent_number: None,
             location_count: 0,
         };
+
         let stop_points = vec![
             stop_point("1.1", "breakpoint"),
             stop_point("1.2", "breakpoint"),
@@ -2922,36 +3143,44 @@ mod tests {
                 ..stop_point("7", "catchpoint")
             },
         ];
+
         assert_eq!(breakpoint_command_numbers(&stop_points, false), ["1"]);
         assert_eq!(breakpoint_command_numbers(&stop_points, true), ["2"]);
         assert_eq!(signal_catchpoint_command_numbers(&stop_points), ["3"]);
+
         assert_eq!(
             event_catchpoint_command_numbers(&stop_points),
             ["4", "5", "6", "7"]
         );
+
         assert_eq!(
             event_catchpoint_command_number(&stop_points, EventCatchpoint::CxxThrow).as_deref(),
             Some("4")
         );
+
         assert_eq!(
             event_catchpoint_command_number(&stop_points, EventCatchpoint::RustPanic).as_deref(),
             Some("5")
         );
+
         assert_eq!(
             event_catchpoint_command_number(&stop_points, EventCatchpoint::Syscall).as_deref(),
             Some("7")
         );
+
         assert_eq!(
             signal_catchpoint_command_number(&stop_points, "segv").as_deref(),
             Some("3")
         );
+
         assert_eq!(normalized_signal_name(" usr1 ").as_deref(), Some("SIGUSR1"));
+
         assert_eq!(
             normalized_signal_name("SIGRTMIN+1").as_deref(),
             Some("SIGRTMIN+1")
         );
-        assert!(normalized_signal_name("SIGSEGV; quit").is_none());
 
+        assert!(normalized_signal_name("SIGSEGV; quit").is_none());
         let mut stop_points = stop_points;
         assert!(set_breakpoint_enabled(&mut stop_points, "1", false));
         assert!(!stop_points[0].enabled);
@@ -2962,10 +3191,12 @@ mod tests {
         assert!(stop_points[0].enabled);
         assert!(!stop_points[1].enabled);
         stop_points[0].address = Some(String::from("0x0000000000401000"));
+
         assert_eq!(
             breakpoint_command_number_at_address(&stop_points, "0x401000").as_deref(),
             Some("1")
         );
+
         assert_eq!(
             breakpoint_command_number_at_address(&stop_points, "0x402000"),
             None

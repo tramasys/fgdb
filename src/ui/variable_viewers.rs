@@ -56,11 +56,13 @@ impl VariableViewerRegistry {
         let array_registered = registry.register(ArrayViewerProvider);
         let list_registered = registry.register(LinkedListViewerProvider);
         debug_assert!(array_registered && list_registered);
+
         registry
     }
 
     pub(crate) fn register(&mut self, provider: impl VariableViewerProvider + 'static) -> bool {
         let descriptor = provider.descriptor();
+
         if descriptor.id.trim().is_empty()
             || descriptor.title.trim().is_empty()
             || self
@@ -70,7 +72,9 @@ impl VariableViewerRegistry {
         {
             return false;
         }
+
         self.providers.push(Rc::new(provider));
+
         true
     }
 
@@ -98,7 +102,9 @@ impl VariableViewerProvider for ArrayViewerProvider {
     }
 
     fn supports(&self, variable: &Variable) -> bool {
-        viewer_can_inspect(variable) && variable.type_name.as_deref().is_some_and(is_indexed_type)
+        viewer_can_inspect(variable)
+            && (variable.display_hint.as_deref() == Some("array")
+                || variable.type_name.as_deref().is_some_and(is_indexed_type))
     }
 }
 
@@ -144,6 +150,7 @@ impl VariableViewerProvider for LinkedListViewerProvider {
 
 fn viewer_can_inspect(variable: &Variable) -> bool {
     let value = variable.value.trim();
+
     !variable.name.trim().is_empty()
         && (variable.is_available() || value.starts_with("<not available"))
 }
@@ -151,8 +158,10 @@ fn viewer_can_inspect(variable: &Variable) -> bool {
 fn is_indexed_type(type_name: &str) -> bool {
     let compact = compact_variable_type(type_name);
     let lower = compact.to_ascii_lowercase();
+
     let native_array = (compact.contains('[') && compact.contains(']'))
         || (compact.starts_with('[') && compact.contains(';'));
+
     native_array
         || [
             "std::array<",
@@ -171,6 +180,7 @@ fn is_indexed_type(type_name: &str) -> bool {
 
 fn is_linked_type(type_name: &str) -> bool {
     let compact = compact_variable_type(type_name).to_ascii_lowercase();
+
     let outer = compact
         .trim()
         .trim_start_matches("const ")
@@ -184,27 +194,33 @@ fn is_linked_type(type_name: &str) -> bool {
         .rsplit("::")
         .next()
         .unwrap_or_default();
+
     let direct_node = outer.ends_with("node")
         || outer.ends_with("list_node")
         || outer.ends_with("listnode")
         || outer.ends_with("link")
         || outer.ends_with("entry")
         || outer.contains("intrusive_list");
+
     let known_wrapper = ["rc", "arc", "box", "refcell", "option", "nonnull"].contains(&outer);
+
     direct_node || (known_wrapper && compact.contains("node"))
 }
 
 fn is_object_pointer(type_name: &str) -> bool {
     let compact = compact_variable_type(type_name).to_ascii_lowercase();
     let trimmed = compact.trim();
+
     let pointer = trimmed.contains('*')
         || trimmed.starts_with("&mut ")
         || trimmed.starts_with("&")
         || trimmed.starts_with("*mut ")
         || trimmed.starts_with("*const ");
+
     if !pointer || trimmed.contains("(*)") || trimmed.contains("(* ") {
         return false;
     }
+
     let pointee = trimmed
         .trim_start_matches("const ")
         .trim_start_matches("volatile ")
@@ -216,6 +232,7 @@ fn is_object_pointer(type_name: &str) -> bool {
         .trim_start_matches("class ")
         .trim_end_matches(['*', '&', ' '])
         .trim();
+
     ![
         "void",
         "bool",
@@ -252,6 +269,7 @@ fn is_linked_name(name: &str) -> bool {
         .next()
         .unwrap_or(name)
         .to_ascii_lowercase();
+
     ["head", "list", "node", "entry", "first"]
         .iter()
         .any(|hint| name == *hint || name.ends_with(&format!("_{hint}")))
@@ -283,11 +301,14 @@ impl VariableViewerSession {
             .into_iter()
             .map(glib::BoxedAnyObject::new)
             .collect::<Vec<_>>();
+
         if rows.is_empty() {
             return;
         }
+
         self.shown.set(self.shown.get().saturating_add(rows.len()));
         self.store.extend_from_slice(&rows);
+
         self.status.set_text(&format!(
             "{} item{} loaded",
             self.shown.get(),
@@ -321,15 +342,14 @@ impl Ui {
             .default_width(900)
             .default_height(620)
             .build();
+
         crate::install_window_icon(&window);
         window.add_css_class("variable-viewer-window");
-
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
         root.set_margin_top(12);
         root.set_margin_bottom(12);
         root.set_margin_start(12);
         root.set_margin_end(12);
-
         let identity = gtk::Box::new(gtk::Orientation::Vertical, 3);
         identity.add_css_class("variable-viewer-identity");
         let caption = gtk::Label::new(Some(&request.descriptor.title.to_ascii_uppercase()));
@@ -339,6 +359,7 @@ impl Ui {
         name.add_css_class("variable-viewer-name");
         name.set_halign(gtk::Align::Start);
         name.set_ellipsize(pango::EllipsizeMode::Middle);
+
         let type_name = compact_variable_type(
             request
                 .variable
@@ -346,6 +367,7 @@ impl Ui {
                 .as_deref()
                 .unwrap_or("<unknown type>"),
         );
+
         let detail = gtk::Label::new(Some(&type_name));
         detail.add_css_class("muted");
         detail.set_halign(gtk::Align::Start);
@@ -354,42 +376,49 @@ impl Ui {
         identity.append(&name);
         identity.append(&detail);
         root.append(&identity);
-
         let query = Rc::new(RefCell::new(String::new()));
         let query_for_filter = Rc::clone(&query);
+
         let filter = gtk::CustomFilter::new(move |object| {
             let Some(object) = object.downcast_ref::<glib::BoxedAnyObject>() else {
                 return false;
             };
+
             let row = object.borrow::<VariableViewerRow>();
             let query = query_for_filter.borrow();
+
             if query.is_empty() {
                 return true;
             }
+
             let searchable = format!(
                 "{} {} {} {}",
                 row.name, row.value, row.type_name, row.details
             )
             .to_ascii_lowercase();
+
             query
                 .split_whitespace()
                 .all(|term| searchable.contains(term))
         });
+
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
         let search = source_search_entry("Filter name, value, type, or field");
         let query_for_search = Rc::clone(&query);
+
         search.connect_changed(move |search| {
             query_for_search.replace(search.text().trim().to_ascii_lowercase());
             filter.changed(gtk::FilterChange::Different);
         });
-        root.append(&search);
 
+        root.append(&search);
         let selection = gtk::NoSelection::new(Some(filtered));
         let view = gtk::ColumnView::new(Some(selection));
         view.add_css_class("debug-table");
         view.add_css_class("variable-viewer-table");
         view.set_vexpand(true);
+
         for (title, width, expand, field) in [
             ("INDEX", 75, false, 0_u8),
             ("NAME / ADDRESS", 180, false, 1),
@@ -398,13 +427,14 @@ impl Ui {
         ] {
             view.append_column(&variable_viewer_column(title, width, expand, field));
         }
+
         let scrolled = gtk::ScrolledWindow::builder()
             .child(&view)
             .vexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Automatic)
             .build();
-        root.append(&scrolled);
 
+        root.append(&scrolled);
         let status = gtk::Label::new(Some("Loading bounded debugger data..."));
         status.add_css_class("muted");
         status.set_halign(gtk::Align::Start);
@@ -412,27 +442,35 @@ impl Ui {
         root.append(&status);
         window.set_child(Some(&root));
         connect_escape_to_close(&window);
+
         let oldest = {
             let mut windows = self.variable_viewer_windows.borrow_mut();
             windows.retain(|window| window.is_visible());
+
             (windows.len() >= MAX_OPEN_VARIABLE_VIEWERS).then(|| windows.remove(0))
         };
+
         if let Some(oldest) = oldest {
             oldest.close();
         }
+
         self.variable_viewer_windows
             .borrow_mut()
             .push(window.clone());
+
         let windows = Rc::downgrade(&self.variable_viewer_windows);
         let weak_window = window.downgrade();
+
         window.connect_close_request(move |_| {
             if let (Some(windows), Some(window)) = (windows.upgrade(), weak_window.upgrade()) {
                 windows
                     .borrow_mut()
                     .retain(|candidate| candidate != &window);
             }
+
             glib::Propagation::Proceed
         });
+
         window.present();
 
         Rc::new(VariableViewerSession {
@@ -451,10 +489,12 @@ fn variable_viewer_column(
     field: u8,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
+
     factory.connect_setup(|_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
         };
+
         let label = gtk::Label::new(None);
         label.add_css_class("debug-table-cell");
         label.set_halign(gtk::Align::Fill);
@@ -463,17 +503,22 @@ fn variable_viewer_column(
         enable_stable_text_selection(&label);
         item.set_child(Some(&label));
     });
+
     factory.connect_bind(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
             return;
         };
+
         let Some(label) = item.child().and_downcast::<gtk::Label>() else {
             return;
         };
+
         let Some(data) = item.item().and_downcast::<glib::BoxedAnyObject>() else {
             return;
         };
+
         let row = data.borrow::<VariableViewerRow>();
+
         let text = match field {
             0 => row.ordinal.to_string(),
             1 => row.name.clone(),
@@ -481,16 +526,20 @@ fn variable_viewer_column(
             2 => row.value.clone(),
             _ => row.type_name.clone(),
         };
+
         label.set_text(&text);
+
         label.set_tooltip_text(Some(&format!(
             "{}\n{}\n{}",
             row.name, row.value, row.type_name
         )));
     });
+
     let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
     column.set_fixed_width(width);
     column.set_expand(expand);
     column.set_resizable(true);
+
     column
 }
 
@@ -507,6 +556,8 @@ mod tests {
             varobj: Some(String::from("var1")),
             num_children: 3,
             has_more: false,
+            display_hint: None,
+            dynamic: false,
         }
     }
 
@@ -515,25 +566,22 @@ mod tests {
         let registry = VariableViewerRegistry::with_builtins();
         let cpp = registry.matching(&variable("std::vector<int>"));
         assert!(cpp.iter().any(|viewer| viewer.id == "indexed-children"));
-
         let rust = registry.matching(&variable("alloc::vec::Vec<crate::Node>"));
         assert!(rust.iter().any(|viewer| viewer.id == "indexed-children"));
         assert!(!rust.iter().any(|viewer| viewer.id == "linked-list"));
-
         let rust_node = registry.matching(&variable("crate::Node"));
         assert!(rust_node.iter().any(|viewer| viewer.id == "linked-list"));
 
         let rust_owner =
             registry.matching(&variable("alloc::rc::Rc<core::cell::RefCell<crate::Node>>"));
-        assert!(rust_owner.iter().any(|viewer| viewer.id == "linked-list"));
 
+        assert!(rust_owner.iter().any(|viewer| viewer.id == "linked-list"));
         let node = registry.matching(&variable("fixture::Node *"));
         assert!(node.iter().any(|viewer| viewer.id == "linked-list"));
-
         let opaque_node = registry.matching(&variable("fixture::Task *"));
         assert!(opaque_node.iter().any(|viewer| viewer.id == "linked-list"));
-
         let scalar_pointer = registry.matching(&variable("unsigned long *"));
+
         assert!(
             !scalar_pointer
                 .iter()
@@ -544,6 +592,7 @@ mod tests {
         lazy_array.value = String::from("<not available>");
         lazy_array.varobj = None;
         lazy_array.num_children = 0;
+
         assert!(
             registry
                 .matching(&lazy_array)

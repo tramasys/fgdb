@@ -1,4 +1,5 @@
 mod app;
+mod background;
 mod bounded;
 mod breakpoint_gutter;
 mod config;
@@ -31,13 +32,16 @@ pub(crate) fn install_window_icon(window: &impl IsA<gtk::Window>) {
             ))
         })
         .collect::<Vec<_>>();
+
     window.as_ref().connect_realize(move |window| {
         let Some(surface) = window.surface() else {
             return;
         };
+
         let Ok(toplevel) = surface.downcast::<gtk::gdk::Toplevel>() else {
             return;
         };
+
         toplevel.set_icon_list(&textures);
     });
 }
@@ -45,14 +49,17 @@ pub(crate) fn install_window_icon(window: &impl IsA<gtk::Window>) {
 fn main() -> gtk::glib::ExitCode {
     gtk::gio::resources_register_include!("fgdb.gresource")
         .expect("fgdb's bundled resources must be valid");
+
     match config::LaunchConfig::from_process() {
         Ok(StartupAction::Run(configuration)) => run_application(configuration),
         Ok(StartupAction::Print(output)) => {
             print!("{output}");
+
             gtk::glib::ExitCode::SUCCESS
         }
         Err(error) => {
             eprintln!("{error}");
+
             if error.should_show_graphically() && !std::io::stderr().is_terminal() {
                 run_startup_error(
                     error.to_string(),
@@ -85,6 +92,7 @@ fn run_startup_error(message: String, active_config_path: Option<PathBuf>) -> gt
         .application_id(APPLICATION_ID)
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
+
     application.connect_activate(move |application| {
         let window = gtk::ApplicationWindow::builder()
             .application(application)
@@ -92,18 +100,17 @@ fn run_startup_error(message: String, active_config_path: Option<PathBuf>) -> gt
             .icon_name(APPLICATION_ID)
             .default_width(620)
             .build();
+
         install_window_icon(&window);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
         content.set_margin_top(18);
         content.set_margin_bottom(18);
         content.set_margin_start(18);
         content.set_margin_end(18);
-
         let heading = gtk::Label::new(Some("fgdb could not start"));
         heading.add_css_class("title-2");
         heading.set_halign(gtk::Align::Start);
         content.append(&heading);
-
         let detail = gtk::Label::new(Some(message.trim()));
         detail.add_css_class("monospace");
         detail.set_halign(gtk::Align::Start);
@@ -118,21 +125,24 @@ fn run_startup_error(message: String, active_config_path: Option<PathBuf>) -> gt
         } else {
             "Run fgdb --help in a terminal to see valid options."
         };
+
         let hint = gtk::Label::new(Some(hint_text));
         hint.add_css_class("dim-label");
         hint.set_halign(gtk::Align::Start);
         content.append(&hint);
-
         let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         actions.set_halign(gtk::Align::End);
+
         if let Some(path) = active_config_path.as_ref() {
             let open = gtk::Button::with_label("Open active config");
             let file = gtk::gio::File::for_path(path);
             let launcher = gtk::FileLauncher::new(Some(&file));
             launcher.set_writable(true);
             let window_for_open = window.clone();
+
             open.connect_clicked(move |_| {
                 let window_for_error = window_for_open.clone();
+
                 launcher.launch(
                     Some(&window_for_open),
                     None::<&gtk::gio::Cancellable>,
@@ -148,18 +158,21 @@ fn run_startup_error(message: String, active_config_path: Option<PathBuf>) -> gt
                     },
                 );
             });
+
             actions.append(&open);
         }
+
         let close = gtk::Button::with_label("Close");
         let window_for_close = window.clone();
         close.connect_clicked(move |_| window_for_close.close());
         actions.append(&close);
         content.append(&actions);
-
         window.set_child(Some(&content));
         window.present();
     });
+
     let _ = application.run_with_args(&["fgdb"]);
+
     gtk::glib::ExitCode::FAILURE
 }
 
@@ -170,6 +183,7 @@ mod tests {
     #[test]
     fn bundles_every_runtime_asset() {
         gio::resources_register_include!("fgdb.gresource").unwrap();
+
         for path in [
             "/dev/fgdb/Fgdb/icons/dev.fgdb.Fgdb.png",
             "/dev/fgdb/Fgdb/icons/hicolor/16x16/apps/dev.fgdb.Fgdb.png",

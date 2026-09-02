@@ -8,18 +8,22 @@ pub(super) fn run_to_source_line(ui: Weak<Ui>, client: &MiClient, path: PathBuf,
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
+
     if !current_ui.movement_commands_available() {
         current_ui.set_status(
             "Jump unavailable",
             "The inferior must be paused before execution can run to a source line.",
             Some("status-error"),
         );
+
         return;
     }
+
     drop(current_ui);
 
     resolve_executable_source_line(ui, client, path, line, |ui, client, source| {
         let command = format!("-exec-until {}", crate::debugger::quote(&source.location));
+
         if let Some(ui) = ui.upgrade() {
             crate::ui::controls::issue_execution_command(
                 &ui,
@@ -46,26 +50,34 @@ fn resolve_executable_source_line(
                 Some("status-error"),
             );
         }
+
         return;
     }
+
     let location = format!("{}:{line}", path.display());
+
     if let Some(ui) = ui.upgrade() {
         ui.set_command_pending(true);
+
         ui.set_status(
             "Checking source line",
             &format!("Looking for executable code at {location}"),
             None,
         );
     }
+
     let command = format!(
         "-symbol-list-lines {}",
         crate::debugger::quote(&path.to_string_lossy())
     );
+
     let ui_for_response = ui.clone();
+
     if let Err(error) = client.request(&command, move |client, record| {
         if !record.is_done() {
             if let Some(ui) = ui_for_response.upgrade() {
                 ui.set_command_pending(false);
+
                 ui.set_status(
                     "Jump unavailable",
                     record
@@ -74,19 +86,24 @@ fn resolve_executable_source_line(
                     Some("status-error"),
                 );
             }
+
             return;
         }
+
         if !crate::debugger::executable_source_lines(&record).contains(&line) {
             if let Some(ui) = ui_for_response.upgrade() {
                 ui.set_command_pending(false);
+
                 ui.set_status(
                     "Jump unavailable",
                     &format!("{location} contains no executable code"),
                     None,
                 );
             }
+
             return;
         }
+
         on_resolved(ui_for_response, client, ResolvedSourceLine { location });
     }) && let Some(ui) = ui.upgrade()
     {

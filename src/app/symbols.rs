@@ -17,6 +17,7 @@ pub(super) fn request_source_discovery(
         SourceDiscoveryRequest::LoadedFiles(generation) => {
             let ui_for_response = ui.clone();
             let ui_for_guard = ui.clone();
+
             if client
                 .request_when(
                     "-file-list-exec-source-files",
@@ -61,6 +62,7 @@ pub(super) fn request_source_discovery(
 
 fn request_source_symbol_results(ui: Weak<Ui>, client: &MiClient, query: String, generation: u64) {
     let pattern = source_symbol_pattern(&query);
+
     let search = Rc::new(SourceSymbolSearch {
         ui,
         query,
@@ -68,6 +70,7 @@ fn request_source_symbol_results(ui: Weak<Ui>, client: &MiClient, query: String,
         pending: Cell::new(2),
         locations: RefCell::new(Vec::new()),
     });
+
     for command in [
         format!(
             "-symbol-info-functions --name {} --max-results 256",
@@ -81,6 +84,7 @@ fn request_source_symbol_results(ui: Weak<Ui>, client: &MiClient, query: String,
         let search_for_response = Rc::clone(&search);
         let ui_for_guard = search.ui.clone();
         let generation = search.generation;
+
         if client
             .request_when(
                 &command,
@@ -96,6 +100,7 @@ fn request_source_symbol_results(ui: Weak<Ui>, client: &MiClient, query: String,
                             .borrow_mut()
                             .extend(crate::debugger::source_locations(&record));
                     }
+
                     finish_source_symbol_request(&search_for_response);
                 },
             )
@@ -109,17 +114,22 @@ fn request_source_symbol_results(ui: Weak<Ui>, client: &MiClient, query: String,
 fn finish_source_symbol_request(search: &SourceSymbolSearch) {
     let remaining = search.pending.get().saturating_sub(1);
     search.pending.set(remaining);
+
     if remaining != 0 {
         return;
     }
+
     let mut locations = search.locations.borrow().clone();
+
     locations.sort_unstable_by(|left, right| {
         left.function
             .cmp(&right.function)
             .then_with(|| left.source_path().cmp(right.source_path()))
             .then_with(|| left.line.cmp(&right.line))
     });
+
     locations.dedup();
+
     if let Some(ui) = search.ui.upgrade() {
         ui.show_source_symbol_results(search.generation, &search.query, locations);
     }
@@ -132,10 +142,12 @@ pub(super) fn request_source_symbol(
     load_libraries_on_miss: bool,
 ) {
     let pattern = source_symbol_pattern(&symbol);
+
     let command = format!(
         "-symbol-info-functions --name {} --max-results 256",
         crate::debugger::quote(&pattern)
     );
+
     if let Some(ui) = ui.upgrade() {
         ui.set_status(
             "Resolving source",
@@ -143,13 +155,16 @@ pub(super) fn request_source_symbol(
             None,
         );
     }
+
     let ui_for_response = ui.clone();
     let client_for_response = Rc::clone(&client);
     let symbol_for_response = symbol;
+
     if let Err(error) = client.request(&command, move |_, record| {
         let locations = record
             .is_done()
             .then(|| crate::debugger::source_locations(&record));
+
         match locations {
             Some(locations) if !locations.is_empty() => {
                 if let Some(ui) = ui_for_response.upgrade() {
@@ -196,10 +211,12 @@ pub(super) fn load_library_symbols_for_source(ui: Weak<Ui>, client: Rc<MiClient>
             None,
         );
     }
+
     let command = crate::debugger::console_command("sharedlibrary");
     let ui_for_response = ui.clone();
     let client_for_response = Rc::clone(&client);
     let symbol_for_response = symbol;
+
     if let Err(error) = client.request(&command, move |_, record| {
         if record.is_done() {
             request_source_symbol(
@@ -253,7 +270,9 @@ pub(super) fn source_symbol_pattern(symbol: &str) -> String {
                     ) {
                         escaped.push('\\');
                     }
+
                     escaped.push(character);
+
                     escaped
                 })
         })
@@ -280,6 +299,7 @@ pub(super) fn vector_assignment_expression(
 
 pub(super) fn parse_gdb_integer(value: &str) -> Option<u64> {
     let value = value.trim();
+
     value.strip_prefix("0x").map_or_else(
         || value.parse().ok(),
         |value| u64::from_str_radix(value, 16).ok(),
@@ -289,6 +309,7 @@ pub(super) fn parse_gdb_integer(value: &str) -> Option<u64> {
 pub(super) fn symbol_annotation(value: &str) -> Option<&str> {
     let start = value.find('<')?;
     let end = value[start..].find('>')? + start;
+
     value.get(start..=end)
 }
 
@@ -300,6 +321,7 @@ pub(super) fn handle_session_event(ui: &Weak<Ui>, event: SessionEvent) {
     match event {
         SessionEvent::Spawned(pid) => {
             ui.set_debugger_pid(Some(pid));
+
             ui.set_status(
                 "Connecting",
                 "GDB started. Waiting for its secondary MI interface.",
@@ -309,6 +331,7 @@ pub(super) fn handle_session_event(ui: &Weak<Ui>, event: SessionEvent) {
         SessionEvent::Failed(message) => {
             ui.set_debugger_pid(None);
             ui.set_controls_ready(false);
+
             ui.set_status(
                 "GDB failed",
                 &format!("Could not start the configured debugger: {message}"),
@@ -323,11 +346,13 @@ pub(super) fn handle_session_event(ui: &Weak<Ui>, event: SessionEvent) {
             ui.set_inferior_started(false);
             ui.reset_target_abi();
             ui.clear_debugger_state();
+
             ui.set_status(
                 "GDB exited",
                 &format!("The debugger process exited with status {status}."),
                 Some("status-error"),
             );
+
             ui.set_controls_ready(false);
         }
     }

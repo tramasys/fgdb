@@ -73,11 +73,13 @@ pub extern "C" fn rust_variable_viewer_checkpoint(
     let local_vector = vec![2_i64, 3, 5, 7, 11, 13, 17, 19];
     let local_large_vector = (0_u32..300).collect::<Vec<_>>();
     let local_nested_vector = vec![vec![1_u8, 2, 3], vec![], vec![0xfe, 0xff]];
+
     let local_deque = VecDeque::from([
         String::from("front"),
         String::from("middle value"),
         String::from("back"),
     ]);
+
     let local_linked_list = LinkedList::from([10_i32, 20, 30, 40]);
     let local_binary_heap = BinaryHeap::from([29_i32, 7, 41, 13, 3]);
 
@@ -85,14 +87,15 @@ pub extern "C" fn rust_variable_viewer_checkpoint(
         (String::from("alpha"), vec![1_u32, 2, 3]),
         (String::from("beta"), vec![5, 8, 13]),
     ]);
+
     let local_tree_map = BTreeMap::from([
         (1_u16, Message::Empty),
         (2, Message::Text(String::from("tree value"))),
         (3, Message::Bytes(vec![0, 1, 0x7f, 0x80, 0xff])),
     ]);
+
     let local_hash_set = HashSet::from(["red", "green", "blue"]);
     let local_tree_set = BTreeSet::from([-8_i32, -1, 0, 1, 8]);
-
     let local_string = String::from("UTF-8: Zürich λ 🚀");
     let local_str: &str = &local_string[0..15];
     let local_array = [10_u32, 20, 30, 40, 50, 60, 70, 80];
@@ -107,13 +110,16 @@ pub extern "C" fn rust_variable_viewer_checkpoint(
         enabled: true,
         samples: vec![50, 51, 52],
     }));
+
     let local_none: Option<Record> = None;
+
     let local_result: Result<Record, String> = Ok(Record {
         id: 601,
         name: String::from("successful record"),
         enabled: false,
         samples: vec![-6, 0, 6],
     });
+
     let local_error: Result<u64, String> = Err(String::from("intentional error"));
 
     let local_box = Box::new(Record {
@@ -122,15 +128,19 @@ pub extern "C" fn rust_variable_viewer_checkpoint(
         enabled: true,
         samples: vec![70, 71, 72],
     });
+
     let local_rc = Rc::clone(shared_arg);
+
     let local_arc = Arc::new(Mutex::new(Record {
         id: 801,
         name: String::from("shared record"),
         enabled: true,
         samples: vec![80, 81, 82],
     }));
+
     let local_raw_pointer = local_array.as_ptr();
     let local_reference = &local_tuple;
+
     let local_primitives = PrimitiveTypes {
         boolean: true,
         character: 'ß',
@@ -197,13 +207,16 @@ pub extern "C" fn rust_variable_viewer_checkpoint(
 
 fn main() {
     let vector = vec![1_i32, 1, 2, 3, 5, 8, 13, 21];
+
     let deque = VecDeque::from([
         String::from("zero"),
         String::from("one"),
         String::from("two words"),
         String::from("three"),
     ]);
+
     let linked_list = LinkedList::from([-5_i64, -3, -1, 1, 3, 5]);
+
     let hash_map = HashMap::from([
         (
             String::from("first"),
@@ -224,17 +237,20 @@ fn main() {
             },
         ),
     ]);
+
     let tree_map = BTreeMap::from([
         (10_u32, String::from("ten")),
         (20, String::from("twenty")),
         (30, String::from("thirty")),
     ]);
+
     let option = Some(Box::new(Record {
         id: 201,
         name: String::from("argument option"),
         enabled: true,
         samples: vec![2, 0, 1],
     }));
+
     let result = Err(String::from("argument Result error"));
     let string = String::from("argument String with UTF-8 λ");
     let slice_storage = [0_u16, 1, 2, 3, 5, 8, 13, 21, 34];
@@ -245,12 +261,14 @@ fn main() {
         next: None,
         previous: Weak::new(),
     }));
+
     let second = Rc::new(RefCell::new(Node {
         value: 2,
         label: String::from("second node"),
         next: None,
         previous: Rc::downgrade(&first),
     }));
+
     first.borrow_mut().next = Some(second);
 
     rust_variable_viewer_checkpoint(

@@ -9,18 +9,22 @@ pub(super) fn request_value_type_metadata(ui: Weak<Ui>, client: Rc<MiClient>, va
     let Some(generation) = ui.upgrade().map(|ui| ui.current_stop_refresh_generation()) else {
         return;
     };
+
     let Some(varobj) = variable.varobj.as_deref() else {
         request_resolved_metadata(ui, client, generation, variable.name.clone(), variable);
         return;
     };
+
     let command = format!(
         "-var-info-path-expression {}",
         crate::debugger::quote(varobj)
     );
+
     let ui_for_response = ui.clone();
     let ui_for_guard = ui.clone();
     let client_for_response = Rc::clone(&client);
     let variable_for_response = variable.clone();
+
     if client
         .request_for_stop(
             &command,
@@ -33,6 +37,7 @@ pub(super) fn request_value_type_metadata(ui: Weak<Ui>, client: Rc<MiClient>, va
             move |_, record| {
                 let expression = crate::debugger::variable_path_expression(&record)
                     .unwrap_or_else(|| variable_for_response.name.clone());
+
                 request_resolved_metadata(
                     ui_for_response,
                     client_for_response,
@@ -56,11 +61,13 @@ pub(super) fn assign_float_bytes(
 ) {
     let Some(generation) = ui.upgrade().and_then(|current_ui| {
         let generation = current_ui.current_stop_refresh_generation();
+
         current_ui.stop_context(generation).map(|_| generation)
     }) else {
         show_float_assignment_error(&ui, "The selected stop context changed");
         return;
     };
+
     let Some(varobj) = variable.varobj.as_deref() else {
         assign_resolved_float(
             ui,
@@ -70,17 +77,21 @@ pub(super) fn assign_float_bytes(
             variable,
             raw_bytes,
         );
+
         return;
     };
+
     let command = format!(
         "-var-info-path-expression {}",
         crate::debugger::quote(varobj)
     );
+
     let ui_for_response = ui.clone();
     let ui_for_guard = ui.clone();
     let client_for_response = Rc::clone(&client);
     let variable_for_response = variable;
     let raw_for_response = raw_bytes;
+
     if client
         .request_for_stop(
             &command,
@@ -90,6 +101,7 @@ pub(super) fn assign_float_bytes(
                 if record.class == "superseded" {
                     return;
                 }
+
                 let Some(expression) = crate::debugger::variable_path_expression(&record) else {
                     show_float_assignment_error(
                         &ui_for_response,
@@ -97,8 +109,10 @@ pub(super) fn assign_float_bytes(
                             .error_message()
                             .unwrap_or("GDB could not resolve the selected value"),
                     );
+
                     return;
                 };
+
                 assign_resolved_float(
                     ui_for_response,
                     client_for_response,
@@ -134,16 +148,20 @@ gdb.selected_inferior().write_memory(v.address,b[::-1] if little else b)"#,
         hex(expression.as_bytes()),
         hex(&raw_bytes),
     );
+
     let command = crate::debugger::console_command(&format!(
         "python exec(bytes.fromhex(\"{}\").decode())",
         hex(python.as_bytes())
     ));
+
     let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
         show_float_assignment_error(&ui, "The selected stop context changed");
         return;
     };
+
     let ui_for_response = ui.clone();
     let ui_for_guard = ui.clone();
+
     if let Err(error) = client.request_control_for_stop(
         &command,
         generation,
@@ -152,12 +170,14 @@ gdb.selected_inferior().write_memory(v.address,b[::-1] if little else b)"#,
             let Some(ui) = ui_for_response.upgrade() else {
                 return;
             };
+
             if record.is_done() {
                 ui.set_status(
                     "Paused",
                     &format!("Updated the exact bit pattern of {}", variable.name),
                     Some("status-ready"),
                 );
+
                 refresh_stopped_state(&ui_for_response, client);
             } else if record.class != "superseded" {
                 ui.set_status(
@@ -190,17 +210,21 @@ fn request_resolved_metadata(
     let id = NEXT_METADATA_ID.fetch_add(1, Ordering::Relaxed);
     let convenience = format!("fgdb_type_meta_{id}");
     let python = metadata_python(&expression, &convenience);
+
     let command = crate::debugger::console_command(&format!(
         "python exec(bytes.fromhex(\"{}\").decode())",
         hex(python.as_bytes())
     ));
+
     let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
         return;
     };
+
     let ui_for_response = ui.clone();
     let ui_for_guard = ui.clone();
     let client_for_response = Rc::clone(&client);
     let variable_for_response = variable.clone();
+
     if client
         .request_for_stop(
             &command,
@@ -215,20 +239,24 @@ fn request_resolved_metadata(
                     present_editor(&ui_for_response, variable_for_response, None);
                     return;
                 }
+
                 let ui_for_value = ui_for_response.clone();
                 let variable_for_value = variable_for_response.clone();
                 let evaluate = format!("-data-evaluate-expression ${convenience}");
+
                 let Some(evaluate) =
                     frame_scoped_stop_command(&ui_for_response, generation, &evaluate)
                 else {
                     return;
                 };
+
                 if client_for_response
                     .request_for_stop(
                         &evaluate,
                         generation,
                         {
                             let ui = ui_for_value.clone();
+
                             move || {
                                 ui.upgrade()
                                     .is_some_and(|ui| ui.is_stop_refresh_current(generation))
@@ -238,6 +266,7 @@ fn request_resolved_metadata(
                             let metadata = crate::debugger::evaluated_value(&record)
                                 .as_deref()
                                 .and_then(parse_metadata);
+
                             present_editor(&ui_for_value, variable_for_value, metadata);
                         },
                     )
@@ -298,9 +327,11 @@ gdb.set_convenience_variable("{}",gdb.Value(meta))"#,
 fn parse_metadata(value: &str) -> Option<ValueTypeMetadata> {
     let value = value.trim().strip_prefix('"')?.strip_suffix('"')?;
     let mut fields = value.split(';');
+
     if fields.next()? != "1" {
         return None;
     }
+
     let kind = match fields.next()? {
         "integer" => ValueTypeKind::Integer,
         "float" => ValueTypeKind::Float,
@@ -309,30 +340,37 @@ fn parse_metadata(value: &str) -> Option<ValueTypeMetadata> {
         "character" => ValueTypeKind::Character,
         _ => ValueTypeKind::Other,
     };
+
     let bits = fields.next()?.parse().ok().filter(|bits| *bits > 0);
+
     let signed = match fields.next()? {
         "1" => Some(true),
         "0" => Some(false),
         _ => None,
     };
+
     let raw_bytes = match fields.next()? {
         "" => None,
         raw => decode_hex(raw),
     };
+
     let language = match fields.next()? {
         "" => None,
         language => String::from_utf8(decode_hex(language)?).ok(),
     };
+
     let enum_variants = fields
         .filter_map(|field| {
             let (name, value) = field.split_once('=')?;
             let name = String::from_utf8(decode_hex(name)?).ok()?;
+
             Some(EnumVariant {
                 name,
                 value: value.to_owned(),
             })
         })
         .collect();
+
     Some(ValueTypeMetadata {
         kind,
         bits,
@@ -345,10 +383,12 @@ fn parse_metadata(value: &str) -> Option<ValueTypeMetadata> {
 
 fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
+
     bytes.iter().fold(
         String::with_capacity(bytes.len() * 2),
         |mut output, byte| {
             let _ = write!(output, "{byte:02x}");
+
             output
         },
     )
@@ -358,12 +398,15 @@ fn decode_hex(value: &str) -> Option<Vec<u8>> {
     if !value.len().is_multiple_of(2) {
         return None;
     }
+
     let (pairs, remainder) = value.as_bytes().as_chunks::<2>();
     debug_assert!(remainder.is_empty());
+
     pairs
         .iter()
         .map(|digits| {
             let digits = std::str::from_utf8(digits).ok()?;
+
             u8::from_str_radix(digits, 16).ok()
         })
         .collect()
@@ -390,6 +433,7 @@ mod tests {
     #[test]
     fn preserves_float_storage_bytes_in_canonical_order() {
         let metadata = parse_metadata(r#""1;float;64;1;3ff4000000000000;63""#).unwrap();
+
         assert_eq!(
             metadata.raw_bytes.unwrap(),
             1.25_f64.to_bits().to_be_bytes()

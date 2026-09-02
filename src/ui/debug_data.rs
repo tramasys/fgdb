@@ -120,6 +120,7 @@ fn defer_debug_data_action(
     action: DebugDataAction,
 ) {
     let handler = handler.borrow().clone();
+
     if let Some(handler) = handler {
         glib::idle_add_local_once(move || handler(action));
     }
@@ -127,11 +128,13 @@ fn defer_debug_data_action(
 
 fn connect_debug_data_search(search: &gtk::Entry, weak_ui: Weak<Ui>, render: fn(&Ui)) {
     let generation = Rc::new(Cell::new(0_u64));
+
     search.connect_changed(move |_| {
         let next_generation = generation.get().wrapping_add(1);
         generation.set(next_generation);
         let generation = Rc::clone(&generation);
         let weak_ui = weak_ui.clone();
+
         glib::timeout_add_local_once(DEBUG_DATA_SEARCH_DELAY, move || {
             if generation.get() == next_generation
                 && let Some(ui) = weak_ui.upgrade()
@@ -153,11 +156,14 @@ impl Ui {
 
     pub(crate) fn connect_debug_data_actions(self: &Rc<Self>) {
         let weak_ui = Rc::downgrade(self);
+
         self.debug_data_button.connect_clicked(move |_| {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
+
             ui.present_debug_data();
+
             if !ui.debug_data_state.borrow().refreshing {
                 ui.dispatch_debug_data_action(DebugDataAction::Refresh);
             }
@@ -174,6 +180,7 @@ impl Ui {
         self.debug_data_state.borrow_mut().refreshing = true;
         self.refresh_module_debug_metadata(true);
         self.render_debug_data_overview();
+
         generation
     }
 
@@ -192,15 +199,18 @@ impl Ui {
         if !self.debug_data_refresh_is_current(generation) {
             return;
         }
+
         let mut state = self.debug_data_state.borrow_mut();
         let modules_changed = state.debuginfod_status != status;
         let overview_changed = modules_changed || state.debuginfod_urls != urls;
         state.debuginfod_status = status;
         state.debuginfod_urls = urls;
         drop(state);
+
         if overview_changed {
             self.render_debug_data_overview();
         }
+
         if modules_changed {
             self.render_debug_data_modules();
         }
@@ -215,14 +225,19 @@ impl Ui {
         if !self.debug_data_refresh_is_current(generation) {
             return;
         }
+
         let mut state = self.debug_data_state.borrow_mut();
+
         let changed =
             state.source_directories != directories || state.substitutions != substitutions;
+
         if changed {
             state.source_directories = directories;
             state.substitutions = substitutions;
         }
+
         drop(state);
+
         if changed {
             self.render_debug_data_sources();
         }
@@ -230,15 +245,18 @@ impl Ui {
 
     pub(crate) fn begin_debug_data_pretty_printer_refresh(&self) -> Option<u64> {
         let mut state = self.debug_data_state.borrow_mut();
+
         if state.pretty_printers_loading {
             return None;
         }
+
         state.pretty_printer_generation = state.pretty_printer_generation.wrapping_add(1);
         let generation = state.pretty_printer_generation;
         state.pretty_printers_loading = true;
         state.pretty_printer_error = None;
         drop(state);
         self.render_debug_data_printers();
+
         Some(generation)
     }
 
@@ -252,28 +270,35 @@ impl Ui {
         printers: Result<Vec<String>, String>,
     ) {
         let mut state = self.debug_data_state.borrow_mut();
+
         if state.pretty_printer_generation != generation {
             return;
         }
+
         state.pretty_printers_loading = false;
+
         match printers {
             Ok(printers) => {
                 let printers = Rc::new(parse_pretty_printer_scopes(&printers));
+
                 if state.pretty_printers != printers {
                     state.pretty_printers = printers;
                     state.pretty_printer_limit = PRETTY_PRINTER_PAGE_SIZE;
                 }
+
                 state.pretty_printers_ready = true;
                 state.pretty_printer_error = None;
             }
             Err(error) => state.pretty_printer_error = Some(error),
         }
+
         drop(state);
         self.render_debug_data_printers();
     }
 
     pub(crate) fn debug_data_pretty_printers_were_requested(&self) -> bool {
         let state = self.debug_data_state.borrow();
+
         state.pretty_printers_ready
             || state.pretty_printers_loading
             || state.pretty_printer_error.is_some()
@@ -301,33 +326,68 @@ impl Ui {
         let key = format!("{:?}:{}", notice.outcome, notice.operation);
         let mut recent = self.performance_notice_times.borrow_mut();
         recent.retain(|_, recorded| now.saturating_duration_since(*recorded) < NOTICE_COOLDOWN);
+
         if recent
             .get(&key)
             .is_some_and(|recorded| now.saturating_duration_since(*recorded) < NOTICE_COOLDOWN)
         {
             return;
         }
+
         recent.insert(key, now);
         drop(recent);
         self.add_debug_data_warning(notice.message());
     }
 
     pub(crate) fn record_ui_render_duration(&self, operation: &str, started_at: Instant) {
+        let elapsed = Instant::now().saturating_duration_since(started_at);
+
+        let adjustment = self
+            .adaptive_render_budgets
+            .borrow_mut()
+            .observe(operation, elapsed);
+
         if let Some(notice) = crate::performance::duration_notice(
             operation,
-            Instant::now().saturating_duration_since(started_at),
+            elapsed,
             crate::performance::UI_RENDER_BUDGET,
         ) {
             self.record_performance_notice(notice);
         }
+
+        if let Some(adjustment) = adjustment {
+            self.record_performance_notice(crate::performance::PerformanceNotice {
+                outcome: crate::performance::BudgetOutcome::Deferred,
+                operation: operation.to_owned(),
+                detail: format!(
+                    "adaptive widget page changed from {} to {} entries after a {} ms render",
+                    adjustment.previous,
+                    adjustment.current,
+                    elapsed.as_millis()
+                ),
+            });
+        }
+    }
+
+    pub(crate) fn adaptive_render_limit(
+        &self,
+        operation: &str,
+        default: usize,
+        minimum: usize,
+    ) -> usize {
+        self.adaptive_render_budgets
+            .borrow_mut()
+            .limit(operation, default, minimum)
     }
 
     fn record_debug_data_activity(&self, kind: DebugDataActivityKind, message: impl Into<String>) {
         let mut message = message.into();
+
         if message.len() > MAX_DEBUG_DATA_ACTIVITY_BYTES {
             message.truncate(message.floor_char_boundary(MAX_DEBUG_DATA_ACTIVITY_BYTES));
             message.push_str("\n… output truncated in the activity view");
         }
+
         let time = debug_data_activity_time();
         let mut state = self.debug_data_state.borrow_mut();
         append_debug_data_activity(&mut state.activity, kind, message, time);
@@ -337,18 +397,22 @@ impl Ui {
 
     pub(crate) fn show_more_debug_data_pretty_printers(&self) {
         let mut state = self.debug_data_state.borrow_mut();
+
         state.pretty_printer_limit = state
             .pretty_printer_limit
             .saturating_add(PRETTY_PRINTER_PAGE_SIZE);
+
         drop(state);
         self.render_debug_data_printers();
     }
 
     pub(crate) fn show_more_debug_data_modules(&self) {
         let mut state = self.debug_data_state.borrow_mut();
+
         state.module_limit = state
             .module_limit
             .saturating_add(DEBUG_DATA_RESULT_PAGE_SIZE);
+
         drop(state);
         self.render_debug_data_modules();
     }
@@ -359,9 +423,11 @@ impl Ui {
 
     pub(crate) fn show_more_debug_data_sources(&self) {
         let mut state = self.debug_data_state.borrow_mut();
+
         state.source_limit = state
             .source_limit
             .saturating_add(DEBUG_DATA_RESULT_PAGE_SIZE);
+
         drop(state);
         self.render_debug_data_sources();
     }
@@ -393,18 +459,22 @@ impl Ui {
         if !self.source_roots.borrow().contains(&path) {
             self.source_roots.borrow_mut().push(path.clone());
         }
+
         if !self.source_tree_roots.borrow().contains(&path) {
             self.source_tree_roots.borrow_mut().push(path);
         }
+
         self.invalidate_source_discovery();
     }
 
     pub(crate) fn remove_runtime_source_directory(&self, path: &str) {
         let path = Path::new(path);
         self.source_roots.borrow_mut().retain(|root| root != path);
+
         self.source_tree_roots
             .borrow_mut()
             .retain(|root| root != path);
+
         self.invalidate_source_discovery();
     }
 
@@ -412,27 +482,38 @@ impl Ui {
         self.resolved_source_paths.borrow_mut().clear();
         self.source_loaded_cache.borrow_mut().take();
         self.source_tree_cache.borrow_mut().take();
+        self.source_index.borrow_mut().take();
         self.source_tree_generation.fetch_add(1, Ordering::Relaxed);
+
         self.source_tree_render_generation
             .fetch_add(1, Ordering::Relaxed);
+
+        // A worker for the old generation may still complete, but it must not
+        // keep a new generation from starting its own index.
+        self.source_tree_indexing.set(false);
     }
 
     pub(crate) fn cache_loaded_source_files(&self, files: &[SourceFile]) {
         let files_changed = self.loaded_source_files.borrow().as_slice() != files;
+
         if files_changed {
             self.loaded_source_files.replace(files.to_vec());
         }
+
         let state_changed = {
             let mut state = self.debug_data_state.borrow_mut();
             let changed = !state.source_files_ready || state.source_files_loading;
             state.source_files_ready = true;
             state.source_files_loading = false;
             state.source_files_error = None;
+
             if files_changed {
                 state.source_limit = DEBUG_DATA_RESULT_PAGE_SIZE;
             }
+
             changed
         };
+
         if files_changed || state_changed {
             self.render_debug_data_overview();
             self.render_debug_data_sources();
@@ -441,14 +522,17 @@ impl Ui {
 
     pub(super) fn begin_loaded_source_files_request(&self) -> bool {
         let mut state = self.debug_data_state.borrow_mut();
+
         if state.source_files_loading {
             return false;
         }
+
         state.source_files_loading = true;
         state.source_files_error = None;
         drop(state);
         self.render_debug_data_overview();
         self.render_debug_data_sources();
+
         true
     }
 
@@ -456,13 +540,16 @@ impl Ui {
         if !self.loaded_source_files_request_is_current(generation) {
             return;
         }
+
         let mut state = self.debug_data_state.borrow_mut();
         state.source_files_loading = false;
         state.source_files_error = Some(message.clone());
         drop(state);
+
         self.add_debug_data_warning(format!(
             "Loaded-source discovery is unavailable: {message}. Retry from the Sources tab"
         ));
+
         self.render_debug_data_overview();
         self.render_debug_data_sources();
     }
@@ -474,11 +561,13 @@ impl Ui {
     pub(crate) fn show_debug_data_source_files(&self) -> bool {
         let mut state = self.debug_data_state.borrow_mut();
         let needs_load = !state.source_files_ready;
+
         if !state.source_files_visible {
             state.source_files_visible = true;
             drop(state);
             self.render_debug_data_sources();
         }
+
         needs_load
     }
 
@@ -487,6 +576,7 @@ impl Ui {
             view.window.present();
             return;
         }
+
         let window = gtk::Window::builder()
             .title("fgdb debug data")
             .transient_for(&self.window)
@@ -495,13 +585,13 @@ impl Ui {
             .default_width(980)
             .default_height(700)
             .build();
+
         window.add_css_class("debug-data-window");
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
         root.set_margin_top(10);
         root.set_margin_bottom(10);
         root.set_margin_start(10);
         root.set_margin_end(10);
-
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         heading.add_css_class("debug-data-heading");
         let title = gtk::Label::new(Some("Debug data"));
@@ -513,15 +603,17 @@ impl Ui {
         let refresh = gtk::Button::with_label("Refresh");
         refresh.add_css_class("inline-action");
         let weak_ui = Rc::downgrade(self);
+
         refresh.connect_clicked(move |button| {
             button.set_sensitive(false);
+
             if let Some(ui) = weak_ui.upgrade() {
                 ui.dispatch_debug_data_action(DebugDataAction::Refresh);
             }
         });
+
         heading.append(&refresh);
         root.append(&heading);
-
         let notebook = gtk::Notebook::new();
         notebook.set_vexpand(true);
         let overview = debug_data_page();
@@ -552,26 +644,32 @@ impl Ui {
             source_search: source_search.clone(),
             printer_search: printer_search.clone(),
         }));
+
         connect_debug_data_search(
             &module_search,
             Rc::downgrade(self),
             Ui::reset_debug_data_module_limit,
         );
+
         connect_debug_data_search(
             &source_search,
             Rc::downgrade(self),
             Ui::reset_debug_data_source_limit,
         );
+
         connect_debug_data_search(
             &printer_search,
             Rc::downgrade(self),
             Ui::reset_debug_data_pretty_printer_limit,
         );
+
         let window_for_switch = window.clone();
         let weak_ui = Rc::downgrade(self);
+
         notebook.connect_switch_page(move |_, _, page| {
             let window = window_for_switch.clone();
             glib::idle_add_local_once(move || clear_label_selections(&window));
+
             if page == 3
                 && let Some(ui) = weak_ui.upgrade()
                 && !ui.debug_data_pretty_printers_were_requested()
@@ -579,6 +677,7 @@ impl Ui {
                 ui.dispatch_debug_data_action(DebugDataAction::LoadPrettyPrinters);
             }
         });
+
         self.render_all_debug_data();
         window.present();
     }
@@ -595,9 +694,12 @@ impl Ui {
         let Some(view) = self.debug_data_view.borrow().as_ref().cloned() else {
             return;
         };
+
         clear_debug_data_box(&view.overview);
+
         let (refreshing, debuginfod_status, debuginfod_urls, sources_ready, sources_loading) = {
             let state = self.debug_data_state.borrow();
+
             (
                 state.refreshing,
                 state.debuginfod_status.clone(),
@@ -606,18 +708,22 @@ impl Ui {
                 state.source_files_loading,
             )
         };
+
         view.refresh.set_sensitive(!refreshing);
         view.modules.set_sensitive(!refreshing);
         view.sources.set_sensitive(!refreshing);
         view.printers.set_sensitive(!refreshing);
         let capabilities = self.gdb_capabilities.borrow().clone();
+
         let loaded = self
             .latest_modules
             .borrow()
             .iter()
             .filter(|module| module.symbols_loaded)
             .count();
+
         let modules = self.latest_modules.borrow().len();
+
         view.overview.append(&debug_data_fact(
             "Debugger",
             &capabilities.version.as_deref().map_or_else(
@@ -625,10 +731,12 @@ impl Ui {
                 |version| format!("GDB {version}"),
             ),
         ));
+
         view.overview.append(&debug_data_fact(
             "Capabilities",
             &capabilities.compatibility_summary(),
         ));
+
         view.overview.append(&debug_data_fact(
             "Modules",
             &format!(
@@ -636,6 +744,7 @@ impl Ui {
                 modules.saturating_sub(loaded)
             ),
         ));
+
         let loaded_sources = if sources_loading {
             String::from("Loading…")
         } else if sources_ready {
@@ -643,76 +752,94 @@ impl Ui {
         } else {
             String::from("Not loaded")
         };
+
         view.overview
             .append(&debug_data_fact("Loaded sources", &loaded_sources));
+
         let status = if debuginfod_status.is_empty() {
             "Unknown"
         } else {
             debuginfod_status.as_str()
         };
+
         view.overview.append(&debug_data_fact("Debuginfod", status));
+
         if debuginfod_status == "ask" {
             view.overview.append(&muted_label(
                 "Choose Enable or Disable before retrying symbols so GDB cannot block on a hidden confirmation prompt.",
             ));
         }
+
         let debuginfod_actions = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         debuginfod_actions.add_css_class("debug-data-control-card");
+
         for (label, enabled) in [("Enable", true), ("Disable", false)] {
             let button = gtk::Button::with_label(label);
             button.add_css_class("inline-action");
             button.set_sensitive(!refreshing);
             let handler = Rc::clone(&self.debug_data_action_handler);
+
             button.connect_clicked(move |button| {
                 button.set_sensitive(false);
                 defer_debug_data_action(&handler, DebugDataAction::SetDebuginfodEnabled(enabled));
             });
+
             debuginfod_actions.append(&button);
         }
+
         let urls = gtk::Entry::builder()
             .placeholder_text("DEBUGINFOD_URLS")
             .text(&debuginfod_urls)
             .hexpand(true)
             .build();
+
         debuginfod_actions.append(&urls);
         let apply_urls = gtk::Button::with_label("Apply URLs");
         apply_urls.add_css_class("inline-action");
         apply_urls.set_sensitive(!refreshing);
         let handler = Rc::clone(&self.debug_data_action_handler);
+
         apply_urls.connect_clicked(move |button| {
             button.set_sensitive(false);
+
             defer_debug_data_action(
                 &handler,
                 DebugDataAction::SetDebuginfodUrls(urls.text().trim().to_owned()),
             );
         });
+
         debuginfod_actions.append(&apply_urls);
         view.overview.append(&debuginfod_actions);
-
         let printer_actions = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         printer_actions.add_css_class("debug-data-control-card");
+
         let printer_label = gtk::Label::new(Some(if capabilities.pretty_printing {
             "Dynamic pretty printing is enabled"
         } else {
             "Dynamic pretty printing is disabled or unavailable"
         }));
+
         printer_label.set_halign(gtk::Align::Start);
         printer_label.set_hexpand(true);
         printer_actions.append(&printer_label);
+
         for (label, enabled) in [("Enable printers", true), ("Disable printers", false)] {
             let button = gtk::Button::with_label(label);
             button.add_css_class("inline-action");
             button.set_sensitive(!refreshing);
             let handler = Rc::clone(&self.debug_data_action_handler);
+
             button.connect_clicked(move |button| {
                 button.set_sensitive(false);
                 defer_debug_data_action(&handler, DebugDataAction::SetPrettyPrinting(enabled));
             });
+
             printer_actions.append(&button);
         }
-        view.overview.append(&printer_actions);
 
+        view.overview.append(&printer_actions);
         view.overview.append(&debug_data_section("GDB/MI FEATURES"));
+
         if capabilities.features.is_empty() {
             view.overview
                 .append(&muted_label(if capabilities.features_known {
@@ -724,6 +851,7 @@ impl Ui {
             view.overview
                 .append(&wrapping_value(&capabilities.features.join("  ·  ")));
         }
+
         if refreshing {
             view.overview
                 .prepend(&muted_label("Refreshing debugger diagnostics…"));
@@ -734,33 +862,41 @@ impl Ui {
         let Some(view) = self.debug_data_view.borrow().as_ref().cloned() else {
             return;
         };
+
         let render_started = Instant::now();
         clear_page_after_search(&view.modules);
         let query = view.module_search.text().trim().to_ascii_lowercase();
         let terms = query.split_whitespace().collect::<Vec<_>>();
         let metadata = self.module_debug_metadata.borrow();
         let modules = self.latest_modules.borrow();
+
         let (can_retry_symbols, render_limit) = {
             let debug_data = self.debug_data_state.borrow();
+
             (
                 debug_data.debuginfod_status != "ask",
                 debug_data.module_limit.max(DEBUG_DATA_RESULT_PAGE_SIZE),
             )
         };
+
         let mut shown = 0_usize;
         let mut matching = 0_usize;
+
         for module in modules.iter() {
             let path_text = module.host_name.as_deref().unwrap_or(&module.target_name);
             let path = Path::new(path_text);
             let details = metadata.get(path);
+
             let build_id = details
                 .and_then(|details| details.build_id.as_deref())
                 .unwrap_or("");
+
             let status = if module.symbols_loaded {
                 "symbols loaded"
             } else {
                 "missing symbols"
             };
+
             if !terms.iter().all(|term| {
                 text_matches(&module.target_name, term)
                     || text_matches(path_text, term)
@@ -769,10 +905,13 @@ impl Ui {
             }) {
                 continue;
             }
+
             matching += 1;
+
             if shown >= render_limit {
                 continue;
             }
+
             shown += 1;
             let row = gtk::Box::new(gtk::Orientation::Vertical, 3);
             row.add_css_class("debug-data-row");
@@ -782,43 +921,53 @@ impl Ui {
             name.set_halign(gtk::Align::Start);
             name.set_hexpand(true);
             heading.append(&name);
+
             let state = gtk::Label::new(Some(if module.symbols_loaded {
                 "SYMBOLS"
             } else {
                 "NO SYMBOLS"
             }));
+
             state.add_css_class(if module.symbols_loaded {
                 "module-symbols-loaded"
             } else {
                 "module-symbols-missing"
             });
+
             heading.append(&state);
             let retry = gtk::Button::with_label("Retry");
             retry.add_css_class("inline-action");
             retry.set_sensitive(can_retry_symbols);
             let handler = Rc::clone(&self.debug_data_action_handler);
             let target = module.target_name.clone();
+
             retry.connect_clicked(move |button| {
                 button.set_sensitive(false);
+
                 defer_debug_data_action(
                     &handler,
                     DebugDataAction::RetrySymbols(Some(target.clone())),
                 );
             });
+
             heading.append(&retry);
             row.append(&heading);
             row.append(&selectable_value(&path.display().to_string()));
+
             if let Some(details) = details {
                 if let Some(build_id) = details.build_id.as_deref() {
                     row.append(&debug_data_fact("Build ID", build_id));
                 }
+
                 if let Some(debuglink) = details.debuglink.as_deref() {
                     let value = details.debuglink_crc.map_or_else(
                         || debuglink.to_owned(),
                         |crc| format!("{debuglink} · CRC {crc:08x}"),
                     );
+
                     row.append(&debug_data_fact("Debuglink", &value));
                 }
+
                 let debug_file = details.separate_debug_file.as_ref().map_or_else(
                     || {
                         if details.embedded_debug_info {
@@ -829,15 +978,19 @@ impl Ui {
                     },
                     |path| path.display().to_string(),
                 );
+
                 row.append(&debug_data_fact("Debug file", &debug_file));
+
                 if let Some(message) = details.error.as_deref().or(details.suggestion.as_deref()) {
                     row.append(&muted_label(message));
                 }
             } else {
                 row.append(&muted_label("Inspecting ELF metadata…"));
             }
+
             view.modules.append(&row);
         }
+
         if matching == 0 {
             view.modules.append(&muted_label(if modules.is_empty() {
                 "Modules appear after an executable or core is loaded"
@@ -845,34 +998,43 @@ impl Ui {
                 "No modules match the filter"
             }));
         }
+
         if shown < matching {
             let remaining = matching - shown;
+
             let show_more = gtk::Button::with_label(&format!(
                 "Show {} more module{}",
                 remaining.min(DEBUG_DATA_RESULT_PAGE_SIZE),
                 if remaining == 1 { "" } else { "s" }
             ));
+
             show_more.add_css_class("inline-action");
             show_more.set_halign(gtk::Align::Center);
             let handler = Rc::clone(&self.debug_data_action_handler);
+
             show_more.connect_clicked(move |button| {
                 button.set_sensitive(false);
                 defer_debug_data_action(&handler, DebugDataAction::ShowMoreModules);
             });
+
             view.modules.append(&show_more);
         }
+
         if !modules.is_empty() {
             let retry_all = gtk::Button::with_label("Retry all missing symbols");
             retry_all.add_css_class("inline-action");
             retry_all.set_halign(gtk::Align::Start);
             retry_all.set_sensitive(can_retry_symbols);
             let handler = Rc::clone(&self.debug_data_action_handler);
+
             retry_all.connect_clicked(move |button| {
                 button.set_sensitive(false);
                 defer_debug_data_action(&handler, DebugDataAction::RetrySymbols(None));
             });
+
             view.modules.append(&retry_all);
         }
+
         self.record_ui_render_duration("Debug Data modules", render_started);
     }
 
@@ -880,8 +1042,10 @@ impl Ui {
         let Some(view) = self.debug_data_view.borrow().as_ref().cloned() else {
             return;
         };
+
         let render_started = Instant::now();
         clear_page_after_search(&view.sources);
+
         let (
             source_directories,
             substitutions,
@@ -892,6 +1056,7 @@ impl Ui {
             render_limit,
         ) = {
             let state = self.debug_data_state.borrow();
+
             (
                 state.source_directories.clone(),
                 state.substitutions.clone(),
@@ -902,8 +1067,10 @@ impl Ui {
                 state.source_limit.max(DEBUG_DATA_RESULT_PAGE_SIZE),
             )
         };
+
         view.sources
             .append(&debug_data_section("SOURCE DIRECTORIES"));
+
         for directory in &source_directories {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
             row.add_css_class("debug-data-control-card");
@@ -915,41 +1082,51 @@ impl Ui {
             let handler = Rc::clone(&self.debug_data_action_handler);
             let directory = directory.clone();
             remove.set_sensitive(!directory.starts_with('$'));
+
             remove.connect_clicked(move |button| {
                 button.set_sensitive(false);
+
                 defer_debug_data_action(
                     &handler,
                     DebugDataAction::RemoveSourceDirectory(directory.clone()),
                 );
             });
+
             row.append(&remove);
             view.sources.append(&row);
         }
+
         let add_source = gtk::Button::with_label("Add source directory");
         add_source.add_css_class("inline-action");
         add_source.set_halign(gtk::Align::Start);
         let parent = view.window.clone();
         let handler = Rc::clone(&self.debug_data_action_handler);
+
         add_source.connect_clicked(move |_| {
             let dialog = gtk::FileDialog::builder()
                 .title("Add source directory")
                 .modal(true)
                 .build();
+
             let parent = parent.clone();
             let handler = Rc::clone(&handler);
+
             glib::spawn_future_local(async move {
                 let Ok(folder) = dialog.select_folder_future(Some(&parent)).await else {
                     return;
                 };
+
                 let Some(path) = folder.path() else {
                     return;
                 };
+
                 defer_debug_data_action(&handler, DebugDataAction::AddSourceDirectory(path));
             });
         });
-        view.sources.append(&add_source);
 
+        view.sources.append(&add_source);
         view.sources.append(&debug_data_section("SUBSTITUTE PATH"));
+
         for (from, to) in &substitutions {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
             row.add_css_class("debug-data-control-card");
@@ -960,36 +1137,46 @@ impl Ui {
             remove.add_css_class("inline-action");
             let handler = Rc::clone(&self.debug_data_action_handler);
             let from = from.clone();
+
             remove.connect_clicked(move |button| {
                 button.set_sensitive(false);
+
                 defer_debug_data_action(
                     &handler,
                     DebugDataAction::RemoveSubstitution(from.clone()),
                 );
             });
+
             row.append(&remove);
             view.sources.append(&row);
         }
+
         let substitution = gtk::Box::new(gtk::Orientation::Horizontal, 5);
         substitution.add_css_class("debug-data-control-card");
+
         let from = gtk::Entry::builder()
             .placeholder_text("Compiled path")
             .hexpand(true)
             .build();
+
         let to = gtk::Entry::builder()
             .placeholder_text("Local path")
             .hexpand(true)
             .build();
+
         substitution.append(&from);
         substitution.append(&to);
         let add = gtk::Button::with_label("Add");
         add.add_css_class("inline-action");
         let handler = Rc::clone(&self.debug_data_action_handler);
+
         add.connect_clicked(move |button| {
             let from_value = from.text().trim().to_owned();
             let to_value = to.text().trim().to_owned();
+
             if !from_value.is_empty() && !to_value.is_empty() {
                 button.set_sensitive(false);
+
                 defer_debug_data_action(
                     &handler,
                     DebugDataAction::AddSubstitution {
@@ -999,26 +1186,30 @@ impl Ui {
                 );
             }
         });
+
         substitution.append(&add);
         view.sources.append(&substitution);
-
         view.sources.append(&debug_data_section("LOADED SOURCES"));
+
         view.source_search
             .set_sensitive(files_ready && files_visible && !files_loading);
+
         view.source_search
             .set_placeholder_text(Some(if files_ready && files_visible {
                 "Filter loaded source files"
             } else {
                 "Show source files to search"
             }));
+
         let source_actions = gtk::Box::new(gtk::Orientation::Horizontal, 7);
         source_actions.add_css_class("debug-data-control-card");
         let source_count = self.loaded_source_files.borrow().len();
+
         let source_status = if files_loading {
             String::from("Asking GDB for its source-file list…")
         } else if let Some(error) = source_error.as_deref() {
             if files_ready {
-                format!("Refresh failed; showing the previous source-file list: {error}")
+                format!("Refresh failed. Showing the previous source-file list: {error}")
             } else {
                 format!("Source-file list unavailable: {error}")
             }
@@ -1029,13 +1220,15 @@ impl Ui {
                 if source_count == 1 { "" } else { "s" }
             )
         } else if files_ready {
-            format!("{source_count} source files available; hidden until requested")
+            format!("{source_count} source files available. Hidden until requested")
         } else {
             String::from("Source files are loaded only when requested")
         };
+
         let source_status = muted_label(&source_status);
         source_status.set_hexpand(true);
         source_actions.append(&source_status);
+
         let load_sources = gtk::Button::with_label(if files_loading {
             "Loading source files…"
         } else if source_error.is_some() {
@@ -1047,42 +1240,54 @@ impl Ui {
         } else {
             "Load source files"
         });
+
         load_sources.add_css_class("inline-action");
         load_sources.set_sensitive(!files_loading);
         let handler = Rc::clone(&self.debug_data_action_handler);
+
         let action = if files_ready && files_visible {
             DebugDataAction::ReloadSourceFiles
         } else {
             DebugDataAction::ShowSourceFiles
         };
+
         load_sources.connect_clicked(move |button| {
             button.set_sensitive(false);
             defer_debug_data_action(&handler, action.clone());
         });
+
         source_actions.append(&load_sources);
         view.sources.append(&source_actions);
+
         if !files_ready || !files_visible {
             self.record_ui_render_duration("Debug Data sources", render_started);
             return;
         }
+
         let query = view.source_search.text().trim().to_ascii_lowercase();
         let files = self.loaded_source_files.borrow();
         let mut shown = 0_usize;
         let mut matching = 0_usize;
+
         for file in files.iter() {
             let path = file.source_path();
+
             if !text_matches(path, &query) {
                 continue;
             }
+
             matching += 1;
+
             if shown >= render_limit {
                 continue;
             }
+
             shown += 1;
             let source = selectable_value(path);
             source.add_css_class("debug-data-source");
             view.sources.append(&source);
         }
+
         if matching == 0 {
             view.sources.append(&muted_label(if files.is_empty() {
                 "No source files have been reported by GDB"
@@ -1090,22 +1295,28 @@ impl Ui {
                 "No loaded source files match the filter"
             }));
         }
+
         if shown < matching {
             let remaining = matching - shown;
+
             let show_more = gtk::Button::with_label(&format!(
                 "Show {} more source{}",
                 remaining.min(DEBUG_DATA_RESULT_PAGE_SIZE),
                 if remaining == 1 { "" } else { "s" }
             ));
+
             show_more.add_css_class("inline-action");
             show_more.set_halign(gtk::Align::Center);
             let handler = Rc::clone(&self.debug_data_action_handler);
+
             show_more.connect_clicked(move |button| {
                 button.set_sensitive(false);
                 defer_debug_data_action(&handler, DebugDataAction::ShowMoreSources);
             });
+
             view.sources.append(&show_more);
         }
+
         self.record_ui_render_duration("Debug Data sources", render_started);
     }
 
@@ -1113,10 +1324,13 @@ impl Ui {
         let Some(view) = self.debug_data_view.borrow().as_ref().cloned() else {
             return;
         };
+
         let render_started = Instant::now();
         clear_page_after_search(&view.printers);
+
         let (scopes, render_limit, ready, loading, error) = {
             let state = self.debug_data_state.borrow();
+
             (
                 Rc::clone(&state.pretty_printers),
                 state.pretty_printer_limit.max(PRETTY_PRINTER_PAGE_SIZE),
@@ -1125,7 +1339,9 @@ impl Ui {
                 state.pretty_printer_error.clone(),
             )
         };
+
         view.printer_search.set_sensitive(ready && !loading);
+
         if loading {
             view.printers.append(&muted_label(if scopes.is_empty() {
                 "Loading pretty-printers from GDB…"
@@ -1133,6 +1349,7 @@ impl Ui {
                 "Refreshing pretty-printers from GDB…"
             }));
         }
+
         if let Some(error) = error.as_deref() {
             let warning = wrapping_value(error);
             warning.add_css_class("warning");
@@ -1142,24 +1359,30 @@ impl Ui {
             retry.set_halign(gtk::Align::Start);
             retry.set_sensitive(!loading);
             let handler = Rc::clone(&self.debug_data_action_handler);
+
             retry.connect_clicked(move |button| {
                 button.set_sensitive(false);
                 defer_debug_data_action(&handler, DebugDataAction::LoadPrettyPrinters);
             });
+
             view.printers.append(&retry);
         }
+
         if !ready && !loading {
             if scopes.is_empty() && error.is_none() {
                 view.printers.append(&muted_label(
                     "Pretty-printers are loaded when this tab is opened",
                 ));
             }
+
             self.record_ui_render_duration("Debug Data pretty-printers", render_started);
             return;
         }
+
         if scopes.is_empty() {
             view.printers
                 .append(&muted_label("No pretty-printers were reported by GDB"));
+
             self.record_ui_render_duration("Debug Data pretty-printers", render_started);
             return;
         }
@@ -1168,38 +1391,45 @@ impl Ui {
         let total_printers = scopes.iter().map(pretty_printer_count).sum::<usize>();
         let summary = gtk::Box::new(gtk::Orientation::Horizontal, 7);
         summary.add_css_class("debug-data-printer-summary");
+
         let summary_text = gtk::Label::new(Some(&format!(
             "{total_printers} registered printer{}",
             if total_printers == 1 { "" } else { "s" }
         )));
+
         summary_text.add_css_class("debug-data-printer-summary-count");
         summary_text.set_halign(gtk::Align::Start);
         summary.append(&summary_text);
+
         let scope_count = muted_label(&format!(
             "across {} scope{}",
             scopes.len(),
             if scopes.len() == 1 { "" } else { "s" }
         ));
+
         scope_count.set_hexpand(true);
         summary.append(&scope_count);
         view.printers.append(&summary);
-
         let mut remaining = render_limit;
         let mut matching_printers = 0_usize;
         let mut matching_scopes = 0_usize;
         let mut shown_scopes = Vec::new();
+
         for scope in scopes.iter() {
             let (filtered, matches) = filter_pretty_printer_scope(scope, &query, &mut remaining);
             matching_printers += matches;
             matching_scopes += usize::from(matches > 0);
+
             if let Some(filtered) = filtered {
                 shown_scopes.push((filtered, matches));
             }
         }
+
         let shown_printers = shown_scopes
             .iter()
             .map(|(scope, _)| pretty_printer_count(scope))
             .sum::<usize>();
+
         for (scope, matching_in_scope) in &shown_scopes {
             view.printers.append(&pretty_printer_scope_card(
                 &scope.name,
@@ -1209,6 +1439,7 @@ impl Ui {
                 *matching_in_scope,
             ));
         }
+
         if matching_printers == 0 {
             view.printers
                 .append(&muted_label("No pretty-printers match the filter"));
@@ -1219,25 +1450,32 @@ impl Ui {
                 matching_scopes,
                 if matching_scopes == 1 { "" } else { "s" }
             ));
+
             matches.add_css_class("debug-data-printer-match-count");
             view.printers.insert_child_after(&matches, Some(&summary));
         }
+
         if shown_printers < matching_printers {
             let remaining = matching_printers - shown_printers;
+
             let show_more = gtk::Button::with_label(&format!(
                 "Show {} more printer{}",
                 remaining.min(PRETTY_PRINTER_PAGE_SIZE),
                 if remaining == 1 { "" } else { "s" }
             ));
+
             show_more.add_css_class("inline-action");
             show_more.set_halign(gtk::Align::Center);
             let handler = Rc::clone(&self.debug_data_action_handler);
+
             show_more.connect_clicked(move |button| {
                 button.set_sensitive(false);
                 defer_debug_data_action(&handler, DebugDataAction::ShowMorePrettyPrinters);
             });
+
             view.printers.append(&show_more);
         }
+
         self.record_ui_render_duration("Debug Data pretty-printers", render_started);
     }
 
@@ -1245,21 +1483,27 @@ impl Ui {
         let Some(view) = self.debug_data_view.borrow().as_ref().cloned() else {
             return;
         };
+
         clear_debug_data_box(&view.activity);
         let activity = self.debug_data_state.borrow().activity.clone();
+
         view.activity
             .append(&debug_data_activity_summary(&activity));
+
         if activity.is_empty() {
             let empty = muted_label("Symbol downloads and diagnostic errors appear here");
             empty.add_css_class("debug-data-activity-empty");
             view.activity.append(&empty);
             return;
         }
+
         let feed = gtk::Box::new(gtk::Orientation::Vertical, 0);
         feed.add_css_class("debug-data-activity-feed");
+
         for event in activity.iter().rev() {
             feed.append(&debug_data_activity_row(event));
         }
+
         view.activity.append(&feed);
     }
 
@@ -1268,9 +1512,12 @@ impl Ui {
             .module_debug_generation
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
+
         self.module_debug_force_pending
             .fetch_or(force, Ordering::Release);
+
         let mut seen = HashSet::new();
+
         let paths = self
             .latest_modules
             .borrow()
@@ -1278,82 +1525,145 @@ impl Ui {
             .map(|module| PathBuf::from(module.host_name.as_deref().unwrap_or(&module.target_name)))
             .filter(|path| seen.insert(path.clone()))
             .collect::<Vec<_>>();
+
         if paths.is_empty() {
             self.module_debug_force_pending
                 .store(false, Ordering::Release);
+
             if !self.module_debug_metadata.borrow().is_empty() {
                 self.module_debug_metadata.borrow_mut().clear();
                 self.render_debug_data_modules();
             }
+
             return;
         }
+
         if self.module_debug_worker_active.swap(true, Ordering::AcqRel) {
             return;
         }
+
         let force = self
             .module_debug_force_pending
             .swap(false, Ordering::AcqRel);
+
+        let live_paths = paths.iter().cloned().collect::<HashSet<_>>();
+
+        self.module_debug_metadata
+            .borrow_mut()
+            .retain(|path, _| live_paths.contains(path));
+
         let cached = self.module_debug_metadata.borrow().clone();
         let current_generation = Arc::clone(&self.module_debug_generation);
-        let total_paths = paths.len();
-        let paths = paths
+
+        // New modules take precedence over cached ELF revalidation. Repeating
+        // bounded batches therefore advances through every loaded module
+        // instead of rescanning the same prefix forever.
+        let uncached = paths
+            .iter()
+            .filter(|path| !cached.contains_key(*path))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let progressive_scan = !uncached.is_empty();
+        let candidates = if progressive_scan { uncached } else { paths };
+        let total_paths = candidates.len();
+
+        let paths = candidates
             .into_iter()
             .take(crate::performance::MODULE_METADATA_FILE_BUDGET)
             .collect::<Vec<_>>();
+
         let (sender, receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut metadata = HashMap::with_capacity(paths.len());
-            let started_at = Instant::now();
-            let mut time_budget_exhausted = false;
-            for path in paths {
-                if current_generation.load(Ordering::Relaxed) != generation {
-                    return;
-                }
-                if started_at.elapsed() >= crate::performance::MODULE_METADATA_TIME_BUDGET {
-                    time_budget_exhausted = true;
-                    break;
-                }
-                let file = std::fs::metadata(&path).ok();
-                let unchanged = file.as_ref().and_then(|file| {
-                    let modified = file.modified().ok();
-                    cached.get(&path).filter(|cached| {
-                        modified.is_some()
-                            && cached.file_size == Some(file.len())
-                            && cached.modified == modified
-                    })
-                });
-                let details = match unchanged {
-                    Some(cached) if force && cached.error.is_some() => {
-                        crate::debug_info::inspect_module(&path)
+        let queued_generation = Arc::clone(&current_generation);
+
+        if let Err(error) = crate::background::submit_cancellable_with_priority(
+            crate::background::Priority::Background,
+            move || queued_generation.load(Ordering::Relaxed) == generation,
+            move || {
+                let mut metadata = HashMap::with_capacity(paths.len());
+                let started_at = Instant::now();
+                let mut time_budget_exhausted = false;
+
+                for path in paths {
+                    if current_generation.load(Ordering::Relaxed) != generation {
+                        return;
                     }
-                    Some(cached) if force => {
-                        crate::debug_info::refresh_module_debug_file(cached.clone())
+
+                    if started_at.elapsed() >= crate::performance::MODULE_METADATA_TIME_BUDGET {
+                        time_budget_exhausted = true;
+                        break;
                     }
-                    Some(cached) => cached.clone(),
-                    None => crate::debug_info::inspect_module(&path),
-                };
-                metadata.insert(path, details);
-            }
-            if current_generation.load(Ordering::Relaxed) == generation {
-                let _ = sender.send((metadata, total_paths, time_budget_exhausted));
-            }
-        });
+
+                    let file = std::fs::metadata(&path).ok();
+
+                    let unchanged = file.as_ref().and_then(|file| {
+                        let modified = file.modified().ok();
+
+                        cached.get(&path).filter(|cached| {
+                            modified.is_some()
+                                && cached.file_size == Some(file.len())
+                                && cached.modified == modified
+                        })
+                    });
+
+                    let details = match unchanged {
+                        Some(cached) if force && cached.error.is_some() => {
+                            crate::debug_info::inspect_module(&path)
+                        }
+                        Some(cached) if force => {
+                            crate::debug_info::refresh_module_debug_file(cached.clone())
+                        }
+                        Some(cached) => cached.clone(),
+                        None => crate::debug_info::inspect_module(&path),
+                    };
+
+                    metadata.insert(path, details);
+                }
+
+                if current_generation.load(Ordering::Relaxed) == generation {
+                    let _ = sender.send((metadata, total_paths, time_budget_exhausted));
+                }
+            },
+        ) {
+            self.module_debug_worker_active
+                .store(false, Ordering::Release);
+
+            self.module_debug_force_pending
+                .fetch_or(force, Ordering::Release);
+
+            self.record_performance_notice(crate::performance::PerformanceNotice {
+                outcome: crate::performance::BudgetOutcome::Rejected,
+                operation: String::from("module debug metadata"),
+                detail: error.to_string(),
+            });
+
+            return;
+        }
+
         let weak_ui = Rc::downgrade(self);
+
         glib::timeout_add_local(Duration::from_millis(25), move || {
             let Some(ui) = weak_ui.upgrade() else {
                 return glib::ControlFlow::Break;
             };
+
             match receiver.try_recv() {
                 Ok((metadata, total_paths, time_budget_exhausted)) => {
                     ui.module_debug_worker_active
                         .store(false, Ordering::Release);
+
                     if ui.module_debug_generation.load(Ordering::Relaxed) == generation {
                         let inspected = metadata.len();
-                        let changed = *ui.module_debug_metadata.borrow() != metadata;
+
+                        let changed = metadata.iter().any(|(path, details)| {
+                            ui.module_debug_metadata.borrow().get(path) != Some(details)
+                        });
+
                         if changed {
-                            ui.module_debug_metadata.replace(metadata);
+                            ui.module_debug_metadata.borrow_mut().extend(metadata);
                             ui.render_debug_data_modules();
                         }
+
                         if inspected < total_paths {
                             ui.record_performance_notice(
                                 crate::performance::PerformanceNotice {
@@ -1365,31 +1675,40 @@ impl Ui {
                                     operation: String::from("module debug metadata"),
                                     detail: if time_budget_exhausted {
                                         format!(
-                                            "inspected {inspected} of {total_paths} modules before the time budget; Refresh can continue the cached scan"
+                                            "inspected {inspected} of {total_paths} pending modules before the time budget. The scan will continue in the background"
                                         )
                                     } else {
                                         format!(
-                                            "inspected {inspected} of {total_paths} modules; remaining detailed ELF metadata stayed unloaded at the file budget"
+                                            "inspected {inspected} of {total_paths} pending modules. The next bounded batch will continue automatically"
                                         )
                                     },
                                 },
                             );
                         }
+
+                        if progressive_scan && inspected < total_paths {
+                            ui.refresh_module_debug_metadata(false);
+                            return glib::ControlFlow::Break;
+                        }
                     }
+
                     if ui.module_debug_generation.load(Ordering::Relaxed) != generation {
                         let force = ui.module_debug_force_pending.swap(false, Ordering::AcqRel);
                         ui.refresh_module_debug_metadata(force);
                     }
+
                     glib::ControlFlow::Break
                 }
                 Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
                 Err(TryRecvError::Disconnected) => {
                     ui.module_debug_worker_active
                         .store(false, Ordering::Release);
+
                     if ui.module_debug_generation.load(Ordering::Relaxed) != generation {
                         let force = ui.module_debug_force_pending.swap(false, Ordering::AcqRel);
                         ui.refresh_module_debug_metadata(force);
                     }
+
                     glib::ControlFlow::Break
                 }
             }
@@ -1402,29 +1721,36 @@ fn parse_pretty_printer_scopes(lines: &[String]) -> Vec<PrettyPrinterScope> {
         .iter()
         .filter_map(|line| {
             let name = line.trim();
+
             (!name.is_empty()).then(|| (line.len() - line.trim_start().len(), name.to_owned()))
         })
         .collect::<Vec<_>>();
+
     let Some(base_indent) = entries.iter().map(|(indent, _)| *indent).min() else {
         return Vec::new();
     };
 
     let mut scopes = Vec::<PrettyPrinterScope>::new();
     let mut index = 0_usize;
+
     while index < entries.len() {
         let (indent, name) = &entries[index];
+
         let has_children = entries
             .get(index + 1)
             .is_some_and(|(next_indent, _)| next_indent > indent);
+
         if *indent == base_indent && name.ends_with(':') && has_children {
             scopes.push(PrettyPrinterScope {
                 name: name.clone(),
                 direct_printers: Vec::new(),
                 providers: Vec::new(),
             });
+
             index += 1;
             continue;
         }
+
         if scopes.is_empty() {
             scopes.push(PrettyPrinterScope {
                 name: String::from("GDB pretty-printers"),
@@ -1432,16 +1758,20 @@ fn parse_pretty_printer_scopes(lines: &[String]) -> Vec<PrettyPrinterScope> {
                 providers: Vec::new(),
             });
         }
+
         if *indent == base_indent {
             scopes
                 .last_mut()
                 .expect("a fallback printer scope was created")
                 .direct_printers
                 .push(name.clone());
+
             index += 1;
             continue;
         }
+
         let scope = scopes.last_mut().expect("a printer scope was created");
+
         if !has_children {
             scope.direct_printers.push(name.clone());
             index += 1;
@@ -1452,10 +1782,13 @@ fn parse_pretty_printer_scopes(lines: &[String]) -> Vec<PrettyPrinterScope> {
         let provider_name = name.clone();
         index += 1;
         let children_begin = index;
+
         while index < entries.len() && entries[index].0 > provider_indent {
             index += 1;
         }
+
         let children = &entries[children_begin..index];
+
         let printers = children
             .iter()
             .enumerate()
@@ -1466,6 +1799,7 @@ fn parse_pretty_printer_scopes(lines: &[String]) -> Vec<PrettyPrinterScope> {
             })
             .map(|(_, (_, child_name))| child_name.clone())
             .collect::<Vec<_>>();
+
         if printers.is_empty() {
             scope.direct_printers.push(provider_name);
         } else {
@@ -1475,7 +1809,9 @@ fn parse_pretty_printer_scopes(lines: &[String]) -> Vec<PrettyPrinterScope> {
             });
         }
     }
+
     scopes.retain(|scope| pretty_printer_count(scope) > 0);
+
     scopes
 }
 
@@ -1504,9 +1840,11 @@ fn filter_pretty_printer_scope(
     let scope_matches = lowercase_query.is_empty() || text_matches(&scope.name, lowercase_query);
     let mut matching = 0_usize;
     let mut direct_printers = Vec::new();
+
     for printer in &scope.direct_printers {
         if scope_matches || text_matches(printer, lowercase_query) {
             matching += 1;
+
             if *remaining > 0 {
                 direct_printers.push(printer.clone());
                 *remaining -= 1;
@@ -1515,18 +1853,22 @@ fn filter_pretty_printer_scope(
     }
 
     let mut providers = Vec::new();
+
     for provider in &scope.providers {
         let provider_matches = scope_matches || text_matches(&provider.name, lowercase_query);
         let mut printers = Vec::new();
+
         for printer in &provider.printers {
             if provider_matches || text_matches(printer, lowercase_query) {
                 matching += 1;
+
                 if *remaining > 0 {
                     printers.push(printer.clone());
                     *remaining -= 1;
                 }
             }
         }
+
         if !printers.is_empty() {
             providers.push(PrettyPrinterProvider {
                 name: provider.name.clone(),
@@ -1534,7 +1876,9 @@ fn filter_pretty_printer_scope(
             });
         }
     }
+
     let visible = !direct_printers.is_empty() || !providers.is_empty();
+
     (
         visible.then(|| PrettyPrinterScope {
             name: scope.name.clone(),
@@ -1566,6 +1910,7 @@ fn pretty_printer_scope_card(
     title.set_hexpand(true);
     title.set_ellipsize(pango::EllipsizeMode::Middle);
     header.append(&title);
+
     let count_text = if visible_printers < matching_printers {
         format!("{visible_printers} of {matching_printers} printers")
     } else {
@@ -1574,10 +1919,12 @@ fn pretty_printer_scope_card(
             if visible_printers == 1 { "" } else { "s" }
         )
     };
+
     let count = gtk::Label::new(Some(&count_text));
     count.add_css_class("debug-data-printer-count");
     header.append(&count);
     card.append(&header);
+
     if let Some(path) = path {
         let path_label = selectable_value(&path);
         path_label.add_css_class("debug-data-printer-path");
@@ -1585,9 +1932,11 @@ fn pretty_printer_scope_card(
         path_label.set_hexpand(true);
         card.append(&path_label);
     }
+
     if !direct_printers.is_empty() {
         card.append(&pretty_printer_grid(direct_printers));
     }
+
     for provider in providers {
         let provider_header = gtk::Box::new(gtk::Orientation::Horizontal, 6);
         provider_header.add_css_class("debug-data-printer-provider");
@@ -1602,14 +1951,17 @@ fn pretty_printer_scope_card(
         card.append(&provider_header);
         card.append(&pretty_printer_grid(&provider.printers));
     }
+
     card
 }
 
 fn pretty_printer_scope_identity(scope: &str) -> (&'static str, String, Option<String>) {
     let scope = scope.trim_end_matches(':');
+
     if scope.eq_ignore_ascii_case("global pretty-printers") {
         return ("GLOBAL", String::from("Global"), None);
     }
+
     if let Some(path) = scope
         .strip_prefix("objfile ")
         .and_then(|scope| scope.strip_suffix(" pretty-printers"))
@@ -1619,8 +1971,10 @@ fn pretty_printer_scope_identity(scope: &str) -> (&'static str, String, Option<S
             .and_then(|name| name.to_str())
             .unwrap_or(path)
             .to_owned();
+
         return ("OBJFILE", title, Some(path.to_owned()));
     }
+
     ("SCOPE", scope.to_owned(), None)
 }
 
@@ -1630,14 +1984,17 @@ fn pretty_printer_grid(printers: &[String]) -> gtk::Grid {
         .column_spacing(5)
         .row_spacing(4)
         .build();
+
     grid.add_css_class("debug-data-printer-grid");
     let columns = printers.len().clamp(1, 3);
+
     for (index, printer) in printers.iter().enumerate() {
         let label = selectable_value(printer);
         label.add_css_class("debug-data-printer");
         label.set_halign(gtk::Align::Fill);
         label.set_hexpand(true);
         label.set_max_width_chars(32);
+
         grid.attach(
             &label,
             (index % columns) as i32,
@@ -1646,6 +2003,7 @@ fn pretty_printer_grid(printers: &[String]) -> gtk::Grid {
             1,
         );
     }
+
     grid
 }
 
@@ -1670,12 +2028,14 @@ fn append_debug_data_activity(
         last.occurrences = last.occurrences.saturating_add(1);
         return;
     }
+
     activity.push(DebugDataActivity {
         kind,
         message: Rc::from(message),
         time,
         occurrences: 1,
     });
+
     if activity.len() > MAX_DEBUG_DATA_ACTIVITY_EVENTS {
         let excess = activity.len() - MAX_DEBUG_DATA_ACTIVITY_EVENTS;
         activity.drain(..excess);
@@ -1692,6 +2052,7 @@ fn debug_data_activity_summary(activity: &[DebugDataActivity]) -> gtk::Box {
     title.set_halign(gtk::Align::Start);
     title.set_xalign(0.0);
     title.add_css_class("debug-data-activity-summary-title");
+
     let issue_count = activity
         .iter()
         .filter(|event| {
@@ -1701,12 +2062,14 @@ fn debug_data_activity_summary(activity: &[DebugDataActivity]) -> gtk::Box {
             )
         })
         .count();
+
     let detail = match (activity.len(), issue_count) {
         (0, _) => String::from("No activity has been recorded for this session"),
         (events, 0) => format!("{events} events · no warnings or errors"),
         (events, 1) => format!("{events} events · 1 warning or error"),
         (events, issues) => format!("{events} events · {issues} warnings or errors"),
     };
+
     let detail = gtk::Label::new(Some(&detail));
     detail.set_halign(gtk::Align::Start);
     detail.set_xalign(0.0);
@@ -1719,6 +2082,7 @@ fn debug_data_activity_summary(activity: &[DebugDataActivity]) -> gtk::Box {
     order.set_valign(gtk::Align::Center);
     order.add_css_class("debug-data-activity-order");
     row.append(&order);
+
     row
 }
 
@@ -1726,25 +2090,26 @@ fn debug_data_activity_row(event: &DebugDataActivity) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
     row.add_css_class("debug-data-activity-row");
     row.add_css_class(event.kind.css_class());
-
     let badge = gtk::Label::new(Some(event.kind.label()));
     badge.set_halign(gtk::Align::Start);
     badge.set_valign(gtk::Align::Center);
     badge.add_css_class("debug-data-activity-kind");
     row.append(&badge);
-
     let content = gtk::Box::new(gtk::Orientation::Vertical, 3);
     content.set_hexpand(true);
     content.set_valign(gtk::Align::Center);
+
     let (headline, detail) = event.message.split_once('\n').map_or_else(
         || (event.message.as_ref(), None),
         |(headline, detail)| (headline, (!detail.is_empty()).then_some(detail)),
     );
+
     let headline = wrapping_value(headline);
     headline.set_hexpand(true);
     headline.set_halign(gtk::Align::Fill);
     headline.add_css_class("debug-data-activity-message");
     content.append(&headline);
+
     if let Some(detail) = detail {
         let detail = wrapping_value(detail);
         detail.set_hexpand(true);
@@ -1752,14 +2117,15 @@ fn debug_data_activity_row(event: &DebugDataActivity) -> gtk::Box {
         detail.add_css_class("debug-data-activity-detail");
         content.append(&detail);
     }
-    row.append(&content);
 
+    row.append(&content);
     let metadata = gtk::Box::new(gtk::Orientation::Vertical, 2);
     metadata.set_valign(gtk::Align::Center);
     let time = gtk::Label::new(Some(&event.time));
     time.set_halign(gtk::Align::End);
     time.add_css_class("debug-data-activity-time");
     metadata.append(&time);
+
     if event.occurrences > 1 {
         let occurrences = gtk::Label::new(Some(&format!("×{}", event.occurrences)));
         occurrences.set_halign(gtk::Align::End);
@@ -1767,7 +2133,9 @@ fn debug_data_activity_row(event: &DebugDataActivity) -> gtk::Box {
         occurrences.add_css_class("debug-data-activity-occurrences");
         metadata.append(&occurrences);
     }
+
     row.append(&metadata);
+
     row
 }
 
@@ -1777,12 +2145,14 @@ fn debug_data_page() -> gtk::Box {
     page.set_margin_bottom(8);
     page.set_margin_start(8);
     page.set_margin_end(8);
+
     page
 }
 
 fn debug_data_page_with_search(search: &gtk::Entry) -> gtk::Box {
     let page = debug_data_page();
     page.append(search);
+
     page
 }
 
@@ -1791,16 +2161,20 @@ fn debug_data_search(placeholder: &str) -> gtk::Entry {
         .placeholder_text(placeholder)
         .primary_icon_name("system-search-symbolic")
         .build();
+
     search.add_css_class("debug-data-search");
+
     search.connect_changed(|search| {
         search
             .set_secondary_icon_name((!search.text().is_empty()).then_some("edit-clear-symbolic"));
     });
+
     search.connect_icon_release(|search, position| {
         if position == gtk::EntryIconPosition::Secondary {
             search.set_text("");
         }
     });
+
     search
 }
 
@@ -1830,6 +2204,7 @@ fn append_debug_data_page(notebook: &gtk::Notebook, content: &gtk::Box, title: &
 
 fn clear_page_after_search(page: &gtk::Box) {
     clear_label_selections(page);
+
     while page
         .last_child()
         .is_some_and(|child| !child.has_css_class("debug-data-search"))
@@ -1851,6 +2226,7 @@ fn debug_data_section(text: &str) -> gtk::Label {
     label.set_halign(gtk::Align::Fill);
     label.set_xalign(0.0);
     label.set_margin_top(5);
+
     label
 }
 
@@ -1865,6 +2241,7 @@ fn debug_data_fact(name: &str, value: &str) -> gtk::Box {
     value.set_hexpand(true);
     row.append(&name);
     row.append(&value);
+
     row
 }
 
@@ -1876,6 +2253,7 @@ fn selectable_value(text: &str) -> gtk::Label {
     label.set_focusable(false);
     label.set_ellipsize(pango::EllipsizeMode::Middle);
     label.set_tooltip_text(Some(text));
+
     label
 }
 
@@ -1884,12 +2262,14 @@ fn wrapping_value(text: &str) -> gtk::Label {
     label.set_ellipsize(pango::EllipsizeMode::None);
     label.set_wrap(true);
     label.set_wrap_mode(pango::WrapMode::WordChar);
+
     label
 }
 
 fn muted_label(text: &str) -> gtk::Label {
     let label = wrapping_value(text);
     label.add_css_class("muted");
+
     label
 }
 
@@ -1967,17 +2347,18 @@ mod tests {
             direct_printers: (0..500).map(|index| format!("Printer{index}")).collect(),
             providers: Vec::new(),
         };
-        let mut remaining = PRETTY_PRINTER_PAGE_SIZE;
 
+        let mut remaining = PRETTY_PRINTER_PAGE_SIZE;
         let (filtered, matching) = filter_pretty_printer_scope(&scope, "", &mut remaining);
         let filtered = filtered.expect("the first page should be visible");
         assert_eq!(matching, 500);
         assert_eq!(pretty_printer_count(&filtered), PRETTY_PRINTER_PAGE_SIZE);
         assert_eq!(remaining, 0);
-
         let mut remaining = PRETTY_PRINTER_PAGE_SIZE;
+
         let (filtered, matching) =
             filter_pretty_printer_scope(&scope, "printer499", &mut remaining);
+
         let filtered = filtered.expect("the matching printer should be visible");
         assert_eq!(matching, 1);
         assert_eq!(filtered.direct_printers, ["Printer499"]);
@@ -1986,18 +2367,21 @@ mod tests {
     #[test]
     fn coalesces_only_consecutive_activity_with_the_same_kind() {
         let mut activity = Vec::new();
+
         append_debug_data_activity(
             &mut activity,
             DebugDataActivityKind::Progress,
             String::from("Loading symbols"),
             String::from("10:00:00"),
         );
+
         append_debug_data_activity(
             &mut activity,
             DebugDataActivityKind::Progress,
             String::from("Loading symbols"),
             String::from("10:00:01"),
         );
+
         assert_eq!(activity.len(), 1);
         assert_eq!(activity[0].occurrences, 2);
         assert_eq!(activity[0].time, "10:00:01");
@@ -2008,6 +2392,7 @@ mod tests {
             String::from("Loading symbols"),
             String::from("10:00:02"),
         );
+
         assert_eq!(activity.len(), 2);
         assert_eq!(activity[1].occurrences, 1);
     }
@@ -2015,6 +2400,7 @@ mod tests {
     #[test]
     fn activity_history_retains_only_the_newest_bounded_entries() {
         let mut activity = Vec::new();
+
         for index in 0..MAX_DEBUG_DATA_ACTIVITY_EVENTS + 5 {
             append_debug_data_activity(
                 &mut activity,
@@ -2023,6 +2409,7 @@ mod tests {
                 String::from("10:00:00"),
             );
         }
+
         assert_eq!(activity.len(), MAX_DEBUG_DATA_ACTIVITY_EVENTS);
         assert_eq!(activity[0].message.as_ref(), "event 5");
     }

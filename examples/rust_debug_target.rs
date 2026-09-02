@@ -89,6 +89,7 @@ pub extern "C" fn rust_debugger_checkpoint(state: &mut RustState, worker_total: 
     let watched = RUST_WATCHED.fetch_add(worker_total, Ordering::Relaxed);
     let description = state.trait_object.describe();
     black_box(&state.values);
+
     println!(
         "rust checkpoint: {} {description} watched={watched:#x} worker={worker_total}",
         state.name
@@ -102,12 +103,14 @@ fn main() {
         next: None,
         previous: Weak::new(),
     }));
+
     let second = Rc::new(RefCell::new(Node {
         id: 2,
         label: "second".to_owned(),
         next: Some(Rc::clone(&first)),
         previous: Rc::downgrade(&first),
     }));
+
     first.borrow_mut().next = Some(Rc::clone(&second));
 
     let mut state = RustState {
@@ -142,19 +145,23 @@ fn main() {
 
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let worker_gate = Arc::clone(&gate);
+
     let worker = thread::Builder::new()
         .name("fgdb-rust-worker".to_owned())
         .spawn(move || {
             let (lock, changed) = &*worker_gate;
             let mut release = lock.lock().expect("worker gate poisoned");
+
             while !*release {
                 release = changed.wait(release).expect("worker gate poisoned");
             }
+
             (1_u64..=32).sum::<u64>()
         })
         .expect("cannot start worker");
 
     rust_debugger_checkpoint(&mut state, 528);
+
     for iteration in 0..6 {
         RUST_WATCHED.fetch_xor(iteration * 0x101, Ordering::Relaxed);
     }

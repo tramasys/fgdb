@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     ffi::OsString,
     path::{Path, PathBuf},
 };
@@ -10,6 +10,205 @@ mod cache;
 
 const MAX_SOURCE_TREE_DIRECTORIES: usize = 25_000;
 const MAX_SEARCHABLE_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_INDEXED_SUFFIX_COMPONENTS: usize = 8;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SourceResolution {
+    Missing,
+    Unique(PathBuf),
+    Ambiguous,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SourceId(PathBuf);
+
+impl SourceId {
+    pub fn from_path(path: &Path) -> Self {
+        Self(canonical_source_path(path))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceMatch {
+    Exact,
+    Different,
+    Ambiguous,
+    Unresolved,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexedCandidate {
+    Unique(usize),
+    Ambiguous,
+}
+
+/// Canonical, immutable lookup data shared by source navigation operations.
+///
+/// Building the suffix table is filesystem work, so callers construct it on a
+/// worker alongside source discovery and retain it until the source roots are
+/// invalidated. Resolution is then deterministic and does not silently pick
+/// one of several files with the same debugger-reported suffix.
+#[derive(Clone, Debug, Default)]
+pub struct SourceIndex {
+    roots: Vec<PathBuf>,
+    files: Vec<PathBuf>,
+    suffixes: HashMap<PathBuf, IndexedCandidate>,
+}
+
+impl SourceIndex {
+    pub fn new(files: &[PathBuf], roots: &[PathBuf]) -> Self {
+        let mut files = files
+            .iter()
+            .map(|path| canonical_source_path(path))
+            .collect::<Vec<_>>();
+
+        files.sort_unstable();
+        files.dedup();
+
+        let mut roots = roots
+            .iter()
+            .map(|path| canonical_source_path(path))
+            .collect::<Vec<_>>();
+
+        roots.sort_unstable();
+        roots.dedup();
+        let mut suffixes = HashMap::new();
+
+        for (index, file) in files.iter().enumerate() {
+            let components = normal_components(file);
+
+            for length in 1..=components.len().min(MAX_INDEXED_SUFFIX_COMPONENTS) {
+                let suffix = components[components.len() - length..]
+                    .iter()
+                    .collect::<PathBuf>();
+
+                suffixes
+                    .entry(suffix)
+                    .and_modify(|candidate| {
+                        if *candidate != IndexedCandidate::Unique(index) {
+                            *candidate = IndexedCandidate::Ambiguous;
+                        }
+                    })
+                    .or_insert(IndexedCandidate::Unique(index));
+            }
+        }
+
+        Self {
+            roots,
+            files,
+            suffixes,
+        }
+    }
+
+    pub fn resolve(&self, reported: &str) -> SourceResolution {
+        let reported = Path::new(reported);
+
+        if reported.is_absolute() && reported.is_file() {
+            return SourceResolution::Unique(canonical_source_path(reported));
+        }
+
+        let direct = self
+            .roots
+            .iter()
+            .map(|root| root.join(reported.strip_prefix("/").unwrap_or(reported)))
+            .filter(|candidate| candidate.is_file());
+
+        match unique_existing_path(direct) {
+            SourceResolution::Missing => {}
+            resolution => return resolution,
+        }
+
+        let components = normal_components(reported);
+
+        for length in (1..=components.len().min(MAX_INDEXED_SUFFIX_COMPONENTS)).rev() {
+            let suffix = components[components.len() - length..]
+                .iter()
+                .collect::<PathBuf>();
+
+            match self.suffixes.get(&suffix) {
+                Some(IndexedCandidate::Unique(index)) => {
+                    return SourceResolution::Unique(self.files[*index].clone());
+                }
+                Some(IndexedCandidate::Ambiguous) => return SourceResolution::Ambiguous,
+                None => {}
+            }
+        }
+
+        SourceResolution::Missing
+    }
+
+    pub fn files(&self) -> &[PathBuf] {
+        &self.files
+    }
+
+    pub fn match_reported_id(&self, open: &SourceId, reported_path: &str) -> SourceMatch {
+        let reported = Path::new(reported_path);
+
+        if reported.is_absolute() {
+            return if open.0 == reported || *open == SourceId::from_path(reported) {
+                SourceMatch::Exact
+            } else {
+                SourceMatch::Different
+            };
+        }
+
+        let components = normal_components(reported);
+        let length = components.len().min(MAX_INDEXED_SUFFIX_COMPONENTS);
+
+        if length == 0 {
+            return SourceMatch::Unresolved;
+        }
+
+        let suffix = components[components.len() - length..]
+            .iter()
+            .collect::<PathBuf>();
+
+        match self.suffixes.get(&suffix) {
+            Some(IndexedCandidate::Unique(index)) => {
+                if open.0 == self.files[*index] {
+                    SourceMatch::Exact
+                } else {
+                    SourceMatch::Different
+                }
+            }
+            Some(IndexedCandidate::Ambiguous) => SourceMatch::Ambiguous,
+            None => SourceMatch::Unresolved,
+        }
+    }
+}
+
+fn normal_components(path: &Path) -> Vec<OsString> {
+    path.components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(component) => Some(component.to_os_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn canonical_source_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn unique_existing_path(candidates: impl Iterator<Item = PathBuf>) -> SourceResolution {
+    let mut unique = None;
+
+    for candidate in candidates {
+        let candidate = canonical_source_path(&candidate);
+
+        if unique.as_ref() == Some(&candidate) {
+            continue;
+        }
+
+        if unique.is_some() {
+            return SourceResolution::Ambiguous;
+        }
+
+        unique = Some(candidate);
+    }
+
+    unique.map_or(SourceResolution::Missing, SourceResolution::Unique)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceTreeMatch {
@@ -41,26 +240,48 @@ struct SourceTreeDirectory {
     files: BTreeMap<OsString, PathBuf>,
 }
 
-pub fn paths_match(open_path: &Path, reported_path: &str) -> bool {
+pub fn paths_match(index: Option<&SourceIndex>, open_path: &Path, reported_path: &str) -> bool {
+    paths_match_id(index, &SourceId::from_path(open_path), reported_path)
+}
+
+pub fn paths_match_id(index: Option<&SourceIndex>, open: &SourceId, reported_path: &str) -> bool {
+    if let Some(index) = index {
+        return index.match_reported_id(open, reported_path) == SourceMatch::Exact;
+    }
+
     let reported_path = Path::new(reported_path);
-    open_path == reported_path || open_path.ends_with(reported_path)
+
+    if reported_path.is_absolute() {
+        return open.0 == reported_path || *open == SourceId::from_path(reported_path);
+    }
+
+    // A suffix cannot identify a source file without the index proving it is
+    // unique. Rejecting an unresolved relative path is safer than associating
+    // a breakpoint with the wrong `main.rs` in another crate or build root.
+    false
 }
 
 pub fn roots(config: &LaunchConfig) -> Vec<PathBuf> {
     let mut roots = vec![config.working_directory.clone()];
     roots.extend(config.source_paths.iter().cloned());
+
     if let Some(paths) = std::env::var_os("RUST_SRC_PATH") {
         roots.extend(std::env::split_paths(&paths));
     }
+
     if let Some(sysroot) = config.rust_sysroot() {
         roots.push(sysroot.join("lib/rustlib/src/rust"));
     }
+
     roots.push(PathBuf::from("/usr/src/debug"));
+
     if let Some(home) = std::env::var_os("HOME") {
         roots.push(PathBuf::from(home).join(".cache/debuginfod_client"));
     }
+
     let mut seen = HashSet::new();
     roots.retain(|root| root.is_dir() && seen.insert(root.clone()));
+
     roots
 }
 
@@ -69,34 +290,65 @@ pub fn search_roots(config: &LaunchConfig) -> Vec<PathBuf> {
     roots.extend(config.source_paths.iter().cloned());
     let mut seen = HashSet::new();
     roots.retain(|root| root.is_dir() && seen.insert(root.clone()));
+
     roots
 }
 
+#[cfg(test)]
 pub fn discover_source_files(roots: &[PathBuf], limit: usize) -> Vec<PathBuf> {
+    discover_source_files_while(roots, limit, || true)
+}
+
+pub fn discover_source_files_while(
+    roots: &[PathBuf],
+    limit: usize,
+    mut should_continue: impl FnMut() -> bool,
+) -> Vec<PathBuf> {
     let mut pending = roots.iter().cloned().collect::<VecDeque<_>>();
     let mut visited_directories = HashSet::new();
     let mut seen_files = HashSet::new();
     let mut files = Vec::new();
     let mut directories = 0_usize;
+
     while let Some(directory) = pending.pop_front() {
+        if !should_continue() {
+            break;
+        }
+
         if files.len() >= limit || directories >= MAX_SOURCE_TREE_DIRECTORIES {
             break;
         }
+
         if !visited_directories.insert(directory.clone()) {
             continue;
         }
+
         directories += 1;
+
         let Ok(entries) = std::fs::read_dir(directory) else {
             continue;
         };
-        for entry in entries.flatten() {
+
+        let mut entries = entries.flatten().collect::<Vec<_>>();
+        entries.sort_unstable_by_key(std::fs::DirEntry::file_name);
+
+        for (index, entry) in entries.into_iter().enumerate() {
+            if index % 256 == 0 && !should_continue() {
+                files.sort_unstable();
+                files.dedup();
+                return files;
+            }
+
             if files.len() >= limit {
                 break;
             }
+
             let path = entry.path();
+
             let Ok(file_type) = entry.file_type() else {
                 continue;
             };
+
             if file_type.is_dir() {
                 if !is_ignored_source_directory(&entry.file_name()) {
                     pending.push_back(path);
@@ -109,8 +361,10 @@ pub fn discover_source_files(roots: &[PathBuf], limit: usize) -> Vec<PathBuf> {
             }
         }
     }
+
     files.sort_unstable();
     files.dedup();
+
     files
 }
 
@@ -135,10 +389,12 @@ pub fn build_source_tree_while(
         .split_whitespace()
         .map(str::to_lowercase)
         .collect::<Vec<_>>();
+
     let loaded = loaded_files
         .iter()
         .map(PathBuf::as_path)
         .collect::<HashSet<_>>();
+
     let mut directories = roots
         .iter()
         .cloned()
@@ -147,21 +403,27 @@ pub fn build_source_tree_while(
             ..SourceTreeDirectory::default()
         })
         .collect::<Vec<_>>();
+
     let root_depths = roots
         .iter()
         .map(|root| root.components().count())
         .collect::<Vec<_>>();
+
     let mut file_count = 0;
+
     for (index, file) in files.iter().enumerate() {
         if index % 256 == 0 && !should_continue() {
             return SourceTreeBuild::default();
         }
+
         if !terms.is_empty() {
             let path_text = file.to_string_lossy().to_lowercase();
+
             if !terms.iter().all(|term| path_text.contains(term)) {
                 continue;
             }
         }
+
         let Some((root_index, root)) = roots
             .iter()
             .enumerate()
@@ -170,9 +432,11 @@ pub fn build_source_tree_while(
         else {
             continue;
         };
+
         let Ok(relative) = file.strip_prefix(root) else {
             continue;
         };
+
         let components = relative
             .components()
             .filter_map(|component| match component {
@@ -180,12 +444,16 @@ pub fn build_source_tree_while(
                 _ => None,
             })
             .collect::<Vec<_>>();
+
         let Some((file_name, parents)) = components.split_last() else {
             continue;
         };
+
         let mut directory = &mut directories[root_index];
+
         for parent in parents {
             let path = directory.path.join(parent);
+
             directory = directory
                 .directories
                 .entry(parent.clone())
@@ -194,6 +462,7 @@ pub fn build_source_tree_while(
                     ..SourceTreeDirectory::default()
                 });
         }
+
         if directory
             .files
             .insert(file_name.clone(), file.clone())
@@ -202,11 +471,13 @@ pub fn build_source_tree_while(
             file_count += 1;
         }
     }
+
     let roots = directories
         .into_iter()
         .filter(|directory| !directory.directories.is_empty() || !directory.files.is_empty())
         .map(|directory| source_tree_directory_node(directory, &loaded, true))
         .collect();
+
     SourceTreeBuild { roots, file_count }
 }
 
@@ -220,6 +491,7 @@ fn source_tree_directory_node(
         .into_values()
         .map(|directory| source_tree_directory_node(directory, loaded_files, false))
         .collect::<Vec<_>>();
+
     children.extend(
         directory
             .files
@@ -232,7 +504,9 @@ fn source_tree_directory_node(
                 children: Vec::new(),
             }),
     );
+
     let loaded = children.iter().any(|child| child.loaded);
+
     let name = if root {
         directory
             .path
@@ -248,6 +522,7 @@ fn source_tree_directory_node(
             |name| name.to_string_lossy().into_owned(),
         )
     };
+
     SourceTreeNodeData {
         name,
         path: directory.path,
@@ -265,39 +540,49 @@ pub fn search_source_files(
     mut should_continue: impl FnMut() -> bool,
 ) -> Vec<SourceTreeMatch> {
     let query = query.trim();
+
     if query.is_empty() {
         return Vec::new();
     }
+
     let query_lower = query.to_lowercase();
     let mut matches = Vec::new();
+
     for path in files {
         if !should_continue() {
             break;
         }
+
         if scope.is_some_and(|scope| !path.starts_with(scope)) {
             continue;
         }
+
         let Some(source) = cache::searchable_source(path) else {
             continue;
         };
+
         for (line_index, line) in source.lines().enumerate() {
             if line_index % 256 == 0 && !should_continue() {
                 return matches;
             }
+
             let Some(column) = case_insensitive_match_column(line, &query_lower) else {
                 continue;
             };
+
             matches.push(SourceTreeMatch {
                 path: path.clone(),
                 line: u32::try_from(line_index + 1).unwrap_or(u32::MAX),
                 column: u32::try_from(column).unwrap_or(u32::MAX),
                 preview: line.trim().chars().take(240).collect(),
             });
+
             if matches.len() >= match_limit {
                 return matches;
             }
         }
     }
+
     matches
 }
 
@@ -305,24 +590,31 @@ fn case_insensitive_match_column(line: &str, query_lower: &str) -> Option<usize>
     if query_lower.is_empty() {
         return Some(1);
     }
+
     if line.is_ascii() && query_lower.is_ascii() {
         let query = query_lower.as_bytes();
+
         let byte_offset = line
             .as_bytes()
             .windows(query.len())
             .position(|window| window.eq_ignore_ascii_case(query))?;
+
         return Some(byte_offset + 1);
     }
+
     let line_lower = line.to_lowercase();
     let byte_offset = line_lower.find(query_lower)?;
     let lowered_character_offset = line_lower.get(..byte_offset)?.chars().count();
     let mut produced_lowercase_characters = 0;
+
     for (original_character_offset, character) in line.chars().enumerate() {
         if produced_lowercase_characters >= lowered_character_offset {
             return Some(original_character_offset + 1);
         }
+
         produced_lowercase_characters += character.to_lowercase().count();
     }
+
     Some(line.chars().count().saturating_add(1))
 }
 
@@ -416,28 +708,40 @@ fn is_source_path(path: &Path) -> bool {
 
 pub fn resolve(reported: &str, roots: &[PathBuf]) -> Option<PathBuf> {
     let reported = Path::new(reported);
+
     if reported.is_file() {
-        return Some(reported.to_path_buf());
+        return Some(canonical_source_path(reported));
     }
-    for root in roots {
-        let direct = root.join(reported.strip_prefix("/").unwrap_or(reported));
-        if direct.is_file() {
-            return Some(direct);
-        }
+
+    let direct = roots
+        .iter()
+        .map(|root| root.join(reported.strip_prefix("/").unwrap_or(reported)))
+        .filter(|candidate| candidate.is_file());
+
+    match unique_existing_path(direct) {
+        SourceResolution::Unique(path) => return Some(path),
+        SourceResolution::Ambiguous => return None,
+        SourceResolution::Missing => {}
     }
 
     let components: Vec<_> = reported.components().collect();
+
     if let Some(rustc) = components
         .iter()
         .position(|component| component.as_os_str() == "rustc")
         && components.len() > rustc + 2
     {
         let suffix: PathBuf = components[rustc + 2..].iter().collect();
-        for root in roots {
-            let candidate = root.join(&suffix);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+
+        let candidates = roots
+            .iter()
+            .map(|root| root.join(&suffix))
+            .filter(|candidate| candidate.is_file());
+
+        match unique_existing_path(candidates) {
+            SourceResolution::Unique(path) => return Some(path),
+            SourceResolution::Ambiguous => return None,
+            SourceResolution::Missing => {}
         }
     }
 
@@ -445,56 +749,123 @@ pub fn resolve(reported: &str, roots: &[PathBuf]) -> Option<PathBuf> {
         .rev()
         .map(|length| components[components.len() - length..].iter().collect())
         .collect::<Vec<PathBuf>>();
+
+    let mut child_directories = Vec::new();
+
     for root in roots {
         // Most compiler paths retain a useful suffix. Try those cheap direct
         // probes before enumerating child directories on every cache miss.
-        if let Some(candidate) = suffixes
-            .iter()
-            .map(|suffix| root.join(suffix))
-            .find(|candidate| candidate.is_file())
-        {
-            return Some(candidate);
-        }
-        let child_directories = std::fs::read_dir(root)
+        let mut children = std::fs::read_dir(root)
             .into_iter()
             .flatten()
             .flatten()
-            .take(256)
             .map(|entry| entry.path())
             .filter(|path| path.is_dir())
             .collect::<Vec<_>>();
-        for suffix in &suffixes {
-            for child in &child_directories {
-                for candidate in [child.join(suffix), child.join("source").join(suffix)] {
-                    if candidate.is_file() {
-                        return Some(candidate);
-                    }
-                }
-            }
+
+        children.sort_unstable();
+        children.truncate(256);
+        child_directories.extend(children);
+    }
+
+    for suffix in &suffixes {
+        let direct = roots
+            .iter()
+            .map(|root| root.join(suffix))
+            .filter(|candidate| candidate.is_file());
+
+        match unique_existing_path(direct) {
+            SourceResolution::Unique(path) => return Some(path),
+            SourceResolution::Ambiguous => return None,
+            SourceResolution::Missing => {}
+        }
+
+        let nested = child_directories.iter().flat_map(|child| {
+            [child.join(suffix), child.join("source").join(suffix)]
+                .into_iter()
+                .filter(|candidate| candidate.is_file())
+        });
+
+        match unique_existing_path(nested) {
+            SourceResolution::Unique(path) => return Some(path),
+            SourceResolution::Ambiguous => return None,
+            SourceResolution::Missing => {}
         }
     }
+
     None
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SEARCHABLE_SOURCE_BYTES, build_source_tree, build_source_tree_while,
-        case_insensitive_match_column, discover_source_files, paths_match, search_source_files,
+        MAX_SEARCHABLE_SOURCE_BYTES, SourceIndex, SourceResolution, build_source_tree,
+        build_source_tree_while, case_insensitive_match_column, discover_source_files, paths_match,
+        resolve, search_source_files,
     };
     use std::path::{Path, PathBuf};
 
     #[test]
     fn matches_absolute_and_debugger_relative_source_paths() {
         let open = Path::new("/home/user/project/src/main.rs");
-        assert!(paths_match(open, "/home/user/project/src/main.rs"));
-        assert!(paths_match(open, "src/main.rs"));
-        assert!(!paths_match(open, "other/main.rs"));
+        assert!(paths_match(None, open, "/home/user/project/src/main.rs"));
+        assert!(!paths_match(None, open, "src/main.rs"));
+
+        let index = SourceIndex::new(
+            &[open.to_path_buf()],
+            &[PathBuf::from("/home/user/project")],
+        );
+
+        assert!(paths_match(Some(&index), open, "src/main.rs"));
+        assert!(!paths_match(Some(&index), open, "other/main.rs"));
+    }
+
+    #[test]
+    fn source_index_rejects_ambiguous_suffixes_and_keeps_longer_unique_paths() {
+        let directory = temporary_test_directory("source-index-ambiguity");
+        let first = directory.join("one/src/shared/main.rs");
+        let second = directory.join("two/src/shared/main.rs");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(second.parent().unwrap()).unwrap();
+        std::fs::write(&first, "fn one() {}\n").unwrap();
+        std::fs::write(&second, "fn two() {}\n").unwrap();
+
+        let index = SourceIndex::new(
+            &[first.clone(), second.clone()],
+            std::slice::from_ref(&directory),
+        );
+
+        assert_eq!(
+            index.resolve("src/shared/main.rs"),
+            SourceResolution::Ambiguous
+        );
+
+        assert_eq!(
+            index.resolve("one/src/shared/main.rs"),
+            SourceResolution::Unique(std::fs::canonicalize(&first).unwrap())
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn filesystem_resolution_never_selects_between_duplicate_direct_matches() {
+        let directory = temporary_test_directory("source-resolution-ambiguity");
+        let first_root = directory.join("one");
+        let second_root = directory.join("two");
+        let relative = Path::new("src/main.c");
+        std::fs::create_dir_all(first_root.join("src")).unwrap();
+        std::fs::create_dir_all(second_root.join("src")).unwrap();
+        std::fs::write(first_root.join(relative), "int one;\n").unwrap();
+        std::fs::write(second_root.join(relative), "int two;\n").unwrap();
+        assert_eq!(resolve("src/main.c", &[first_root, second_root]), None);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn searches_source_text_and_honors_cancellation() {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/source.rs");
+
         let matches = search_source_files(
             std::slice::from_ref(&path),
             "MAX_SEARCHABLE_SOURCE_BYTES",
@@ -502,6 +873,7 @@ mod tests {
             None,
             || true,
         );
+
         assert!(!matches.is_empty());
         assert_eq!(matches[0].path, path);
 
@@ -512,8 +884,8 @@ mod tests {
             Some(Path::new("/outside/source/root")),
             || true,
         );
-        assert!(outside_scope.is_empty());
 
+        assert!(outside_scope.is_empty());
         let cancelled = search_source_files(&[path], "SourceTreeMatch", 10, None, || false);
         assert!(cancelled.is_empty());
     }
@@ -521,6 +893,7 @@ mod tests {
     #[test]
     fn source_search_accepts_files_below_and_at_the_byte_limit() {
         let directory = temporary_test_directory("bounded-search-accepted");
+
         for (name, length) in [
             ("below.c", MAX_SEARCHABLE_SOURCE_BYTES - 1),
             ("exact.c", MAX_SEARCHABLE_SOURCE_BYTES),
@@ -532,6 +905,7 @@ mod tests {
             let matches = search_source_files(&[path], "needle", 1, None, || true);
             assert_eq!(matches.len(), 1, "{name} should be searchable");
         }
+
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -542,7 +916,6 @@ mod tests {
         let mut contents = vec![b' '; MAX_SEARCHABLE_SOURCE_BYTES + 1];
         contents[..6].copy_from_slice(b"needle");
         std::fs::write(&path, contents).unwrap();
-
         assert!(search_source_files(&[path], "needle", 1, None, || true).is_empty());
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -553,14 +926,17 @@ mod tests {
             case_insensitive_match_column("Alpha TARGET", "alpha"),
             Some(1)
         );
+
         assert_eq!(
             case_insensitive_match_column("Alpha TARGET", "target"),
             Some(7)
         );
+
         assert_eq!(
             case_insensitive_match_column("alpha target", "target"),
             Some(7)
         );
+
         assert_eq!(case_insensitive_match_column("İtarget", "target"), Some(2));
         assert_eq!(case_insensitive_match_column("Ärger", "är"), Some(1));
     }
@@ -572,6 +948,7 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ));
+
         let nested = root.join("nested");
         let sibling = root.join("sibling");
         std::fs::create_dir_all(&nested).unwrap();
@@ -589,12 +966,14 @@ mod tests {
         let root = PathBuf::from("/project");
         let main = root.join("src/main.rs");
         let parser = root.join("src/parser/mod.rs");
+
         let build = build_source_tree(
             &[main.clone(), parser.clone(), root.join("tests/parser.rs")],
             std::slice::from_ref(&root),
             std::slice::from_ref(&parser),
             "src parser",
         );
+
         assert_eq!(build.file_count, 1);
         assert_eq!(build.roots.len(), 1);
         let src = &build.roots[0].children[0];
@@ -612,8 +991,10 @@ mod tests {
         let files = (0..300)
             .map(|index| PathBuf::from(format!("/project/src/file-{index}.rs")))
             .collect::<Vec<_>>();
+
         let build =
             build_source_tree_while(&files, &[PathBuf::from("/project")], &[], "", || false);
+
         assert_eq!(build, Default::default());
     }
 
@@ -623,7 +1004,9 @@ mod tests {
             std::process::id(),
             std::thread::current().id()
         ));
+
         std::fs::create_dir_all(&directory).unwrap();
+
         directory
     }
 }

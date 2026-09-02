@@ -84,10 +84,13 @@ pub(super) fn variable_float_edit(
 ) -> Option<FloatEdit> {
     let metadata = metadata.filter(|metadata| metadata.kind == ValueTypeKind::Float)?;
     let bits = metadata.bits.filter(|bits| matches!(bits, 32 | 64))?;
+
     let raw_bytes = metadata.raw_bytes.clone().or_else(|| {
         let value = variable.value.split_whitespace().next()?;
+
         parse_float_value(value, bits, FloatRepresentation::Decimal).ok()
     })?;
+
     (raw_bytes.len() * 8 == bits as usize).then_some(FloatEdit { bits, raw_bytes })
 }
 
@@ -99,15 +102,18 @@ pub(super) fn format_float_value(
     if representation == FloatRepresentation::RawBits {
         return format!("0x{}", encode_hex(raw_bytes));
     }
+
     match bits {
         32 => {
             let raw = u32::from_be_bytes(raw_bytes.try_into().unwrap_or_default());
             let value = f32::from_bits(raw);
+
             format_float32(value, raw, representation)
         }
         64 => {
             let raw = u64::from_be_bytes(raw_bytes.try_into().unwrap_or_default());
             let value = f64::from_bits(raw);
+
             format_float64(value, raw, representation)
         }
         _ => String::new(),
@@ -120,23 +126,29 @@ pub(super) fn parse_float_value(
     representation: FloatRepresentation,
 ) -> Result<Vec<u8>, &'static str> {
     let input = input.trim();
+
     if input.is_empty() {
         return Err("Enter a floating-point value");
     }
+
     if representation == FloatRepresentation::RawBits {
         let digits = input
             .strip_prefix("0x")
             .or_else(|| input.strip_prefix("0X"))
             .unwrap_or(input)
             .replace(['_', '\''], "");
+
         let raw = u128::from_str_radix(&digits, 16)
             .map_err(|_| "Enter the raw bits as a hexadecimal integer")?;
+
         if bits < 128 && raw >= (1_u128 << bits) {
             return Err("The raw value does not fit the destination type");
         }
+
         let bytes = raw.to_be_bytes();
         return Ok(bytes[bytes.len() - bits.div_ceil(8) as usize..].to_vec());
     }
+
     match bits {
         32 => parse_float_number(input, representation)
             .map(|value| (value as f32).to_bits().to_be_bytes().to_vec()),
@@ -154,6 +166,7 @@ pub(super) fn canonical_gdb_float(raw_bytes: &[u8], bits: u32) -> String {
         64 => f64::from_bits(u64::from_be_bytes(raw_bytes.try_into().unwrap_or_default())),
         _ => return String::from("0.0"),
     };
+
     if value.is_nan() {
         String::from("(0.0/0.0)")
     } else if value == f64::INFINITY {
@@ -170,18 +183,21 @@ fn parse_float_number(
     representation: FloatRepresentation,
 ) -> Result<f64, &'static str> {
     let normalized = input.trim().to_ascii_lowercase();
+
     match normalized.as_str() {
         "inf" | "+inf" | "infinity" | "+infinity" => return Ok(f64::INFINITY),
         "-inf" | "-infinity" => return Ok(f64::NEG_INFINITY),
         "nan" | "+nan" | "-nan" => return Ok(f64::NAN),
         _ => {}
     }
+
     if representation != FloatRepresentation::HexFloat {
         return normalized
             .replace('_', "")
             .parse()
             .map_err(|_| "Enter a number, inf, -inf, or nan");
     }
+
     parse_hex_float(&normalized)
 }
 
@@ -189,27 +205,37 @@ fn parse_hex_float(input: &str) -> Result<f64, &'static str> {
     let (negative, input) = input
         .strip_prefix('-')
         .map_or((false, input), |input| (true, input));
+
     let input = input.strip_prefix('+').unwrap_or(input);
+
     let input = input
         .strip_prefix("0x")
         .ok_or("A hexadecimal float starts with 0x")?;
+
     let (significand, exponent) = input
         .split_once(['p', 'P'])
         .ok_or("A hexadecimal float needs a binary exponent such as p+0")?;
+
     let exponent = exponent
         .parse::<i32>()
         .map_err(|_| "The hexadecimal float exponent is invalid")?;
+
     let (whole, fraction) = significand.split_once('.').unwrap_or((significand, ""));
     let digits = format!("{whole}{fraction}").replace('_', "");
+
     if digits.is_empty() || digits.len() > 28 {
         return Err("The hexadecimal significand is invalid or too long");
     }
+
     let magnitude =
         u128::from_str_radix(&digits, 16).map_err(|_| "The hexadecimal significand is invalid")?;
+
     let binary_exponent = exponent
         .checked_sub(i32::try_from(fraction.len() * 4).map_err(|_| "Exponent is too large")?)
         .ok_or("Exponent is too large")?;
+
     let value = (magnitude as f64) * 2_f64.powi(binary_exponent);
+
     Ok(if negative { -value } else { value })
 }
 
@@ -261,40 +287,51 @@ fn format_hex_float(
     infinite: bool,
 ) -> String {
     let sign = if negative { "-" } else { "" };
+
     if nan {
         return format!("{sign}nan");
     }
+
     if infinite {
         return format!("{sign}inf");
     }
+
     if exponent == 0 && fraction == 0 {
         return format!("{sign}0x0p+0");
     }
+
     let max_exponent = (1_u64 << exponent_bits) - 1;
     debug_assert!(exponent < max_exponent);
+
     let (leading, power) = if exponent == 0 {
         ('0', 1 - bias)
     } else {
         ('1', exponent as i32 - bias)
     };
+
     let padded_fraction = if fraction_digits == 6 {
         fraction << 1
     } else {
         fraction
     };
+
     let mut fraction = format!("{padded_fraction:0fraction_digits$x}");
+
     while fraction.ends_with('0') && fraction.len() > 1 {
         fraction.pop();
     }
+
     format!("{sign}0x{leading}.{fraction}p{power:+}")
 }
 
 fn encode_hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
+
     bytes.iter().fold(
         String::with_capacity(bytes.len() * 2),
         |mut output, byte| {
             let _ = write!(output, "{byte:02x}");
+
             output
         },
     )
@@ -330,6 +367,7 @@ impl IntegerRadix {
 
     pub(super) fn detect(value: &str) -> Self {
         let value = value.trim().trim_start_matches(['+', '-']);
+
         if value.starts_with("0x") || value.starts_with("0X") {
             Self::Hexadecimal
         } else if value.starts_with("0b") || value.starts_with("0B") {
@@ -357,6 +395,7 @@ pub(super) fn variable_integer_format(
     metadata: Option<&ValueTypeMetadata>,
 ) -> Option<IntegerFormat> {
     let type_name = variable.type_name.as_deref()?.trim().to_ascii_lowercase();
+
     if variable.is_pointer()
         || type_name.contains(['[', ']'])
         || matches!(type_name.as_str(), "bool" | "_bool")
@@ -366,6 +405,7 @@ pub(super) fn variable_integer_format(
     {
         return None;
     }
+
     target_integer_format(metadata).or_else(|| integer_format(&type_name, target_pointer_bits))
 }
 
@@ -375,11 +415,13 @@ pub(super) fn variable_boolean_value(
 ) -> Option<bool> {
     let type_name = variable.type_name.as_deref()?.trim().to_ascii_lowercase();
     let final_component = type_name.rsplit("::").next().unwrap_or(&type_name);
+
     let unqualified = final_component
         .split_whitespace()
         .filter(|word| !matches!(*word, "const" | "volatile" | "_atomic"))
         .collect::<Vec<_>>()
         .join(" ");
+
     if !matches!(unqualified.as_str(), "bool" | "_bool" | "c_bool")
         && !metadata.is_some_and(|metadata| metadata.kind == ValueTypeKind::Boolean)
     {
@@ -391,6 +433,7 @@ pub(super) fn variable_boolean_value(
         .split_whitespace()
         .next()?
         .to_ascii_lowercase();
+
     match value.as_str() {
         "false" => Some(false),
         "true" => Some(true),
@@ -410,6 +453,7 @@ fn parse_boolean_integer(value: &str) -> Option<u128> {
                 .map(|digits| (digits, 2))
         })
         .unwrap_or((value, 10));
+
     u128::from_str_radix(digits, radix).ok()
 }
 
@@ -420,17 +464,22 @@ pub(super) fn variable_character_format(
     metadata: Option<&ValueTypeMetadata>,
 ) -> Option<IntegerFormat> {
     let type_name = variable.type_name.as_deref()?.trim().to_ascii_lowercase();
+
     if variable.is_pointer() || type_name.contains(['[', ']']) {
         return None;
     }
+
     let final_component = type_name.rsplit("::").next().unwrap_or(&type_name);
+
     let unqualified = final_component
         .split_whitespace()
         .filter(|word| matches!(*word, "char" | "signed" | "unsigned" | "const" | "volatile"))
         .collect::<Vec<_>>()
         .join(" ");
+
     let rust_language = rust_source
         || metadata.is_some_and(|metadata| metadata.language.as_deref() == Some("rust"));
+
     if rust_language && unqualified == "char" {
         target_integer_format(metadata).or(Some(IntegerFormat::unsigned(32)))
     } else if matches!(
@@ -451,6 +500,7 @@ pub(super) fn variable_character_format(
 fn target_integer_format(metadata: Option<&ValueTypeMetadata>) -> Option<IntegerFormat> {
     let metadata = metadata?;
     let bits = metadata.bits.filter(|bits| (1..=128).contains(bits))?;
+
     metadata.signed.map(|signed| {
         if signed {
             IntegerFormat::signed(bits)
@@ -466,6 +516,7 @@ pub(super) fn register_integer_format(
     architecture: TargetArchitecture,
 ) -> Option<IntegerFormat> {
     let name = register_expression.strip_prefix('$')?;
+
     if architecture.is_dedicated_address_register(name)
         || is_address_register_name(name)
         || super::formatting::vector_register_for_architecture(name, architecture)
@@ -473,7 +524,9 @@ pub(super) fn register_integer_format(
     {
         return None;
     }
+
     let bits = architecture.scalar_register_bits(name, target_pointer_bits);
+
     Some(IntegerFormat::unsigned(bits))
 }
 
@@ -517,13 +570,17 @@ pub(super) fn parse_integer_input(
     selected_radix: IntegerRadix,
 ) -> Result<u128, &'static str> {
     let input = input.trim();
+
     if input.is_empty() {
         return Err("Enter a value");
     }
+
     let (negative, input) = input
         .strip_prefix('-')
         .map_or((false, input), |value| (true, value));
+
     let input = input.strip_prefix('+').unwrap_or(input);
+
     let (digits, radix, explicit_non_decimal) = if let Some(digits) = input
         .strip_prefix("0x")
         .or_else(|| input.strip_prefix("0X"))
@@ -546,27 +603,36 @@ pub(super) fn parse_integer_input(
             selected_radix != IntegerRadix::Decimal,
         )
     };
+
     let digits = digits.replace(['_', '\''], "");
+
     if digits.is_empty() {
         return Err("Enter digits after the base prefix");
     }
+
     let magnitude =
         u128::from_str_radix(&digits, radix).map_err(|_| "The value is not valid in this base")?;
+
     if magnitude > format.mask() {
         return Err("The value does not fit the destination type");
     }
+
     if negative {
         if !format.signed {
             return Err("Unsigned values cannot be negative");
         }
+
         if magnitude > format.sign_bit() {
             return Err("The negative value does not fit the destination type");
         }
+
         return Ok(((!magnitude).wrapping_add(1)) & format.mask());
     }
+
     if format.signed && !explicit_non_decimal && magnitude >= format.sign_bit() {
         return Err("The decimal value does not fit the signed destination type");
     }
+
     Ok(magnitude)
 }
 
@@ -576,22 +642,27 @@ pub(super) fn format_integer_value(
     radix: IntegerRadix,
 ) -> String {
     let raw = raw & format.mask();
+
     match radix {
         IntegerRadix::Decimal if format.signed && raw & format.sign_bit() != 0 => {
             let magnitude = ((!raw).wrapping_add(1)) & format.mask();
+
             format!("-{magnitude}")
         }
         IntegerRadix::Decimal => raw.to_string(),
         IntegerRadix::Hexadecimal => {
             let width = format.bits.div_ceil(4) as usize;
+
             format!("0x{raw:0width$x}")
         }
         IntegerRadix::Binary => {
             let width = format.bits as usize;
+
             format!("0b{raw:0width$b}")
         }
         IntegerRadix::Octal => {
             let width = format.bits.div_ceil(3) as usize;
+
             format!("0o{raw:0width$o}")
         }
     }
@@ -603,6 +674,7 @@ pub(super) fn canonical_gdb_integer(
     radix: IntegerRadix,
 ) -> String {
     let formatted = format_integer_value(raw, format, radix);
+
     if radix == IntegerRadix::Octal {
         if let Some(digits) = formatted.strip_prefix("0o") {
             format!("0{digits}")
@@ -619,10 +691,12 @@ pub(super) fn parse_character_input(
     format: IntegerFormat,
 ) -> Result<u128, &'static str> {
     let input = input.trim();
+
     let inner = input
         .strip_prefix('\'')
         .and_then(|value| value.strip_suffix('\''))
         .unwrap_or(input);
+
     let value = if let Some(escape) = inner.strip_prefix('\\') {
         match escape {
             "0" => 0,
@@ -650,6 +724,7 @@ pub(super) fn parse_character_input(
                 u32::from_str_radix(&escape[1..], 16)
                     .map_err(|_| "Use a Unicode escape such as \\U00000041")?
             }
+
             _ if escape.len() <= 3
                 && escape
                     .chars()
@@ -665,11 +740,13 @@ pub(super) fn parse_character_input(
         if characters.next().is_some() {
             return Err("Enter exactly one character");
         }
+
         u32::from(character)
     };
     if u128::from(value) > format.mask() {
         return Err("The character does not fit the destination type");
     }
+
     Ok(u128::from(value))
 }
 
@@ -747,6 +824,7 @@ pub(super) fn string_edit(variable: &Variable) -> Option<StringEdit> {
             bytes,
         });
     }
+
     if owned_type == "std::string"
         || owned_type.starts_with("std::__cxx11::basic_string<char,")
         || owned_type.starts_with("std::basic_string<char,")
@@ -756,6 +834,7 @@ pub(super) fn string_edit(variable: &Variable) -> Option<StringEdit> {
             storage: StringStorage::CppString,
         });
     }
+
     let base = compact.split(['*', '[']).next().unwrap_or(compact.as_str());
     let narrow_char = matches!(
         base,
@@ -764,6 +843,7 @@ pub(super) fn string_edit(variable: &Variable) -> Option<StringEdit> {
     if !narrow_char {
         return None;
     }
+
     if variable.is_pointer() {
         let capacity = bytes.len();
         return Some(StringEdit {
@@ -774,6 +854,7 @@ pub(super) fn string_edit(variable: &Variable) -> Option<StringEdit> {
             },
         });
     }
+
     let length = compact
         .rsplit_once('[')
         .and_then(|(_, length)| length.strip_suffix(']'))
@@ -811,6 +892,7 @@ pub(super) fn parse_string_input(input: &str) -> Result<Vec<u8>, &'static str> {
             bytes.extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
             continue;
         }
+
         let escape = characters
             .next()
             .ok_or("A trailing backslash needs an escape")?;
@@ -826,6 +908,7 @@ pub(super) fn parse_string_input(input: &str) -> Result<Vec<u8>, &'static str> {
                         digits.push(character);
                     }
                 }
+
                 bytes.push(
                     u8::from_str_radix(&digits, 8)
                         .map_err(|_| "An octal escape must fit in one byte")?,
@@ -859,6 +942,7 @@ pub(super) fn parse_string_input(input: &str) -> Result<Vec<u8>, &'static str> {
             }
         }
     }
+
     Ok(bytes)
 }
 
@@ -875,6 +959,7 @@ pub(super) fn format_string_bytes(bytes: &[u8]) -> String {
             _ => output.push_str(&format!("\\x{byte:02x}")),
         }
     }
+
     output
 }
 
@@ -882,10 +967,12 @@ fn decode_gdb_string(value: &str) -> Option<Vec<u8>> {
     let quoted = value.get(value.find('"')?..)?;
     let mut escaped = false;
     let mut content = String::new();
+
     for character in quoted[1..].chars() {
         if !escaped && character == '"' {
             return parse_string_input(&content).ok();
         }
+
         content.push(character);
         if character == '\\' {
             escaped = !escaped;
@@ -893,6 +980,7 @@ fn decode_gdb_string(value: &str) -> Option<Vec<u8>> {
             escaped = false;
         }
     }
+
     None
 }
 
@@ -910,8 +998,8 @@ pub(super) fn integer_decimal_value(
     {
         return None;
     }
-    let format = integer_format(&type_name, target_pointer_bits)?;
 
+    let format = integer_format(&type_name, target_pointer_bits)?;
     let value = value.trim();
     let (negative, magnitude) = value
         .strip_prefix('-')
@@ -1013,6 +1101,7 @@ fn integer_format(type_name: &str, target_pointer_bits: u32) -> Option<IntegerFo
         "unsigned long" | "unsigned long int" | "c_ulong" => {
             Some(IntegerFormat::unsigned(target_pointer_bits))
         }
+
         "long long"
         | "long long int"
         | "signed long long"
@@ -1062,6 +1151,7 @@ fn fixed_width_integer_format(name: &str, target_pointer_bits: u32) -> Option<In
     if !matches!(bits, 8 | 16 | 32 | 64 | 128) {
         return None;
     }
+
     let bits = if fast && bits != 8 {
         bits.max(target_pointer_bits)
     } else {
@@ -1089,6 +1179,7 @@ fn c_builtin_integer_format(name: &str, target_pointer_bits: u32) -> Option<Inte
     {
         return None;
     }
+
     let bits = if words.contains(&"char") {
         8
     } else if words.contains(&"short") {
@@ -1116,6 +1207,7 @@ fn c_bit_int_format(type_name: &str) -> Option<IntegerFormat> {
     if bits == 0 || bits > 128 {
         return None;
     }
+
     Some(if type_name.contains("unsigned") {
         IntegerFormat::unsigned(bits)
     } else {
@@ -1185,6 +1277,8 @@ mod float_tests {
             varobj: None,
             num_children: 0,
             has_more: false,
+            display_hint: None,
+            dynamic: false,
         };
         let metadata = ValueTypeMetadata {
             kind: ValueTypeKind::Integer,
