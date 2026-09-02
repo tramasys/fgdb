@@ -1414,6 +1414,23 @@ fn is_indirect_branch(mnemonic: &str, operands: &str, architecture: TargetArchit
     }
 }
 
+pub(super) fn direct_control_flow_address(
+    mnemonic: &str,
+    operands: &str,
+    architecture: TargetArchitecture,
+) -> Option<u64> {
+    if is_indirect_branch(mnemonic, operands, architecture) {
+        return None;
+    }
+
+    operands
+        .split(|character: char| {
+            character.is_whitespace() || matches!(character, ',' | '(' | ')' | '[' | ']')
+        })
+        .map(|part| part.trim_matches(|character: char| matches!(character, '$' | '#' | ';' | ':')))
+        .find_map(hex_value)
+}
+
 fn instruction_accesses_memory(
     mnemonic: &str,
     operands: &str,

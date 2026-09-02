@@ -406,6 +406,7 @@ pub(super) fn populate_threads_and_signals(
     snapshot: &mut KernelSnapshot,
     root: &Path,
     process_status: &HashMap<String, String>,
+    work: &WorkDeadline,
 ) {
     const MAX_THREADS: usize = 8_192;
 
@@ -421,6 +422,10 @@ pub(super) fn populate_threads_and_signals(
     let mut thread_blocked = [0_usize; 64];
 
     for (index, entry) in entries.filter_map(Result::ok).enumerate() {
+        if work.should_stop() {
+            return;
+        }
+
         if index >= MAX_THREADS {
             snapshot.warnings.push(format!(
                 "Thread details were truncated at {MAX_THREADS} entries"
@@ -580,6 +585,7 @@ pub(super) fn populate_hierarchy(
     snapshot: &mut KernelSnapshot,
     root: &Path,
     status: &HashMap<String, String>,
+    work: &WorkDeadline,
 ) {
     const HIERARCHY_BUDGET: Duration = Duration::from_millis(250);
 
@@ -597,7 +603,7 @@ pub(super) fn populate_hierarchy(
     let mut visited = HashSet::new();
 
     for _ in 0..8 {
-        if parent == 0 || !visited.insert(parent) {
+        if work.should_stop() || parent == 0 || !visited.insert(parent) {
             break;
         }
 
@@ -642,11 +648,11 @@ pub(super) fn populate_hierarchy(
     let deadline = Instant::now() + HIERARCHY_BUDGET;
 
     while let Some((parent, depth)) = queue.pop_front() {
-        if snapshot.process_tree.len() >= 256 || Instant::now() >= deadline {
+        if work.should_stop() || snapshot.process_tree.len() >= 256 || Instant::now() >= deadline {
             break;
         }
 
-        for child in child_processes(proc_root, parent, deadline) {
+        for child in child_processes(proc_root, parent, deadline, work) {
             if !seen.insert(child) {
                 continue;
             }
@@ -780,7 +786,7 @@ fn process_display_name(root: &Path, status: &HashMap<String, String>) -> String
         .unwrap_or(kernel_name)
 }
 
-fn child_processes(proc_root: &Path, pid: u32, deadline: Instant) -> Vec<u32> {
+fn child_processes(proc_root: &Path, pid: u32, deadline: Instant, work: &WorkDeadline) -> Vec<u32> {
     const MAX_CHILDREN: usize = 256;
     let task = proc_root.join(pid.to_string()).join("task");
 
@@ -792,7 +798,7 @@ fn child_processes(proc_root: &Path, pid: u32, deadline: Instant) -> Vec<u32> {
     let mut seen = HashSet::new();
 
     'threads: for entry in entries.filter_map(Result::ok) {
-        if Instant::now() >= deadline {
+        if work.should_stop() || Instant::now() >= deadline {
             break;
         }
 

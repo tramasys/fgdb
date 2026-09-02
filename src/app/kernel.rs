@@ -113,6 +113,8 @@ fn read_kernel_snapshot(
     }
 
     let (sender, receiver) = mpsc::channel();
+    let work = crate::kernel::WorkDeadline::new(SNAPSHOT_TIMEOUT);
+    let worker_work = work.clone();
 
     let worker = std::thread::Builder::new()
         .name(String::from("fgdb-procfs"))
@@ -123,6 +125,7 @@ fn read_kernel_snapshot(
                 pid,
                 debugger_pid,
                 include_tls_metadata,
+                &worker_work,
             ));
         });
 
@@ -155,12 +158,26 @@ fn read_kernel_snapshot(
                 gtk::glib::ControlFlow::Break
             }
 
-            Err(TryRecvError::Empty)
-                if ui.strong_count() > 0 && started.elapsed() < SNAPSHOT_TIMEOUT =>
-            {
-                gtk::glib::ControlFlow::Continue
+            Err(TryRecvError::Empty) if ui.strong_count() == 0 => {
+                work.cancel();
+
+                gtk::glib::ControlFlow::Break
             }
-            Err(TryRecvError::Empty) if ui.strong_count() > 0 => {
+            Err(TryRecvError::Empty)
+                if ui
+                    .upgrade()
+                    .is_some_and(|ui| !ui.kernel_refresh_is_current(generation)) =>
+            {
+                work.cancel();
+
+                if let Some(ui) = ui.upgrade() {
+                    ui.finish_stale_kernel_refresh();
+                }
+
+                gtk::glib::ControlFlow::Break
+            }
+            Err(TryRecvError::Empty) if started.elapsed() >= SNAPSHOT_TIMEOUT => {
+                work.cancel();
                 show_kernel_error(
                     &ui,
                     generation,
@@ -178,7 +195,7 @@ fn read_kernel_snapshot(
 
                 gtk::glib::ControlFlow::Break
             }
-            Err(TryRecvError::Empty) => gtk::glib::ControlFlow::Break,
+            Err(TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
         }
     });
 }

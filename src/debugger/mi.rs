@@ -1,11 +1,11 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     io::{self, Read},
     os::fd::AsRawFd,
     path::PathBuf,
     rc::{Rc, Weak},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use gtk::glib;
@@ -46,6 +46,9 @@ use transport::{
 type TransportFactory = Rc<dyn Fn() -> io::Result<MiTransport>>;
 type EventHandler = Box<dyn Fn(&MiClient, MiEvent)>;
 const MAX_RETAINED_MI_INPUT_BYTES: usize = 256 * 1024;
+const MI_READ_CHUNK_BYTES: usize = 16 * 1024;
+const MAX_MI_READ_BATCH_BYTES: usize = 256 * 1024;
+const MAX_MI_READ_BATCH_TIME: Duration = Duration::from_millis(4);
 const RUST_PRINTER_PROBE: &str = "python import gdb; next(printer for holder in [*gdb.objfiles(), gdb.current_progspace()] for printer in getattr(holder, \"pretty_printers\", []) if getattr(printer, \"name\", \"\") == \"rust\")";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1126,30 +1129,46 @@ impl MiClient {
             return glib::ControlFlow::Break;
         };
 
-        let mut bytes = [0_u8; 16 * 1024];
+        let epoch = client.transport_epoch.get();
+        let started = Instant::now();
+        let mut total = 0_usize;
+        let mut bytes = [0_u8; MI_READ_CHUNK_BYTES];
 
-        let read_result = {
-            let mut transport = client.transport.borrow_mut();
+        while total < MAX_MI_READ_BATCH_BYTES && started.elapsed() < MAX_MI_READ_BATCH_TIME {
+            let remaining = MAX_MI_READ_BATCH_BYTES - total;
+            let read_length = remaining.min(bytes.len());
+            let read_result = {
+                let mut transport = client.transport.borrow_mut();
 
-            transport.master.read(&mut bytes)
-        };
+                transport.master.read(&mut bytes[..read_length])
+            };
 
-        match read_result {
-            Ok(0) => client.disconnect(IoSource::Read),
-            Ok(length) => {
-                client.consume(&bytes[..length]);
+            match read_result {
+                Ok(0) => return client.disconnect(IoSource::Read),
+                Ok(length) => {
+                    total += length;
+                    client.consume(&bytes[..length]);
 
-                glib::ControlFlow::Continue
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                if condition.intersects(glib::IOCondition::HUP | glib::IOCondition::ERR) {
-                    client.disconnect(IoSource::Read)
-                } else {
-                    glib::ControlFlow::Continue
+                    // Event handlers may reconnect while consuming a record.
+                    // The replacement transport owns a new readiness source.
+                    if client.transport_epoch.get() != epoch || !client.connected.get() {
+                        return glib::ControlFlow::Break;
+                    }
                 }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    return if condition.intersects(glib::IOCondition::HUP | glib::IOCondition::ERR)
+                    {
+                        client.disconnect(IoSource::Read)
+                    } else {
+                        glib::ControlFlow::Continue
+                    };
+                }
+                Err(_) => return client.disconnect(IoSource::Read),
             }
-            Err(_) => client.disconnect(IoSource::Read),
         }
+
+        glib::ControlFlow::Continue
     }
 
     fn disconnect(&self, origin: IoSource) -> glib::ControlFlow {
@@ -1450,8 +1469,18 @@ impl MiClient {
                 .collect::<Vec<_>>()
         };
 
+        let expired_tokens = expired
+            .iter()
+            .map(|(token, _)| *token)
+            .collect::<HashSet<_>>();
+
+        let cancelled_before_write = self
+            .outgoing
+            .borrow_mut()
+            .cancel_unstarted_many(&expired_tokens);
+
         for (token, stale) in expired {
-            let cancelled_before_write = self.outgoing.borrow_mut().cancel_unstarted(token);
+            let cancelled_before_write = cancelled_before_write.contains(&token);
             let request = { self.pending.borrow_mut().remove(&token) };
 
             if let Some(request) = request {
@@ -2375,6 +2404,38 @@ mod tests {
 
                 super::MiClient::on_io_ready(&client.weak(), gtk::glib::IOCondition::IN);
                 assert_eq!(result.borrow().as_deref(), Some("done"));
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn one_readiness_callback_drains_records_across_chunk_boundaries() {
+        use std::{cell::RefCell, io::Write, rc::Rc};
+
+        let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = gtk::glib::MainContext::new();
+
+        context
+            .with_thread_default(|| {
+                let result = Rc::new(RefCell::new(None));
+                let result_for_request = Rc::clone(&result);
+                let (client, mut peer) =
+                    super::MiClient::open_with_injected_transport(|_, _| {}).unwrap();
+
+                let token = client
+                    .request("-thread-info", move |_, record| {
+                        result_for_request.replace(Some(record.class));
+                    })
+                    .unwrap();
+
+                let padding = "x".repeat(super::MI_READ_CHUNK_BYTES + 512);
+                let transcript = format!("~\"{padding}\"\n{token}^done\n");
+                peer.write_all(transcript.as_bytes()).unwrap();
+
+                super::MiClient::on_io_ready(&client.weak(), gtk::glib::IOCondition::IN);
+
+                assert_eq!(result.borrow().as_deref(), Some("done"));
+                assert!(client.incoming.borrow().is_empty());
             })
             .unwrap();
     }
@@ -3478,6 +3539,34 @@ mod tests {
         assert!(outgoing.cancel_unstarted(2));
         assert_eq!(outgoing.commands.len(), 1);
         assert_eq!(outgoing.commands.front().unwrap().token, 1);
+    }
+
+    #[test]
+    fn cancels_expired_unstarted_commands_in_one_queue_pass() {
+        let mut outgoing = OutgoingQueue::default();
+        outgoing.enqueue(1, 0, "-partially-written").unwrap();
+        outgoing.enqueue(2, 0, "-expired-two").unwrap();
+        outgoing.enqueue(3, 0, "-retained").unwrap();
+        outgoing.enqueue(4, 0, "-expired-four").unwrap();
+        outgoing.advance(3);
+        let before = outgoing.remaining_bytes;
+        let removed = outgoing.commands[1].bytes.len() + outgoing.commands[3].bytes.len();
+
+        let cancelled = outgoing.cancel_unstarted_many(&std::collections::HashSet::from([
+            1_u64, 2_u64, 4_u64, 99_u64,
+        ]));
+
+        assert_eq!(cancelled, std::collections::HashSet::from([2_u64, 4_u64]));
+        assert_eq!(outgoing.remaining_bytes, before - removed);
+
+        assert_eq!(
+            outgoing
+                .commands
+                .iter()
+                .map(|command| (command.token, command.written))
+                .collect::<Vec<_>>(),
+            [(1, 3), (3, 0)]
+        );
     }
 
     #[test]

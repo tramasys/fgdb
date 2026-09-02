@@ -419,7 +419,8 @@ impl DisassemblyController {
                     return;
                 }
 
-                let instructions = crate::debugger::instructions(&record);
+                let instructions =
+                    instructions_for_focus(crate::debugger::instructions(&record), address);
 
                 if instructions.is_empty() {
                     drop(ui);
@@ -464,7 +465,7 @@ impl DisassemblyController {
                 }
 
                 let instructions = if record.is_done() {
-                    crate::debugger::instructions(&record)
+                    instructions_for_focus(crate::debugger::instructions(&record), address)
                 } else {
                     Vec::new()
                 };
@@ -714,6 +715,31 @@ fn instruction_end_address(instruction: &crate::debugger::Instruction) -> Option
     address.checked_add(u64::try_from(bytes).ok()?)
 }
 
+fn instructions_for_focus(
+    mut instructions: Vec<crate::debugger::Instruction>,
+    focus: u64,
+) -> Vec<crate::debugger::Instruction> {
+    let Some(focus_position) = instructions
+        .iter()
+        .position(|instruction| parse_address(&instruction.address) == Some(focus))
+    else {
+        return Vec::new();
+    };
+
+    let function = instructions[focus_position].function.as_str();
+    let start = instructions[..focus_position]
+        .iter()
+        .rposition(|instruction| instruction.function != function)
+        .map_or(0, |position| position + 1);
+
+    let end = instructions[focus_position + 1..]
+        .iter()
+        .position(|instruction| instruction.function != function)
+        .map_or(instructions.len(), |position| focus_position + position + 1);
+
+    instructions.drain(start..end).collect()
+}
+
 fn opcode_byte_count(opcodes: &str) -> usize {
     opcodes
         .split_ascii_whitespace()
@@ -760,6 +786,17 @@ fn resolved_call_target_display(expression: &str, value: &str) -> Option<String>
 mod tests {
     use super::*;
 
+    fn instruction(address: &str, function: &str) -> crate::debugger::Instruction {
+        crate::debugger::Instruction {
+            address: address.to_owned(),
+            function: function.to_owned(),
+            offset: String::new(),
+            opcodes: Some(String::from("90")),
+            text: String::from("nop"),
+            source: None,
+        }
+    }
+
     #[test]
     fn extracts_addresses_from_gdb_values() {
         assert_eq!(evaluated_address("0x401126 <main>"), Some(0x401126));
@@ -786,6 +823,35 @@ mod tests {
         assert_eq!(opcode_byte_count("e92d4800"), 4);
         assert_eq!(opcode_byte_count("0x1234 0xabcd"), 4);
         assert_eq!(opcode_byte_count("unavailable"), 1);
+    }
+
+    #[test]
+    fn keeps_only_the_function_containing_the_requested_instruction() {
+        let instructions = vec![
+            instruction("0x401000", "_start"),
+            instruction("0x401005", "_start"),
+            instruction("0x401038", "fill_loop"),
+            instruction("0x401039", "fill_loop"),
+            instruction("0x40105b", "??"),
+            instruction("0x40105d", "??"),
+        ];
+
+        let focused = instructions_for_focus(instructions, 0x401039);
+
+        assert_eq!(
+            focused
+                .iter()
+                .map(|instruction| instruction.address.as_str())
+                .collect::<Vec<_>>(),
+            ["0x401038", "0x401039"]
+        );
+    }
+
+    #[test]
+    fn rejects_disassembly_windows_that_do_not_contain_the_focus() {
+        assert!(
+            instructions_for_focus(vec![instruction("0x401000", "_start")], 0x402000).is_empty()
+        );
     }
 
     #[test]

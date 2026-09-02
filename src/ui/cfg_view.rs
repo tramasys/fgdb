@@ -876,7 +876,11 @@ fn cfg_flow(instruction: &CfgInstruction, architecture: TargetArchitecture) -> O
             && matches!(mnemonic, "jmp" | "ljmp" | "b" | "j"));
 
     if unconditional {
-        return Some(CfgFlow::Unconditional(direct_branch_target(operands)));
+        return Some(CfgFlow::Unconditional(direct_control_flow_address(
+            mnemonic,
+            operands,
+            architecture,
+        )));
     }
 
     let conditional = is_conditional_branch(mnemonic, architecture)
@@ -885,21 +889,14 @@ fn cfg_flow(instruction: &CfgInstruction, architecture: TargetArchitecture) -> O
                 || mnemonic.starts_with("loop")));
 
     if conditional {
-        return Some(CfgFlow::Conditional(direct_branch_target(operands)));
+        return Some(CfgFlow::Conditional(direct_control_flow_address(
+            mnemonic,
+            operands,
+            architecture,
+        )));
     }
 
     is_terminal_instruction(mnemonic, architecture).then_some(CfgFlow::Terminal)
-}
-
-fn direct_branch_target(operands: &str) -> Option<u64> {
-    operands
-        .split(|character: char| {
-            character.is_whitespace() || matches!(character, ',' | '(' | ')' | '[' | ']')
-        })
-        .map(|part| {
-            part.trim_matches(|character: char| matches!(character, '*' | '$' | '#' | ';' | ':'))
-        })
-        .find_map(hex_value)
 }
 
 fn is_terminal_instruction(mnemonic: &str, architecture: TargetArchitecture) -> bool {
@@ -1546,6 +1543,51 @@ mod tests {
         assert_eq!(graph.blocks.len(), 2);
         assert!(graph.edges.is_empty());
         assert_eq!(graph.external_edges, 1);
+    }
+
+    #[test]
+    fn classifies_direct_and_indirect_x86_control_flow_operands() {
+        for instruction in ["jmp 0x401000", "je 0x401000", "call 0x401000"] {
+            let (mnemonic, operands) =
+                normalized_instruction_parts(instruction, TargetArchitecture::X86_64);
+
+            assert_eq!(
+                direct_control_flow_address(&mnemonic, operands, TargetArchitecture::X86_64),
+                Some(0x401000),
+                "{instruction}"
+            );
+        }
+
+        for instruction in [
+            "jmp *%rax",
+            "jmp *0x8(%rax)",
+            "jmp *0x401000",
+            "call *%rax",
+            "jmp rax",
+            "jmp [rax]",
+            "jmp qword ptr [0x401000]",
+            "call rax",
+        ] {
+            let (mnemonic, operands) =
+                normalized_instruction_parts(instruction, TargetArchitecture::X86_64);
+
+            assert_eq!(
+                direct_control_flow_address(&mnemonic, operands, TargetArchitecture::X86_64),
+                None,
+                "{instruction}"
+            );
+        }
+    }
+
+    #[test]
+    fn indirect_memory_jumps_do_not_create_known_cfg_edges() {
+        for jump in ["jmp *0x8(%rax)", "jmp *0x401000", "jmp [rax]"] {
+            let instructions = [instruction(0x100, jump), instruction(0x108, "ret")];
+            let graph = graph(&instructions, 0x100);
+
+            assert!(graph.edges.is_empty(), "{jump}");
+            assert_eq!(graph.external_edges, 1, "{jump}");
+        }
     }
 
     #[test]

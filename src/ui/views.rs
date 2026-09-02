@@ -2195,6 +2195,7 @@ pub(super) fn build_source_tree_view() -> SourceTreeControls {
         model,
         selection,
         view,
+        file_routes: Rc::new(RefCell::new(HashMap::new())),
         open_handler,
         search_handler,
         refresh_handler,

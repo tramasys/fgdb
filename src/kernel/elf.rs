@@ -16,7 +16,7 @@ use goblin::elf::{
     sym::{self, STT_TLS},
 };
 
-use super::{KernelSnapshot, KernelTlsModule, KernelTlsSymbol};
+use super::{KernelSnapshot, KernelTlsModule, KernelTlsSymbol, WorkDeadline};
 
 const MAX_ELF_BYTES: usize = 64 * 1024 * 1024;
 const MAX_TOTAL_ELF_BYTES: usize = 128 * 1024 * 1024;
@@ -68,8 +68,12 @@ struct ScanBudget {
 static TLS_CACHE: OnceLock<Mutex<HashMap<CacheKey, CacheEntry>>> = OnceLock::new();
 static TLS_CACHE_CLOCK: AtomicU64 = AtomicU64::new(1);
 
-pub(super) fn populate_tls_metadata(snapshot: &mut KernelSnapshot, root: &Path) {
-    let candidates = module_candidates(snapshot, root);
+pub(super) fn populate_tls_metadata(
+    snapshot: &mut KernelSnapshot,
+    root: &Path,
+    work: &WorkDeadline,
+) {
+    let candidates = module_candidates(snapshot, root, work);
 
     let mut budget = ScanBudget {
         remaining_bytes: MAX_TOTAL_ELF_BYTES,
@@ -80,20 +84,28 @@ pub(super) fn populate_tls_metadata(snapshot: &mut KernelSnapshot, root: &Path) 
     let mut failures = Vec::new();
 
     for candidate in candidates.into_iter().take(MAX_MODULES) {
-        let tls =
-            match cached_tls_analysis(&candidate.open_path, &candidate.display_path, &mut budget) {
-                Ok(Some(tls)) => tls,
-                Ok(None) => continue,
-                Err(error) => {
-                    skipped += 1;
+        if work.should_stop() {
+            return;
+        }
 
-                    if failures.len() < 3 {
-                        failures.push(format!("{}: {error}", candidate.display_path));
-                    }
+        let tls = match cached_tls_analysis(
+            &candidate.open_path,
+            &candidate.display_path,
+            &mut budget,
+            work,
+        ) {
+            Ok(Some(tls)) => tls,
+            Ok(None) => continue,
+            Err(error) => {
+                skipped += 1;
 
-                    continue;
+                if failures.len() < 3 {
+                    failures.push(format!("{}: {error}", candidate.display_path));
                 }
-            };
+
+                continue;
+            }
+        };
 
         snapshot.tls_modules.push(KernelTlsModule {
             module: module_name(&candidate.display_path),
@@ -128,7 +140,11 @@ pub(super) fn populate_tls_metadata(snapshot: &mut KernelSnapshot, root: &Path) 
     });
 }
 
-fn module_candidates(snapshot: &KernelSnapshot, root: &Path) -> Vec<ModuleCandidate> {
+fn module_candidates(
+    snapshot: &KernelSnapshot,
+    root: &Path,
+    work: &WorkDeadline,
+) -> Vec<ModuleCandidate> {
     let mut candidates = Vec::new();
     let executable = fs::read_link(root.join("exe")).ok();
 
@@ -146,11 +162,16 @@ fn module_candidates(snapshot: &KernelSnapshot, root: &Path) -> Vec<ModuleCandid
         .map(|path| HashSet::from([normalized_deleted_path(&path).to_owned()]))
         .unwrap_or_default();
 
-    for mapping in snapshot
+    for (index, mapping) in snapshot
         .mappings
         .iter()
         .filter(|mapping| mapping.permissions.contains('x'))
+        .enumerate()
     {
+        if index % 256 == 0 && work.should_stop() {
+            break;
+        }
+
         let Some(path) = mapping.path.as_deref().filter(|path| path.starts_with('/')) else {
             continue;
         };
@@ -217,7 +238,9 @@ fn cached_tls_analysis(
     path: &Path,
     display_path: &str,
     budget: &mut ScanBudget,
+    work: &WorkDeadline,
 ) -> Result<Option<ParsedTls>, String> {
+    work.check()?;
     let metadata = fs::metadata(path).map_err(|error| format!("Cannot inspect ELF: {error}"))?;
 
     if metadata.len() > MAX_ELF_BYTES as u64 {
@@ -266,7 +289,9 @@ fn cached_tls_analysis(
     let bytes = crate::bounded::read_bytes(path, MAX_ELF_BYTES)
         .map_err(|error| format!("Cannot read ELF: {error}"))?;
 
+    work.check()?;
     let parsed = parse_elf_tls(&bytes)?;
+    work.check()?;
     let mut cache = cache.lock().unwrap_or_else(|poison| poison.into_inner());
 
     if cache.len() >= MAX_CACHE_ENTRIES {

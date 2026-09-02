@@ -1,4 +1,11 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 mod elf;
 mod memory;
@@ -18,6 +25,41 @@ pub(crate) use snapshot::read_snapshot;
 pub(crate) use startup::{
     ProcessArgument, ProcessEnvironment, ProcessStartupSnapshot, read_process_startup,
 };
+
+#[derive(Clone, Debug)]
+pub(crate) struct WorkDeadline {
+    cancelled: Arc<AtomicBool>,
+    deadline: Instant,
+}
+
+impl WorkDeadline {
+    pub(crate) fn new(timeout: Duration) -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: Instant::now()
+                .checked_add(timeout)
+                .unwrap_or_else(Instant::now),
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    pub(crate) fn should_stop(&self) -> bool {
+        self.cancelled.load(Ordering::Relaxed) || Instant::now() >= self.deadline
+    }
+
+    pub(crate) fn check(&self) -> Result<(), String> {
+        if self.should_stop() {
+            Err(String::from(
+                "The procfs snapshot exceeded the 15-second collection limit",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct KernelFact {
@@ -1191,6 +1233,20 @@ pub(crate) fn format_bytes(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn work_deadline_supports_expiration_and_cooperative_cancellation() {
+        let cancelled = WorkDeadline::new(Duration::from_secs(60));
+        assert!(!cancelled.should_stop());
+        assert!(cancelled.check().is_ok());
+        cancelled.cancel();
+        assert!(cancelled.should_stop());
+        assert!(cancelled.check().is_err());
+
+        let expired = WorkDeadline::new(Duration::ZERO);
+        assert!(expired.should_stop());
+        assert!(expired.check().is_err());
+    }
 
     #[test]
     fn computes_signed_snapshot_deltas() {

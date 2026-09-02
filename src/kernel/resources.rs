@@ -217,8 +217,12 @@ pub(super) fn populate_constraints(snapshot: &mut KernelSnapshot, root: &Path) {
     }
 }
 
-pub(super) fn populate_descriptors(snapshot: &mut KernelSnapshot, root: &Path) {
-    match read_file_descriptors(root) {
+pub(super) fn populate_descriptors(
+    snapshot: &mut KernelSnapshot,
+    root: &Path,
+    work: &WorkDeadline,
+) {
+    match read_file_descriptors(root, work) {
         Ok((descriptors, truncated)) => {
             snapshot.file_descriptors = descriptors;
 
@@ -256,7 +260,10 @@ pub(super) fn populate_kernel_policy(snapshot: &mut KernelSnapshot, root: &Path)
     }
 }
 
-fn read_file_descriptors(root: &Path) -> io::Result<(Vec<KernelFileDescriptor>, bool)> {
+fn read_file_descriptors(
+    root: &Path,
+    work: &WorkDeadline,
+) -> io::Result<(Vec<KernelFileDescriptor>, bool)> {
     const MAX_FILE_DESCRIPTORS: usize = 16_384;
     const MAX_FDINFO_BYTES: usize = 64 * 1024;
     let mut truncated = false;
@@ -264,6 +271,13 @@ fn read_file_descriptors(root: &Path) -> io::Result<(Vec<KernelFileDescriptor>, 
     let mut descriptors = Vec::new();
 
     for entry in fs::read_dir(root.join("fd"))?.filter_map(Result::ok) {
+        if work.should_stop() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "file descriptor inspection was cancelled",
+            ));
+        }
+
         if descriptors.len() >= MAX_FILE_DESCRIPTORS || Instant::now() >= deadline {
             truncated = true;
             break;
@@ -295,7 +309,7 @@ fn read_file_descriptors(root: &Path) -> io::Result<(Vec<KernelFileDescriptor>, 
         .filter_map(|(_, target, _)| socket_inode(target))
         .collect::<HashSet<_>>();
 
-    let sockets = read_socket_endpoints(root, &socket_inodes);
+    let sockets = read_socket_endpoints(root, &socket_inodes, work);
     drop(socket_inodes);
 
     let mut descriptors = descriptors
@@ -422,7 +436,11 @@ fn socket_inode(target: &str) -> Option<&str> {
     target.strip_prefix("socket:[")?.strip_suffix(']')
 }
 
-fn read_socket_endpoints(root: &Path, wanted: &HashSet<&str>) -> HashMap<String, String> {
+fn read_socket_endpoints(
+    root: &Path,
+    wanted: &HashSet<&str>,
+    work: &WorkDeadline,
+) -> HashMap<String, String> {
     let mut endpoints = HashMap::new();
 
     if wanted.is_empty() {
@@ -435,13 +453,21 @@ fn read_socket_endpoints(root: &Path, wanted: &HashSet<&str>) -> HashMap<String,
         ("udp", "UDP", false),
         ("udp6", "UDP6", true),
     ] {
+        if work.should_stop() {
+            return endpoints;
+        }
+
         let Ok(input) =
             crate::bounded::read_string(&root.join("net").join(entry), 16 * 1024 * 1024)
         else {
             continue;
         };
 
-        for line in input.lines().skip(1) {
+        for (index, line) in input.lines().skip(1).enumerate() {
+            if index % 256 == 0 && work.should_stop() {
+                return endpoints;
+            }
+
             let mut fields = line.split_whitespace();
 
             let Some(local_field) = fields.nth(1) else {
@@ -480,7 +506,11 @@ fn read_socket_endpoints(root: &Path, wanted: &HashSet<&str>) -> HashMap<String,
     }
 
     if let Ok(input) = crate::bounded::read_string(&root.join("net/unix"), 16 * 1024 * 1024) {
-        for line in input.lines().skip(1) {
+        for (index, line) in input.lines().skip(1).enumerate() {
+            if index % 256 == 0 && work.should_stop() {
+                return endpoints;
+            }
+
             let mut fields = line.split_whitespace();
 
             let Some(socket_type) = fields.nth(4) else {

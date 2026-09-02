@@ -581,8 +581,11 @@ impl Ui {
     pub(crate) fn invalidate_source_discovery(&self) {
         self.resolved_source_paths.borrow_mut().clear();
         self.source_loaded_cache.borrow_mut().take();
+        self.source_loaded_search.borrow_mut().take();
         self.source_tree_cache.borrow_mut().take();
+        self.source_tree_search.borrow_mut().take();
         self.source_index.borrow_mut().take();
+        self.source_tree.file_routes.borrow_mut().clear();
         self.source_tree_generation.fetch_add(1, Ordering::Relaxed);
 
         self.source_tree_render_generation

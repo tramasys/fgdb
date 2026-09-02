@@ -1,5 +1,6 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    cmp::Ordering,
+    collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque},
     ffi::OsString,
     path::{Path, PathBuf},
 };
@@ -25,6 +26,10 @@ pub struct SourceId(PathBuf);
 impl SourceId {
     pub fn from_path(path: &Path) -> Self {
         Self(canonical_source_path(path))
+    }
+
+    fn from_indexed_path(path: &Path) -> Self {
+        Self(path.to_path_buf())
     }
 }
 
@@ -231,6 +236,176 @@ pub struct SourceTreeNodeData {
 pub struct SourceTreeBuild {
     pub roots: Vec<SourceTreeNodeData>,
     pub file_count: usize,
+    pub file_routes: HashMap<SourceId, Box<[u32]>>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SourceSearchIndex {
+    entries: Vec<SourceSearchEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SourceSearchEntry {
+    path: PathBuf,
+    normalized_path: Box<str>,
+    normalized_filename: Box<str>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SourceFileMatch {
+    pub path: PathBuf,
+    pub loaded: bool,
+}
+
+impl SourceSearchIndex {
+    pub fn new(files: &[PathBuf]) -> Self {
+        let entries = files
+            .iter()
+            .map(|path| SourceSearchEntry {
+                path: path.clone(),
+                normalized_path: path.to_string_lossy().to_lowercase().into_boxed_str(),
+                normalized_filename: path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_lowercase()
+                    .into_boxed_str(),
+            })
+            .collect();
+
+        Self { entries }
+    }
+}
+
+struct NormalizedSourceQuery {
+    text: Box<str>,
+    terms: Vec<Box<str>>,
+}
+
+impl NormalizedSourceQuery {
+    fn new(query: &str) -> Self {
+        let text = query.trim().to_lowercase().into_boxed_str();
+        let terms = text
+            .split_whitespace()
+            .map(|term| term.to_owned().into_boxed_str())
+            .collect();
+
+        Self { text, terms }
+    }
+
+    fn score(&self, entry: &SourceSearchEntry) -> Option<u16> {
+        if self.text.is_empty() {
+            return Some(1);
+        }
+
+        if !self
+            .terms
+            .iter()
+            .all(|term| entry.normalized_path.contains(term.as_ref()))
+        {
+            return None;
+        }
+
+        Some(
+            if entry.normalized_filename.as_ref() == self.text.as_ref() {
+                500
+            } else if entry.normalized_filename.starts_with(self.text.as_ref()) {
+                400
+            } else if entry.normalized_filename.contains(self.text.as_ref()) {
+                300
+            } else if entry.normalized_path.ends_with(self.text.as_ref()) {
+                200
+            } else {
+                100
+            },
+        )
+    }
+}
+
+#[derive(Eq)]
+struct RankedSource<'a> {
+    score: u16,
+    entry: &'a SourceSearchEntry,
+    loaded: bool,
+}
+
+impl PartialEq for RankedSource<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.score == other.score && self.entry.path == other.entry.path
+    }
+}
+
+impl Ord for RankedSource<'_> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // BinaryHeap keeps the greatest value at the root. Invert the score so
+        // the worst retained candidate can be replaced in constant time.
+        other
+            .score
+            .cmp(&self.score)
+            .then_with(|| self.entry.path.cmp(&other.entry.path))
+    }
+}
+
+impl PartialOrd for RankedSource<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+pub fn search_source_paths(
+    loaded: &SourceSearchIndex,
+    tree: &SourceSearchIndex,
+    query: &str,
+    limit: usize,
+) -> Vec<SourceFileMatch> {
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    let query = NormalizedSourceQuery::new(query);
+    let mut seen = HashSet::new();
+    let mut matches = BinaryHeap::with_capacity(limit.saturating_add(1));
+
+    for (index, loaded) in [(loaded, true), (tree, false)] {
+        for entry in &index.entries {
+            if !seen.insert(entry.path.as_path()) {
+                continue;
+            }
+
+            let Some(score) = query.score(entry) else {
+                continue;
+            };
+
+            let candidate = RankedSource {
+                score,
+                entry,
+                loaded,
+            };
+
+            if matches.len() < limit {
+                matches.push(candidate);
+            } else if matches.peek().is_some_and(|worst| candidate < *worst) {
+                matches.pop();
+                matches.push(candidate);
+            }
+        }
+    }
+
+    let mut matches = matches.into_vec();
+    matches.sort_unstable_by(|left, right| {
+        right
+            .score
+            .cmp(&left.score)
+            .then_with(|| left.entry.path.cmp(&right.entry.path))
+    });
+
+    matches
+        .into_iter()
+        .map(|candidate| SourceFileMatch {
+            path: candidate.entry.path.clone(),
+            loaded: candidate.loaded,
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -476,9 +651,57 @@ pub fn build_source_tree_while(
         .into_iter()
         .filter(|directory| !directory.directories.is_empty() || !directory.files.is_empty())
         .map(|directory| source_tree_directory_node(directory, &loaded, true))
-        .collect();
+        .collect::<Vec<_>>();
 
-    SourceTreeBuild { roots, file_count }
+    let file_routes = source_tree_file_routes(&roots);
+
+    SourceTreeBuild {
+        roots,
+        file_count,
+        file_routes,
+    }
+}
+
+fn source_tree_file_routes(roots: &[SourceTreeNodeData]) -> HashMap<SourceId, Box<[u32]>> {
+    fn visit(
+        node: &SourceTreeNodeData,
+        route: &mut Vec<u32>,
+        routes: &mut HashMap<SourceId, Box<[u32]>>,
+    ) {
+        if !node.directory {
+            // Source-tree paths came from SourceIndex and are already
+            // canonical. Avoid another filesystem lookup for every file each
+            // time a filtered tree is rebuilt.
+            routes.insert(
+                SourceId::from_indexed_path(&node.path),
+                route.clone().into_boxed_slice(),
+            );
+            return;
+        }
+
+        for (index, child) in node.children.iter().enumerate() {
+            let Ok(index) = u32::try_from(index) else {
+                break;
+            };
+
+            route.push(index);
+            visit(child, route, routes);
+            route.pop();
+        }
+    }
+
+    let mut routes = HashMap::new();
+
+    for (index, root) in roots.iter().enumerate() {
+        let Ok(index) = u32::try_from(index) else {
+            break;
+        };
+
+        let mut route = vec![index];
+        visit(root, &mut route, &mut routes);
+    }
+
+    routes
 }
 
 fn source_tree_directory_node(
@@ -799,9 +1022,9 @@ pub fn resolve(reported: &str, roots: &[PathBuf]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_SEARCHABLE_SOURCE_BYTES, SourceIndex, SourceResolution, build_source_tree,
-        build_source_tree_while, case_insensitive_match_column, discover_source_files, paths_match,
-        resolve, search_source_files,
+        MAX_SEARCHABLE_SOURCE_BYTES, SourceId, SourceIndex, SourceResolution, SourceSearchIndex,
+        build_source_tree, build_source_tree_while, case_insensitive_match_column,
+        discover_source_files, paths_match, resolve, search_source_files, search_source_paths,
     };
     use std::path::{Path, PathBuf};
 
@@ -984,6 +1207,84 @@ mod tests {
         assert!(parser_directory.loaded);
         assert_eq!(parser_directory.children[0].path, parser);
         assert!(!build.roots[0].children.iter().any(|node| node.path == main));
+    }
+
+    #[test]
+    fn source_tree_build_indexes_direct_routes_to_nested_files() {
+        let root = PathBuf::from("/project");
+        let target = root.join("src/parser/deep/mod.rs");
+        let build = build_source_tree(
+            &[root.join("src/main.rs"), target.clone()],
+            std::slice::from_ref(&root),
+            &[],
+            "",
+        );
+
+        let route = build
+            .file_routes
+            .get(&SourceId::from_path(&target))
+            .expect("nested file must have a direct route");
+
+        let mut node = &build.roots[route[0] as usize];
+
+        for &index in &route[1..] {
+            node = &node.children[index as usize];
+        }
+
+        assert_eq!(node.path, target);
+        assert!(!node.directory);
+    }
+
+    #[test]
+    fn quick_open_preserves_ranking_deduplication_and_loaded_status() {
+        let exact = PathBuf::from("/project/src/main.rs");
+        let prefix = PathBuf::from("/project/src/main_helper.rs");
+        let contains = PathBuf::from("/project/src/domain.rs");
+        let path_only = PathBuf::from("/project/main/generated.rs");
+        let loaded = SourceSearchIndex::new(std::slice::from_ref(&exact));
+        let tree =
+            SourceSearchIndex::new(&[path_only, contains.clone(), prefix.clone(), exact.clone()]);
+
+        let matches = search_source_paths(&loaded, &tree, "MAIN", 3);
+
+        assert_eq!(
+            matches
+                .iter()
+                .map(|result| result.path.as_path())
+                .collect::<Vec<_>>(),
+            [exact.as_path(), prefix.as_path(), contains.as_path()]
+        );
+
+        assert!(matches[0].loaded);
+        assert!(matches[1..].iter().all(|result| !result.loaded));
+    }
+
+    #[test]
+    fn quick_open_applies_the_limit_during_top_n_selection() {
+        let files = (0..1_000)
+            .rev()
+            .map(|index| PathBuf::from(format!("/project/src/file-{index:04}.rs")))
+            .collect::<Vec<_>>();
+
+        let matches = search_source_paths(
+            &SourceSearchIndex::default(),
+            &SourceSearchIndex::new(&files),
+            "file",
+            4,
+        );
+
+        assert_eq!(
+            matches
+                .iter()
+                .map(|result| result.path.as_path())
+                .collect::<Vec<_>>(),
+            [
+                Path::new("/project/src/file-0000.rs"),
+                Path::new("/project/src/file-0001.rs"),
+                Path::new("/project/src/file-0002.rs"),
+                Path::new("/project/src/file-0003.rs"),
+            ]
+        );
     }
 
     #[test]

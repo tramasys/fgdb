@@ -1,6 +1,4 @@
 use std::{
-    cmp::Reverse,
-    collections::HashSet,
     sync::mpsc::{self, TryRecvError},
     time::Duration,
 };
@@ -697,6 +695,19 @@ impl Ui {
             .unwrap_or_default();
 
         let loaded_files_ready = self.source_loaded_cache.borrow().is_some();
+        let loaded_search = self
+            .source_loaded_search
+            .borrow()
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
+
+        let tree_search = self
+            .source_tree_search
+            .borrow()
+            .as_ref()
+            .cloned()
+            .unwrap_or_default();
 
         self.source_palette.replace(Some(SourcePalette {
             window: window.clone(),
@@ -705,6 +716,7 @@ impl Ui {
             results,
             status,
             loaded_files,
+            loaded_search,
             loaded_files_ready,
             tree_files: self
                 .source_tree_cache
@@ -712,6 +724,7 @@ impl Ui {
                 .as_ref()
                 .cloned()
                 .unwrap_or_default(),
+            tree_search,
             scope,
         }));
 
@@ -893,8 +906,15 @@ impl Ui {
     }
 
     fn start_source_tree_index(self: &Rc<Self>) {
-        if let Some(files) = self.source_tree_cache.borrow().as_ref().cloned() {
-            self.apply_source_tree_index(files);
+        let cached = self
+            .source_tree_cache
+            .borrow()
+            .as_ref()
+            .cloned()
+            .zip(self.source_tree_search.borrow().as_ref().cloned());
+
+        if let Some((files, search)) = cached {
+            self.apply_source_tree_index(files, search);
             return;
         }
 
@@ -922,8 +942,9 @@ impl Ui {
                 }
 
                 let index = Arc::new(source::SourceIndex::new(&files, &roots));
+                let search = Arc::new(source::SourceSearchIndex::new(index.files()));
                 let files = Arc::new(index.files().to_vec());
-                let _ = sender.send((files, index));
+                let _ = sender.send((files, index, search));
             },
         ) {
             self.source_tree_indexing.set(false);
@@ -952,16 +973,17 @@ impl Ui {
             };
 
             match receiver.try_recv() {
-                Ok((files, index)) => {
+                Ok((files, index, search)) => {
                     if ui.source_tree_generation.load(Ordering::Relaxed) != generation {
                         return glib::ControlFlow::Break;
                     }
 
                     ui.source_tree_indexing.set(false);
                     ui.source_tree_cache.replace(Some(Arc::clone(&files)));
+                    ui.source_tree_search.replace(Some(Arc::clone(&search)));
                     ui.source_index.replace(Some(index));
                     ui.resolved_source_paths.borrow_mut().clear();
-                    ui.apply_source_tree_index(files);
+                    ui.apply_source_tree_index(files, search);
 
                     glib::ControlFlow::Break
                 }
@@ -982,7 +1004,11 @@ impl Ui {
         });
     }
 
-    fn apply_source_tree_index(self: &Rc<Self>, files: Arc<Vec<PathBuf>>) {
+    fn apply_source_tree_index(
+        self: &Rc<Self>,
+        files: Arc<Vec<PathBuf>>,
+        search: Arc<source::SourceSearchIndex>,
+    ) {
         if self.source_tree_initialized.get() {
             self.render_source_tree();
         }
@@ -995,6 +1021,7 @@ impl Ui {
             };
 
             palette.tree_files = files;
+            palette.tree_search = search;
 
             palette.mode
         };
@@ -1128,7 +1155,8 @@ impl Ui {
                     .is_none()
                     .then(|| Arc::new(source::SourceIndex::new(&resolved, &roots)));
 
-                let _ = sender.send((resolved, index));
+                let search = Arc::new(source::SourceSearchIndex::new(&resolved));
+                let _ = sender.send((resolved, index, search));
             },
         ) {
             if self.source_tree_initialized.get() {
@@ -1154,9 +1182,9 @@ impl Ui {
             };
 
             match receiver.try_recv() {
-                Ok((resolved, index)) => {
+                Ok((resolved, index, search)) => {
                     if ui.source_loaded_generation.load(Ordering::Relaxed) == generation {
-                        ui.apply_loaded_source_files(resolved, index);
+                        ui.apply_loaded_source_files(resolved, index, search);
                     }
 
                     glib::ControlFlow::Break
@@ -1171,6 +1199,7 @@ impl Ui {
         self: &Rc<Self>,
         resolved: Vec<PathBuf>,
         index: Option<Arc<source::SourceIndex>>,
+        search: Arc<source::SourceSearchIndex>,
     ) {
         if self.source_index.borrow().is_none()
             && let Some(index) = index
@@ -1184,6 +1213,8 @@ impl Ui {
         self.source_loaded_cache
             .replace(Some(Arc::clone(&resolved)));
 
+        self.source_loaded_search.replace(Some(Arc::clone(&search)));
+
         if self.source_tree_initialized.get() {
             self.render_source_tree();
         }
@@ -1196,6 +1227,7 @@ impl Ui {
             };
 
             palette.loaded_files = resolved;
+            palette.loaded_search = search;
             palette.loaded_files_ready = true;
 
             palette.mode
@@ -1215,10 +1247,13 @@ impl Ui {
             .fetch_add(1, Ordering::Relaxed);
 
         self.source_tree_cache.borrow_mut().take();
+        self.source_tree_search.borrow_mut().take();
         self.source_index.borrow_mut().take();
         self.source_loaded_cache.borrow_mut().take();
+        self.source_loaded_search.borrow_mut().take();
         self.source_tree_indexing.set(false);
         self.source_tree.roots.remove_all();
+        self.source_tree.file_routes.borrow_mut().clear();
         self.source_tree.status.set_text("Indexing source files");
         self.request_loaded_source_files();
         self.start_source_tree_index();
@@ -1316,10 +1351,17 @@ impl Ui {
     }
 
     fn apply_source_tree_build(&self, build: source::SourceTreeBuild) {
-        let root_count = build.roots.len();
-        self.source_tree.roots.remove_all();
+        let source::SourceTreeBuild {
+            roots,
+            file_count,
+            file_routes,
+        } = build;
 
-        for root in build.roots {
+        let root_count = roots.len();
+        self.source_tree.roots.remove_all();
+        self.source_tree.file_routes.replace(file_routes);
+
+        for root in roots {
             self.source_tree
                 .roots
                 .append(&glib::BoxedAnyObject::new(SourceTreeNode {
@@ -1328,7 +1370,7 @@ impl Ui {
         }
 
         let query_active = !self.source_tree.search.text().trim().is_empty();
-        let expand_filtered = query_active && build.file_count <= MAX_SOURCE_RESULTS;
+        let expand_filtered = query_active && file_count <= MAX_SOURCE_RESULTS;
         let mut position = 0;
         let mut expanded_roots = 0;
 
@@ -1358,7 +1400,7 @@ impl Ui {
             }
         }
 
-        self.source_tree.status.set_text(&match build.file_count {
+        self.source_tree.status.set_text(&match file_count {
             0 if query_active => String::from("No matching source files"),
             0 => String::from("No source files found"),
             1 => String::from("1 source file"),
@@ -1380,48 +1422,35 @@ impl Ui {
 
         self.source_tree.selection.unselect_all();
 
-        for _ in 0..128 {
-            let mut path_expanded = false;
+        let target = source::SourceId::from_path(&target);
+        let routes = self.source_tree.file_routes.borrow();
+        let Some((root, children)) = routes.get(&target).and_then(|route| route.split_first())
+        else {
+            return;
+        };
 
-            for position in 0..self.source_tree.model.n_items() {
-                let Some(row) = self
-                    .source_tree
-                    .model
-                    .item(position)
-                    .and_downcast::<gtk::TreeListRow>()
-                else {
-                    continue;
-                };
+        let Some(mut row) = self.source_tree.model.child_row(*root) else {
+            return;
+        };
 
-                let Some(item) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
-                    continue;
-                };
+        for &child in children {
+            row.set_expanded(true);
 
-                let node = item.borrow::<SourceTreeNode>();
+            let Some(child_row) = row.child_row(child) else {
+                return;
+            };
 
-                if node.data.path == target {
-                    drop(node);
-                    self.source_tree.selection.set_selected(position);
+            row = child_row;
+        }
 
-                    self.source_tree
-                        .view
-                        .scroll_to(position, gtk::ListScrollFlags::FOCUS, None);
+        let position = row.position();
 
-                    return;
-                }
+        if position != gtk::INVALID_LIST_POSITION {
+            self.source_tree.selection.set_selected(position);
 
-                if node.data.directory && target.starts_with(&node.data.path) && !row.is_expanded()
-                {
-                    drop(node);
-                    row.set_expanded(true);
-                    path_expanded = true;
-                    break;
-                }
-            }
-
-            if !path_expanded {
-                break;
-            }
+            self.source_tree
+                .view
+                .scroll_to(position, gtk::ListScrollFlags::FOCUS, None);
         }
     }
 
@@ -1431,8 +1460,8 @@ impl Ui {
                 (palette.mode == SourceSearchMode::Files).then(|| {
                     (
                         palette.entry.text().to_string(),
-                        palette.loaded_files.clone(),
-                        palette.tree_files.clone(),
+                        Arc::clone(&palette.loaded_search),
+                        Arc::clone(&palette.tree_search),
                     )
                 })
             })
@@ -1441,26 +1470,7 @@ impl Ui {
         };
 
         let (path_query, requested_line) = split_source_file_query(&query);
-        let mut seen = HashSet::new();
-        let loaded_set = loaded.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
-
-        let mut matches = loaded
-            .iter()
-            .chain(tree.iter())
-            .filter(|path| seen.insert(path.as_path()))
-            .cloned()
-            .filter_map(|path| {
-                source_file_match_score(&path, path_query).map(|score| (score, path))
-            })
-            .collect::<Vec<_>>();
-
-        matches.sort_unstable_by(|(left_score, left_path), (right_score, right_path)| {
-            Reverse(*left_score)
-                .cmp(&Reverse(*right_score))
-                .then_with(|| left_path.cmp(right_path))
-        });
-
-        matches.truncate(MAX_SOURCE_RESULTS);
+        let matches = source::search_source_paths(&loaded, &tree, path_query, MAX_SOURCE_RESULTS);
         clear_source_palette_results(self);
         let palette_state = self.source_palette.borrow();
 
@@ -1468,18 +1478,21 @@ impl Ui {
             return;
         };
 
-        for (_, path) in &matches {
-            let kind = if loaded_set.contains(path.as_path()) {
+        for result in &matches {
+            let kind = if result.loaded {
                 "GDB source"
             } else {
                 "Source tree"
             };
 
-            let button =
-                source_palette_result(&source_tab_title(path), &path.display().to_string(), kind);
+            let button = source_palette_result(
+                &source_tab_title(&result.path),
+                &result.path.display().to_string(),
+                kind,
+            );
 
             let weak_ui = Rc::downgrade(self);
-            let path = path.clone();
+            let path = result.path.clone();
 
             button.connect_clicked(move |_| {
                 if let Some(ui) = weak_ui.upgrade() {
@@ -1715,45 +1728,9 @@ fn split_source_file_query(query: &str) -> (&str, Option<u32>) {
         .map_or((query, None), |line| (path.trim(), Some(line)))
 }
 
-fn source_file_match_score(path: &Path, query: &str) -> Option<u16> {
-    let query = query.trim().to_lowercase();
-
-    if query.is_empty() {
-        return Some(1);
-    }
-
-    let path_text = path.to_string_lossy().to_lowercase();
-
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_lowercase();
-
-    if !query
-        .split_whitespace()
-        .all(|component| path_text.contains(component))
-    {
-        return None;
-    }
-
-    Some(if file_name == query {
-        500
-    } else if file_name.starts_with(&query) {
-        400
-    } else if file_name.contains(&query) {
-        300
-    } else if path_text.ends_with(&query) {
-        200
-    } else {
-        100
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{source_file_match_score, split_source_file_query};
-    use std::path::Path;
+    use super::split_source_file_query;
 
     #[test]
     fn parses_optional_quick_open_line_numbers() {
@@ -1771,13 +1748,5 @@ mod tests {
             split_source_file_query("src/main.rs:no"),
             ("src/main.rs:no", None)
         );
-    }
-
-    #[test]
-    fn ranks_exact_file_names_before_path_fragments() {
-        let exact = source_file_match_score(Path::new("/project/src/main.rs"), "main.rs").unwrap();
-        let fragment = source_file_match_score(Path::new("/project/src/domain.rs"), "src").unwrap();
-        assert!(exact > fragment);
-        assert!(source_file_match_score(Path::new("/project/src/main.rs"), "missing").is_none());
     }
 }

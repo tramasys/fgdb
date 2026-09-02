@@ -12,11 +12,16 @@ use super::*;
 
 const MAX_MAPPINGS: usize = 32_768;
 
-pub(super) fn populate_mappings(snapshot: &mut KernelSnapshot, root: &Path) {
+pub(super) fn populate_mappings(snapshot: &mut KernelSnapshot, root: &Path, work: &WorkDeadline) {
     const MAX_SMAPS_BYTES: usize = 64 * 1024 * 1024;
 
     match File::open(root.join("smaps")).and_then(|file| {
-        parse_smaps_reader(BufReader::new(file), MAX_SMAPS_BYTES, MAX_MAPPINGS)
+        parse_smaps_reader_while(
+            BufReader::new(file),
+            MAX_SMAPS_BYTES,
+            MAX_MAPPINGS,
+            || !work.should_stop(),
+        )
     }) {
         Ok((mappings, truncated)) => {
             snapshot.mappings = mappings;
@@ -37,7 +42,12 @@ pub(super) fn populate_memory(
     snapshot: &mut KernelSnapshot,
     root: &Path,
     status: &HashMap<String, String>,
+    work: &WorkDeadline,
 ) {
+    if work.should_stop() {
+        return;
+    }
+
     if snapshot.mappings.is_empty() {
         for (source, label) in [
             ("VmSize", "Address space (VSS)"),
@@ -66,7 +76,13 @@ pub(super) fn populate_memory(
             .unwrap_or(0);
     } else {
         let executable = fs::read_link(root.join("exe")).ok();
-        let mut accounting = summarize_mappings(&snapshot.mappings, executable.as_deref());
+        let Some(mut accounting) =
+            summarize_mappings_while(&snapshot.mappings, executable.as_deref(), || {
+                !work.should_stop()
+            })
+        else {
+            return;
+        };
 
         accounting.page_tables = status
             .get("VmPTE")
@@ -189,10 +205,20 @@ fn parse_statm(input: &str, page_size: u64) -> Option<(u64, u64)> {
     ))
 }
 
+#[cfg(test)]
 fn summarize_mappings(
     mappings: &[KernelMapping],
     executable: Option<&Path>,
 ) -> KernelMemoryAccounting {
+    summarize_mappings_while(mappings, executable, || true)
+        .expect("an uncancelled mapping summary must complete")
+}
+
+fn summarize_mappings_while(
+    mappings: &[KernelMapping],
+    executable: Option<&Path>,
+    mut should_continue: impl FnMut() -> bool,
+) -> Option<KernelMemoryAccounting> {
     let page_size = mappings
         .iter()
         .filter_map(|mapping| (mapping.mmu_page_size > 0).then_some(mapping.mmu_page_size))
@@ -206,7 +232,11 @@ fn summarize_mappings(
 
     let mut categories = BTreeMap::<&'static str, (KernelMemoryCategory, BTreeSet<&str>)>::new();
 
-    for mapping in mappings {
+    for (index, mapping) in mappings.iter().enumerate() {
+        if index.is_multiple_of(256) && !should_continue() {
+            return None;
+        }
+
         accounting.virtual_bytes = accounting.virtual_bytes.saturating_add(mapping.size);
         accounting.rss = accounting.rss.saturating_add(mapping.rss);
         accounting.pss = accounting.pss.saturating_add(mapping.pss);
@@ -285,7 +315,7 @@ fn summarize_mappings(
     categories.sort_by_key(|category| memory_category_order(&category.category));
     accounting.categories = categories;
 
-    accounting
+    Some(accounting)
 }
 
 fn mapping_category(mapping: &KernelMapping, executable: Option<&Path>) -> &'static str {
@@ -370,18 +400,27 @@ fn memory_category_order(category: &str) -> u8 {
     }
 }
 
-pub(super) fn populate_numa(snapshot: &mut KernelSnapshot, root: &Path) {
+pub(super) fn populate_numa(snapshot: &mut KernelSnapshot, root: &Path, work: &WorkDeadline) {
     const MAX_NUMA_MAPS_BYTES: usize = 32 * 1024 * 1024;
 
     let Ok(parsed) = File::open(root.join("numa_maps")).and_then(|file| {
-        parse_numa_maps_reader(BufReader::new(file), MAX_NUMA_MAPS_BYTES, MAX_MAPPINGS)
+        parse_numa_maps_reader_while(
+            BufReader::new(file),
+            MAX_NUMA_MAPS_BYTES,
+            MAX_MAPPINGS,
+            || !work.should_stop(),
+        )
     }) else {
         return;
     };
 
     let mut totals = HashMap::<u32, u64>::new();
 
-    for mapping in &mut snapshot.mappings {
+    for (index, mapping) in snapshot.mappings.iter_mut().enumerate() {
+        if index % 256 == 0 && work.should_stop() {
+            return;
+        }
+
         let Some((policy, nodes, details)) = parsed.get(&mapping.start) else {
             continue;
         };
@@ -422,7 +461,11 @@ pub(super) fn populate_numa(snapshot: &mut KernelSnapshot, root: &Path) {
     }
 }
 
-pub(super) fn populate_page_samples(snapshot: &mut KernelSnapshot, root: &Path) {
+pub(super) fn populate_page_samples(
+    snapshot: &mut KernelSnapshot,
+    root: &Path,
+    work: &WorkDeadline,
+) {
     const MAX_SAMPLED_MAPPINGS: usize = 256;
     const SAMPLE_BUDGET: Duration = Duration::from_millis(150);
 
@@ -451,6 +494,10 @@ pub(super) fn populate_page_samples(snapshot: &mut KernelSnapshot, root: &Path) 
     let deadline = Instant::now() + SAMPLE_BUDGET;
 
     for mapping in &mut snapshot.mappings {
+        if work.should_stop() {
+            return;
+        }
+
         if mapping.size == 0 || mapping.rss == 0 {
             continue;
         }
@@ -669,16 +716,34 @@ fn parse_smaps_bounded(input: &str, maximum_mappings: usize) -> (Vec<KernelMappi
     parser.finish()
 }
 
+#[cfg(test)]
 fn parse_smaps_reader(
-    mut reader: impl BufRead,
+    reader: impl BufRead,
     maximum_bytes: usize,
     maximum_mappings: usize,
 ) -> io::Result<(Vec<KernelMapping>, bool)> {
+    parse_smaps_reader_while(reader, maximum_bytes, maximum_mappings, || true)
+}
+
+fn parse_smaps_reader_while(
+    mut reader: impl BufRead,
+    maximum_bytes: usize,
+    maximum_mappings: usize,
+    mut should_continue: impl FnMut() -> bool,
+) -> io::Result<(Vec<KernelMapping>, bool)> {
     let mut parser = SmapsParser::new(maximum_mappings);
     let mut bytes_read = 0_usize;
+    let mut lines_read = 0_usize;
     let mut line = String::new();
 
     loop {
+        if lines_read.is_multiple_of(256) && !should_continue() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "smaps parsing was cancelled",
+            ));
+        }
+
         line.clear();
         let read = reader.read_line(&mut line)?;
 
@@ -687,6 +752,7 @@ fn parse_smaps_reader(
         }
 
         bytes_read = bytes_read.saturating_add(read);
+        lines_read += 1;
 
         if bytes_read > maximum_bytes {
             return Err(io::Error::new(
@@ -841,16 +907,34 @@ fn parse_numa_maps(input: &str) -> NumaMap {
     input.lines().filter_map(parse_numa_line).collect()
 }
 
+#[cfg(test)]
 fn parse_numa_maps_reader(
-    mut reader: impl BufRead,
+    reader: impl BufRead,
     maximum_bytes: usize,
     maximum_entries: usize,
 ) -> io::Result<NumaMap> {
+    parse_numa_maps_reader_while(reader, maximum_bytes, maximum_entries, || true)
+}
+
+fn parse_numa_maps_reader_while(
+    mut reader: impl BufRead,
+    maximum_bytes: usize,
+    maximum_entries: usize,
+    mut should_continue: impl FnMut() -> bool,
+) -> io::Result<NumaMap> {
     let mut parsed = HashMap::new();
     let mut bytes_read = 0_usize;
+    let mut lines_read = 0_usize;
     let mut line = String::new();
 
     loop {
+        if lines_read.is_multiple_of(256) && !should_continue() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "numa_maps parsing was cancelled",
+            ));
+        }
+
         line.clear();
         let read = reader.read_line(&mut line)?;
 
@@ -859,6 +943,7 @@ fn parse_numa_maps_reader(
         }
 
         bytes_read = bytes_read.saturating_add(read);
+        lines_read += 1;
 
         if bytes_read > maximum_bytes {
             return Err(io::Error::new(
@@ -975,6 +1060,28 @@ mod tests {
         assert!(!truncated);
         assert_eq!(streamed, expected);
         assert!(parse_smaps_reader(Cursor::new(input), input.len() - 1, 32_768).is_err());
+    }
+
+    #[test]
+    fn streaming_procfs_parsers_honor_cancellation() {
+        let smaps = "00400000-00402000 rw-p 00000000 00:00 0 [heap]\nSize: 8 kB\n";
+        let smaps_error =
+            parse_smaps_reader_while(Cursor::new(smaps), smaps.len(), MAX_MAPPINGS, || false)
+                .unwrap_err();
+
+        assert_eq!(smaps_error.kind(), io::ErrorKind::Interrupted);
+
+        let numa_maps = "00400000 default anon=3 N0=3\n";
+        let numa_error = parse_numa_maps_reader_while(
+            Cursor::new(numa_maps),
+            numa_maps.len(),
+            MAX_MAPPINGS,
+            || false,
+        )
+        .unwrap_err();
+
+        assert_eq!(numa_error.kind(), io::ErrorKind::Interrupted);
+        assert!(summarize_mappings_while(&[KernelMapping::default()], None, || false).is_none());
     }
 
     #[test]

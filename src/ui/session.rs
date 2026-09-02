@@ -19,6 +19,7 @@ impl Ui {
     pub fn set_current_session(&self, session: DebugSession) {
         self.close_source_palette();
         self.source_loaded_cache.borrow_mut().take();
+        self.source_loaded_search.borrow_mut().take();
 
         self.source_loaded_generation
             .fetch_add(1, Ordering::Relaxed);
@@ -41,7 +42,9 @@ impl Ui {
         if *self.source_tree_roots.borrow() != tree_roots {
             self.source_tree_roots.replace(tree_roots);
             self.source_tree_cache.borrow_mut().take();
+            self.source_tree_search.borrow_mut().take();
             self.source_index.borrow_mut().take();
+            self.source_tree.file_routes.borrow_mut().clear();
             self.source_tree_indexing.set(false);
             self.source_tree_generation.fetch_add(1, Ordering::Relaxed);
         }

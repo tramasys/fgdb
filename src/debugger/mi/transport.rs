@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     fs::File,
     io::{self, Write},
     os::fd::OwnedFd,
@@ -114,6 +114,30 @@ impl OutgoingQueue {
         }
 
         true
+    }
+
+    pub(super) fn cancel_unstarted_many(&mut self, tokens: &HashSet<u64>) -> HashSet<u64> {
+        if tokens.is_empty() {
+            return HashSet::new();
+        }
+
+        let mut cancelled = HashSet::with_capacity(tokens.len());
+        let mut removed_bytes = 0_usize;
+
+        self.commands.retain(|command| {
+            let remove = command.written == 0 && tokens.contains(&command.token);
+
+            if remove {
+                cancelled.insert(command.token);
+                removed_bytes = removed_bytes.saturating_add(command.bytes.len());
+            }
+
+            !remove
+        });
+
+        self.remaining_bytes = self.remaining_bytes.saturating_sub(removed_bytes);
+
+        cancelled
     }
 
     pub(super) fn is_empty(&self) -> bool {
