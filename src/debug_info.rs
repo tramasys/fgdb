@@ -497,13 +497,19 @@ fn find_separate_debug_file(
         }
     }
 
-    select_separate_debug_file(debuglink_candidates, debuglink_crc, build_id_candidates)
+    select_separate_debug_file(
+        debuglink_candidates,
+        debuglink_crc,
+        build_id_candidates,
+        build_id,
+    )
 }
 
 fn select_separate_debug_file(
     debuglink_candidates: impl IntoIterator<Item = PathBuf>,
     debuglink_crc: Option<u32>,
     build_id_candidates: impl IntoIterator<Item = PathBuf>,
+    expected_build_id: Option<&str>,
 ) -> Option<PathBuf> {
     if let Some(expected_crc) = debuglink_crc {
         for candidate in debuglink_candidates {
@@ -515,9 +521,23 @@ fn select_separate_debug_file(
         }
     }
 
-    build_id_candidates
-        .into_iter()
-        .find(|candidate| candidate.is_file())
+    let expected_build_id = expected_build_id?;
+
+    build_id_candidates.into_iter().find(|candidate| {
+        candidate_build_id(candidate)
+            .is_ok_and(|build_id| build_id.as_deref() == Some(expected_build_id))
+    })
+}
+
+fn candidate_build_id(path: &Path) -> Result<Option<String>, String> {
+    let mut file = File::open(path).map_err(|error| error.to_string())?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+
+    if !metadata.is_file() {
+        return Err(String::from("Build-ID candidate is not a regular file"));
+    }
+
+    inspect_elf_metadata(&mut file, metadata.len()).map(|metadata| metadata.build_id)
 }
 
 fn gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
@@ -886,11 +906,11 @@ mod tests {
         let expected = gnu_debuglink_crc(&candidate).unwrap();
 
         assert_eq!(
-            select_separate_debug_file([candidate.clone()], Some(expected), []),
+            select_separate_debug_file([candidate.clone()], Some(expected), [], None),
             Some(candidate.clone())
         );
         assert_eq!(
-            select_separate_debug_file([candidate], Some(expected ^ 1), []),
+            select_separate_debug_file([candidate], Some(expected ^ 1), [], None),
             None
         );
     }
@@ -905,7 +925,7 @@ mod tests {
         let expected = gnu_debuglink_crc(&second).unwrap();
 
         assert_eq!(
-            select_separate_debug_file([first, second.clone()], Some(expected), []),
+            select_separate_debug_file([first, second.clone()], Some(expected), [], None),
             Some(second)
         );
     }
@@ -918,27 +938,71 @@ mod tests {
         std::fs::write(&existing, b"unvalidated debug information").unwrap();
 
         assert_eq!(
-            select_separate_debug_file([missing], Some(0x1234_5678), []),
+            select_separate_debug_file([missing], Some(0x1234_5678), [], None),
             None
         );
         assert_eq!(
-            select_separate_debug_file([existing], None, []),
+            select_separate_debug_file([existing], None, [], None),
             None,
             "a truncated debuglink CRC must not weaken candidate validation"
         );
     }
 
     #[test]
-    fn build_id_candidates_do_not_use_the_debuglink_crc() {
-        let directory = TestDirectory::new("build-id-candidate");
-        let stale_debuglink = directory.path().join("stale.debug");
-        let build_id = directory.path().join("build-id.debug");
-        std::fs::write(&stale_debuglink, b"stale").unwrap();
-        std::fs::write(&build_id, b"build-id selected file").unwrap();
+    fn accepts_a_build_id_candidate_with_the_expected_embedded_id() {
+        let candidate = std::env::current_exe().unwrap();
+        let expected = candidate_build_id(&candidate).unwrap().unwrap();
 
         assert_eq!(
-            select_separate_debug_file([stale_debuglink], Some(0x1234_5678), [build_id.clone()]),
-            Some(build_id)
+            select_separate_debug_file([], None, [candidate.clone()], Some(&expected)),
+            Some(candidate)
+        );
+    }
+
+    #[test]
+    fn rejects_a_build_id_candidate_with_a_different_embedded_id() {
+        let candidate = std::env::current_exe().unwrap();
+        let embedded = candidate_build_id(&candidate).unwrap().unwrap();
+        let mut expected = embedded.into_bytes();
+        expected[0] = if expected[0] == b'0' { b'1' } else { b'0' };
+        let expected = String::from_utf8(expected).unwrap();
+
+        assert_eq!(
+            select_separate_debug_file([], None, [candidate], Some(&expected)),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_a_build_id_candidate_without_an_embedded_id() {
+        let directory = TestDirectory::new("build-id-missing");
+        let candidate = directory.path().join("without-build-id.debug");
+        let executable = std::env::current_exe().unwrap();
+        let mut header = crate::bounded::read_prefix(&executable, 64).unwrap();
+
+        match header.get(4).copied() {
+            Some(1) => header[32..36].fill(0),
+            Some(2) => header[40..48].fill(0),
+            class => panic!("unexpected test executable ELF class {class:?}"),
+        }
+
+        std::fs::write(&candidate, header).unwrap();
+
+        assert_eq!(
+            select_separate_debug_file([], None, [candidate], Some("deadbeef")),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_a_malformed_build_id_candidate() {
+        let directory = TestDirectory::new("build-id-malformed");
+        let candidate = directory.path().join("malformed.debug");
+        std::fs::write(&candidate, b"not an ELF file").unwrap();
+
+        assert_eq!(
+            select_separate_debug_file([], None, [candidate], Some("deadbeef")),
+            None
         );
     }
 

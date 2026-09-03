@@ -17,7 +17,7 @@ type TargetAbi = (
 );
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct VerifiedProcTarget {
+pub(crate) struct VerifiedProcTarget {
     root: PathBuf,
     pid: u32,
     debugger_pid: u32,
@@ -37,11 +37,11 @@ impl VerifiedProcTarget {
         })
     }
 
-    pub(super) fn root(&self) -> &Path {
+    pub(crate) fn root(&self) -> &Path {
         &self.root
     }
 
-    pub(super) fn start_time(&self) -> u64 {
+    pub(crate) fn start_time(&self) -> u64 {
         self.start_time
     }
 
@@ -58,18 +58,22 @@ impl VerifiedProcTarget {
     }
 }
 
-pub(crate) fn verified_proc_root(pid: u32, debugger_pid: u32) -> Result<PathBuf, String> {
-    VerifiedProcTarget::establish(pid, debugger_pid).map(|target| target.root)
-}
-
-pub(super) fn read_verified_local_proc<T>(
+pub(crate) fn read_verified_local_proc<T>(
     pid: u32,
     debugger_pid: u32,
     read: impl FnOnce(&VerifiedProcTarget) -> Result<T, String>,
 ) -> Result<T, String> {
     let target = VerifiedProcTarget::establish(pid, debugger_pid)?;
-    let value = read(&target)?;
-    target.revalidate()?;
+
+    finish_verified_read(|| read(&target), || target.revalidate())
+}
+
+fn finish_verified_read<T>(
+    read: impl FnOnce() -> Result<T, String>,
+    revalidate: impl FnOnce() -> Result<(), String>,
+) -> Result<T, String> {
+    let value = read()?;
+    revalidate()?;
 
     Ok(value)
 }
@@ -342,6 +346,27 @@ mod tests {
                 .unwrap_err()
                 .contains("disappeared")
         );
+    }
+
+    #[test]
+    fn discards_a_read_when_post_read_identity_validation_fails() {
+        let result = finish_verified_read(
+            || Ok(String::from("untrusted maps contents")),
+            || {
+                validate_identity_observation(
+                    7,
+                    42,
+                    Some(99),
+                    Some(100),
+                    Some(42),
+                    Some(100),
+                    "data was being read",
+                )
+                .map(drop)
+            },
+        );
+
+        assert!(result.unwrap_err().contains("changed"));
     }
 
     #[test]

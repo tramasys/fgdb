@@ -1,12 +1,9 @@
 use super::*;
 
-use std::{cell::Cell, time::Duration};
+use std::{cell::Cell, os::fd::OwnedFd, time::Duration};
 
 use gtk::glib;
-use nix::{
-    sys::signal::{Signal, kill},
-    unistd::Pid,
-};
+use rustix::process::{Pid, PidfdFlags, Signal, kill_process, pidfd_open, pidfd_send_signal};
 use vte4::prelude::*;
 
 const GRACEFUL_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(2500);
@@ -15,6 +12,81 @@ const GDB_CONNECTION_TIMEOUT: Duration = Duration::from_secs(10);
 const RESTART_QUIT_TIMEOUT: Duration = Duration::from_millis(1500);
 const RESTART_TERMINATE_TIMEOUT: Duration = Duration::from_millis(1000);
 const RESTART_KILL_TIMEOUT: Duration = Duration::from_millis(1500);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DebuggerProcessIdentity {
+    pid: u32,
+    start_time: u64,
+}
+
+impl DebuggerProcessIdentity {
+    fn capture(pid: u32) -> Option<Self> {
+        Some(Self {
+            pid,
+            start_time: crate::kernel::local_process_start_time(pid)?,
+        })
+    }
+}
+
+struct DebuggerProcessHandle {
+    identity: DebuggerProcessIdentity,
+    pidfd: Option<OwnedFd>,
+}
+
+impl DebuggerProcessHandle {
+    fn capture(pid: u32) -> Option<Self> {
+        let identity = DebuggerProcessIdentity::capture(pid)?;
+        let process = i32::try_from(pid)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw);
+
+        let pidfd = match process.map(|process| pidfd_open(process, PidfdFlags::empty())) {
+            Some(Ok(pidfd)) => {
+                if DebuggerProcessIdentity::capture(pid) != Some(identity) {
+                    return None;
+                }
+
+                Some(pidfd)
+            }
+            Some(Err(_)) | None => None,
+        };
+
+        Some(Self { identity, pidfd })
+    }
+
+    fn signal(&self, signal: Signal) {
+        if let Some(pidfd) = self.pidfd.as_ref() {
+            let _ = pidfd_send_signal(pidfd, signal);
+            return;
+        }
+
+        let _ = signal_matching_process(
+            self.identity,
+            DebuggerProcessIdentity::capture,
+            kill_process,
+            signal,
+        );
+    }
+}
+
+fn signal_matching_process<E>(
+    expected: DebuggerProcessIdentity,
+    observe: impl FnOnce(u32) -> Option<DebuggerProcessIdentity>,
+    send: impl FnOnce(Pid, Signal) -> Result<(), E>,
+    signal: Signal,
+) -> bool {
+    if observe(expected.pid) != Some(expected) {
+        return false;
+    }
+
+    let Some(pid) = i32::try_from(expected.pid).ok().and_then(Pid::from_raw) else {
+        return false;
+    };
+
+    let _ = send(pid, signal);
+
+    true
+}
 
 pub(super) struct BackendController {
     ui: Weak<Ui>,
@@ -33,6 +105,7 @@ pub(super) struct BackendController {
     restart_terminate_timeout: RefCell<Option<glib::SourceId>>,
     restart_kill_timeout: RefCell<Option<glib::SourceId>>,
     restart_failure_timeout: RefCell<Option<glib::SourceId>>,
+    debugger_process: RefCell<Option<DebuggerProcessHandle>>,
 }
 
 impl BackendController {
@@ -61,6 +134,7 @@ impl BackendController {
             restart_terminate_timeout: RefCell::new(None),
             restart_kill_timeout: RefCell::new(None),
             restart_failure_timeout: RefCell::new(None),
+            debugger_process: RefCell::new(None),
         })
     }
 
@@ -197,6 +271,16 @@ impl BackendController {
     }
 
     fn handle_session_event(self: &Rc<Self>, event: SessionEvent) {
+        match &event {
+            SessionEvent::Spawned(pid) => {
+                self.debugger_process
+                    .replace(DebuggerProcessHandle::capture(*pid));
+            }
+            SessionEvent::Failed(_) | SessionEvent::Exited(_) => {
+                self.debugger_process.borrow_mut().take();
+            }
+        }
+
         if matches!(event, SessionEvent::Exited(_)) && self.closing.get() {
             self.finish_close();
             return;
@@ -315,7 +399,7 @@ impl BackendController {
             };
 
             controller.graceful_timeout.borrow_mut().take();
-            controller.signal_debugger(Signal::SIGTERM);
+            controller.signal_debugger(Signal::TERM);
             controller.start_terminate_timeout();
         });
 
@@ -373,7 +457,7 @@ impl BackendController {
             };
 
             controller.restart_terminate_timeout.borrow_mut().take();
-            controller.signal_debugger(Signal::SIGTERM);
+            controller.signal_debugger(Signal::TERM);
             controller.start_restart_kill_timeout();
         });
 
@@ -389,7 +473,7 @@ impl BackendController {
             };
 
             controller.restart_kill_timeout.borrow_mut().take();
-            controller.signal_debugger(Signal::SIGKILL);
+            controller.signal_debugger(Signal::KILL);
             controller.start_restart_failure_timeout();
         });
 
@@ -450,7 +534,7 @@ impl BackendController {
             };
 
             controller.terminate_timeout.borrow_mut().take();
-            controller.signal_debugger(Signal::SIGKILL);
+            controller.signal_debugger(Signal::KILL);
             controller.finish_close();
         });
 
@@ -458,16 +542,9 @@ impl BackendController {
     }
 
     fn signal_debugger(&self, signal: Signal) {
-        let Some(pid) = self
-            .ui
-            .upgrade()
-            .and_then(|ui| ui.debugger_pid())
-            .and_then(|pid| i32::try_from(pid).ok())
-        else {
-            return;
-        };
-
-        let _ = kill(Pid::from_raw(pid), signal);
+        if let Some(process) = self.debugger_process.borrow().as_ref() {
+            process.signal(signal);
+        }
     }
 
     fn finish_close(&self) {
@@ -486,6 +563,58 @@ impl BackendController {
 
         if let Some(ui) = self.ui.upgrade() {
             ui.window.close();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_fallback_signals_only_the_matching_process_generation() {
+        let expected = DebuggerProcessIdentity {
+            pid: 1234,
+            start_time: 99,
+        };
+        let calls = Cell::new(0);
+
+        assert!(signal_matching_process(
+            expected,
+            |_| Some(expected),
+            |_, _| {
+                calls.set(calls.get() + 1);
+
+                Ok::<(), ()>(())
+            },
+            Signal::TERM,
+        ));
+
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn identity_fallback_refuses_reused_or_disappeared_pids_without_signalling() {
+        let expected = DebuggerProcessIdentity {
+            pid: 1234,
+            start_time: 99,
+        };
+
+        for observed in [
+            Some(DebuggerProcessIdentity {
+                pid: 1234,
+                start_time: 100,
+            }),
+            None,
+        ] {
+            assert!(!signal_matching_process(
+                expected,
+                |_| observed,
+                |_, _| -> Result<(), ()> {
+                    panic!("a stale process identity must never be signalled")
+                },
+                Signal::KILL,
+            ));
         }
     }
 }

@@ -78,9 +78,7 @@ pub(super) fn parse_value(value: &str) -> Option<bool> {
 
     let value = value.split_whitespace().next()?.trim_matches(['(', ')']);
 
-    let (negative, digits) = value
-        .strip_prefix('-')
-        .map_or((false, value), |digits| (true, digits));
+    let digits = value.strip_prefix('-').unwrap_or(value);
 
     let number = digits
         .strip_prefix("0x")
@@ -90,7 +88,7 @@ pub(super) fn parse_value(value: &str) -> Option<bool> {
             |digits| u128::from_str_radix(digits, 16).ok(),
         )?;
 
-    Some(negative || number != 0)
+    Some(number != 0)
 }
 
 #[cfg(test)]
@@ -127,6 +125,17 @@ mod tests {
             "value ^= mask",
         ] {
             assert!(validate(expression).is_err(), "accepted {expression:?}");
+        }
+    }
+
+    #[test]
+    fn numeric_truthiness_is_independent_of_the_sign() {
+        for value in ["0", "-0", "0x0", "-0x0"] {
+            assert_eq!(parse_value(value), Some(false), "{value}");
+        }
+
+        for value in ["1", "-1", "0x1", "-0x1"] {
+            assert_eq!(parse_value(value), Some(true), "{value}");
         }
     }
 }

@@ -472,7 +472,15 @@ struct Inspector<'a> {
 pub(crate) fn inspect_native_heap(
     request: NativeHeapReadRequest,
 ) -> Result<HeapInspectionSnapshot, String> {
-    let root = crate::kernel::verified_proc_root(request.pid, request.debugger_pid)?;
+    crate::kernel::read_verified_local_proc(request.pid, request.debugger_pid, |target| {
+        inspect_native_heap_at(request, target.root())
+    })
+}
+
+fn inspect_native_heap_at(
+    request: NativeHeapReadRequest,
+    root: &Path,
+) -> Result<HeapInspectionSnapshot, String> {
     let (mappings, mappings_capped) = read_maps(&root.join("maps"))?;
 
     if mappings_capped {
@@ -481,7 +489,7 @@ pub(crate) fn inspect_native_heap(
         ));
     }
 
-    let version = detect_glibc_version(&root, &mappings)?;
+    let version = detect_glibc_version(root, &mappings)?;
 
     if version.major != 2
         || version.minor < MIN_SUPPORTED_GLIBC_MINOR
@@ -493,7 +501,7 @@ pub(crate) fn inspect_native_heap(
     }
 
     let layout = GlibcLayout::new(version, request.architecture, request.pointer_bits)?;
-    let reader = MemoryReader::new(&root, &mappings, request.endian, request.pointer_bits)?;
+    let reader = MemoryReader::new(root, &mappings, request.endian, request.pointer_bits)?;
 
     let main_heap = mappings
         .iter()
@@ -515,7 +523,6 @@ pub(crate) fn inspect_native_heap(
 
     locator.main_arena = locator.locate_main_arena(&request.discovery)?;
     locator.run(request.query)?;
-    crate::kernel::verified_proc_root(request.pid, request.debugger_pid)?;
     let bytes_read = locator.reader.bytes_read;
     let summary = native_heap_summary(request.query, version, &locator.rows, bytes_read);
 

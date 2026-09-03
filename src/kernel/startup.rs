@@ -40,8 +40,12 @@ pub(crate) fn read_process_startup(
     pid: u32,
     debugger_pid: u32,
 ) -> Result<ProcessStartupSnapshot, String> {
-    let root = super::verified_proc_root(pid, debugger_pid)?;
+    super::read_verified_local_proc(pid, debugger_pid, |target| {
+        read_process_startup_at(pid, target.root())
+    })
+}
 
+fn read_process_startup_at(pid: u32, root: &Path) -> Result<ProcessStartupSnapshot, String> {
     let before = read_startup_ranges(&root.join("stat"))
         .ok_or_else(|| format!("Cannot read argument boundaries from /proc/{pid}/stat"))?;
 
@@ -98,8 +102,6 @@ pub(crate) fn read_process_startup(
 
     let after = read_startup_ranges(&root.join("stat"))
         .ok_or_else(|| format!("Process {pid} disappeared while its startup data was read"))?;
-
-    super::verified_proc_root(pid, debugger_pid)?;
 
     if before.identity != after.identity {
         return Err(format!(

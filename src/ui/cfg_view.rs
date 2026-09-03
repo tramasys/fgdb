@@ -1561,10 +1561,16 @@ mod tests {
         for instruction in [
             "jmp *%rax",
             "jmp *0x8(%rax)",
+            "jmp *0x20(%rip)",
+            "jmpq *0x20(%rip)",
+            "jmp *0x401000(%rax)",
             "jmp *0x401000",
             "call *%rax",
+            "call *0x20(%rip)",
             "jmp rax",
             "jmp [rax]",
+            "jmp [rip + 0x1234]",
+            "jmp QWORD PTR [rip + 0x2f9a]",
             "jmp qword ptr [0x401000]",
             "call rax",
         ] {
@@ -1581,12 +1587,54 @@ mod tests {
 
     #[test]
     fn indirect_memory_jumps_do_not_create_known_cfg_edges() {
-        for jump in ["jmp *0x8(%rax)", "jmp *0x401000", "jmp [rax]"] {
+        for jump in [
+            "jmp *0x8(%rax)",
+            "jmp *0x20(%rip)",
+            "jmpq *0x20(%rip)",
+            "jmp *0x401000(%rax)",
+            "jmp *0x401000",
+            "jmp [rax]",
+            "jmp [rip + 0x1234]",
+            "jmp QWORD PTR [rip + 0x2f9a]",
+        ] {
             let instructions = [instruction(0x100, jump), instruction(0x108, "ret")];
             let graph = graph(&instructions, 0x100);
 
             assert!(graph.edges.is_empty(), "{jump}");
             assert_eq!(graph.external_edges, 1, "{jump}");
+        }
+    }
+
+    #[test]
+    fn architecture_specific_indirect_branches_have_no_direct_target() {
+        for (architecture, instruction) in [
+            (TargetArchitecture::Arm, "bx r0"),
+            (TargetArchitecture::AArch64, "br x0"),
+            (TargetArchitecture::RiscV32, "jr a0"),
+            (TargetArchitecture::RiscV64, "jalr ra,a0,0"),
+        ] {
+            let (mnemonic, operands) = normalized_instruction_parts(instruction, architecture);
+
+            assert_eq!(
+                direct_control_flow_address(&mnemonic, operands, architecture),
+                None,
+                "{architecture:?}: {instruction}"
+            );
+        }
+
+        for (architecture, instruction) in [
+            (TargetArchitecture::Arm, "b 0x401000"),
+            (TargetArchitecture::AArch64, "b 0x401000"),
+            (TargetArchitecture::RiscV32, "j 0x401000"),
+            (TargetArchitecture::RiscV64, "j 0x401000"),
+        ] {
+            let (mnemonic, operands) = normalized_instruction_parts(instruction, architecture);
+
+            assert_eq!(
+                direct_control_flow_address(&mnemonic, operands, architecture),
+                Some(0x401000),
+                "{architecture:?}: {instruction}"
+            );
         }
     }
 

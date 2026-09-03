@@ -832,8 +832,24 @@ pub(crate) fn read_live_misc(
     include_locks: bool,
     allocator_probe: AllocatorProbe,
 ) -> Result<LiveMiscSnapshot, String> {
-    let root = crate::kernel::verified_proc_root(pid, debugger_pid)?;
+    crate::kernel::read_verified_local_proc(pid, debugger_pid, |target| {
+        read_live_misc_at(
+            pid,
+            debugger_pid,
+            include_locks,
+            allocator_probe,
+            target.root(),
+        )
+    })
+}
 
+fn read_live_misc_at(
+    pid: u32,
+    debugger_pid: u32,
+    include_locks: bool,
+    allocator_probe: AllocatorProbe,
+    root: &Path,
+) -> Result<LiveMiscSnapshot, String> {
     let abi = read_abi(&root.join("exe")).unwrap_or(Abi {
         architecture: TargetArchitecture::Unknown,
         endian: TargetEndian::Little,
@@ -876,8 +892,7 @@ pub(crate) fn read_live_misc(
     }
 
     let allocator = allocator_snapshot(&maps, &allocator_probe);
-    let locks = include_locks.then(|| read_locks(&root, abi.architecture));
-    crate::kernel::verified_proc_root(pid, debugger_pid)?;
+    let locks = include_locks.then(|| read_locks(root, abi.architecture));
 
     Ok(LiveMiscSnapshot {
         startup,
@@ -892,7 +907,12 @@ pub(crate) fn read_process_address_space(
     pid: u32,
     debugger_pid: u32,
 ) -> Result<ProcessAddressSpace, String> {
-    let root = crate::kernel::verified_proc_root(pid, debugger_pid)?;
+    crate::kernel::read_verified_local_proc(pid, debugger_pid, |target| {
+        read_process_address_space_at(target.root())
+    })
+}
+
+fn read_process_address_space_at(root: &Path) -> Result<ProcessAddressSpace, String> {
     let abi = read_abi(&root.join("exe"));
 
     let executable = std::fs::read_link(root.join("exe"))
@@ -914,8 +934,6 @@ pub(crate) fn read_process_address_space(
                 .map(|mapping| mapping.path.clone())
                 .filter(|path| !path.is_empty())
         });
-
-    crate::kernel::verified_proc_root(pid, debugger_pid)?;
 
     Ok(ProcessAddressSpace {
         executable,

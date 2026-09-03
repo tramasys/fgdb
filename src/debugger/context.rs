@@ -173,11 +173,10 @@ pub(crate) fn is_pointer_register(name: &str, architecture: TargetArchitecture) 
 pub(crate) fn read_memory_regions(pid: u32, debugger_pid: u32) -> Vec<MemoryRegion> {
     const MAX_MAPS_BYTES: usize = 16 * 1024 * 1024;
 
-    let Ok(root) = crate::kernel::verified_proc_root(pid, debugger_pid) else {
-        return Vec::new();
-    };
-
-    let Ok(maps) = crate::bounded::read_string(&root.join("maps"), MAX_MAPS_BYTES) else {
+    let Ok(maps) = crate::kernel::read_verified_local_proc(pid, debugger_pid, |target| {
+        crate::bounded::read_string(&target.root().join("maps"), MAX_MAPS_BYTES)
+            .map_err(|error| format!("Cannot read /proc/{pid}/maps: {error}"))
+    }) else {
         return Vec::new();
     };
 

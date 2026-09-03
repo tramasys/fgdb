@@ -19,12 +19,17 @@ const MAX_PROC_TEXT_BYTES: usize = 2 * 1024 * 1024;
 
 pub(crate) use procfs::{
     invalidate_local_target_abi_cache, read_local_parent_pid, read_local_target_abi,
-    verified_proc_root,
+    read_verified_local_proc,
 };
 pub(crate) use snapshot::read_snapshot;
 pub(crate) use startup::{
     ProcessArgument, ProcessEnvironment, ProcessStartupSnapshot, read_process_startup,
 };
+
+pub(crate) fn local_process_start_time(pid: u32) -> Option<u64> {
+    process::read_proc_stat(&std::path::PathBuf::from(format!("/proc/{pid}/stat")))
+        .map(|stat| stat.start_time)
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct WorkDeadline {

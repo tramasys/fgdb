@@ -14,6 +14,7 @@ use super::MAX_SEARCHABLE_SOURCE_BYTES;
 const MAX_CACHED_SOURCE_FILES: usize = 64;
 const MAX_CACHED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_LINE_RANGES: usize = 1_000_000;
+const MAX_STABLE_READ_ATTEMPTS: usize = 2;
 
 #[derive(Clone)]
 pub(super) struct CachedSource {
@@ -190,33 +191,55 @@ fn source_cache() -> &'static Mutex<SourceFileCache> {
 }
 
 pub(super) fn searchable_source(path: &Path) -> Option<CachedSource> {
-    let before = SourceFileIdentity::read(path).ok()?;
+    let (identity, source) = stable_read(
+        || SourceFileIdentity::read(path).ok(),
+        |identity| {
+            if identity.size > MAX_SEARCHABLE_SOURCE_BYTES as u64 {
+                return None;
+            }
 
-    if before.size > MAX_SEARCHABLE_SOURCE_BYTES as u64 {
-        return None;
-    }
+            if let Some(source) = source_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(identity)
+            {
+                return Some(source);
+            }
 
-    if let Some(source) = source_cache()
+            #[cfg(test)]
+            record_source_file_read(path);
+            let bytes = crate::bounded::read_bytes(path, MAX_SEARCHABLE_SOURCE_BYTES).ok()?;
+
+            Some(CachedSource::from_bytes(bytes))
+        },
+    )?;
+
+    source_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&before)
-    {
-        return Some(source);
-    }
-
-    #[cfg(test)]
-    record_source_file_read(path);
-    let bytes = crate::bounded::read_bytes(path, MAX_SEARCHABLE_SOURCE_BYTES).ok()?;
-    let source = CachedSource::from_bytes(bytes);
-
-    if SourceFileIdentity::read(path).ok().as_ref() == Some(&before) {
-        source_cache()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(before, source.clone());
-    }
+        .insert(identity, source.clone());
 
     Some(source)
+}
+
+fn stable_read<I, T>(
+    mut identity: impl FnMut() -> Option<I>,
+    mut read: impl FnMut(&I) -> Option<T>,
+) -> Option<(I, T)>
+where
+    I: Eq,
+{
+    for _ in 0..MAX_STABLE_READ_ATTEMPTS {
+        let before = identity()?;
+        let value = read(&before)?;
+        let after = identity()?;
+
+        if before == after {
+            return Some((before, value));
+        }
+    }
+
+    None
 }
 
 fn source_line_ranges(contents: &str) -> Option<Vec<(usize, usize)>> {
@@ -280,6 +303,7 @@ fn source_file_reads(path: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     struct TestDirectory(PathBuf);
@@ -401,5 +425,56 @@ mod tests {
         let source = CachedSource::from_bytes(vec![b'\n'; MAX_CACHED_LINE_RANGES]);
         assert!(source.line_ranges.is_none());
         assert_eq!(source.lines().count(), MAX_CACHED_LINE_RANGES);
+    }
+
+    #[test]
+    fn stable_reads_return_after_one_attempt() {
+        let mut identities = VecDeque::from([1, 1]);
+        let reads = std::cell::Cell::new(0);
+        let result = stable_read(
+            || identities.pop_front(),
+            |_| {
+                reads.set(reads.get() + 1);
+
+                Some("stable")
+            },
+        );
+
+        assert_eq!(result, Some((1, "stable")));
+        assert_eq!(reads.get(), 1);
+    }
+
+    #[test]
+    fn an_identity_change_retries_once_and_returns_the_stable_snapshot() {
+        let mut identities = VecDeque::from([1, 2, 2, 2]);
+        let reads = std::cell::Cell::new(0);
+        let result = stable_read(
+            || identities.pop_front(),
+            |identity| {
+                reads.set(reads.get() + 1);
+
+                Some(*identity)
+            },
+        );
+
+        assert_eq!(result, Some((2, 2)));
+        assert_eq!(reads.get(), 2);
+    }
+
+    #[test]
+    fn repeatedly_changing_identities_reject_the_source_snapshot() {
+        let mut identities = VecDeque::from([1, 2, 3, 4]);
+        let reads = std::cell::Cell::new(0);
+        let result = stable_read(
+            || identities.pop_front(),
+            |identity| {
+                reads.set(reads.get() + 1);
+
+                Some(*identity)
+            },
+        );
+
+        assert_eq!(result, None);
+        assert_eq!(reads.get(), MAX_STABLE_READ_ATTEMPTS);
     }
 }
