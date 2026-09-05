@@ -858,16 +858,10 @@ impl Ui {
             };
 
             if node.load_more.is_some() {
-                defer_next_variable_page(&node, &children_handler);
+                defer_next_variable_page(&row, &selection, &children_handler);
             } else if !node.placeholder {
                 if row.is_expandable() {
-                    let expanded = !node.expanded.get();
-                    node.expanded.set(expanded);
-                    row.set_expanded(expanded);
-
-                    if expanded {
-                        defer_variable_children_if_expanded(&row, &selection, &children_handler);
-                    }
+                    defer_variable_toggle(&row, &selection, &children_handler);
                 } else {
                     let variable = node.variable;
 
@@ -2577,10 +2571,21 @@ impl Ui {
     }
 
     pub fn show_breakpoints(&self, breakpoints: Vec<Breakpoint>) {
-        self.render_breakpoints(breakpoints, false);
+        // Reconcile membership when the snapshot is accepted, not when its
+        // asynchronous source projection or a filter redraw finishes later.
+        let active_numbers = breakpoints
+            .iter()
+            .filter(|breakpoint| !breakpoint.is_location())
+            .map(|breakpoint| breakpoint.command_number())
+            .collect::<HashSet<_>>();
+        self.stop_point_metadata
+            .borrow_mut()
+            .retain(|number, _| active_numbers.contains(number.as_str()));
+
+        self.prepare_source_breakpoints(breakpoints, false);
     }
 
-    fn render_breakpoints(&self, breakpoints: Vec<Breakpoint>, filter_changed: bool) {
+    pub(super) fn render_breakpoints(&self, breakpoints: Vec<Breakpoint>, filter_changed: bool) {
         if !filter_changed && self.breakpoints.borrow().as_slice() == breakpoints {
             return;
         }
@@ -2589,18 +2594,6 @@ impl Ui {
         let status_only =
             !filter_changed && breakpoint_layout_matches(&self.breakpoints.borrow(), &breakpoints);
         self.breakpoints.replace(breakpoints);
-
-        let active_numbers = self
-            .breakpoints
-            .borrow()
-            .iter()
-            .filter(|breakpoint| !breakpoint.is_location())
-            .map(|breakpoint| breakpoint.command_number().to_owned())
-            .collect::<HashSet<_>>();
-
-        self.stop_point_metadata
-            .borrow_mut()
-            .retain(|number, _| active_numbers.contains(number));
 
         if status_only {
             let breakpoints = self.breakpoints.borrow();
@@ -3227,7 +3220,7 @@ impl Ui {
     }
 
     pub fn set_breakpoint_enabled_pending(&self, number: &str, enabled: bool) -> bool {
-        let mut breakpoints = self.breakpoints.borrow().clone();
+        let mut breakpoints = self.latest_source_breakpoints();
         let changed = set_breakpoint_enabled(&mut breakpoints, number, enabled);
 
         if changed {

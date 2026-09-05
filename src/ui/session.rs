@@ -40,6 +40,7 @@ impl Ui {
             self.source_tree_cache.borrow_mut().take();
             self.source_tree_search.borrow_mut().take();
             self.source_index.borrow_mut().take();
+            self.refresh_source_breakpoint_index();
             self.source_tree.file_routes.borrow_mut().clear();
             self.source_tree_indexing.set(false);
             self.source_tree_generation.fetch_add(1, Ordering::Relaxed);

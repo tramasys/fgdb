@@ -7,7 +7,9 @@ use std::{
 
 use crate::config::LaunchConfig;
 
+mod breakpoints;
 mod cache;
+pub(crate) use breakpoints::SourceBreakpointIndex;
 pub(crate) use cache::{CachedSource, SourceLine};
 
 pub(crate) fn read_source_snapshot(path: &Path) -> Option<CachedSource> {
@@ -195,11 +197,19 @@ impl SourceIndex {
             };
         }
 
+        match self.relative_reported_file(reported) {
+            Ok(path) if open.0 == path => SourceMatch::Exact,
+            Ok(_) => SourceMatch::Different,
+            Err(reason) => reason,
+        }
+    }
+
+    fn relative_reported_file(&self, reported: &Path) -> Result<&Path, SourceMatch> {
         let components = normal_components(reported);
         let length = components.len().min(MAX_INDEXED_SUFFIX_COMPONENTS);
 
         if length == 0 {
-            return SourceMatch::Unresolved;
+            return Err(SourceMatch::Unresolved);
         }
 
         let suffix = components[components.len() - length..]
@@ -207,15 +217,9 @@ impl SourceIndex {
             .collect::<PathBuf>();
 
         match self.suffixes.get(&suffix) {
-            Some(IndexedCandidate::Unique(index)) => {
-                if open.0 == self.files[*index] {
-                    SourceMatch::Exact
-                } else {
-                    SourceMatch::Different
-                }
-            }
-            Some(IndexedCandidate::Ambiguous) => SourceMatch::Ambiguous,
-            None => SourceMatch::Unresolved,
+            Some(IndexedCandidate::Unique(index)) => Ok(&self.files[*index]),
+            Some(IndexedCandidate::Ambiguous) => Err(SourceMatch::Ambiguous),
+            None => Err(SourceMatch::Unresolved),
         }
     }
 }
@@ -1372,7 +1376,7 @@ mod tests {
         assert_eq!(build, Default::default());
     }
 
-    fn temporary_test_directory(name: &str) -> PathBuf {
+    pub(super) fn temporary_test_directory(name: &str) -> PathBuf {
         let directory = std::env::temp_dir().join(format!(
             "fgdb-{name}-{}-{:?}",
             std::process::id(),

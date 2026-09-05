@@ -1,3 +1,4 @@
+use super::lifecycle::{TreeRowBinding, connect_bound_expansion};
 use super::*;
 
 pub(super) fn enable_stable_text_selection(label: &gtk::Label) {
@@ -20,13 +21,15 @@ pub(super) fn clear_label_selections(root: &impl IsA<gtk::Widget>) {
 }
 
 pub(super) fn clear_label_selections_after_switch(root: &impl IsA<gtk::Widget>) {
-    let root = root.as_ref().clone();
+    let root = root.as_ref().downgrade();
 
     // Wait until GTK has completed the notebook or stack transition. Traversing
     // a virtualized list from map or unmap callbacks can re-enter its row
     // lifecycle while GtkColumnView is still attaching or detaching rows.
     glib::idle_add_local_once(move || {
-        if root.is_mapped() {
+        if let Some(root) = root.upgrade()
+            && root.is_mapped()
+        {
             clear_label_selections(&root);
         }
     });
@@ -438,7 +441,7 @@ fn local_name_column(
             let node = data.borrow::<VariableNode>().clone();
             let position = row.position();
 
-            if !variable_row_is_current(&selection_for_click, &row)
+            if !TreeRowBinding::is_current(&row, &selection_for_click)
                 || (!row.is_expandable() && node.load_more.is_none())
             {
                 return;
@@ -456,11 +459,9 @@ fn local_name_column(
             selection_for_click.set_selected(position);
 
             if row.is_expandable() {
-                let expanded = !node.expanded.get();
-                node.expanded.set(expanded);
-                row.set_expanded(expanded);
+                defer_variable_toggle(&row, &selection_for_click, &children_handler_for_click);
             } else {
-                defer_next_variable_page(&node, &children_handler_for_click);
+                defer_next_variable_page(&row, &selection_for_click, &children_handler_for_click);
             }
         });
 
@@ -595,81 +596,35 @@ fn local_name_column(
     column
 }
 
-fn variable_row_is_current(selection: &gtk::SingleSelection, row: &gtk::TreeListRow) -> bool {
-    let position = row.position();
-
-    position != gtk::INVALID_LIST_POSITION
-        && selection.item(position).as_ref() == Some(row.upcast_ref())
-}
-
 fn connect_variable_expansion(
     expander: &gtk::TreeExpander,
     disclosure: &gtk::Label,
     selection: &gtk::SingleSelection,
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
 ) {
-    struct ExpansionSubscription {
-        row: glib::WeakRef<gtk::TreeListRow>,
-        handler: Option<glib::SignalHandlerId>,
-    }
-
-    impl Drop for ExpansionSubscription {
-        fn drop(&mut self) {
-            if let (Some(row), Some(handler)) = (self.row.upgrade(), self.handler.take()) {
-                row.disconnect(handler);
-            }
-        }
-    }
-
-    let subscription = RefCell::new(None::<ExpansionSubscription>);
     let disclosure = disclosure.downgrade();
-    let selection = selection.downgrade();
+    let weak_selection = selection.downgrade();
     let children_handler = Rc::clone(children_handler);
 
-    // Follow the binding, not the widget's lifetime. Recycling must disconnect
-    // the previous row without accumulating handlers or retaining its tree.
-    expander.connect_list_row_notify(move |expander| {
-        subscription.borrow_mut().take();
-
-        let Some(row) = expander.list_row() else {
+    connect_bound_expansion(expander, selection, move |row| {
+        let (Some(disclosure), Some(selection)) = (disclosure.upgrade(), weak_selection.upgrade())
+        else {
             return;
         };
-
-        let disclosure = disclosure.clone();
-        let selection = selection.clone();
-        let children_handler = Rc::clone(&children_handler);
-
-        let handler = row.connect_expanded_notify(move |row| {
-            let (Some(disclosure), Some(selection)) = (disclosure.upgrade(), selection.upgrade())
-            else {
-                return;
-            };
-
-            if !variable_row_is_current(&selection, row) {
-                return;
-            }
-
-            let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
-                return;
-            };
-
-            let expanded = row.is_expanded();
-            data.borrow::<VariableNode>().expanded.set(expanded);
-            disclosure.set_text(if expanded {
-                DISCLOSURE_EXPANDED_ICON
-            } else {
-                DISCLOSURE_COLLAPSED_ICON
-            });
-
-            if expanded {
-                defer_variable_children_if_expanded(row, &selection, &children_handler);
-            }
+        let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+            return;
+        };
+        let expanded = row.is_expanded();
+        data.borrow::<VariableNode>().expanded.set(expanded);
+        disclosure.set_text(if expanded {
+            DISCLOSURE_EXPANDED_ICON
+        } else {
+            DISCLOSURE_COLLAPSED_ICON
         });
 
-        subscription.replace(Some(ExpansionSubscription {
-            row: row.downgrade(),
-            handler: Some(handler),
-        }));
+        if expanded {
+            defer_variable_children_if_expanded(row, &selection, &children_handler);
+        }
     });
 }
 
@@ -678,30 +633,42 @@ fn defer_variable_expansion(
     row: &gtk::TreeListRow,
     selection: &gtk::SingleSelection,
 ) {
-    let expander = expander.downgrade();
-    let row = row.downgrade();
-    let selection = selection.downgrade();
+    if let Some(binding) = TreeRowBinding::new(row, selection) {
+        binding.defer_for_expander(expander, restore_variable_expansion);
+    }
+}
 
-    // Binding can happen during GTK layout and row recycling. Changing the
-    // tree here invalidates the row hierarchy GTK is still traversing.
-    glib::idle_add_local_once(move || {
-        let (Some(expander), Some(row), Some(selection)) =
-            (expander.upgrade(), row.upgrade(), selection.upgrade())
-        else {
-            return;
-        };
+fn restore_variable_expansion(row: &gtk::TreeListRow) {
+    let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+        return;
+    };
+    let expanded = data.borrow::<VariableNode>().expanded.get();
+    row.set_expanded(expanded);
+}
 
-        if expander.list_row().as_ref() != Some(&row) || !variable_row_is_current(&selection, &row)
+pub(super) fn defer_variable_toggle(
+    row: &gtk::TreeListRow,
+    selection: &gtk::SingleSelection,
+    children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
+) {
+    let Some(binding) = TreeRowBinding::new(row, selection) else {
+        return;
+    };
+    let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+        return;
+    };
+    let expanded = data.borrow::<VariableNode>().expanded.clone();
+    expanded.set(!expanded.get());
+    let children_handler = Rc::clone(children_handler);
+
+    binding.defer(move |row| {
+        restore_variable_expansion(row);
+        if row.is_expanded()
+            && let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>()
         {
-            return;
+            let node = data.borrow::<VariableNode>().clone();
+            request_variable_children_if_needed(&node, &children_handler);
         }
-
-        let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
-            return;
-        };
-
-        let expanded = data.borrow::<VariableNode>().expanded.get();
-        row.set_expanded(expanded);
     });
 }
 
@@ -741,7 +708,7 @@ fn connect_current_variable_context_menu(
 
         let position = row.position();
 
-        if !variable_row_is_current(&variable_menu.selection, &row) {
+        if !TreeRowBinding::is_current(&row, &variable_menu.selection) {
             return;
         }
 
@@ -998,16 +965,13 @@ pub(super) fn defer_variable_children_if_expanded(
         return;
     }
 
-    let row = row.downgrade();
-    let selection = selection.downgrade();
+    let Some(binding) = TreeRowBinding::new(row, selection) else {
+        return;
+    };
     let children_handler = Rc::clone(children_handler);
 
-    glib::idle_add_local_once(move || {
-        let (Some(row), Some(selection)) = (row.upgrade(), selection.upgrade()) else {
-            return;
-        };
-
-        if !row.is_expanded() || !variable_row_is_current(&selection, &row) {
+    binding.defer(move |row| {
+        if !row.is_expanded() {
             return;
         }
 
@@ -1045,13 +1009,20 @@ pub(super) fn request_next_variable_page_if_needed(
 }
 
 pub(super) fn defer_next_variable_page(
-    node: &VariableNode,
+    row: &gtk::TreeListRow,
+    selection: &gtk::SingleSelection,
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
 ) {
-    let node = node.clone();
+    let Some(binding) = TreeRowBinding::new(row, selection) else {
+        return;
+    };
     let children_handler = Rc::clone(children_handler);
 
-    glib::idle_add_local_once(move || {
+    binding.defer(move |row| {
+        let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+            return;
+        };
+        let node = data.borrow::<VariableNode>().clone();
         request_next_variable_page_if_needed(&node, &children_handler);
     });
 }
@@ -2289,7 +2260,9 @@ pub(super) fn build_source_tree_view() -> SourceTreeControls {
         };
         let node = item.borrow::<SourceTreeNode>();
         if node.data.directory {
-            row.set_expanded(!row.is_expanded());
+            if let Some(binding) = TreeRowBinding::new(&row, &model_for_activate) {
+                binding.defer(|row| row.set_expanded(!row.is_expanded()));
+            }
         } else {
             let handler = open_for_activate.borrow().clone();
             if let Some(handler) = handler {

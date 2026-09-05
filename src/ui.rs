@@ -25,6 +25,8 @@ use domain::{
     LocalVariableCatalog, MemoryRefreshBatch, TerminalSynchronization, VariableNodeIndex,
 };
 mod layout;
+mod lifecycle;
+mod source_breakpoints;
 mod source_loading;
 mod source_navigation;
 mod value;
@@ -1188,7 +1190,7 @@ struct SourceOpenContext<'a> {
     theme: &'a Theme,
     style_scheme: Option<&'a sourceview5::StyleScheme>,
     breakpoints: &'a Rc<RefCell<Vec<Breakpoint>>>,
-    source_index: &'a Rc<RefCell<Option<Arc<source::SourceIndex>>>>,
+    breakpoint_index: &'a Rc<RefCell<source::SourceBreakpointIndex>>,
     insert_handler: &'a Rc<RefCell<Option<BreakpointInsertHandler>>>,
     jump_handler: &'a Rc<RefCell<Option<SourceJumpHandler>>>,
     delete_handler: &'a Rc<RefCell<Option<StringSelectionHandler>>>,
@@ -1430,6 +1432,8 @@ pub struct Ui {
     source_tree_cache: Rc<RefCell<Option<Arc<Vec<PathBuf>>>>>,
     source_tree_search: Rc<RefCell<Option<Arc<source::SourceSearchIndex>>>>,
     source_index: Rc<RefCell<Option<Arc<source::SourceIndex>>>>,
+    source_breakpoint_index: Rc<RefCell<source::SourceBreakpointIndex>>,
+    source_breakpoint_refresh: Rc<RefCell<source_breakpoints::SourceBreakpointRefresh>>,
     source_tree_indexing: Rc<Cell<bool>>,
     source_tree_generation: Arc<AtomicU64>,
     source_tree_render_generation: Arc<AtomicU64>,

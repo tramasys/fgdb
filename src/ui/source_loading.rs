@@ -193,7 +193,7 @@ impl Ui {
                         theme: &ui.source_theme,
                         style_scheme: ui.source_style_scheme.as_ref(),
                         breakpoints: &ui.breakpoints,
-                        source_index: &ui.source_index,
+                        breakpoint_index: &ui.source_breakpoint_index,
                         insert_handler: &ui.breakpoint_insert_handler,
                         jump_handler: &ui.source_jump_handler,
                         delete_handler: &ui.breakpoint_delete_handler,

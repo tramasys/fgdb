@@ -978,6 +978,7 @@ impl Ui {
                     ui.source_tree_cache.replace(Some(Arc::clone(&files)));
                     ui.source_tree_search.replace(Some(Arc::clone(&search)));
                     ui.source_index.replace(Some(index));
+                    ui.refresh_source_breakpoint_index();
                     ui.resolved_source_paths.borrow_mut().clear();
                     ui.apply_source_tree_index(files, search);
 
@@ -1209,6 +1210,7 @@ impl Ui {
             && let Some(index) = index
         {
             self.source_index.replace(Some(index));
+            self.refresh_source_breakpoint_index();
             self.resolved_source_paths.borrow_mut().clear();
         }
 
@@ -1253,6 +1255,7 @@ impl Ui {
         self.source_tree_cache.borrow_mut().take();
         self.source_tree_search.borrow_mut().take();
         self.source_index.borrow_mut().take();
+        self.refresh_source_breakpoint_index();
         self.source_loaded_cache.borrow_mut().take();
         self.source_loaded_search.borrow_mut().take();
         self.source_tree_indexing.set(false);

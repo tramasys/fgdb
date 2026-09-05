@@ -558,7 +558,7 @@ pub(super) fn build_breakpoint_gutter(
     let SourceOpenContext {
         theme,
         breakpoints,
-        source_index,
+        breakpoint_index,
         insert_handler,
         jump_handler,
         delete_handler,
@@ -569,7 +569,7 @@ pub(super) fn build_breakpoint_gutter(
     // Source loading has already resolved the canonical path on a worker.
     let source_id_for_data = source::SourceId::from_indexed_path(path);
     let breakpoints_for_data = Rc::clone(breakpoints);
-    let source_index_for_data = Rc::clone(source_index);
+    let breakpoint_index_for_data = Rc::clone(breakpoint_index);
     let inactive_foreground = gtk::gdk::RGBA::parse(theme.colors.muted).expect("theme color");
     let disabled_foreground = inactive_foreground;
     let disabled_background = gtk::gdk::RGBA::parse(theme.colors.raised).expect("theme color");
@@ -579,7 +579,7 @@ pub(super) fn build_breakpoint_gutter(
     let path = path.to_path_buf();
     let source_id = source::SourceId::from_indexed_path(&path);
     let breakpoints = Rc::clone(breakpoints);
-    let source_index = Rc::clone(source_index);
+    let breakpoint_index = Rc::clone(breakpoint_index);
     let insert_handler = Rc::clone(insert_handler);
     let jump_handler = Rc::clone(jump_handler);
     let delete_handler = Rc::clone(delete_handler);
@@ -601,20 +601,15 @@ pub(super) fn build_breakpoint_gutter(
                     .is_empty()
             });
 
-            let breakpoint = breakpoints_for_data
+            let enabled = breakpoint_index_for_data
                 .borrow()
-                .iter()
-                .find(|breakpoint| {
-                    breakpoint.line == Some(source_line)
-                        && breakpoint.source_path().is_some_and(|reported| {
-                            source::paths_match_id(
-                                source_index_for_data.borrow().as_deref(),
-                                &source_id_for_data,
-                                reported,
-                            )
-                        })
-                })
-                .cloned();
+                .at_line(&source_id_for_data, source_line)
+                .and_then(|position| {
+                    breakpoints_for_data
+                        .borrow()
+                        .get(position)
+                        .map(|bp| bp.enabled)
+                });
 
             let text = if executing {
                 format!("›{source_line:>3}")
@@ -622,8 +617,8 @@ pub(super) fn build_breakpoint_gutter(
                 format!("{source_line:>4}")
             };
 
-            match breakpoint {
-                Some(breakpoint) if breakpoint.enabled => LineStyle {
+            match enabled {
+                Some(true) => LineStyle {
                     text,
                     foreground: enabled_foreground,
                     background: Some(enabled_background),
@@ -647,20 +642,9 @@ pub(super) fn build_breakpoint_gutter(
         move |renderer, iter, area, button| {
             let line = u32::try_from(iter.line() + 1).ok();
 
-            let existing = breakpoints
-                .borrow()
-                .iter()
-                .find(|breakpoint| {
-                    breakpoint.line == line
-                        && breakpoint.source_path().is_some_and(|reported| {
-                            source::paths_match_id(
-                                source_index.borrow().as_deref(),
-                                &source_id,
-                                reported,
-                            )
-                        })
-                })
-                .cloned();
+            let existing = line
+                .and_then(|line| breakpoint_index.borrow().at_line(&source_id, line))
+                .and_then(|position| breakpoints.borrow().get(position).cloned());
 
             match (button, existing) {
                 (1, Some(breakpoint)) => {

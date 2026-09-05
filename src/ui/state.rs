@@ -159,6 +159,8 @@ impl Ui {
             source_tree_cache: Rc::new(RefCell::new(None)),
             source_tree_search: Rc::new(RefCell::new(None)),
             source_index: Rc::new(RefCell::new(None)),
+            source_breakpoint_index: Rc::new(RefCell::new(Default::default())),
+            source_breakpoint_refresh: Rc::new(RefCell::new(Default::default())),
             source_tree_indexing: Rc::new(Cell::new(false)),
             source_tree_generation: Arc::new(AtomicU64::new(0)),
             source_tree_render_generation: Arc::new(AtomicU64::new(0)),
