@@ -1,0 +1,27 @@
+
+# <type>(<optional scope>): <short summary in the imperative>
+#
+# Types
+# feat      New functionality
+# fix       Correctness or robustness fix
+# perf      Latency, allocation, or throughput improvement
+# refactor  Internal restructuring without changing behavior
+# test      Tests and fixtures
+# build     Dependencies, toolchain, or build configuration
+# ci        Continuous integration changes
+# docs      Documentation changes
+# style     Formatting-only changes
+# chore     Maintenance outside the categories above
+# revert    Revert an earlier change
+#
+# Examples
+# feat(locals): add an array viewer
+# fix(debugger): retain cancelled in-flight requests
+# perf(source): avoid copying unchanged source buffers
+#
+# Omit the scope for changes spanning several subsystems.
+# Use ! before the colon for breaking changes and explain them in a
+# BREAKING CHANGE: footer.
+#
+# After a blank line, explain why the change is needed and note meaningful
+# verification. Keep unrelated changes in separate commits.
