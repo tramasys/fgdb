@@ -557,7 +557,7 @@ fn session_commands(
                 // GDB's `set environment` treats the remainder of the line as
                 // the value. Quoting it would preserve quote characters in the
                 // inferior environment. Session creation validates names and
-                // obtains values one text line at a time; `console_command`
+                // obtains values one text line at a time. `console_command`
                 // still performs the required MI transport escaping.
                 let assignment = format!("{name}={value}");
 

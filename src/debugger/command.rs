@@ -49,8 +49,8 @@ impl MiCommandBuilder {
 
 /// Builds a GDB CLI command that will be carried through GDB/MI.
 ///
-/// CLI grammars differ in whether they parse words or consume a verbatim tail;
-/// the builder makes that distinction explicit and always quotes the complete
+/// CLI grammars differ in whether they parse words or consume a verbatim tail.
+/// The builder makes that distinction explicit and always quotes the complete
 /// command for the MI transport layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CliCommandBuilder {

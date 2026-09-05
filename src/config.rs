@@ -11,7 +11,7 @@ use clap::{Parser, error::ErrorKind};
 use crate::{cpp_toolchain::GccPrettyPrinter, rust_toolchain::RustToolchain};
 
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
-const DEFAULT_CONFIG: &str = "# fgdb configuration\n# Environment variables override these values for one launch.\ngdb=gdb\ngdb_args=\nsource_path=\n# Pretty-printer scripts execute inside GDB. Use the platform path separator for multiple scripts.\n# pretty_printer_path=/path/to/printer.py\ngef_context=hide\nsafe_mode=false\n# working_directory=/path/to/project\n\n# Named profiles can contain these settings and a startup session.\n# [profile example]\n# executable=/path/to/program\n# arguments=--flag 'argument with spaces'\n# working_directory=/path/to/project\n";
+const DEFAULT_CONFIG: &str = "# fgdb configuration\n# Environment variables override these values for one launch.\ngdb=gdb\ngdb_args=\nsource_path=\n# Pretty-printer scripts execute inside GDB. Use the platform path separator for multiple scripts.\n# pretty_printer_path=/path/to/printer.py\ngef_context=hide\nsafe_mode=false\n# Move source breakpoints to GDB's next executable line in the same file.\n# Set false to require the exact clicked line.\nbreakpoint_auto_relocate=true\n# working_directory=/path/to/project\n\n# Named profiles can contain these settings and a startup session.\n# [profile example]\n# executable=/path/to/program\n# arguments=--flag 'argument with spaces'\n# working_directory=/path/to/project\n";
 const DEFAULT_SECTION: &str = "<default>";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -236,6 +236,7 @@ pub struct LaunchConfig {
     pub pretty_printer_paths: Vec<PathBuf>,
     pub working_directory: PathBuf,
     pub safe_mode: bool,
+    pub breakpoint_auto_relocate: bool,
     gcc_pretty_printer: Option<Arc<GccPrettyPrinter>>,
     rust_toolchain: Option<Arc<RustToolchain>>,
     initial_session: Option<DebugSession>,
@@ -243,23 +244,6 @@ pub struct LaunchConfig {
 }
 
 impl LaunchConfig {
-    #[cfg(test)]
-    pub(crate) fn for_ui_test(working_directory: PathBuf) -> Self {
-        Self {
-            gdb_executable: String::from("gdb"),
-            gdb_startup_arguments: Vec::new(),
-            gef_context_visible: false,
-            source_paths: Vec::new(),
-            pretty_printer_paths: Vec::new(),
-            working_directory,
-            safe_mode: true,
-            gcc_pretty_printer: None,
-            rust_toolchain: None,
-            initial_session: None,
-            configuration_report: Arc::new(ConfigurationReport::default()),
-        }
-    }
-
     pub fn from_process() -> Result<StartupAction, StartupError> {
         let arguments: Vec<_> = env::args_os().collect();
 
@@ -511,6 +495,7 @@ struct ConfigLayer {
     pretty_printer_paths: Option<Vec<PathBuf>>,
     working_directory: Option<PathBuf>,
     safe_mode: Option<bool>,
+    breakpoint_auto_relocate: Option<bool>,
     executable: Option<PathBuf>,
     arguments: Option<String>,
     attach: Option<u32>,
@@ -542,6 +527,7 @@ impl ConfigLayer {
             pretty_printer_paths,
             working_directory,
             safe_mode,
+            breakpoint_auto_relocate,
             executable,
             arguments,
             attach,
@@ -771,6 +757,7 @@ fn canonical_config_key(key: &str) -> Option<&'static str> {
         "pretty_printer_path" | "pretty_printer_paths" => Some("pretty_printer_path"),
         "working_directory" | "cwd" => Some("working_directory"),
         "safe_mode" => Some("safe_mode"),
+        "breakpoint_auto_relocate" => Some("breakpoint_auto_relocate"),
         "executable" => Some("executable"),
         "arguments" | "args" => Some("arguments"),
         "attach" | "pid" => Some("attach"),
@@ -809,6 +796,12 @@ fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> 
             layer.safe_mode = Some(
                 parse_boolean(unquoted)
                     .ok_or_else(|| format!("Invalid safe_mode value '{value}'"))?,
+            );
+        }
+        "breakpoint_auto_relocate" => {
+            layer.breakpoint_auto_relocate = Some(
+                parse_boolean(unquoted)
+                    .ok_or_else(|| format!("Invalid breakpoint_auto_relocate value '{value}'"))?,
             );
         }
         "executable" => layer.executable = Some(PathBuf::from(required()?)),
@@ -1097,6 +1090,18 @@ fn read_environment_overrides() -> (EnvironmentOverrides, Vec<ConfigurationIssue
             })
         });
 
+    overrides.layer.breakpoint_auto_relocate =
+        environment_string("FGDB_BREAKPOINT_AUTO_RELOCATE", &mut issues).and_then(|value| {
+            parse_boolean(&value).or_else(|| {
+                issues.push(ConfigurationIssue::external(
+                    "FGDB_BREAKPOINT_AUTO_RELOCATE",
+                    format!("Invalid value '{value}'"),
+                ));
+
+                None
+            })
+        });
+
     overrides.profile = environment_string("FGDB_PROFILE", &mut issues).and_then(|profile| {
         if profile.trim().is_empty() {
             issues.push(ConfigurationIssue::external(
@@ -1159,6 +1164,7 @@ fn resolve_launch_config(
 
     let initial_session = resolve_initial_session(&cli, &settings, &working_directory)?;
     let safe_mode = cli.safe_mode || settings.safe_mode.unwrap_or(false);
+    let breakpoint_auto_relocate = settings.breakpoint_auto_relocate.unwrap_or(true);
 
     let gdb_startup_arguments = if safe_mode {
         Vec::new()
@@ -1226,6 +1232,7 @@ fn resolve_launch_config(
             &pretty_printer_paths,
             &working_directory,
             safe_mode,
+            breakpoint_auto_relocate,
             initial_session.as_ref(),
         ),
     });
@@ -1238,6 +1245,7 @@ fn resolve_launch_config(
         pretty_printer_paths,
         working_directory,
         safe_mode,
+        breakpoint_auto_relocate,
         gcc_pretty_printer,
         rust_toolchain,
         initial_session,
@@ -1349,6 +1357,7 @@ fn effective_configuration(
     pretty_printer_paths: &[PathBuf],
     working_directory: &Path,
     safe_mode: bool,
+    breakpoint_auto_relocate: bool,
     initial_session: Option<&DebugSession>,
 ) -> Vec<EffectiveConfigurationEntry> {
     let mut entries = vec![
@@ -1395,6 +1404,10 @@ fn effective_configuration(
             working_directory.display().to_string(),
         ),
         EffectiveConfigurationEntry::new("safe_mode", safe_mode.to_string()),
+        EffectiveConfigurationEntry::new(
+            "breakpoint_auto_relocate",
+            breakpoint_auto_relocate.to_string(),
+        ),
         EffectiveConfigurationEntry::new(
             "session",
             initial_session.map_or("none", DebugSession::kind_label),
@@ -1705,6 +1718,7 @@ mod tests {
             pretty_printer_paths: Vec::new(),
             working_directory: PathBuf::from("/tmp"),
             safe_mode: false,
+            breakpoint_auto_relocate: true,
             gcc_pretty_printer: None,
             rust_toolchain: Some(Arc::new(RustToolchain::with_printer_directory(
                 "/opt/rust",
@@ -1890,6 +1904,58 @@ mod tests {
                 extended: false,
                 remote_executable: None,
             })
+        );
+    }
+
+    #[test]
+    fn source_breakpoint_relocation_defaults_on_and_obeys_configuration_layers() {
+        for (contents, profile, environment, expected) in [
+            ("", None, None, true),
+            (super::DEFAULT_CONFIG, None, None, true),
+            ("breakpoint_auto_relocate=false\n", None, None, false),
+            (
+                "breakpoint_auto_relocate=true\n[profile exact]\nbreakpoint_auto_relocate=false\n",
+                Some("exact"),
+                None,
+                false,
+            ),
+            ("breakpoint_auto_relocate=false\n", None, Some(true), true),
+            ("", None, Some(false), false),
+        ] {
+            let mut cli = Cli::try_parse_from(["fgdb"]).unwrap();
+            cli.profile = profile.map(str::to_owned);
+            let loaded =
+                loaded_config_from_contents(PathBuf::from("/tmp/fgdb.conf"), contents, false);
+            let overrides = EnvironmentOverrides {
+                layer: ConfigLayer {
+                    breakpoint_auto_relocate: environment,
+                    ..ConfigLayer::default()
+                },
+                ..EnvironmentOverrides::default()
+            };
+            let configuration =
+                resolve_launch_config(cli, &loaded, overrides, PathBuf::from("/current")).unwrap();
+            assert_eq!(configuration.breakpoint_auto_relocate, expected);
+            assert!(configuration.configuration_report().issues().is_empty());
+
+            assert_eq!(
+                configuration
+                    .configuration_report()
+                    .effective()
+                    .iter()
+                    .find(|entry| entry.name() == "breakpoint_auto_relocate")
+                    .unwrap()
+                    .value(),
+                expected.to_string(),
+            );
+        }
+
+        let configuration = resolve(&["fgdb"], "# invalid\nbreakpoint_auto_relocate=perhaps\n");
+        assert!(configuration.breakpoint_auto_relocate);
+        assert_eq!(configuration.configuration_report().issues().len(), 1);
+        assert_eq!(
+            configuration.configuration_report().issues()[0].location(),
+            "/tmp/config.conf:2",
         );
     }
 

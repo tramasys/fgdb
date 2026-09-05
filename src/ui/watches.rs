@@ -225,7 +225,17 @@ impl Ui {
                     request_next_variable_page_if_needed(&node, &children_handler);
                 } else if !node.placeholder {
                     if row.is_expandable() {
-                        row.set_expanded(!row.is_expanded());
+                        let expanded = !node.expanded.get();
+                        node.expanded.set(expanded);
+                        row.set_expanded(expanded);
+
+                        if expanded {
+                            defer_variable_children_if_expanded(
+                                &row,
+                                &selection,
+                                &children_handler,
+                            );
+                        }
                     } else {
                         let variable = node.variable;
                         let editor_handler = editor_handler.borrow().clone();

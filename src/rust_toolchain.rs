@@ -65,7 +65,7 @@ impl RustToolchain {
 
     /// Arguments used by rust-gdb to make the compiler-matched Python
     /// printers discoverable before GDB opens an executable. Keep the chosen
-    /// debugger executable intact; these arguments also work with a custom
+    /// debugger executable intact. These arguments also work with a custom
     /// Python-enabled GDB.
     pub(crate) fn gdb_printer_arguments(&self) -> Vec<String> {
         let Some(printer_directory) = self.printer_directory.as_deref() else {

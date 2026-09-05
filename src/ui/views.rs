@@ -384,6 +384,7 @@ fn local_name_column(
     let children_handler_for_setup = Rc::clone(children_handler);
     let variable_menu_for_setup = variable_menu.clone();
     let active_popover_for_unbind = Rc::clone(&variable_menu.active_popover);
+    let selection_for_bind = variable_menu.selection.clone();
 
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
@@ -417,7 +418,6 @@ fn local_name_column(
         click.set_propagation_phase(gtk::PropagationPhase::Capture);
         let selection_for_click = selection.clone();
         let item_for_click = item.downgrade();
-        let disclosure_for_click = disclosure.clone();
         let children_handler_for_click = Rc::clone(&children_handler_for_setup);
 
         click.connect_pressed(move |gesture, presses, _, _| {
@@ -436,8 +436,7 @@ fn local_name_column(
             let node = data.borrow::<VariableNode>().clone();
             let position = row.position();
 
-            if position == gtk::INVALID_LIST_POSITION
-                || position >= selection_for_click.n_items()
+            if !variable_row_is_current(&selection_for_click, &row)
                 || (!row.is_expandable() && node.load_more.is_none())
             {
                 return;
@@ -455,19 +454,9 @@ fn local_name_column(
             selection_for_click.set_selected(position);
 
             if row.is_expandable() {
-                let expanded = !row.is_expanded();
+                let expanded = !node.expanded.get();
                 node.expanded.set(expanded);
                 row.set_expanded(expanded);
-
-                disclosure_for_click.set_text(if expanded {
-                    DISCLOSURE_EXPANDED_ICON
-                } else {
-                    DISCLOSURE_COLLAPSED_ICON
-                });
-
-                if expanded {
-                    defer_variable_children_if_expanded(&node, &children_handler_for_click);
-                }
             } else {
                 defer_next_variable_page(&node, &children_handler_for_click);
             }
@@ -479,6 +468,12 @@ fn local_name_column(
         expander.set_hide_expander(true);
         expander.set_indent_for_icon(false);
         expander.set_child(Some(&content));
+        connect_variable_expansion(
+            &expander,
+            &disclosure,
+            &selection,
+            &children_handler_for_setup,
+        );
         item.set_child(Some(&expander));
     });
 
@@ -524,11 +519,11 @@ fn local_name_column(
         expander.set_list_row(Some(&row));
 
         if expandable && node.expanded.get() != row.is_expanded() {
-            row.set_expanded(node.expanded.get());
+            defer_variable_expansion(&expander, &row, &selection_for_bind);
         }
 
         disclosure.set_text(if expandable {
-            if row.is_expanded() {
+            if node.expanded.get() {
                 DISCLOSURE_EXPANDED_ICON
             } else {
                 DISCLOSURE_COLLAPSED_ICON
@@ -598,6 +593,116 @@ fn local_name_column(
     column
 }
 
+fn variable_row_is_current(selection: &gtk::SingleSelection, row: &gtk::TreeListRow) -> bool {
+    let position = row.position();
+
+    position != gtk::INVALID_LIST_POSITION
+        && selection.item(position).as_ref() == Some(row.upcast_ref())
+}
+
+fn connect_variable_expansion(
+    expander: &gtk::TreeExpander,
+    disclosure: &gtk::Label,
+    selection: &gtk::SingleSelection,
+    children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
+) {
+    struct ExpansionSubscription {
+        row: glib::WeakRef<gtk::TreeListRow>,
+        handler: Option<glib::SignalHandlerId>,
+    }
+
+    impl Drop for ExpansionSubscription {
+        fn drop(&mut self) {
+            if let (Some(row), Some(handler)) = (self.row.upgrade(), self.handler.take()) {
+                row.disconnect(handler);
+            }
+        }
+    }
+
+    let subscription = RefCell::new(None::<ExpansionSubscription>);
+    let disclosure = disclosure.downgrade();
+    let selection = selection.downgrade();
+    let children_handler = Rc::clone(children_handler);
+
+    // Follow the binding, not the widget's lifetime. Recycling must disconnect
+    // the previous row without accumulating handlers or retaining its tree.
+    expander.connect_list_row_notify(move |expander| {
+        subscription.borrow_mut().take();
+
+        let Some(row) = expander.list_row() else {
+            return;
+        };
+
+        let disclosure = disclosure.clone();
+        let selection = selection.clone();
+        let children_handler = Rc::clone(&children_handler);
+
+        let handler = row.connect_expanded_notify(move |row| {
+            let (Some(disclosure), Some(selection)) = (disclosure.upgrade(), selection.upgrade())
+            else {
+                return;
+            };
+
+            if !variable_row_is_current(&selection, row) {
+                return;
+            }
+
+            let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+                return;
+            };
+
+            let expanded = row.is_expanded();
+            data.borrow::<VariableNode>().expanded.set(expanded);
+            disclosure.set_text(if expanded {
+                DISCLOSURE_EXPANDED_ICON
+            } else {
+                DISCLOSURE_COLLAPSED_ICON
+            });
+
+            if expanded {
+                defer_variable_children_if_expanded(row, &selection, &children_handler);
+            }
+        });
+
+        subscription.replace(Some(ExpansionSubscription {
+            row: row.downgrade(),
+            handler: Some(handler),
+        }));
+    });
+}
+
+fn defer_variable_expansion(
+    expander: &gtk::TreeExpander,
+    row: &gtk::TreeListRow,
+    selection: &gtk::SingleSelection,
+) {
+    let expander = expander.downgrade();
+    let row = row.downgrade();
+    let selection = selection.downgrade();
+
+    // Binding can happen during GTK layout and row recycling. Changing the
+    // tree here invalidates the row hierarchy GTK is still traversing.
+    glib::idle_add_local_once(move || {
+        let (Some(expander), Some(row), Some(selection)) =
+            (expander.upgrade(), row.upgrade(), selection.upgrade())
+        else {
+            return;
+        };
+
+        if expander.list_row().as_ref() != Some(&row) || !variable_row_is_current(&selection, &row)
+        {
+            return;
+        }
+
+        let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+            return;
+        };
+
+        let expanded = data.borrow::<VariableNode>().expanded.get();
+        row.set_expanded(expanded);
+    });
+}
+
 fn connect_current_variable_context_menu(
     row_widget: &impl IsA<gtk::Widget>,
     item: &gtk::ListItem,
@@ -634,7 +739,7 @@ fn connect_current_variable_context_menu(
 
         let position = row.position();
 
-        if position == gtk::INVALID_LIST_POSITION || position >= variable_menu.selection.n_items() {
+        if !variable_row_is_current(&variable_menu.selection, &row) {
             return;
         }
 
@@ -700,10 +805,8 @@ fn show_variable_context_menu(
         popover.popdown();
     }
 
-    let popover = gtk::Popover::new();
+    let (popover, menu) = build_context_menu();
     popover.add_css_class("local-variable-menu");
-    popover.set_autohide(true);
-    popover.set_has_arrow(false);
     popover.set_parent(row_widget);
 
     popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
@@ -713,9 +816,7 @@ fn show_variable_context_menu(
         1,
     )));
 
-    let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    menu.add_css_class("local-variable-menu-content");
-    let summary = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    let summary = gtk::Box::new(gtk::Orientation::Vertical, 2);
     summary.add_css_class("local-variable-menu-summary");
 
     let caption = gtk::Label::new(Some(if variable.argument {
@@ -730,6 +831,8 @@ fn show_variable_context_menu(
     name.add_css_class("local-variable-menu-name");
     name.set_halign(gtk::Align::Start);
     name.set_ellipsize(pango::EllipsizeMode::Middle);
+    name.set_max_width_chars(40);
+    name.set_tooltip_text(Some(&variable.name));
 
     let type_name =
         compact_variable_type(variable.type_name.as_deref().unwrap_or("<unknown type>"));
@@ -738,10 +841,14 @@ fn show_variable_context_menu(
     type_label.add_css_class("local-variable-menu-type");
     type_label.set_halign(gtk::Align::Start);
     type_label.set_ellipsize(pango::EllipsizeMode::Middle);
+    type_label.set_max_width_chars(40);
+    type_label.set_tooltip_text(variable.type_name.as_deref());
     let value = gtk::Label::new(Some(&variable.value));
     value.add_css_class("local-variable-menu-value");
     value.set_halign(gtk::Align::Start);
     value.set_ellipsize(pango::EllipsizeMode::Middle);
+    value.set_max_width_chars(40);
+    value.set_tooltip_text(Some(&variable.value));
     summary.append(&caption);
     summary.append(&name);
     summary.append(&type_label);
@@ -812,8 +919,6 @@ fn show_variable_context_menu(
         menu.append(&button);
     }
 
-    popover.set_child(Some(&menu));
-
     let active_popover_for_close = Rc::downgrade(active_popover);
 
     popover.connect_closed(move |popover| {
@@ -846,18 +951,8 @@ fn variable_menu_section(text: &str) -> gtk::Label {
 }
 
 fn variable_menu_action(label: &str, detail: &str) -> gtk::Button {
-    let row = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    let label = gtk::Label::new(Some(label));
-    label.add_css_class("local-variable-menu-action-label");
-    label.set_halign(gtk::Align::Start);
-    let detail = gtk::Label::new(Some(detail));
-    detail.add_css_class("local-variable-menu-action-detail");
-    detail.set_halign(gtk::Align::Start);
-    row.append(&label);
-    row.append(&detail);
-    let button = gtk::Button::builder().child(&row).build();
-    button.add_css_class("local-variable-menu-action");
-    button.set_halign(gtk::Align::Fill);
+    let button = context_menu_action(label);
+    button.set_tooltip_text(Some(detail));
 
     button
 }
@@ -887,13 +982,39 @@ pub(super) fn request_variable_children_if_needed(
 }
 
 pub(super) fn defer_variable_children_if_expanded(
-    node: &VariableNode,
+    row: &gtk::TreeListRow,
+    selection: &gtk::SingleSelection,
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
 ) {
-    let node = node.clone();
+    let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+        return;
+    };
+
+    let node = data.borrow::<VariableNode>();
+
+    if node.children_loaded.get() || node.children_loading.get() {
+        return;
+    }
+
+    let row = row.downgrade();
+    let selection = selection.downgrade();
     let children_handler = Rc::clone(children_handler);
 
     glib::idle_add_local_once(move || {
+        let (Some(row), Some(selection)) = (row.upgrade(), selection.upgrade()) else {
+            return;
+        };
+
+        if !row.is_expanded() || !variable_row_is_current(&selection, &row) {
+            return;
+        }
+
+        let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+            return;
+        };
+
+        let node = data.borrow::<VariableNode>().clone();
+
         if node.expanded.get() {
             request_variable_children_if_needed(&node, &children_handler);
         }
@@ -2209,23 +2330,23 @@ fn connect_source_tree_context_menu(
     search_handler: &Rc<RefCell<Option<SourceTreePathHandler>>>,
     refresh_handler: &Rc<RefCell<Option<SourceTreeRefreshHandler>>>,
 ) {
-    let popover = gtk::Popover::new();
+    let (popover, menu) = build_context_menu();
     popover.add_css_class("source-tree-menu");
-    popover.set_autohide(true);
-    popover.set_has_arrow(false);
     popover.set_parent(row);
-    let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    let open = source_tree_menu_button("Open");
+    let open = context_menu_action("Open");
     open.set_sensitive(!node.data.directory);
-    let search = source_tree_menu_button("Search within folder");
-    let copy_name = source_tree_menu_button("Copy name");
-    let copy_path = source_tree_menu_button("Copy full path");
-    let refresh = source_tree_menu_button("Refresh source tree");
-    for button in [&open, &search, &copy_name, &copy_path, &refresh] {
-        menu.append(button);
-    }
+    let search = context_menu_action("Search within folder");
+    let copy_name = context_menu_action("Copy name");
+    let copy_path = context_menu_action("Copy full path");
+    let refresh = context_menu_action("Refresh source tree");
+    menu.append(&open);
+    menu.append(&search);
+    menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    menu.append(&copy_name);
+    menu.append(&copy_path);
+    menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    menu.append(&refresh);
 
-    popover.set_child(Some(&menu));
     let path = node.data.path.clone();
     let open_handler = Rc::clone(open_handler);
     let popover_for_open = popover.clone();
@@ -2298,17 +2419,6 @@ fn connect_source_tree_context_menu(
         popover.popup();
     });
     row.add_controller(gesture);
-}
-
-fn source_tree_menu_button(text: &str) -> gtk::Button {
-    let label = gtk::Label::new(Some(text));
-    label.set_halign(gtk::Align::Start);
-    label.set_xalign(0.0);
-    gtk::Button::builder()
-        .child(&label)
-        .hexpand(true)
-        .css_classes(["source-tree-menu-action"])
-        .build()
 }
 
 pub(super) fn build_terminal_panel(
@@ -2504,52 +2614,50 @@ fn connect_terminal_clipboard(terminal: &vte4::Terminal) {
 }
 
 fn open_terminal_context_menu(terminal: &vte4::Terminal, x: f64, y: f64) {
-    let popover = gtk::Popover::builder()
-        .has_arrow(false)
-        .autohide(true)
-        .build();
-
-    let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    menu.add_css_class("terminal-context-menu");
-    let copy = gtk::Button::with_label("Copy");
+    let (popover, menu) = build_context_menu();
+    popover.add_css_class("terminal-context-menu");
+    let copy = context_menu_action("Copy");
     copy.set_sensitive(terminal.has_selection());
     copy.set_tooltip_text(Some("Copy selected terminal text · Ctrl+Shift+C"));
-    let paste = gtk::Button::with_label("Paste");
+    let paste = context_menu_action("Paste");
     paste.set_tooltip_text(Some("Paste clipboard text · Ctrl+V or Ctrl+Shift+V"));
-    let select_all = gtk::Button::with_label("Select all");
+    let select_all = context_menu_action("Select all");
 
     for button in [&copy, &paste, &select_all] {
-        button.set_halign(gtk::Align::Fill);
-        button.set_hexpand(true);
         menu.append(button);
     }
 
     let terminal_for_copy = terminal.clone();
-    let popover_for_copy = popover.clone();
+    let popover_for_copy = popover.downgrade();
 
     copy.connect_clicked(move |_| {
         terminal_for_copy.copy_clipboard_format(vte4::Format::Text);
-        popover_for_copy.popdown();
+        if let Some(popover) = popover_for_copy.upgrade() {
+            popover.popdown();
+        }
     });
 
     let terminal_for_paste = terminal.clone();
-    let popover_for_paste = popover.clone();
+    let popover_for_paste = popover.downgrade();
 
     paste.connect_clicked(move |_| {
         terminal_for_paste.paste_clipboard();
         terminal_for_paste.grab_focus();
-        popover_for_paste.popdown();
+        if let Some(popover) = popover_for_paste.upgrade() {
+            popover.popdown();
+        }
     });
 
     let terminal_for_select = terminal.clone();
-    let popover_for_select = popover.clone();
+    let popover_for_select = popover.downgrade();
 
     select_all.connect_clicked(move |_| {
         terminal_for_select.select_all();
-        popover_for_select.popdown();
+        if let Some(popover) = popover_for_select.upgrade() {
+            popover.popdown();
+        }
     });
 
-    popover.set_child(Some(&menu));
     popover.set_parent(terminal);
 
     popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(

@@ -1368,7 +1368,7 @@ impl TargetEndian {
     }
 
     /// Extracts byte order only when GDB's architecture name states it.
-    /// Ambiguous names deliberately return `None`; guessing is worse than
+    /// Ambiguous names deliberately return `None`. Guessing is worse than
     /// disabling target-memory decoding until ELF/GDB supplies an answer.
     pub fn from_architecture_description(value: &str) -> Option<Self> {
         let value = value.to_ascii_lowercase();

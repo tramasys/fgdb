@@ -1150,7 +1150,7 @@ pub(super) fn request_variable_children(
     };
 
     // Dynamic varobjs may advertise available pretty-printed children only
-    // through `has_more`; GDB documents `numchild` as unreliable for them.
+    // through `has_more`. GDB documents `numchild` as unreliable for them.
     if variable.num_children > 0 || variable.has_more || variable.dynamic {
         let Some(to) = variable_child_page_end(from) else {
             if let Some(ui) = ui.upgrade() {

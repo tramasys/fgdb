@@ -281,15 +281,6 @@ fn close_source_pages(
     }
 }
 
-fn source_tab_menu_button(label: &str) -> gtk::Button {
-    let label = gtk::Label::new(Some(label));
-    label.set_xalign(0.0);
-    let button = gtk::Button::builder().child(&label).hexpand(true).build();
-    button.add_css_class("source-tab-menu-action");
-
-    button
-}
-
 fn copy_source_text(text: &str) {
     if let Some(display) = gtk::gdk::Display::default() {
         display.clipboard().set_text(text);
@@ -304,36 +295,28 @@ fn connect_source_tab_context_menu(
     closed_tabs: &Rc<RefCell<Vec<ClosedSourceTab>>>,
     reopen_closed: &gtk::Button,
 ) {
-    let popover = gtk::Popover::new();
+    let (popover, menu) = build_context_menu();
     popover.add_css_class("source-tab-menu");
-    popover.set_autohide(true);
-    popover.set_has_arrow(false);
     popover.set_parent(&document.tab);
-    let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    menu.add_css_class("source-tab-menu-content");
-    let close = source_tab_menu_button("Close");
-    let close_others = source_tab_menu_button("Close Other Tabs");
-    let close_left = source_tab_menu_button("Close Tabs to the Left");
-    let close_right = source_tab_menu_button("Close Tabs to the Right");
-    let close_all = source_tab_menu_button("Close All Tabs");
+    let close = context_menu_action("Close");
+    let close_others = context_menu_action("Close other tabs");
+    let close_left = context_menu_action("Close tabs to the left");
+    let close_right = context_menu_action("Close tabs to the right");
+    let close_all = context_menu_action("Close all tabs");
 
     for button in [&close, &close_others, &close_left, &close_right, &close_all] {
         menu.append(button);
     }
 
-    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
-    separator.add_css_class("source-tab-menu-separator");
-    menu.append(&separator);
-    let copy_name = source_tab_menu_button("Copy File Name");
-    let copy_path = source_tab_menu_button("Copy Full Path");
-    let copy_path_line = source_tab_menu_button("Copy Path with Line");
-    let copy_directory = source_tab_menu_button("Copy Directory Path");
+    menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let copy_name = context_menu_action("Copy file name");
+    let copy_path = context_menu_action("Copy full path");
+    let copy_path_line = context_menu_action("Copy path with line");
+    let copy_directory = context_menu_action("Copy directory path");
 
     for button in [&copy_name, &copy_path, &copy_path_line, &copy_directory] {
         menu.append(button);
     }
-
-    popover.set_child(Some(&menu));
 
     for (button, scope) in [
         (&close, SourceTabCloseScope::This),
@@ -761,35 +744,35 @@ fn open_source_gutter_menu(
     breakpoint: Option<Breakpoint>,
     handlers: SourceGutterMenuHandlers,
 ) {
-    let popover = gtk::Popover::builder()
-        .has_arrow(false)
-        .autohide(true)
-        .build();
+    let (popover, menu) = build_context_menu();
+    popover.add_css_class("gutter-breakpoint-menu");
+    let heading = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    heading.add_css_class("context-menu-heading");
+    let title = gtk::Label::new(Some(&format!("Line {line}")));
+    title.set_xalign(0.0);
+    title.set_hexpand(true);
+    heading.append(&title);
 
-    let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    menu.add_css_class("gutter-breakpoint-menu");
+    if let Some(breakpoint) = breakpoint.as_ref() {
+        let number = gtk::Label::new(Some(&format!(
+            "Breakpoint #{}",
+            breakpoint.command_number()
+        )));
+        number.set_xalign(1.0);
+        heading.append(&number);
+    }
 
-    let title_text = breakpoint.as_ref().map_or_else(
-        || format!("LINE {line}"),
-        |breakpoint| format!("LINE {line} · BREAKPOINT #{}", breakpoint.command_number()),
-    );
-
-    let title = gtk::Label::new(Some(&title_text));
-    title.add_css_class("section-title");
-    title.set_halign(gtk::Align::Start);
-    menu.append(&title);
-    let jump = gtk::Button::with_label("Jump to");
+    menu.append(&heading);
+    let jump = context_menu_action("Run to line");
 
     jump.set_tooltip_text(Some(
         "Continue execution until this line and pause without creating a persistent breakpoint",
     ));
 
-    jump.set_halign(gtk::Align::Fill);
-    jump.set_hexpand(true);
     jump.set_sensitive(handlers.jump.borrow().is_some());
     menu.append(&jump);
     let jump_handler = Rc::clone(&handlers.jump);
-    let popover_for_jump = popover.clone();
+    let popover_for_jump = popover.downgrade();
 
     jump.connect_clicked(move |_| {
         let handler = jump_handler.borrow().clone();
@@ -798,30 +781,28 @@ fn open_source_gutter_menu(
             handler(path.clone(), line);
         }
 
-        popover_for_jump.popdown();
+        if let Some(popover) = popover_for_jump.upgrade() {
+            popover.popdown();
+        }
     });
 
     if let Some(breakpoint) = breakpoint {
         let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
         menu.append(&separator);
 
-        let toggle = gtk::Button::with_label(if breakpoint.enabled {
-            "Disable"
+        let toggle = context_menu_action(if breakpoint.enabled {
+            "Disable breakpoint"
         } else {
-            "Enable"
+            "Enable breakpoint"
         });
 
-        toggle.set_halign(gtk::Align::Fill);
-        toggle.set_hexpand(true);
-        let delete = gtk::Button::with_label("Delete");
-        delete.set_halign(gtk::Align::Fill);
-        delete.set_hexpand(true);
+        let delete = context_menu_action("Delete breakpoint");
         delete.add_css_class("danger-action");
         menu.append(&toggle);
         menu.append(&delete);
         let number = breakpoint.command_number().to_owned();
         let enable = !breakpoint.enabled;
-        let popover_for_toggle = popover.clone();
+        let popover_for_toggle = popover.downgrade();
         let enabled_handler = Rc::clone(&handlers.enabled);
 
         toggle.connect_clicked(move |_| {
@@ -831,11 +812,13 @@ fn open_source_gutter_menu(
                 handler(number.clone(), enable);
             }
 
-            popover_for_toggle.popdown();
+            if let Some(popover) = popover_for_toggle.upgrade() {
+                popover.popdown();
+            }
         });
 
         let number = breakpoint.command_number().to_owned();
-        let popover_for_delete = popover.clone();
+        let popover_for_delete = popover.downgrade();
         let delete_handler = Rc::clone(&handlers.delete);
 
         delete.connect_clicked(move |_| {
@@ -845,11 +828,12 @@ fn open_source_gutter_menu(
                 handler(number.clone());
             }
 
-            popover_for_delete.popdown();
+            if let Some(popover) = popover_for_delete.upgrade() {
+                popover.popdown();
+            }
         });
     }
 
-    popover.set_child(Some(&menu));
     popover.set_parent(renderer);
     popover.set_position(gtk::PositionType::Right);
     popover.set_offset(4, 0);

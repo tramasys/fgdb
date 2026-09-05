@@ -125,7 +125,13 @@ fn normalize_syscall_filter(filter: &str) -> Result<String, &'static str> {
     Ok(filters.join(" "))
 }
 
-pub(super) fn insert_source_breakpoint(ui: Weak<Ui>, client: &MiClient, path: PathBuf, line: u32) {
+pub(super) fn insert_source_breakpoint(
+    ui: Weak<Ui>,
+    client: &MiClient,
+    path: PathBuf,
+    line: u32,
+    auto_relocate: bool,
+) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
@@ -145,23 +151,52 @@ pub(super) fn insert_source_breakpoint(ui: Weak<Ui>, client: &MiClient, path: Pa
 
     current_ui.set_status(
         "Adding breakpoint",
-        &format!("Requesting an exact breakpoint at {location}"),
+        &format!("Requesting a breakpoint at {location}"),
         None,
     );
 
     drop(current_ui);
-    request_exact_source_breakpoint(ui, client, path, line);
+    request_source_breakpoint(ui, client, path, line, line, auto_relocate);
 }
 
-fn request_exact_source_breakpoint(ui: Weak<Ui>, client: &MiClient, path: PathBuf, line: u32) {
-    let location = format!("{}:{line}", path.display());
-    let command = format!("-break-insert {}", crate::debugger::quote(&location));
+fn request_source_breakpoint(
+    ui: Weak<Ui>,
+    client: &MiClient,
+    path: PathBuf,
+    requested_line: u32,
+    line: u32,
+    auto_relocate: bool,
+) {
+    let location = format!("{}:{requested_line}", path.display());
+    let command = format!(
+        "-break-insert {}",
+        crate::debugger::quote(&format!("{}:{line}", path.display()))
+    );
     let ui_for_response = ui.clone();
     let source_index = ui.upgrade().and_then(|ui| ui.source_index_snapshot());
     let path_for_response = path;
 
     if let Err(error) = client.request(&command, move |client, record| {
         if !record.is_done() {
+            // Some languages (notably Rust) reject uncompiled lines instead of
+            // relocating. Consult the line table only for that error and retry
+            // once, never for transport, permission, or other debugger errors.
+            if auto_relocate
+                && line == requested_line
+                && record
+                    .error_message()
+                    .is_some_and(|message| message.starts_with("No compiled code for line "))
+            {
+                request_next_source_breakpoint(
+                    ui_for_response,
+                    client,
+                    path_for_response,
+                    requested_line,
+                );
+
+                return;
+            }
+
             if let Some(ui) = ui_for_response.upgrade() {
                 ui.set_command_pending(false);
 
@@ -180,20 +215,32 @@ fn request_exact_source_breakpoint(ui: Weak<Ui>, client: &MiClient, path: PathBu
 
         let inserted = crate::debugger::inserted_breakpoints(&record);
 
-        let exact = source_breakpoint_is_exact(
+        let accepted_line = accepted_source_breakpoint_line(
             &inserted,
             source_index.as_deref(),
             &path_for_response,
             line,
+            auto_relocate,
         );
 
-        if exact {
+        if let Some(resolved_line) = accepted_line {
             if let Some(ui) = ui_for_response.upgrade() {
                 ui.set_command_pending(false);
 
+                let detail = if resolved_line == requested_line {
+                    format!("Added breakpoint at {location}")
+                } else {
+                    let resolved = relocated_source_breakpoint_summary(&inserted)
+                        .unwrap_or_else(|| format!("{}:{resolved_line}", path_for_response.display()));
+
+                    format!(
+                        "{location} has no exact executable instruction. Added breakpoint at {resolved}"
+                    )
+                };
+
                 ui.set_status(
                     "Paused",
-                    &format!("Added breakpoint at {location}"),
+                    &detail,
                     Some("status-ready"),
                 );
             }
@@ -205,7 +252,7 @@ fn request_exact_source_breakpoint(ui: Weak<Ui>, client: &MiClient, path: PathBu
                 client,
                 inserted,
                 path_for_response,
-                line,
+                requested_line,
             );
         }
     }) && let Some(ui) = ui.upgrade()
@@ -217,6 +264,72 @@ fn request_exact_source_breakpoint(ui: Weak<Ui>, client: &MiClient, path: PathBu
             &error.to_string(),
             Some("status-error"),
         );
+    }
+}
+
+fn request_next_source_breakpoint(
+    ui: Weak<Ui>,
+    client: &MiClient,
+    path: PathBuf,
+    requested_line: u32,
+) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+
+    let location = format!("{}:{requested_line}", path.display());
+
+    current_ui.set_status(
+        "Finding breakpoint location",
+        &format!("{location} has no compiled code. Looking for the next executable line"),
+        None,
+    );
+
+    let command = format!(
+        "-symbol-list-lines {}",
+        crate::debugger::quote(&path.to_string_lossy())
+    );
+    let ui_for_response = ui.clone();
+
+    if let Err(error) = client.request(&command, move |client, record| {
+        if !record.is_done() {
+            breakpoint_failure(
+                &ui_for_response,
+                "Breakpoint failed",
+                &format!(
+                    "Could not find an executable line after {location}: {}",
+                    record
+                        .error_message()
+                        .unwrap_or("GDB did not return source lines"),
+                ),
+            );
+        } else if let Some(next_line) = crate::debugger::executable_source_lines(&record)
+            .into_iter()
+            .find(|line| *line > requested_line)
+        {
+            request_source_breakpoint(
+                ui_for_response,
+                client,
+                path,
+                requested_line,
+                next_line,
+                true,
+            );
+
+            return;
+        } else if let Some(ui) = ui_for_response.upgrade() {
+            ui.set_command_pending(false);
+
+            ui.set_status(
+                "No breakpoint added",
+                &format!("{location} has no later executable line in this file"),
+                None,
+            );
+        }
+
+        refresh_breakpoints(&ui_for_response, client);
+    }) {
+        breakpoint_failure(&ui, "Breakpoint failed", &error.to_string());
     }
 }
 
@@ -299,18 +412,50 @@ fn remove_relocated_source_breakpoint(
     }
 }
 
-fn source_breakpoint_is_exact(
+fn accepted_source_breakpoint_line(
     breakpoints: &[Breakpoint],
     source_index: Option<&crate::source::SourceIndex>,
     path: &Path,
     line: u32,
-) -> bool {
-    breakpoints.iter().any(|breakpoint| {
+    auto_relocate: bool,
+) -> Option<u32> {
+    if breakpoints.iter().any(|breakpoint| {
         breakpoint.line == Some(line)
             && breakpoint
                 .source_path()
                 .is_some_and(|reported| crate::source::paths_match(source_index, path, reported))
-    })
+    }) {
+        return Some(line);
+    }
+
+    if !auto_relocate {
+        return None;
+    }
+
+    let mut next_line = None;
+
+    for breakpoint in breakpoints {
+        // Multi-location parents have no concrete source position. Validate all
+        // their children so relocation never silently adds stops in other files
+        // or before the clicked line.
+        if breakpoint.location_count > 0 && !breakpoint.is_location() {
+            continue;
+        }
+
+        let resolved_line = breakpoint.line?;
+        let reported_path = breakpoint.source_path()?;
+
+        if resolved_line <= line
+            || breakpoint.pending.is_some()
+            || !crate::source::paths_match(source_index, path, reported_path)
+        {
+            return None;
+        }
+
+        next_line = Some(next_line.map_or(resolved_line, |next: u32| next.min(resolved_line)));
+    }
+
+    next_line
 }
 
 fn relocated_source_breakpoint_summary(breakpoints: &[Breakpoint]) -> Option<String> {
@@ -1156,9 +1301,9 @@ fn infer_existing_stopped_thread(ui: &Weak<Ui>, client: &MiClient) {
 #[cfg(test)]
 mod tests {
     use super::{
-        breakpoint_commands_command, breakpoint_insert_command, canonical_breakpoint_location,
-        filtered_catchpoint_command, relocated_source_breakpoint_summary,
-        source_breakpoint_is_exact, watchpoint_command,
+        accepted_source_breakpoint_line, breakpoint_commands_command, breakpoint_insert_command,
+        canonical_breakpoint_location, filtered_catchpoint_command,
+        relocated_source_breakpoint_summary, watchpoint_command,
     };
     use crate::debugger::Breakpoint;
     use crate::ui::{
@@ -1209,28 +1354,77 @@ mod tests {
     }
 
     #[test]
-    fn accepts_only_the_exact_source_location_reported_by_gdb() {
+    fn accepts_source_breakpoint_relocation_only_when_enabled_and_forward_in_the_same_file() {
         let requested = std::path::Path::new("/workspace/project/src/main.rs");
-        let exact = source_breakpoint("/workspace/project/src/main.rs", 99);
-        let relocated = source_breakpoint("/workspace/project/src/main.rs", 101);
 
-        assert!(source_breakpoint_is_exact(
-            std::slice::from_ref(&exact),
-            None,
-            requested,
-            99
-        ));
+        for (path, resolved_line, auto_relocate, expected) in [
+            ("/workspace/project/src/main.rs", 99, false, Some(99)),
+            ("/workspace/project/src/main.rs", 99, true, Some(99)),
+            ("/workspace/project/src/main.rs", 101, false, None),
+            ("/workspace/project/src/main.rs", 101, true, Some(101)),
+            ("/workspace/project/src/main.rs", 98, true, None),
+            ("/workspace/other/src/main.rs", 101, true, None),
+            ("main.rs", 101, true, None),
+        ] {
+            assert_eq!(
+                accepted_source_breakpoint_line(
+                    &[source_breakpoint(path, resolved_line)],
+                    None,
+                    requested,
+                    99,
+                    auto_relocate,
+                ),
+                expected,
+                "{path}:{resolved_line}, auto_relocate={auto_relocate}",
+            );
+        }
 
-        assert!(!source_breakpoint_is_exact(
-            std::slice::from_ref(&relocated),
-            None,
-            requested,
-            99
-        ));
+        let mut unresolved = source_breakpoint("/workspace/project/src/main.rs", 101);
+        unresolved.line = None;
 
         assert_eq!(
-            relocated_source_breakpoint_summary(&[relocated]),
+            accepted_source_breakpoint_line(&[unresolved], None, requested, 99, true),
+            None,
+        );
+
+        assert_eq!(
+            accepted_source_breakpoint_line(&[], None, requested, 99, true),
+            None,
+        );
+
+        assert_eq!(
+            relocated_source_breakpoint_summary(&[source_breakpoint(
+                "/workspace/project/src/main.rs",
+                101,
+            )]),
             Some(String::from("/workspace/project/src/main.rs:101"))
+        );
+    }
+
+    #[test]
+    fn relocated_multi_location_breakpoints_validate_every_concrete_location() {
+        let requested = std::path::Path::new("/workspace/main.rs");
+        let record = crate::debugger::parse_record(
+            r#"1^done,bkpt={number="1",type="breakpoint",enabled="y",addr="<MULTIPLE>",locations=[{number="1.1",enabled="y",addr="0x1000",fullname="/workspace/main.rs",line="101"},{number="1.2",enabled="y",addr="0x2000",fullname="/workspace/main.rs",line="102"}]}"#,
+        )
+        .unwrap();
+        let mut inserted = crate::debugger::inserted_breakpoints(&record);
+
+        assert_eq!(
+            accepted_source_breakpoint_line(&inserted, None, requested, 99, true),
+            Some(101),
+        );
+
+        assert_eq!(
+            accepted_source_breakpoint_line(&inserted, None, requested, 99, false),
+            None,
+        );
+
+        inserted.last_mut().unwrap().fullname = Some(String::from("/workspace/other.rs"));
+
+        assert_eq!(
+            accepted_source_breakpoint_line(&inserted, None, requested, 99, true),
+            None,
         );
     }
 

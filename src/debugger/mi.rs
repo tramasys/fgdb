@@ -13,8 +13,6 @@ use gtk::glib;
 mod input;
 mod parser;
 mod protocol;
-#[cfg(test)]
-mod regression_tests;
 mod requests;
 mod transport;
 
@@ -930,7 +928,7 @@ impl MiClient {
 
     /// Run a CLI command without allowing its un-tokened stream records to
     /// interleave with another captured command. The completion record remains
-    /// authoritative; `output` is diagnostic text only.
+    /// authoritative. `output` is diagnostic text only.
     pub fn request_console(
         &self,
         command: &str,

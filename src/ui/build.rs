@@ -548,6 +548,30 @@ pub(super) fn build_gef_tool_page(
     (page, controls)
 }
 
+pub(super) fn build_context_menu() -> (gtk::Popover, gtk::Box) {
+    let popover = gtk::Popover::builder()
+        .has_arrow(false)
+        .autohide(true)
+        .css_classes(["debugger-context-menu"])
+        .build();
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    menu.add_css_class("context-menu-content");
+    popover.set_child(Some(&menu));
+
+    (popover, menu)
+}
+
+pub(super) fn context_menu_action(text: &str) -> gtk::Button {
+    let label = gtk::Label::new(Some(text));
+    label.set_xalign(0.0);
+
+    gtk::Button::builder()
+        .child(&label)
+        .hexpand(true)
+        .css_classes(["context-menu-action"])
+        .build()
+}
+
 pub(super) fn header_popup_button(label: &str, popover: &gtk::Popover) -> gtk::ToggleButton {
     let button = gtk::ToggleButton::with_label(label);
     button.set_focus_on_click(false);

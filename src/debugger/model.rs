@@ -137,7 +137,7 @@ impl Variable {
 
     /// Locals already carry scalar and pointer values from
     /// `-stack-list-variables --simple-values`. Only values omitted by that
-    /// response need an eager variable object; pointers can create one lazily
+    /// response need an eager variable object. Pointers can create one lazily
     /// if the user expands them.
     pub fn needs_eager_local_variable_object(&self) -> bool {
         self.value.trim().starts_with("<not available")

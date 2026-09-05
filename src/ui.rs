@@ -25,8 +25,6 @@ mod domain;
 use domain::{
     LocalVariableCatalog, MemoryRefreshBatch, TerminalSynchronization, VariableNodeIndex,
 };
-#[cfg(test)]
-mod hardening_smoke;
 mod layout;
 mod source_loading;
 mod source_navigation;

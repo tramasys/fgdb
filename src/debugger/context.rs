@@ -196,7 +196,7 @@ pub(crate) fn build_stack_entries(
     regions: &[MemoryRegion],
 ) -> Vec<StackEntry> {
     // Stack words are target pointers. Reject corrupt or unsupported ABI
-    // widths here as a last line of defence; slicing the fixed u64 buffer with
+    // widths here as a last line of defence. Slicing the fixed u64 buffer with
     // a wider value would otherwise panic.
     if !matches!(word_size, 4 | 8) {
         return Vec::new();

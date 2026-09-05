@@ -1225,7 +1225,7 @@ fn c_integer_typedef_format(name: &str, target_pointer_bits: u32) -> Option<Inte
         "clockt" => Some(IntegerFormat::signed(target_pointer_bits)),
         "wintt" | "uidt" | "gidt" | "modet" | "socklent" => Some(IntegerFormat::unsigned(32)),
         // time_t/off_t/dev_t/ino_t/nlink_t vary across Linux time64, LFS and
-        // libc ABIs. GDB type metadata is authoritative; do not guess here.
+        // libc ABIs. GDB type metadata is authoritative. Do not guess here.
         _ => None,
     }
 }

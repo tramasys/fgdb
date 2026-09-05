@@ -878,12 +878,12 @@ impl Ui {
                 defer_next_variable_page(&node, &children_handler);
             } else if !node.placeholder {
                 if row.is_expandable() {
-                    let expanded = !row.is_expanded();
+                    let expanded = !node.expanded.get();
                     node.expanded.set(expanded);
                     row.set_expanded(expanded);
 
                     if expanded {
-                        defer_variable_children_if_expanded(&node, &children_handler);
+                        defer_variable_children_if_expanded(&row, &selection, &children_handler);
                     }
                 } else {
                     let variable = node.variable;

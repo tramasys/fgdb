@@ -201,7 +201,7 @@ impl MemoryRefreshBatch {
 }
 
 /// Authoritative lookup for instantiated GDB variable objects. GTK stores
-/// remain presentation models; command validation no longer needs to walk the
+/// remain presentation models. Command validation no longer needs to walk the
 /// entire rendered tree after every child page or value update.
 #[derive(Default)]
 pub(super) struct VariableNodeIndex {

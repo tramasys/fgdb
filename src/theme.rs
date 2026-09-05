@@ -1091,16 +1091,12 @@ button.locals-changed-filter:checked {{
     border-color: alpha(@app_warning, 0.45);
 }}
 
-popover.local-variable-menu > contents {{
-    min-width: 290px;
-    padding: 4px;
-    background: @app_surface;
-    border: 1px solid @app_border;
+popover.debugger-context-menu.local-variable-menu > contents {{
+    min-width: 260px;
 }}
 
 .local-variable-menu-summary {{
-    padding: 4px 7px 5px;
-    background: alpha(@app_fg, 0.025);
+    padding: 5px 8px;
 }}
 
 .local-variable-menu-caption,
@@ -1110,7 +1106,7 @@ popover.local-variable-menu > contents {{
     font-weight: 700;
 }}
 
-.local-variable-menu-section {{ padding: 1px 7px 2px; }}
+.local-variable-menu-section {{ padding: 3px 8px; }}
 
 .local-variable-menu-name {{
     color: @app_accent_hover;
@@ -1120,40 +1116,10 @@ popover.local-variable-menu > contents {{
 .local-variable-menu-type,
 .local-variable-menu-value {{
     color: @app_muted;
-    font-size: 10px;
+    font-size: 11px;
 }}
 
-.local-variable-menu-content > separator {{
-    min-height: 1px;
-    margin: 2px 0;
-    background: @app_border;
-}}
-
-button.local-variable-menu-action {{
-    min-height: 31px;
-    margin: 0;
-    padding: 2px 7px;
-    color: @app_fg;
-    background: alpha(@app_fg, 0.025);
-    border: 0;
-    border-left: 2px solid transparent;
-}}
-
-button.local-variable-menu-action:hover,
-button.local-variable-menu-action:focus-visible {{
-    color: @app_fg;
-    background: @app_raised;
-    border-left-color: @app_accent;
-}}
-
-.local-variable-menu-action-label {{ font-weight: 700; }}
-
-.local-variable-menu-action-detail {{
-    color: @app_muted;
-    font-size: 10px;
-}}
-
-button.local-variable-viewer-action .local-variable-menu-action-label {{
+popover.debugger-context-menu button.local-variable-viewer-action:not(:disabled) {{
     color: @app_accent_hover;
 }}
 
@@ -2041,39 +2007,56 @@ columnview.memory-map-table row {{ min-height: 28px; }}
     font-size: 10px;
 }}
 
-.gutter-breakpoint-menu,
-.terminal-context-menu {{
-    min-width: 172px;
-    padding: 5px;
+popover.debugger-context-menu > contents {{
+    min-width: 168px;
+    padding: 3px;
+    color: @app_fg;
     background: @app_surface;
     border: 1px solid @app_border;
+    border-radius: 4px;
+    font-size: 12px;
 }}
 
-.gutter-breakpoint-menu > label,
-.terminal-context-menu > label {{ padding: 2px 7px 5px; }}
+.context-menu-heading {{
+    padding: 5px 8px;
+    color: @app_muted;
+    font-size: 11px;
+}}
 
-.gutter-breakpoint-menu > button,
-.terminal-context-menu > button {{
-    min-height: 25px;
+popover.debugger-context-menu button.context-menu-action {{
+    min-height: 22px;
+    min-width: 0;
+    margin: 0;
     padding: 1px 8px;
     color: @app_fg;
     background: transparent;
-    border-left: 2px solid transparent;
+    border: 0;
+    border-radius: 2px;
+    font-weight: 400;
 }}
 
-.gutter-breakpoint-menu > button:hover,
-.gutter-breakpoint-menu > button:focus-visible,
-.terminal-context-menu > button:hover,
-.terminal-context-menu > button:focus-visible {{
-    color: @app_accent_hover;
-    background: @app_raised;
-    border-left-color: @app_accent;
+popover.debugger-context-menu button.context-menu-action:hover,
+popover.debugger-context-menu button.context-menu-action:focus-visible {{
+    color: @app_fg;
+    background: alpha(@app_accent, 0.14);
 }}
 
-.gutter-breakpoint-menu > separator,
-.terminal-context-menu > separator {{
+popover.debugger-context-menu button.context-menu-action:active {{
+    background: alpha(@app_accent, 0.20);
+}}
+
+popover.debugger-context-menu button.context-menu-action:disabled {{
+    color: alpha(@app_muted, 0.55);
+    background: transparent;
+}}
+
+popover.debugger-context-menu button.context-menu-action.danger-action:not(:disabled) {{
+    color: @app_danger;
+}}
+
+.context-menu-content > separator {{
     min-height: 1px;
-    margin: 3px 0;
+    margin: 3px 8px;
     background: @app_border;
 }}
 
@@ -2205,7 +2188,7 @@ button.pause-availability-pending:active {{
 }}
 
 /* Stop-only controls remain visually stable while execution interlocks them.
-   They are still insensitive; this only avoids repainting the entire debugger
+   They are still insensitive. This only avoids repainting the entire debugger
    chrome for every single step. */
 .execution-interlocked:disabled {{
     opacity: 1;
@@ -2907,27 +2890,6 @@ listview.source-tree-view row:selected {{ background: alpha(@app_accent, 0.19); 
 .source-tree-name {{ color: @app_fg; }}
 .source-tree-loaded {{ color: @app_success; font-size: 8px; }}
 
-popover.source-tree-menu > contents {{
-    min-width: 190px;
-    padding: 4px;
-    background: @app_surface;
-    border: 1px solid @app_border;
-}}
-
-button.source-tree-menu-action {{
-    min-height: 25px;
-    padding: 1px 7px;
-    color: @app_fg;
-    background: transparent;
-    border: 0;
-}}
-
-button.source-tree-menu-action:hover,
-button.source-tree-menu-action:focus-visible {{
-    color: @app_accent_hover;
-    background: alpha(@app_accent, 0.12);
-}}
-
 .source-tab {{
     padding: 0 2px;
     color: @app_fg;
@@ -2948,31 +2910,6 @@ button.source-tab-close:hover {{
     color: @app_fg;
     background: alpha(@app_fg, 0.10);
 }}
-
-popover.source-tab-menu > contents {{
-    min-width: 206px;
-    padding: 4px;
-    background: @app_surface;
-    border: 1px solid @app_border;
-}}
-
-.source-tab-menu-action {{
-    min-height: 25px;
-    padding: 1px 8px;
-    color: @app_fg;
-    background: transparent;
-    border: 0;
-}}
-
-.source-tab-menu-action:hover,
-.source-tab-menu-action:focus-visible {{
-    color: @app_accent_hover;
-    background: alpha(@app_accent, 0.12);
-}}
-
-.source-tab-menu-action:disabled {{ color: alpha(@app_muted, 0.55); }}
-
-.source-tab-menu-separator {{ margin: 3px 5px; }}
 
 textview,
 textview text {{

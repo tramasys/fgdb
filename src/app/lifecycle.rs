@@ -62,7 +62,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         MiEvent::InferiorStarted { id, pid } => {
             // A terminal user can load and run a different executable in the
             // same GDB process. Register-number caches are target-specific and
-            // must not leak across that boundary; the stopped-state refresh
+            // must not leak across that boundary. The stopped-state refresh
             // will establish the new ABI from GDB and the traced ELF.
             ui.reset_target_abi();
             ui.invalidate_allocator_probe_cache();
@@ -459,7 +459,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         }
         MiEvent::CommandParameterChanged { parameter, value } => {
             // GDB emits these while processing init files too. Ready performs
-            // the initial synchronization; reacting before that boundary can
+            // the initial synchronization. Reacting before that boundary can
             // interleave application requests with MI bootstrap commands.
             if !client.is_ready() {
                 return;

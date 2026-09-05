@@ -2,7 +2,7 @@ use std::{collections::HashMap, hash::Hash, time::Duration};
 
 /// Soft responsiveness targets. Crossing one records a diagnostic and causes
 /// the caller to yield, paginate, defer, or shed optional work. These are not
-/// correctness timeouts; those remain owned by the MI transport.
+/// correctness timeouts. Those remain owned by the MI transport.
 pub(crate) const UI_RENDER_BUDGET: Duration = Duration::from_millis(16);
 pub(crate) const MI_INSPECTION_BUDGET: Duration = Duration::from_millis(750);
 pub(crate) const MI_CONTROL_BUDGET: Duration = Duration::from_secs(2);
