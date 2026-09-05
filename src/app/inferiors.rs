@@ -12,60 +12,67 @@ pub(super) fn refresh_inferiors(ui: &Weak<Ui>, client: &MiClient) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
-
-    let generation = current_ui.start_inferior_refresh();
+    let Some(generation) = current_ui.begin_inferior_refresh() else {
+        return;
+    };
     drop(current_ui);
     let weak_ui = ui.clone();
-    let weak_ui_for_error = ui.clone();
+    let guard = ui.clone();
 
-    if client
-        .request("-list-thread-groups --recurse 1", move |client, record| {
+    if let Err(error) = client.request_when(
+        "-list-thread-groups --recurse 1",
+        move || {
+            guard
+                .upgrade()
+                .is_some_and(|ui| ui.is_inferior_refresh_current(generation))
+        },
+        move |client, record| {
             let Some(ui) = weak_ui.upgrade() else {
                 return;
             };
+            let mut selection_changed = false;
+            let mut refresh_selected = false;
 
-            if !ui.is_inferior_refresh_current(generation) {
-                return;
+            if ui.is_inferior_refresh_current(generation) {
+                if record.is_done() {
+                    let previous = ui.selected_inferior_id();
+                    let current_thread_id = ui.current_thread_id();
+                    ui.show_inferiors(crate::debugger::inferiors(
+                        &record,
+                        current_thread_id.as_deref(),
+                    ));
+                    selection_changed = previous != ui.selected_inferior_id();
+                    refresh_selected = selection_changed && ui.selected_inferior_context_stopped();
+                } else if record.class != "superseded" {
+                    ui.set_status(
+                        "Inferior refresh failed",
+                        record
+                            .error_message()
+                            .unwrap_or("GDB did not return its thread groups"),
+                        Some("status-error"),
+                    );
+                }
             }
 
-            if !record.is_done() {
-                ui.set_status(
-                    "Inferior refresh failed",
-                    record
-                        .error_message()
-                        .unwrap_or("GDB did not return its thread groups"),
-                    Some("status-error"),
-                );
-
-                return;
-            }
-
-            let previous = ui.selected_inferior_id();
-            let current_thread_id = ui.current_thread_id();
-
-            ui.show_inferiors(crate::debugger::inferiors(
-                &record,
-                current_thread_id.as_deref(),
-            ));
-
-            let selection_changed = previous != ui.selected_inferior_id();
-            let refresh_selected = selection_changed && ui.selected_inferior_context_stopped();
+            let again = ui.finish_inferior_refresh();
             drop(ui);
 
             if selection_changed {
                 refresh_modules(&weak_ui, client);
             }
-
             if refresh_selected {
                 refresh_threads(&weak_ui, client);
             }
-        })
-        .is_err()
-        && let Some(ui) = weak_ui_for_error.upgrade()
+            if again && client.is_ready() {
+                refresh_inferiors(&weak_ui, client);
+            }
+        },
+    ) && let Some(ui) = ui.upgrade()
     {
+        ui.finish_inferior_refresh();
         ui.set_status(
             "Inferior refresh failed",
-            "Could not queue the GDB thread-group query",
+            &error.to_string(),
             Some("status-error"),
         );
     }
@@ -76,7 +83,9 @@ pub(super) fn refresh_fork_policy(ui: &Weak<Ui>, client: &MiClient) {
         return;
     };
 
-    let generation = current_ui.start_fork_policy_refresh();
+    let Some(generation) = current_ui.begin_fork_policy_refresh() else {
+        return;
+    };
     drop(current_ui);
 
     let refresh = Rc::new(RefCell::new(ForkPolicyRefresh {
@@ -90,7 +99,7 @@ pub(super) fn refresh_fork_policy(ui: &Weak<Ui>, client: &MiClient) {
     let refresh_for_response = Rc::clone(&refresh);
 
     if client
-        .request("-gdb-show follow-fork-mode", move |_, record| {
+        .request("-gdb-show follow-fork-mode", move |client, record| {
             let mode = record
                 .is_done()
                 .then(|| record.field("value"))
@@ -102,17 +111,17 @@ pub(super) fn refresh_fork_policy(ui: &Weak<Ui>, client: &MiClient) {
                     _ => None,
                 });
 
-            complete_fork_policy_refresh(&refresh_for_response, Some(mode), None);
+            complete_fork_policy_refresh(client, &refresh_for_response, Some(mode), None);
         })
         .is_err()
     {
-        complete_fork_policy_refresh(&refresh, Some(None), None);
+        complete_fork_policy_refresh(client, &refresh, Some(None), None);
     }
 
     let refresh_for_response = Rc::clone(&refresh);
 
     if client
-        .request("-gdb-show detach-on-fork", move |_, record| {
+        .request("-gdb-show detach-on-fork", move |client, record| {
             let detach = record
                 .is_done()
                 .then(|| record.field("value"))
@@ -124,15 +133,16 @@ pub(super) fn refresh_fork_policy(ui: &Weak<Ui>, client: &MiClient) {
                     _ => None,
                 });
 
-            complete_fork_policy_refresh(&refresh_for_response, None, Some(detach));
+            complete_fork_policy_refresh(client, &refresh_for_response, None, Some(detach));
         })
         .is_err()
     {
-        complete_fork_policy_refresh(&refresh, None, Some(None));
+        complete_fork_policy_refresh(client, &refresh, None, Some(None));
     }
 }
 
 fn complete_fork_policy_refresh(
+    client: &MiClient,
     refresh: &Rc<RefCell<ForkPolicyRefresh>>,
     follow: Option<Option<ForkFollowMode>>,
     detach: Option<Option<bool>>,
@@ -164,11 +174,17 @@ fn complete_fork_policy_refresh(
         return;
     };
 
-    if let Some(ui) = ui
-        .upgrade()
-        .filter(|ui| ui.is_fork_policy_refresh_current(generation))
-    {
-        ui.set_fork_policy(follow, detach);
+    if let Some(current_ui) = ui.upgrade() {
+        if current_ui.is_fork_policy_refresh_current(generation) {
+            current_ui.set_fork_policy(follow, detach);
+        }
+
+        let again = current_ui.finish_fork_policy_refresh();
+        drop(current_ui);
+
+        if again && client.is_ready() {
+            refresh_fork_policy(&ui, client);
+        }
     }
 }
 

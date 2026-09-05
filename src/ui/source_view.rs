@@ -1,8 +1,5 @@
 use super::*;
 
-const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
-const MAX_SOURCE_LINES: usize = 250_000;
-
 #[derive(Clone)]
 struct SourceGutterMenuHandlers {
     jump: Rc<RefCell<Option<SourceJumpHandler>>>,
@@ -466,9 +463,10 @@ fn connect_source_tab_context_menu(
 
 pub(super) fn open_source_document(
     path: &Path,
+    contents: &str,
     context: SourceOpenContext<'_>,
-) -> Option<SourceDocument> {
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+) -> SourceDocument {
+    let path = path.to_path_buf();
 
     if let Some(document) = context
         .documents
@@ -482,16 +480,10 @@ pub(super) fn open_source_document(
         }
 
         document.view.grab_focus();
-        return Some(document);
+        return document;
     }
 
-    let contents = crate::bounded::read_string(&path, MAX_SOURCE_BYTES).ok()?;
-
-    if contents.lines().take(MAX_SOURCE_LINES + 1).count() > MAX_SOURCE_LINES {
-        return None;
-    }
-
-    let buffer = build_source_buffer(&contents, Some(&path), context.style_scheme);
+    let buffer = build_source_buffer(contents, Some(&path), context.style_scheme);
     let view = build_source_view(&buffer);
     let breakpoint_renderer = build_breakpoint_gutter(&path, context);
 
@@ -573,7 +565,7 @@ pub(super) fn open_source_document(
     context.notebook.set_current_page(Some(page_number));
     document.view.grab_focus();
 
-    Some(document)
+    document
 }
 
 pub(super) fn build_breakpoint_gutter(
@@ -591,7 +583,8 @@ pub(super) fn build_breakpoint_gutter(
         ..
     } = context;
 
-    let source_id_for_data = source::SourceId::from_path(path);
+    // Source loading has already resolved the canonical path on a worker.
+    let source_id_for_data = source::SourceId::from_indexed_path(path);
     let breakpoints_for_data = Rc::clone(breakpoints);
     let source_index_for_data = Rc::clone(source_index);
     let inactive_foreground = gtk::gdk::RGBA::parse(theme.colors.muted).expect("theme color");
@@ -601,7 +594,7 @@ pub(super) fn build_breakpoint_gutter(
     let enabled_background = gtk::gdk::RGBA::parse(theme.colors.success).expect("theme color");
     let execution_foreground = gtk::gdk::RGBA::parse(theme.colors.warning).expect("theme color");
     let path = path.to_path_buf();
-    let source_id = source::SourceId::from_path(&path);
+    let source_id = source::SourceId::from_indexed_path(&path);
     let breakpoints = Rc::clone(breakpoints);
     let source_index = Rc::clone(source_index);
     let insert_handler = Rc::clone(insert_handler);

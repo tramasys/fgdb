@@ -1721,6 +1721,16 @@ impl Ui {
             .filter(|path| seen.insert(path.clone()))
             .collect::<Vec<_>>();
 
+        self.refresh_module_debug_metadata_batch(Arc::new(paths), generation, force, 0);
+    }
+
+    fn refresh_module_debug_metadata_batch(
+        self: &Rc<Self>,
+        paths: Arc<Vec<PathBuf>>,
+        generation: u64,
+        force: bool,
+        offset: usize,
+    ) {
         if paths.is_empty() {
             self.module_debug_force_pending
                 .store(false, Ordering::Release);
@@ -1739,34 +1749,36 @@ impl Ui {
 
         let force = self
             .module_debug_force_pending
-            .swap(false, Ordering::AcqRel);
+            .swap(false, Ordering::AcqRel)
+            || force;
 
-        let live_paths = paths.iter().cloned().collect::<HashSet<_>>();
+        if offset == 0 {
+            let live_paths = paths.iter().collect::<HashSet<_>>();
+            self.module_debug_metadata
+                .borrow_mut()
+                .retain(|path, _| live_paths.contains(path));
+        }
 
-        self.module_debug_metadata
-            .borrow_mut()
-            .retain(|path, _| live_paths.contains(path));
-
-        let cached = self.module_debug_metadata.borrow().clone();
         let current_generation = Arc::clone(&self.module_debug_generation);
+        let total_paths = paths.len().saturating_sub(offset);
+        let scan_paths = Arc::clone(&paths);
 
-        // New modules take precedence over cached ELF revalidation. Repeating
-        // bounded batches therefore advances through every loaded module
-        // instead of rescanning the same prefix forever.
-        let uncached = paths
+        // The cursor belongs to this generation, including forced scans of
+        // already cached modules. Cache presence is not a progress marker.
+        let paths = paths
             .iter()
-            .filter(|path| !cached.contains_key(*path))
+            .skip(offset)
+            .take(crate::performance::MODULE_METADATA_FILE_BUDGET)
             .cloned()
             .collect::<Vec<_>>();
 
-        let progressive_scan = !uncached.is_empty();
-        let candidates = if progressive_scan { uncached } else { paths };
-        let total_paths = candidates.len();
-
-        let paths = candidates
-            .into_iter()
-            .take(crate::performance::MODULE_METADATA_FILE_BUDGET)
-            .collect::<Vec<_>>();
+        let cached = {
+            let cache = self.module_debug_metadata.borrow();
+            paths
+                .iter()
+                .filter_map(|path| cache.get(path).map(|value| (path.clone(), value.clone())))
+                .collect::<HashMap<_, _>>()
+        };
 
         let (sender, receiver) = mpsc::channel();
         let queued_generation = Arc::clone(&current_generation);
@@ -1778,13 +1790,16 @@ impl Ui {
                 let mut metadata = HashMap::with_capacity(paths.len());
                 let started_at = Instant::now();
                 let mut time_budget_exhausted = false;
+                let is_current = || current_generation.load(Ordering::Relaxed) == generation;
 
                 for path in paths {
                     if current_generation.load(Ordering::Relaxed) != generation {
                         return;
                     }
 
-                    if started_at.elapsed() >= crate::performance::MODULE_METADATA_TIME_BUDGET {
+                    if !metadata.is_empty()
+                        && started_at.elapsed() >= crate::performance::MODULE_METADATA_TIME_BUDGET
+                    {
                         time_budget_exhausted = true;
                         break;
                     }
@@ -1803,13 +1818,16 @@ impl Ui {
 
                     let details = match unchanged {
                         Some(cached) if force && cached.error.is_some() => {
-                            crate::debug_info::inspect_module(&path)
+                            crate::debug_info::inspect_module_while(&path, &is_current)
                         }
                         Some(cached) if force => {
-                            crate::debug_info::refresh_module_debug_file(cached.clone())
+                            crate::debug_info::refresh_module_debug_file_while(
+                                cached.clone(),
+                                &is_current,
+                            )
                         }
                         Some(cached) => cached.clone(),
-                        None => crate::debug_info::inspect_module(&path),
+                        None => crate::debug_info::inspect_module_while(&path, &is_current),
                     };
 
                     metadata.insert(path, details);
@@ -1831,6 +1849,19 @@ impl Ui {
                 operation: String::from("module debug metadata"),
                 detail: error.to_string(),
             });
+
+            if error == crate::background::SubmitError::QueueFull {
+                let weak = Rc::downgrade(self);
+                glib::timeout_add_local_once(Duration::from_millis(100), move || {
+                    if let Some(ui) = weak.upgrade()
+                        && ui.module_debug_generation.load(Ordering::Relaxed) == generation
+                    {
+                        ui.refresh_module_debug_metadata_batch(
+                            scan_paths, generation, force, offset,
+                        );
+                    }
+                });
+            }
 
             return;
         }
@@ -1881,14 +1912,18 @@ impl Ui {
                             );
                         }
 
-                        if progressive_scan && inspected < total_paths {
-                            ui.refresh_module_debug_metadata(false);
+                        if inspected > 0 && inspected < total_paths {
+                            ui.refresh_module_debug_metadata_batch(
+                                Arc::clone(&scan_paths),
+                                generation,
+                                force,
+                                offset + inspected,
+                            );
                             return glib::ControlFlow::Break;
                         }
                     }
 
                     if ui.module_debug_generation.load(Ordering::Relaxed) != generation {
-                        let force = ui.module_debug_force_pending.swap(false, Ordering::AcqRel);
                         ui.refresh_module_debug_metadata(force);
                     }
 
@@ -1900,7 +1935,6 @@ impl Ui {
                         .store(false, Ordering::Release);
 
                     if ui.module_debug_generation.load(Ordering::Relaxed) != generation {
-                        let force = ui.module_debug_force_pending.swap(false, Ordering::AcqRel);
                         ui.refresh_module_debug_metadata(force);
                     }
 

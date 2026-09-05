@@ -8,8 +8,14 @@ use std::{
 use crate::config::LaunchConfig;
 
 mod cache;
+pub(crate) use cache::{CachedSource, SourceLine};
+
+pub(crate) fn read_source_snapshot(path: &Path) -> Option<CachedSource> {
+    cache::searchable_source(path)
+}
 
 const MAX_SOURCE_TREE_DIRECTORIES: usize = 25_000;
+const MAX_SOURCE_TREE_ENTRIES: usize = 400_000;
 const MAX_SEARCHABLE_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_INDEXED_SUFFIX_COMPONENTS: usize = 8;
 
@@ -28,7 +34,7 @@ impl SourceId {
         Self(canonical_source_path(path))
     }
 
-    fn from_indexed_path(path: &Path) -> Self {
+    pub(crate) fn from_indexed_path(path: &Path) -> Self {
         Self(path.to_path_buf())
     }
 }
@@ -121,6 +127,38 @@ impl SourceIndex {
         match unique_existing_path(direct) {
             SourceResolution::Missing => {}
             resolution => return resolution,
+        }
+
+        self.resolve_indexed(&reported.to_string_lossy())
+    }
+
+    /// Resolve known paths without filesystem calls on the GTK thread.
+    pub fn resolve_indexed(&self, reported: &str) -> SourceResolution {
+        let reported = Path::new(reported);
+        if self
+            .files
+            .binary_search_by(|path| path.as_path().cmp(reported))
+            .is_ok()
+        {
+            return SourceResolution::Unique(reported.to_path_buf());
+        }
+
+        let mut direct = None;
+        for root in &self.roots {
+            let candidate = root.join(reported.strip_prefix("/").unwrap_or(reported));
+            if self.files.binary_search(&candidate).is_ok() {
+                if direct
+                    .as_ref()
+                    .is_some_and(|existing| existing != &candidate)
+                {
+                    return SourceResolution::Ambiguous;
+                }
+                direct = Some(candidate);
+            }
+        }
+
+        if let Some(path) = direct {
+            return SourceResolution::Unique(path);
         }
 
         let components = normal_components(reported);
@@ -471,26 +509,38 @@ pub fn search_roots(config: &LaunchConfig) -> Vec<PathBuf> {
 
 #[cfg(test)]
 pub fn discover_source_files(roots: &[PathBuf], limit: usize) -> Vec<PathBuf> {
-    discover_source_files_while(roots, limit, || true)
+    discover_source_files_while(roots, limit, || true).files
+}
+
+pub(crate) struct SourceDiscovery {
+    pub(crate) files: Vec<PathBuf>,
+    pub(crate) truncated: bool,
 }
 
 pub fn discover_source_files_while(
     roots: &[PathBuf],
     limit: usize,
     mut should_continue: impl FnMut() -> bool,
-) -> Vec<PathBuf> {
-    let mut pending = roots.iter().cloned().collect::<VecDeque<_>>();
+) -> SourceDiscovery {
+    let mut pending = roots
+        .iter()
+        .take(MAX_SOURCE_TREE_DIRECTORIES)
+        .cloned()
+        .collect::<VecDeque<_>>();
     let mut visited_directories = HashSet::new();
     let mut seen_files = HashSet::new();
     let mut files = Vec::new();
     let mut directories = 0_usize;
+    let mut entries_seen = 0_usize;
+    let mut truncated = roots.len() > MAX_SOURCE_TREE_DIRECTORIES;
 
-    while let Some(directory) = pending.pop_front() {
+    'scan: while let Some(directory) = pending.pop_front() {
         if !should_continue() {
             break;
         }
 
         if files.len() >= limit || directories >= MAX_SOURCE_TREE_DIRECTORIES {
+            truncated = true;
             break;
         }
 
@@ -504,19 +554,22 @@ pub fn discover_source_files_while(
             continue;
         };
 
-        let mut entries = entries.flatten().collect::<Vec<_>>();
-        entries.sort_unstable_by_key(std::fs::DirEntry::file_name);
-
-        for (index, entry) in entries.into_iter().enumerate() {
+        // Stream directory entries so a generated/build directory cannot
+        // allocate an unbounded temporary vector before cancellation is seen.
+        for (index, entry) in entries.enumerate() {
             if index % 256 == 0 && !should_continue() {
-                files.sort_unstable();
-                files.dedup();
-                return files;
+                break 'scan;
             }
 
-            if files.len() >= limit {
-                break;
+            if files.len() >= limit || entries_seen >= MAX_SOURCE_TREE_ENTRIES {
+                truncated = true;
+                break 'scan;
             }
+
+            entries_seen += 1;
+            let Ok(entry) = entry else {
+                continue;
+            };
 
             let path = entry.path();
 
@@ -526,7 +579,11 @@ pub fn discover_source_files_while(
 
             if file_type.is_dir() {
                 if !is_ignored_source_directory(&entry.file_name()) {
-                    pending.push_back(path);
+                    if pending.len() + directories < MAX_SOURCE_TREE_DIRECTORIES {
+                        pending.push_back(path);
+                    } else {
+                        truncated = true;
+                    }
                 }
             } else if file_type.is_file()
                 && is_source_path(&path)
@@ -540,7 +597,7 @@ pub fn discover_source_files_while(
     files.sort_unstable();
     files.dedup();
 
-    files
+    SourceDiscovery { files, truncated }
 }
 
 #[cfg(test)]
@@ -981,9 +1038,11 @@ pub fn resolve(reported: &str, roots: &[PathBuf]) -> Option<PathBuf> {
         let mut children = std::fs::read_dir(root)
             .into_iter()
             .flatten()
+            .take(4096)
             .flatten()
             .map(|entry| entry.path())
             .filter(|path| path.is_dir())
+            .take(256)
             .collect::<Vec<_>>();
 
         children.sort_unstable();
@@ -1069,6 +1128,14 @@ mod tests {
         );
 
         std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(
+            index.resolve_indexed("src/shared/main.rs"),
+            SourceResolution::Ambiguous
+        );
+        assert_eq!(
+            index.resolve_indexed("one/src/shared/main.rs"),
+            SourceResolution::Unique(first)
+        );
     }
 
     #[test]
@@ -1180,6 +1247,12 @@ mod tests {
         std::fs::write(nested.join("b.c"), "int b;\n").unwrap();
         std::fs::write(sibling.join("c.c"), "int c;\n").unwrap();
         let files = discover_source_files(&[root.clone(), nested], 3);
+        let limited = super::discover_source_files_while(std::slice::from_ref(&root), 1, || true);
+        assert_eq!(limited.files.len(), 1);
+        assert!(limited.truncated);
+        let cancelled =
+            super::discover_source_files_while(std::slice::from_ref(&root), 3, || false);
+        assert!(cancelled.files.is_empty());
         std::fs::remove_dir_all(&root).unwrap();
         assert_eq!(files.len(), 3);
     }

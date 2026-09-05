@@ -64,55 +64,6 @@ pub(super) fn event_catchpoint_command_numbers(breakpoints: &[Breakpoint]) -> Ve
     numbers
 }
 
-pub(super) fn apply_stop_point_filter(
-    rows: &[StopPointFilterRow],
-    metadata: &HashMap<String, StopPointMetadata>,
-    controls: &StopPointFilterControls,
-) {
-    let query = controls.search.text().trim().to_ascii_lowercase();
-    let terms = query.split_whitespace().collect::<Vec<_>>();
-    let mut visible_count = 0;
-
-    for row in rows {
-        let kind_matches = match controls.kind.selected() {
-            1 => !row.watchpoint && !row.catchpoint,
-            2 => row.hardware,
-            3 => row.watchpoint,
-            4 => row.catchpoint,
-            5 => !row.enabled,
-            _ => true,
-        };
-
-        let metadata = metadata.get(&row.number);
-        let mut metadata_matches = true;
-
-        if let Some(metadata) = metadata {
-            let metadata_text = stop_point_metadata_text(metadata).to_ascii_lowercase();
-
-            metadata_matches = terms
-                .iter()
-                .all(|term| row.searchable.contains(term) || metadata_text.contains(term));
-        }
-
-        let visible = kind_matches
-            && if metadata.is_some() {
-                metadata_matches
-            } else {
-                terms.iter().all(|term| row.searchable.contains(term))
-            };
-
-        visible_count += usize::from(visible);
-
-        for widget in &row.widgets {
-            widget.set_visible(visible);
-        }
-    }
-
-    controls
-        .empty
-        .set_visible(!rows.is_empty() && visible_count == 0);
-}
-
 pub(super) fn stop_point_search_text(breakpoint: &Breakpoint) -> String {
     format!(
         "{} {} {} {} {} {} {} {} {}",
@@ -131,6 +82,35 @@ pub(super) fn stop_point_search_text(breakpoint: &Breakpoint) -> String {
         },
     )
     .to_ascii_lowercase()
+}
+
+pub(super) fn stop_point_matches(
+    breakpoint: &Breakpoint,
+    metadata: Option<&StopPointMetadata>,
+    terms: &[&str],
+    kind: u32,
+) -> bool {
+    let kind_matches = match kind {
+        1 => !breakpoint.is_watchpoint() && !breakpoint.is_catchpoint(),
+        2 => breakpoint.is_hardware_breakpoint(),
+        3 => breakpoint.is_watchpoint(),
+        4 => breakpoint.is_catchpoint(),
+        5 => !breakpoint.enabled,
+        _ => true,
+    };
+
+    if !kind_matches || terms.is_empty() {
+        return kind_matches;
+    }
+
+    let searchable = stop_point_search_text(breakpoint);
+    let metadata = metadata
+        .map(stop_point_metadata_text)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    terms
+        .iter()
+        .all(|term| searchable.contains(term) || metadata.contains(term))
 }
 
 pub(super) fn normalized_stop_point_metadata(group: &str, tags: &str) -> StopPointMetadata {

@@ -4,8 +4,10 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let theme = Theme::graphite();
     theme.install();
     let ui = Rc::new(Ui::build(application, &launch_config, &theme));
+    ui.connect_source_loading();
     ui.connect_terminal_synchronization();
     ui.connect_local_paging();
+    ui.connect_stop_point_search();
     ui.set_controls_ready(false);
     ui.connect_inferior_controls();
     ui.connect_thread_controls();

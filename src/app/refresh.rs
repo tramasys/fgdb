@@ -1078,11 +1078,7 @@ pub(super) fn delete_variable_object(client: &MiClient, varobj: &str) {
         .with(|owned| take_owned_variable_objects(&mut owned.borrow_mut(), varobj));
 
     for object in objects.into_iter().rev() {
-        let command = format!("-var-delete {}", crate::debugger::quote(&object));
-
-        // Parent deletion can legitimately remove child objects also present
-        // in the expanded UI tree, so consume any resulting errors locally.
-        let _ = client.request(&command, |_, _| {});
+        client.delete_variable_object(object);
     }
 }
 

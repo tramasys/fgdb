@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     io::{self, Read},
     os::fd::AsRawFd,
     path::PathBuf,
@@ -10,6 +10,7 @@ use std::{
 
 use gtk::glib;
 
+mod input;
 mod parser;
 mod protocol;
 #[cfg(test)]
@@ -46,6 +47,7 @@ use transport::{
 };
 
 type TransportFactory = Rc<dyn Fn() -> io::Result<MiTransport>>;
+use input::{DecodedLine, PendingInput};
 type EventHandler = Box<dyn Fn(&MiClient, MiEvent)>;
 const MAX_RETAINED_MI_INPUT_BYTES: usize = 256 * 1024;
 const MI_READ_CHUNK_BYTES: usize = 16 * 1024;
@@ -63,12 +65,16 @@ pub struct MiClient {
     transport_factory: TransportFactory,
     transport: RefCell<MiTransport>,
     incoming: RefCell<Vec<u8>>,
+    pending_input: RefCell<Option<PendingInput>>,
+    input_source: RefCell<Option<glib::SourceId>>,
     next_token: Cell<u64>,
     printer_probe_generation: Cell<u64>,
     ready: Cell<bool>,
     initializing: Cell<bool>,
     capabilities: RefCell<GdbCapabilities>,
     pending: RefCell<HashMap<u64, PendingRequest>>,
+    deferred_variable_deletions: RefCell<BTreeSet<String>>,
+    flushing_variable_deletions: Cell<bool>,
     scoped_request: RefCell<Option<ScopedMiRequest>>,
     scoped_queue: RefCell<VecDeque<ScopedMiRequest>>,
     outgoing: RefCell<OutgoingQueue>,
@@ -79,6 +85,7 @@ pub struct MiClient {
     transport_epoch: Cell<u64>,
     read_source: RefCell<Option<glib::SourceId>>,
     write_source: RefCell<Option<glib::SourceId>>,
+    write_callback_active: Cell<bool>,
     timeout_source: RefCell<Option<glib::SourceId>>,
     discarding_oversized_line: Cell<bool>,
     oversized_record_header: Cell<Option<MiRecordHeader>>,
@@ -103,12 +110,16 @@ impl MiClient {
             transport_factory,
             transport: RefCell::new(transport),
             incoming: RefCell::new(Vec::new()),
+            pending_input: RefCell::new(None),
+            input_source: RefCell::new(None),
             next_token: Cell::new(1),
             printer_probe_generation: Cell::new(0),
             ready: Cell::new(false),
             initializing: Cell::new(false),
             capabilities: RefCell::new(GdbCapabilities::default()),
             pending: RefCell::new(HashMap::new()),
+            deferred_variable_deletions: RefCell::new(BTreeSet::new()),
+            flushing_variable_deletions: Cell::new(false),
             scoped_request: RefCell::new(None),
             scoped_queue: RefCell::new(VecDeque::new()),
             outgoing: RefCell::new(OutgoingQueue::default()),
@@ -119,6 +130,7 @@ impl MiClient {
             transport_epoch: Cell::new(1),
             read_source: RefCell::new(None),
             write_source: RefCell::new(None),
+            write_callback_active: Cell::new(false),
             timeout_source: RefCell::new(None),
             discarding_oversized_line: Cell::new(false),
             oversized_record_header: Cell::new(None),
@@ -179,6 +191,7 @@ impl MiClient {
 
     pub fn reconnect(&self) -> io::Result<PathBuf> {
         self.advance_transport_epoch();
+        self.remove_sources();
 
         self.printer_probe_generation
             .set(self.printer_probe_generation.get().wrapping_add(1));
@@ -186,18 +199,6 @@ impl MiClient {
         if self.connected.replace(false) {
             self.ready.set(false);
             self.initializing.set(false);
-
-            if let Some(source) = self.read_source.borrow_mut().take() {
-                source.remove();
-            }
-
-            if let Some(source) = self.write_source.borrow_mut().take() {
-                source.remove();
-            }
-
-            if let Some(source) = self.timeout_source.borrow_mut().take() {
-                source.remove();
-            }
 
             self.outgoing.borrow_mut().clear();
             self.fail_pending_requests("GDB/MI connection replaced");
@@ -223,6 +224,21 @@ impl MiClient {
     }
 
     fn install_sources(&self) {
+        self.install_read_source();
+        let weak_client = self.self_weak.clone();
+
+        let timeout_source = glib::timeout_add_local(REQUEST_TIMEOUT_POLL, move || {
+            let Some(client) = weak_client.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+
+            client.expire_requests();
+            glib::ControlFlow::Continue
+        });
+        self.timeout_source.replace(Some(timeout_source));
+    }
+
+    fn install_read_source(&self) {
         let master_fd = self.transport.borrow().master.as_raw_fd();
         let weak_client = self.self_weak.clone();
 
@@ -233,19 +249,20 @@ impl MiClient {
         );
 
         self.read_source.replace(Some(source));
-        let weak_client = self.self_weak.clone();
+    }
 
-        let timeout_source = glib::timeout_add_local(REQUEST_TIMEOUT_POLL, move || {
-            let Some(client) = weak_client.upgrade() else {
-                return glib::ControlFlow::Break;
-            };
-
-            client.expire_requests();
-
-            glib::ControlFlow::Continue
-        });
-
-        self.timeout_source.replace(Some(timeout_source));
+    fn remove_sources(&self) {
+        for slot in [
+            &self.read_source,
+            &self.write_source,
+            &self.timeout_source,
+            &self.input_source,
+        ] {
+            if let Some(source) = slot.borrow_mut().take() {
+                source.remove();
+            }
+        }
+        self.pending_input.borrow_mut().take();
     }
 
     pub fn send(&self, command: &str) -> io::Result<u64> {
@@ -730,6 +747,73 @@ impl MiClient {
                 }
             }
         }
+
+        self.flush_variable_deletions();
+    }
+
+    pub(crate) fn delete_variable_object(&self, name: String) {
+        if !self.connected.get() || self.quarantined.get() {
+            return;
+        }
+
+        self.deferred_variable_deletions.borrow_mut().insert(name);
+        self.flush_variable_deletions();
+    }
+
+    fn flush_variable_deletions(&self) {
+        if !self.connected.get()
+            || self.quarantined.get()
+            || self.flushing_variable_deletions.replace(true)
+        {
+            return;
+        }
+
+        // Cleanup keeps ownership while ordinary admission is backpressured.
+        // Use the background window so it cannot fill the execution reserve.
+        while self.pending.borrow().len() < MAX_NON_EXECUTION_REQUESTS
+            && self.can_dispatch(CommandClass::Background, self.next_token.get())
+        {
+            let Some(name) = self.deferred_variable_deletions.borrow_mut().pop_first() else {
+                break;
+            };
+            let retry = name.clone();
+            let epoch = self.transport_epoch.get();
+            let command = format!("-var-delete {}", quote(&name));
+
+            if self
+                .request_inner(
+                    &command,
+                    CommandClass::Background,
+                    None,
+                    None,
+                    Box::new(move |client, record| {
+                        // GDB's own errors usually mean a parent already removed this
+                        // child. Transport rejection before execution needs a retry.
+                        if matches!(record.class.as_str(), "unavailable" | "timeout")
+                            && client.transport_epoch.get() == epoch
+                            && client.connected.get()
+                            && !client.quarantined.get()
+                        {
+                            client
+                                .deferred_variable_deletions
+                                .borrow_mut()
+                                .insert(retry);
+                        }
+                    }),
+                )
+                .is_err()
+            {
+                if self.transport_epoch.get() == epoch
+                    && self.connected.get()
+                    && !self.quarantined.get()
+                {
+                    self.deferred_variable_deletions.borrow_mut().insert(name);
+                }
+                break;
+            }
+        }
+
+        self.flushing_variable_deletions.set(false);
     }
 
     fn cancel_invalid_pending_requests(&self) {
@@ -1199,7 +1283,10 @@ impl MiClient {
     }
 
     fn ensure_write_source(&self) {
-        if self.write_source.borrow().is_some() {
+        if self.write_callback_active.get()
+            || self.write_source.borrow().is_some()
+            || self.pending_input.borrow().is_some()
+        {
             return;
         }
 
@@ -1216,7 +1303,8 @@ impl MiClient {
     }
 
     fn stop_write_source_if_idle(&self) {
-        if self.outgoing.borrow().is_empty()
+        if !self.write_callback_active.get()
+            && self.outgoing.borrow().is_empty()
             && let Some(source) = self.write_source.borrow_mut().take()
         {
             source.remove();
@@ -1228,6 +1316,23 @@ impl MiClient {
             return glib::ControlFlow::Break;
         };
 
+        // Request callbacks may cancel and enqueue writes synchronously. Keep
+        // this source's ownership until its callback has finished, so a new
+        // source cannot be mistaken for the one returning Break.
+        client.write_callback_active.set(true);
+        let result = Self::drain_write_ready(Rc::clone(&client), condition);
+        client.write_callback_active.set(false);
+
+        if client.connected.get()
+            && !client.quarantined.get()
+            && !client.outgoing.borrow().is_empty()
+        {
+            client.ensure_write_source();
+        }
+        result
+    }
+
+    fn drain_write_ready(client: Rc<Self>, condition: glib::IOCondition) -> glib::ControlFlow {
         let epoch = client.transport_epoch.get();
 
         loop {
@@ -1298,7 +1403,11 @@ impl MiClient {
                     MiEvent::Error(String::from("GDB closed the MI command channel")),
                 );
 
-                client.disconnect(IoSource::Write)
+                if client.transport_epoch.get() == epoch {
+                    client.disconnect(IoSource::Write)
+                } else {
+                    glib::ControlFlow::Break
+                }
             }
             Ok(false) => glib::ControlFlow::Continue,
             Err(error) => {
@@ -1309,7 +1418,11 @@ impl MiClient {
                     MiEvent::Error(format!("Could not write a GDB/MI command: {error}")),
                 );
 
-                client.disconnect(IoSource::Write)
+                if client.transport_epoch.get() == epoch {
+                    client.disconnect(IoSource::Write)
+                } else {
+                    glib::ControlFlow::Break
+                }
             }
         }
     }
@@ -1341,7 +1454,10 @@ impl MiClient {
 
                     // Event handlers may reconnect while consuming a record.
                     // The replacement transport owns a new readiness source.
-                    if client.transport_epoch.get() != epoch || !client.connected.get() {
+                    if client.transport_epoch.get() != epoch
+                        || !client.connected.get()
+                        || client.pending_input.borrow().is_some()
+                    {
                         return glib::ControlFlow::Break;
                     }
                 }
@@ -1385,6 +1501,11 @@ impl MiClient {
             source.remove();
         }
 
+        if let Some(source) = self.input_source.borrow_mut().take() {
+            source.remove();
+        }
+        self.pending_input.borrow_mut().take();
+
         self.outgoing.borrow_mut().clear();
         self.fail_pending_requests("GDB/MI connection closed");
 
@@ -1398,6 +1519,7 @@ impl MiClient {
     }
 
     fn fail_pending_requests(&self, reason: &str) {
+        self.deferred_variable_deletions.borrow_mut().clear();
         let pending = std::mem::take(&mut *self.pending.borrow_mut());
         let scoped = self.scoped_request.borrow_mut().take();
         let queued = self.scoped_queue.borrow_mut().drain(..).collect::<Vec<_>>();
@@ -1483,6 +1605,11 @@ impl MiClient {
         let Some(complete) = complete else {
             return;
         };
+
+        if complete.len() > input::INLINE_INPUT_BYTES {
+            self.defer_input(complete);
+            return;
+        }
 
         for line in complete.split(|byte| *byte == b'\n') {
             if self.transport_epoch.get() != epoch {
@@ -1616,6 +1743,10 @@ impl MiClient {
             self.quarantined.set(true);
             self.ready.set(false);
             self.initializing.set(false);
+            // Quarantine also retires callbacks that will return Break after
+            // observing the new epoch. Clear their IDs before GLib destroys
+            // them, otherwise a later restart tries to remove a dead source.
+            self.remove_sources();
             self.outgoing.borrow_mut().clear();
             self.fail_pending_requests("GDB/MI connection quarantined");
 
@@ -2021,63 +2152,57 @@ impl MiClient {
     }
 
     fn process_line(&self, line: &str) {
-        let line = line.trim();
+        self.process_decoded_line(DecodedLine::parse(line.as_bytes()));
+    }
 
+    fn process_decoded_line(&self, line: DecodedLine) {
         if self.quarantined.get() {
             return;
         }
 
-        if line == "(gdb)" {
-            if !self.ready.get() && !self.initializing.replace(true) {
-                self.begin_initialization();
-            } else if self.ready.get() && self.thread_exit_since_prompt.replace(false) {
-                (self.event_handler)(self, MiEvent::ThreadExitPrompt);
-            }
-
-            return;
-        }
-
-        if matches!(line.as_bytes().first(), Some(b'~' | b'&' | b'@')) {
-            let output = parse_any_stream_output(line).ok();
-
-            // Console stream records matter on this private MI channel only
-            // while a scoped `interpreter-exec mi` request is waiting for its
-            // nested result. Avoid decoding ignored console output, and avoid
-            // constructing a parse error for every ordinary MI record.
-            if let Some(output) = output
-                && let Some(request) = self.scoped_request.borrow_mut().as_mut()
-                && !request.cancelled
-            {
-                let command_output = matches!(line.as_bytes().first(), Some(b'~' | b'&'));
-
-                if command_output {
-                    let now = Instant::now();
-                    request.deadline = (now + request.class.timeout()).min(request.hard_deadline);
+        let record = match line {
+            DecodedLine::Prompt => {
+                if !self.ready.get() && !self.initializing.replace(true) {
+                    self.begin_initialization();
+                } else if self.ready.get() && self.thread_exit_since_prompt.replace(false) {
+                    (self.event_handler)(self, MiEvent::ThreadExitPrompt);
                 }
-
-                if request.expect_nested_mi {
-                    if line.starts_with('~')
-                        && let Ok(response) = parse_record(output.trim())
-                        && response.kind == '^'
-                    {
-                        request.response = Some(response);
+                return;
+            }
+            DecodedLine::Stream {
+                kind,
+                output,
+                nested,
+            } => {
+                if let Some(request) = self.scoped_request.borrow_mut().as_mut()
+                    && !request.cancelled
+                {
+                    let command_output = matches!(kind, b'~' | b'&');
+                    if command_output {
+                        let now = Instant::now();
+                        request.deadline =
+                            (now + request.class.timeout()).min(request.hard_deadline);
                     }
-                } else if command_output {
-                    let remaining = MAX_CAPTURED_CONSOLE_BYTES.saturating_sub(request.output.len());
-                    let accepted = output.floor_char_boundary(remaining);
-                    request.output.push_str(&output[..accepted]);
-                    request.output_truncated |= accepted < output.len();
+
+                    if request.expect_nested_mi {
+                        if let Some(response) = nested {
+                            request.response = Some(response);
+                        }
+                    } else if command_output {
+                        let remaining =
+                            MAX_CAPTURED_CONSOLE_BYTES.saturating_sub(request.output.len());
+                        let accepted = output.floor_char_boundary(remaining);
+                        request.output.push_str(&output[..accepted]);
+                        request.output_truncated |= accepted < output.len();
+                    }
                 }
+                return;
             }
-
-            return;
-        }
-
-        let record = match parse_record(line) {
-            Ok(record) => record,
-            Err(error) => {
-                let header = mi_record_header(line.as_bytes());
-
+            DecodedLine::Invalid {
+                header,
+                error,
+                state,
+            } => {
                 if header.kind == Some(b'^')
                     && let Some(token) = header.token
                 {
@@ -2085,18 +2210,17 @@ impl MiClient {
                         token,
                         &format!("GDB/MI result exceeded its structural budget: {error}"),
                     );
-
-                    return;
+                } else if state {
+                    self.report_unusable(String::from("GDB emitted a malformed MI state record. Debugger synchronization can no longer be trusted."));
                 }
-
-                if looks_like_mi_record(line) {
-                    self.report_unusable(String::from(
-                    "GDB emitted a malformed MI state record. Debugger synchronization can no longer be trusted.",
-                ));
-                }
-
                 return;
             }
+            DecodedLine::Oversized(header) => {
+                self.handle_oversized_record(header);
+                return;
+            }
+            DecodedLine::Ignored => return,
+            DecodedLine::Record(record) => record,
         };
 
         match record.kind {
@@ -2466,17 +2590,7 @@ fn looks_like_mi_record(line: &str) -> bool {
 
 impl Drop for MiClient {
     fn drop(&mut self) {
-        if let Some(source) = self.read_source.borrow_mut().take() {
-            source.remove();
-        }
-
-        if let Some(source) = self.write_source.borrow_mut().take() {
-            source.remove();
-        }
-
-        if let Some(source) = self.timeout_source.borrow_mut().take() {
-            source.remove();
-        }
+        self.remove_sources();
     }
 }
 

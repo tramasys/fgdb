@@ -30,6 +30,116 @@ fn write_ready(client: &Rc<MiClient>, peer: &mut UnixStream) -> String {
     output
 }
 
+fn iterate_until(mut done: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !done() {
+        assert!(
+            Instant::now() < deadline,
+            "MI main-loop work did not complete"
+        );
+        glib::MainContext::default().iteration(false);
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn breakpoint_failure_quarantine_then_restart_retires_glib_sources() {
+    use std::io::Write;
+
+    with_client(|client, peer| {
+        let token = client
+            .request("-break-insert rust_fixture.rs:51", |client, record| {
+                assert_eq!(record.class, "error");
+                client.quarantine("breakpoint backend failure");
+            })
+            .unwrap();
+        write_ready(&client, peer);
+        peer.write_all(format!("{token}^error,msg=\"backend failure\"\n").as_bytes())
+            .unwrap();
+        iterate_until(|| client.quarantined.get());
+
+        assert!(client.read_source.borrow().is_none());
+        assert!(client.write_source.borrow().is_none());
+        assert!(client.timeout_source.borrow().is_none());
+        client.reconnect().unwrap();
+        assert!(client.read_source.borrow().is_some());
+        assert!(!client.quarantined.get());
+    });
+}
+
+#[test]
+fn deferred_input_preserves_order_and_cannot_publish_into_a_replacement_transport() {
+    with_client(|client, peer| {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let first = Rc::clone(&calls);
+        let one = client
+            .request("-thread-info", move |_, record| {
+                assert!(record.is_done());
+                first.borrow_mut().push(1);
+            })
+            .unwrap();
+        let second = Rc::clone(&calls);
+        let two = client
+            .request("-thread-info", move |_, record| {
+                assert!(record.is_done());
+                second.borrow_mut().push(2);
+            })
+            .unwrap();
+        write_ready(&client, peer);
+        let padding = "x".repeat(input::INLINE_INPUT_BYTES * 2);
+        client.consume(format!("{one}^done,value=\"{padding}\"\n{two}^done\n").as_bytes());
+        assert!(calls.borrow().is_empty());
+        assert!(client.read_source.borrow().is_none());
+        client.request("-thread-info", |_, _| {}).unwrap();
+        assert!(client.write_source.borrow().is_none());
+        iterate_until(|| client.pending_input.borrow().is_none());
+        assert_eq!(*calls.borrow(), [1, 2]);
+        assert!(client.read_source.borrow().is_some());
+        assert!(client.write_source.borrow().is_some());
+
+        client.consume(format!("*stopped,reason=\"{padding}\"\n").as_bytes());
+        client.reconnect().unwrap();
+        assert!(client.pending_input.borrow().is_none());
+        assert!(client.input_source.borrow().is_none());
+        assert!(client.read_source.borrow().is_some());
+    });
+}
+
+#[test]
+fn variable_cleanup_retains_ownership_until_background_capacity_returns() {
+    with_client(|client, peer| {
+        let mut tokens = Vec::new();
+        for _ in 0..MAX_ACTIVE_BACKGROUND_REQUESTS {
+            tokens.push(
+                client
+                    .request_inner(
+                        "-thread-info",
+                        CommandClass::Background,
+                        None,
+                        None,
+                        Box::new(|_, _| {}),
+                    )
+                    .unwrap(),
+            );
+        }
+        write_ready(&client, peer);
+        client.delete_variable_object(String::from("var-owned"));
+        client.delete_variable_object(String::from("var-owned"));
+        assert_eq!(client.deferred_variable_deletions.borrow().len(), 1);
+        assert!(write_ready(&client, peer).is_empty());
+
+        client.process_line(&format!("{}^done", tokens[0]));
+        let wire = write_ready(&client, peer);
+        assert_eq!(wire.matches("-var-delete").count(), 1);
+        assert!(wire.contains("var-owned"));
+        assert!(client.deferred_variable_deletions.borrow().is_empty());
+
+        client.delete_variable_object(String::from("old-backend"));
+        client.reconnect().unwrap();
+        assert!(client.deferred_variable_deletions.borrow().is_empty());
+    });
+}
+
 #[test]
 fn stale_on_admission_completes_once_without_writing() {
     with_client(|client, peer| {
@@ -74,6 +184,8 @@ fn revalidates_unwritten_requests_and_allows_reentrant_callbacks() {
             .unwrap();
         current.set(false);
 
+        iterate_until(|| client.outgoing.borrow().is_empty());
+        assert!(client.write_source.borrow().is_none());
         let wire = write_ready(&client, peer);
         assert!(!wire.contains("stale"));
         assert!(wire.contains("-thread-info"));

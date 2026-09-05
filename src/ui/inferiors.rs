@@ -207,6 +207,26 @@ impl Ui {
         generation
     }
 
+    pub(crate) fn begin_inferior_refresh(&self) -> Option<u64> {
+        self.inferior_refresh_gate
+            .begin()
+            .then(|| self.start_inferior_refresh())
+    }
+
+    pub(crate) fn finish_inferior_refresh(&self) -> bool {
+        self.inferior_refresh_gate.finish()
+    }
+
+    pub(crate) fn begin_fork_policy_refresh(&self) -> Option<u64> {
+        self.fork_policy_refresh_gate
+            .begin()
+            .then(|| self.start_fork_policy_refresh())
+    }
+
+    pub(crate) fn finish_fork_policy_refresh(&self) -> bool {
+        self.fork_policy_refresh_gate.finish()
+    }
+
     pub(crate) fn is_inferior_refresh_current(&self, generation: u64) -> bool {
         self.inferior_refresh_generation.get() == generation
     }

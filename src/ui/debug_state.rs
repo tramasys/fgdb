@@ -1612,40 +1612,6 @@ impl Ui {
         });
     }
 
-    fn disassembly_source_text(&self, instruction: &Instruction) -> Option<Rc<str>> {
-        const MAX_SOURCE_BYTES: usize = 2 * 1024 * 1024;
-        let source = instruction.source.as_ref()?;
-        let path = self.resolve_source_path(source.source_path())?;
-
-        let lines =
-            if let Some(lines) = self.disassembly_source_cache.borrow_mut().get_cloned(&path) {
-                lines
-            } else {
-                let contents = crate::bounded::read_string(&path, MAX_SOURCE_BYTES).ok()?;
-                let lines = Rc::new(contents.lines().map(Rc::<str>::from).collect::<Vec<_>>());
-                let mut cache = self.disassembly_source_cache.borrow_mut();
-                let evicted = cache.insert(path, Rc::clone(&lines));
-                drop(cache);
-
-                if evicted {
-                    self.record_performance_notice(crate::performance::PerformanceNotice {
-                        outcome: crate::performance::BudgetOutcome::Evicted,
-                        operation: String::from("disassembly source cache"),
-                        detail: format!(
-                            "least-recently used file was removed at the {}-file budget",
-                            crate::performance::DISASSEMBLY_SOURCE_CACHE_BUDGET
-                        ),
-                    });
-                }
-
-                lines
-            };
-
-        let index = usize::try_from(source.line).ok()?.checked_sub(1)?;
-
-        lines.get(index).cloned()
-    }
-
     fn update_instruction_insight(&self) {
         let Some(instruction) = self.current_instruction.borrow().clone() else {
             self.instruction_flow
@@ -2544,39 +2510,36 @@ impl Ui {
             .connect_activate(move |_| button.emit_clicked());
     }
 
+    pub(crate) fn connect_stop_point_search(self: &Rc<Self>) {
+        let weak = Rc::downgrade(self);
+        let scheduled = Rc::new(Cell::new(false));
+        let refresh = Rc::new(move || {
+            if scheduled.replace(true) {
+                return;
+            }
+
+            let scheduled = Rc::clone(&scheduled);
+            let weak = weak.clone();
+            // Replacing entry text can emit a transient empty search. Render
+            // once after the edit instead of rebuilding an unfiltered pane.
+            glib::idle_add_local_once(move || {
+                scheduled.set(false);
+                if let Some(ui) = weak.upgrade() {
+                    let breakpoints = ui.breakpoints.borrow().clone();
+                    ui.render_breakpoints(breakpoints, true);
+                }
+            });
+        });
+        let on_search = Rc::clone(&refresh);
+        self.stop_point_filter
+            .search
+            .connect_search_changed(move |_| on_search());
+        self.stop_point_filter
+            .kind
+            .connect_selected_notify(move |_| refresh());
+    }
+
     pub(super) fn connect_breakpoint_bulk_controls(&self) {
-        let rows = Rc::clone(&self.stop_point_filter_rows);
-        let metadata = Rc::clone(&self.stop_point_metadata);
-        let search = self.stop_point_filter.search.clone();
-        let kind = self.stop_point_filter.kind.clone();
-        let rows_for_search = Rc::clone(&rows);
-        let metadata_for_search = Rc::clone(&metadata);
-        let controls_for_search = self.stop_point_filter.clone();
-
-        search.connect_search_changed(move |search| {
-            let _ = search;
-
-            apply_stop_point_filter(
-                &rows_for_search.borrow(),
-                &metadata_for_search.borrow(),
-                &controls_for_search,
-            );
-        });
-
-        let rows_for_kind = rows;
-        let metadata_for_kind = metadata;
-        let controls_for_kind = self.stop_point_filter.clone();
-
-        kind.connect_selected_notify(move |kind| {
-            let _ = kind;
-
-            apply_stop_point_filter(
-                &rows_for_kind.borrow(),
-                &metadata_for_kind.borrow(),
-                &controls_for_kind,
-            );
-        });
-
         let parent = self.window.clone();
         let handler = Rc::clone(&self.breakpoint_editor_handler);
         let capabilities = Rc::clone(&self.gdb_capabilities);
@@ -2823,12 +2786,17 @@ impl Ui {
     }
 
     pub fn show_breakpoints(&self, breakpoints: Vec<Breakpoint>) {
-        if self.breakpoints.borrow().as_slice() == breakpoints {
+        self.render_breakpoints(breakpoints, false);
+    }
+
+    fn render_breakpoints(&self, breakpoints: Vec<Breakpoint>, filter_changed: bool) {
+        if !filter_changed && self.breakpoints.borrow().as_slice() == breakpoints {
             return;
         }
 
         let render_started = Instant::now();
-        let status_only = breakpoint_layout_matches(&self.breakpoints.borrow(), &breakpoints);
+        let status_only =
+            !filter_changed && breakpoint_layout_matches(&self.breakpoints.borrow(), &breakpoints);
         self.breakpoints.replace(breakpoints);
 
         let active_numbers = self
@@ -2887,13 +2855,56 @@ impl Ui {
             .borrow()
             .supports("pending-breakpoints");
 
-        let total_stop_points = breakpoints.len();
+        let query = self
+            .stop_point_filter
+            .search
+            .text()
+            .trim()
+            .to_ascii_lowercase();
+        let terms = query.split_whitespace().collect::<Vec<_>>();
+        let metadata = self.stop_point_metadata.borrow();
+        let matching = breakpoints
+            .iter()
+            .filter(|breakpoint| {
+                stop_point_matches(
+                    breakpoint,
+                    metadata.get(breakpoint.command_number()),
+                    &terms,
+                    self.stop_point_filter.kind.selected(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let matching_parents = matching
+            .iter()
+            .map(|breakpoint| breakpoint.command_number())
+            .collect::<HashSet<_>>();
+        let directly_matching_parents = matching
+            .iter()
+            .filter(|breakpoint| !breakpoint.is_location())
+            .map(|breakpoint| breakpoint.command_number())
+            .collect::<HashSet<_>>();
+        let matching_locations = matching
+            .iter()
+            .filter(|breakpoint| breakpoint.is_location())
+            .map(|breakpoint| breakpoint.number.as_str())
+            .collect::<HashSet<_>>();
+        let location_matches = |location: &&Breakpoint| {
+            directly_matching_parents.contains(location.command_number())
+                || matching_locations.contains(location.number.as_str())
+        };
+        let total_stop_points = breakpoints
+            .iter()
+            .filter(|breakpoint| {
+                if breakpoint.is_location() {
+                    location_matches(breakpoint)
+                } else {
+                    matching_parents.contains(breakpoint.command_number())
+                }
+            })
+            .count();
         let mut rendered_stop_points = 0_usize;
 
-        // Stop-point filtering currently operates on rendered rows, so this
-        // hard cap must not adapt downward and hide entries that were
-        // previously searchable. Unlike locals and threads, the pane needs a
-        // true paged model before runtime shedding is safe.
+        // Search the complete model before bounding widget construction.
         let stop_point_limit = crate::performance::STOP_POINT_WIDGET_BUDGET;
 
         if breakpoints.is_empty() {
@@ -2904,6 +2915,7 @@ impl Ui {
             let rendered_parent_numbers = breakpoints
                 .iter()
                 .filter(|breakpoint| !breakpoint.is_location())
+                .filter(|breakpoint| matching_parents.contains(breakpoint.command_number()))
                 .take(stop_point_limit)
                 .map(|breakpoint| breakpoint.number.as_str())
                 .collect::<HashSet<_>>();
@@ -2914,6 +2926,7 @@ impl Ui {
             for location in breakpoints
                 .iter()
                 .filter(|breakpoint| breakpoint.is_location())
+                .filter(location_matches)
             {
                 if retained_location_count >= stop_point_limit {
                     break;
@@ -2936,6 +2949,7 @@ impl Ui {
             for breakpoint in breakpoints
                 .iter()
                 .filter(|breakpoint| !breakpoint.is_location())
+                .filter(|breakpoint| matching_parents.contains(breakpoint.command_number()))
             {
                 if rendered_stop_points >= stop_point_limit {
                     break;
@@ -3166,13 +3180,11 @@ impl Ui {
                 let parent = self.window.clone();
                 let number = breakpoint.command_number().to_owned();
                 let metadata = Rc::clone(&self.stop_point_metadata);
-                let filter_rows = Rc::clone(&self.stop_point_filter_rows);
                 let filter_controls = self.stop_point_filter.clone();
 
                 organize_button.connect_clicked(move |_| {
                     let current = metadata.borrow().get(&number).cloned().unwrap_or_default();
                     let metadata_for_apply = Rc::clone(&metadata);
-                    let rows_for_apply = Rc::clone(&filter_rows);
                     let controls_for_apply = filter_controls.clone();
                     let organization = organization.clone();
                     let number_for_apply = number.clone();
@@ -3194,11 +3206,9 @@ impl Ui {
                                     .insert(number_for_apply.clone(), updated);
                             }
 
-                            apply_stop_point_filter(
-                                &rows_for_apply.borrow(),
-                                &metadata_for_apply.borrow(),
-                                &controls_for_apply,
-                            );
+                            controls_for_apply
+                                .search
+                                .emit_by_name::<()>("search-changed", &[]);
                         }),
                     );
                 });
@@ -3227,7 +3237,6 @@ impl Ui {
                 });
 
                 self.breakpoints_list.append(&row);
-                let mut filter_widgets = vec![row.clone().upcast::<gtk::Widget>()];
 
                 for location in locations_by_parent
                     .get(breakpoint.number.as_str())
@@ -3305,20 +3314,13 @@ impl Ui {
                     });
 
                     self.breakpoints_list.append(&location_row);
-                    filter_widgets.push(location_row.upcast::<gtk::Widget>());
                 }
 
                 self.stop_point_filter_rows
                     .borrow_mut()
                     .push(StopPointFilterRow {
-                        widgets: filter_widgets,
                         number: breakpoint.command_number().to_owned(),
-                        searchable: stop_point_search_text(breakpoint),
                         status,
-                        hardware: breakpoint.is_hardware_breakpoint(),
-                        watchpoint: breakpoint.is_watchpoint(),
-                        catchpoint: breakpoint.is_catchpoint(),
-                        enabled: breakpoint.enabled,
                     });
             }
         }
@@ -3327,7 +3329,7 @@ impl Ui {
             let omitted = total_stop_points - rendered_stop_points;
 
             let notice = performance_partial_label(&format!(
-                "{omitted} additional stop point{} not rendered. Use the GDB console for the complete set",
+                "{omitted} additional matching stop point{} not rendered. Refine the search to find them",
                 if omitted == 1 { " was" } else { "s were" }
             ));
 
@@ -3343,11 +3345,9 @@ impl Ui {
 
         self.breakpoints_list.append(&self.stop_point_filter.empty);
 
-        apply_stop_point_filter(
-            &self.stop_point_filter_rows.borrow(),
-            &self.stop_point_metadata.borrow(),
-            &self.stop_point_filter,
-        );
+        self.stop_point_filter
+            .empty
+            .set_visible(!breakpoints.is_empty() && total_stop_points == 0);
 
         for (button, signal, description) in &self.signal_buttons {
             if let Some(number) = signal_catchpoint_command_number(&breakpoints, signal) {

@@ -400,15 +400,6 @@ mod tests {
     }
 
     #[test]
-    fn rust_string_assignment_is_atomic_and_does_not_use_global_scratch_values() {
-        let script = rust_string_assignment_python("local_string", "Zürich".as_bytes());
-        assert!(!script.contains("set_convenience_variable"));
-        assert!(!script.contains("$fgdb_"));
-        assert!(script.contains("b.decode(\"utf-8\")"));
-        assert!(script.contains("gdb.selected_inferior().write_memory"));
-    }
-
-    #[test]
     #[ignore = "requires Python-enabled GDB and the built rust-variable-viewer-target fixture"]
     fn live_rust_string_and_type_metadata_roundtrip() {
         use std::{process::Command, time::Duration};

@@ -70,7 +70,15 @@ impl ModuleDebugMetadata {
     }
 }
 
-pub(crate) fn inspect_module(path: &Path) -> ModuleDebugMetadata {
+#[cfg(test)]
+fn inspect_module(path: &Path) -> ModuleDebugMetadata {
+    inspect_module_while(path, &|| true)
+}
+
+pub(crate) fn inspect_module_while(
+    path: &Path,
+    is_current: &impl Fn() -> bool,
+) -> ModuleDebugMetadata {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) => {
@@ -107,18 +115,21 @@ pub(crate) fn inspect_module(path: &Path) -> ModuleDebugMetadata {
         }
     };
 
-    refresh_module_debug_file(ModuleDebugMetadata {
-        path: path.to_path_buf(),
-        build_id: elf.build_id,
-        debuglink: elf.debuglink,
-        debuglink_crc: elf.debuglink_crc,
-        separate_debug_file: None,
-        embedded_debug_info: elf.embedded_debug_info,
-        suggestion: None,
-        error: None,
-        file_size: Some(metadata.len()),
-        modified: metadata.modified().ok(),
-    })
+    refresh_module_debug_file_while(
+        ModuleDebugMetadata {
+            path: path.to_path_buf(),
+            build_id: elf.build_id,
+            debuglink: elf.debuglink,
+            debuglink_crc: elf.debuglink_crc,
+            separate_debug_file: None,
+            embedded_debug_info: elf.embedded_debug_info,
+            suggestion: None,
+            error: None,
+            file_size: Some(metadata.len()),
+            modified: metadata.modified().ok(),
+        },
+        is_current,
+    )
 }
 
 struct ElfDebugMetadata {
@@ -371,7 +382,10 @@ fn section_name(names: &[u8], offset: usize) -> Option<&str> {
     std::str::from_utf8(&name[..end]).ok()
 }
 
-pub(crate) fn refresh_module_debug_file(mut metadata: ModuleDebugMetadata) -> ModuleDebugMetadata {
+pub(crate) fn refresh_module_debug_file_while(
+    mut metadata: ModuleDebugMetadata,
+    is_current: &impl Fn() -> bool,
+) -> ModuleDebugMetadata {
     if metadata.error.is_some() {
         return metadata;
     }
@@ -381,6 +395,7 @@ pub(crate) fn refresh_module_debug_file(mut metadata: ModuleDebugMetadata) -> Mo
         metadata.debuglink.as_deref(),
         metadata.debuglink_crc,
         metadata.build_id.as_deref(),
+        is_current,
     );
 
     metadata.suggestion = (!metadata.embedded_debug_info && metadata.separate_debug_file.is_none())
@@ -457,6 +472,7 @@ fn find_separate_debug_file(
     debuglink: Option<&str>,
     debuglink_crc: Option<u32>,
     build_id: Option<&str>,
+    is_current: &impl Fn() -> bool,
 ) -> Option<PathBuf> {
     let mut debuglink_candidates = Vec::new();
 
@@ -497,24 +513,47 @@ fn find_separate_debug_file(
         }
     }
 
-    select_separate_debug_file(
+    select_separate_debug_file_while(
         debuglink_candidates,
         debuglink_crc,
         build_id_candidates,
         build_id,
+        is_current,
     )
 }
 
+#[cfg(test)]
 fn select_separate_debug_file(
     debuglink_candidates: impl IntoIterator<Item = PathBuf>,
     debuglink_crc: Option<u32>,
     build_id_candidates: impl IntoIterator<Item = PathBuf>,
     expected_build_id: Option<&str>,
 ) -> Option<PathBuf> {
+    select_separate_debug_file_while(
+        debuglink_candidates,
+        debuglink_crc,
+        build_id_candidates,
+        expected_build_id,
+        &|| true,
+    )
+}
+
+fn select_separate_debug_file_while(
+    debuglink_candidates: impl IntoIterator<Item = PathBuf>,
+    debuglink_crc: Option<u32>,
+    build_id_candidates: impl IntoIterator<Item = PathBuf>,
+    expected_build_id: Option<&str>,
+    is_current: &impl Fn() -> bool,
+) -> Option<PathBuf> {
     if let Some(expected_crc) = debuglink_crc {
         for candidate in debuglink_candidates {
+            if !is_current() {
+                return None;
+            }
+
             if candidate.is_file()
-                && cached_gnu_debuglink_crc(&candidate).is_ok_and(|crc| crc == expected_crc)
+                && cached_gnu_debuglink_crc_while(&candidate, is_current)
+                    .is_ok_and(|crc| crc == expected_crc)
             {
                 return Some(candidate);
             }
@@ -523,10 +562,13 @@ fn select_separate_debug_file(
 
     let expected_build_id = expected_build_id?;
 
-    build_id_candidates.into_iter().find(|candidate| {
-        candidate_build_id(candidate)
-            .is_ok_and(|build_id| build_id.as_deref() == Some(expected_build_id))
-    })
+    build_id_candidates
+        .into_iter()
+        .take_while(|_| is_current())
+        .find(|candidate| {
+            candidate_build_id(candidate)
+                .is_ok_and(|build_id| build_id.as_deref() == Some(expected_build_id))
+        })
 }
 
 fn candidate_build_id(path: &Path) -> Result<Option<String>, String> {
@@ -540,7 +582,12 @@ fn candidate_build_id(path: &Path) -> Result<Option<String>, String> {
     inspect_elf_metadata(&mut file, metadata.len()).map(|metadata| metadata.build_id)
 }
 
+#[cfg(test)]
 fn gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
+    gnu_debuglink_crc_while(path, &|| true)
+}
+
+fn gnu_debuglink_crc_while(path: &Path, is_current: &impl Fn() -> bool) -> io::Result<u32> {
     #[cfg(test)]
     record_debuglink_crc_calculation(path);
     let mut file = File::open(path)?;
@@ -548,6 +595,13 @@ fn gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
     let mut crc = u32::MAX;
 
     loop {
+        if !is_current() {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "Debug metadata scan superseded",
+            ));
+        }
+
         let read = file.read(&mut buffer)?;
 
         if read == 0 {
@@ -640,7 +694,12 @@ fn debuglink_crc_cache() -> &'static Mutex<DebuglinkCrcCache> {
     CACHE.get_or_init(|| Mutex::new(DebuglinkCrcCache::new(MAX_DEBUGLINK_CRC_CACHE_ENTRIES)))
 }
 
+#[cfg(test)]
 fn cached_gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
+    cached_gnu_debuglink_crc_while(path, &|| true)
+}
+
+fn cached_gnu_debuglink_crc_while(path: &Path, is_current: &impl Fn() -> bool) -> io::Result<u32> {
     let before = DebuglinkFileIdentity::read(path)?;
 
     if let Some(crc) = debuglink_crc_cache()
@@ -651,7 +710,7 @@ fn cached_gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
         return Ok(crc);
     }
 
-    let crc = gnu_debuglink_crc(path)?;
+    let crc = gnu_debuglink_crc_while(path, is_current)?;
     let after = DebuglinkFileIdentity::read(path)?;
 
     if before != after {
@@ -1026,7 +1085,20 @@ mod tests {
         let directory = TestDirectory::new("debuglink-cache-failure");
         let candidate = directory.path().join("later.debug");
         assert!(cached_gnu_debuglink_crc(&candidate).is_err());
-        std::fs::write(&candidate, b"now available").unwrap();
+        std::fs::write(&candidate, vec![b'x'; DEBUGLINK_CRC_BUFFER_BYTES * 3]).unwrap();
+        let chunks = std::cell::Cell::new(0);
+        let cancelled = cached_gnu_debuglink_crc_while(&candidate, &|| {
+            chunks.set(chunks.get() + 1);
+            chunks.get() < 2
+        });
+        assert_eq!(cancelled.unwrap_err().kind(), io::ErrorKind::Interrupted);
+        assert!(
+            debuglink_crc_cache()
+                .lock()
+                .unwrap()
+                .get(&DebuglinkFileIdentity::read(&candidate).unwrap())
+                .is_none()
+        );
         assert_eq!(
             cached_gnu_debuglink_crc(&candidate).unwrap(),
             gnu_debuglink_crc(&candidate).unwrap()

@@ -96,6 +96,10 @@ impl Ui {
         let source_tree_base_roots = source::search_roots(config);
 
         let ui = Self {
+            self_weak: Rc::new(RefCell::new(std::rc::Weak::new())),
+            source_open_generation: Arc::new(AtomicU64::new(0)),
+            source_io_epoch: Arc::new(AtomicU64::new(0)),
+            disassembly_source_pending: Rc::new(RefCell::new(HashSet::new())),
             window,
             terminal,
             session_button: topbar.session_button,
@@ -189,6 +193,8 @@ impl Ui {
             inferior_parents: Rc::new(RefCell::new(HashMap::new())),
             pending_fork_parents: Rc::new(RefCell::new(HashMap::new())),
             inferior_refresh_generation: Rc::new(Cell::new(0)),
+            inferior_refresh_gate: Rc::new(RefreshGate::default()),
+            fork_policy_refresh_gate: Rc::new(RefreshGate::default()),
             execution_context_visual_generation: Rc::new(Cell::new(0)),
             execution_context_visual_pending: Rc::new(Cell::new(false)),
             fork_policy_generation: Rc::new(Cell::new(0)),
@@ -477,7 +483,7 @@ impl Ui {
         self.reset_target_abi();
         self.invalidate_allocator_probe_cache();
         self.previous_registers.borrow_mut().clear();
-        self.disassembly_source_cache.borrow_mut().clear();
+        self.invalidate_source_io();
         self.start_stop_refresh();
         self.start_thread_refresh();
         self.invalidate_kernel_refresh();

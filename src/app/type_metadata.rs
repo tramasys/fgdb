@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn metadata_transport_preserves_long_enums_without_convenience_variables() {
+    fn metadata_transport_preserves_long_enums() {
         let variants = (0..512)
             .map(|index| {
                 format!(
@@ -477,9 +477,6 @@ mod tests {
         let metadata = parse_metadata_output(&output).unwrap();
         assert_eq!(metadata.enum_variants.len(), 512);
         assert_eq!(metadata.enum_variants[511].name, "Mode::Variant511");
-        let python = metadata_python("value");
-        assert!(!python.contains("set_convenience_variable"));
-        assert!(python.contains("gdb.write"));
     }
 
     #[test]

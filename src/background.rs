@@ -75,7 +75,7 @@ struct SharedQueue {
     ready: Condvar,
     capacity: usize,
     reserved_critical: usize,
-    max_running_background: usize,
+    max_running_noncritical: usize,
 }
 
 struct WorkerPool {
@@ -90,7 +90,7 @@ impl WorkerPool {
             ready: Condvar::new(),
             capacity: queue_capacity,
             reserved_critical: RESERVED_CRITICAL_SLOTS.min(queue_capacity.saturating_sub(1)),
-            max_running_background: worker_count.saturating_sub(1).max(1),
+            max_running_noncritical: worker_count.saturating_sub(1).max(1),
         });
 
         let mut workers = Vec::with_capacity(worker_count);
@@ -184,14 +184,21 @@ fn worker_loop(shared: &SharedQueue) {
             };
 
             loop {
+                // Filesystem searches are interactive work too. Reserve a
+                // worker for transport parsing even while those reads block.
+                let noncritical_available = state.running[Priority::Interactive.index()]
+                    + state.running[Priority::Background.index()]
+                    < shared.max_running_noncritical;
                 let next = state.queues[Priority::Critical.index()]
                     .pop_front()
-                    .or_else(|| state.queues[Priority::Interactive.index()].pop_front())
                     .or_else(|| {
-                        (state.running[Priority::Background.index()]
-                            < shared.max_running_background)
-                            .then(|| state.queues[Priority::Background.index()].pop_front())
-                            .flatten()
+                        if noncritical_available {
+                            state.queues[Priority::Interactive.index()]
+                                .pop_front()
+                                .or_else(|| state.queues[Priority::Background.index()].pop_front())
+                        } else {
+                            None
+                        }
                     });
 
                 if let Some(job) = next {
@@ -295,6 +302,46 @@ mod tests {
         assert_eq!(pool.submit(|| {}), Err(SubmitError::QueueFull));
         assert!(pool.submit_with_priority(Priority::Critical, || {}).is_ok());
         release_sender.send(()).unwrap();
+
+        let pool = WorkerPool::new(3, 8).unwrap();
+        let (started_sender, started_receiver) = mpsc::channel();
+        let mut releases: Vec<mpsc::Sender<()>> = Vec::new();
+        for (index, priority) in [
+            Priority::Background,
+            Priority::Interactive,
+            Priority::Interactive,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (release, wait) = mpsc::channel();
+            releases.push(release);
+            let started = started_sender.clone();
+            pool.submit_with_priority(priority, move || {
+                started.send(()).unwrap();
+                let _ = wait.recv();
+            })
+            .unwrap();
+            if index < 2 {
+                started_receiver
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap();
+            }
+        }
+        assert_eq!(
+            started_receiver.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+        let (critical, completed) = mpsc::channel();
+        pool.submit_with_priority(Priority::Critical, move || {
+            let _ = critical.send(());
+        })
+        .unwrap();
+        completed.recv_timeout(Duration::from_secs(1)).unwrap();
+        drop(releases);
+        started_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap();
     }
 
     #[test]

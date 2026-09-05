@@ -20,7 +20,7 @@ impl Ui {
             .source_index
             .borrow()
             .as_ref()
-            .map(|index| index.resolve(reported_path));
+            .map(|index| index.resolve_indexed(reported_path));
 
         let path = match indexed {
             Some(source::SourceResolution::Unique(path)) => path,
@@ -36,7 +36,9 @@ impl Ui {
                 return None;
             }
             Some(source::SourceResolution::Missing) | None => {
-                source::resolve(reported_path, &self.source_roots.borrow())?
+                // Unindexed paths are resolved and validated by the source
+                // loader when selected, not while rendering search results.
+                return Some(PathBuf::from(reported_path));
             }
         };
 
@@ -63,50 +65,76 @@ impl Ui {
     }
 
     pub fn show_source_locations(&self, symbol: &str, locations: &[SourceLocation]) {
-        let candidate = locations
-            .iter()
-            .filter_map(|location| {
-                let path = self.resolve_source_path(location.source_path())?;
-                let score = source_location_score(symbol, location);
+        let generation = self
+            .source_open_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let current = Arc::clone(&self.source_open_generation);
+        let queued = Arc::clone(&current);
+        let roots = self.source_roots.borrow().clone();
+        let index = self.source_index_snapshot();
+        let locations = locations.to_vec();
+        let symbol = symbol.to_owned();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
 
-                Some((score, path, location))
-            })
-            // Preserve the stable-sort behavior for equal scores by retaining
-            // the first candidate rather than Iterator::max_by_key's last one.
-            .reduce(|best, candidate| {
-                if best.0 >= candidate.0 {
-                    best
-                } else {
-                    candidate
-                }
-            });
-
-        let Some((_, path, location)) = candidate else {
+        if let Err(error) = crate::background::submit_cancellable_with_priority(
+            crate::background::Priority::Interactive,
+            move || queued.load(Ordering::Relaxed) == generation,
+            move || {
+                let candidate = locations
+                    .into_iter()
+                    .take_while(|_| current.load(Ordering::Relaxed) == generation)
+                    .filter_map(|location| {
+                        let path = match index
+                            .as_ref()
+                            .map(|index| index.resolve(location.source_path()))
+                        {
+                            Some(source::SourceResolution::Unique(path)) => Some(path),
+                            Some(source::SourceResolution::Ambiguous) => None,
+                            _ => source::resolve(location.source_path(), &roots),
+                        }?;
+                        Some((source_location_score(&symbol, &location), path, location))
+                    })
+                    .reduce(|best, candidate| {
+                        if best.0 >= candidate.0 {
+                            best
+                        } else {
+                            candidate
+                        }
+                    });
+                let _ = sender.send(candidate);
+            },
+        ) {
             self.set_status(
-                "Source unavailable",
-                &format!(
-                    "No source-backed definition for {symbol}. Install matching debuginfo and source files."
-                ),
+                "Source lookup deferred",
+                &error.to_string(),
                 Some("status-error"),
             );
-
-            return;
-        };
-
-        if !self.navigate_to_source(&path, location.line, true) {
             return;
         }
 
-        self.set_status(
-            "Source",
-            &format!(
-                "{} · {}:{}",
-                location.function,
-                path.display(),
-                location.line
-            ),
-            Some("status-ready"),
-        );
+        let weak = self.self_weak.borrow().clone();
+        glib::timeout_add_local(Duration::from_millis(10), move || {
+            let Some(ui) = weak.upgrade() else {
+                return glib::ControlFlow::Break;
+            };
+            if ui.source_open_generation.load(Ordering::Relaxed) != generation {
+                return glib::ControlFlow::Break;
+            }
+
+            match receiver.try_recv() {
+                Ok(Some((_, path, location))) => {
+                    let detail = format!("{} · {}:{}", location.function, path.display(), location.line);
+                    ui.navigate_to_source_then(&path, location.line, true, move |ui, opened| {
+                        if opened { ui.set_status("Source", &detail, Some("status-ready")); }
+                    });
+                }
+                Ok(None) => ui.set_status("Source unavailable", "No readable source-backed definition was found. Install matching debuginfo and source files.", Some("status-error")),
+                Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => ui.set_status("Source unavailable", "Source lookup stopped before completing", Some("status-error")),
+            }
+            glib::ControlFlow::Break
+        });
     }
 
     pub fn show_initial_source(&self, source_file: &SourceFile) {
@@ -114,40 +142,21 @@ impl Ui {
             return;
         }
 
-        let Some(path) = self.resolve_source_path(source_file.source_path()) else {
-            return;
-        };
-
-        let context = SourceOpenContext {
-            notebook: &self.source_notebook,
-            documents: &self.source_documents,
-            theme: &self.source_theme,
-            style_scheme: self.source_style_scheme.as_ref(),
-            breakpoints: &self.breakpoints,
-            source_index: &self.source_index,
-            insert_handler: &self.breakpoint_insert_handler,
-            jump_handler: &self.source_jump_handler,
-            delete_handler: &self.breakpoint_delete_handler,
-            enabled_handler: &self.breakpoint_enabled_handler,
-            symbol_handler: &self.source_symbol_handler,
-            closed_tabs: &self.closed_source_tabs,
-            reopen_closed: &self.source_navigation.reopen_closed,
-        };
-
-        let Some(document) = open_source_document(&path, context) else {
-            return;
-        };
-
-        scroll_source_document(&document, source_file.line);
-
-        self.set_status(
-            "Ready",
-            &format!(
-                "Opened {} from the executable's debug information",
-                path.display()
-            ),
-            Some("status-ready"),
-        );
+        let line = source_file.line;
+        self.open_source_when_ready(Path::new(source_file.source_path()), move |ui, document| {
+            let Some(document) = document else {
+                return;
+            };
+            scroll_source_document(&document, line);
+            ui.set_status(
+                "Ready",
+                &format!(
+                    "Opened {} from the executable's debug information",
+                    document.path.display()
+                ),
+                Some("status-ready"),
+            );
+        });
     }
 
     pub fn show_execution_location(&self, frame: &StackFrame) {
@@ -185,104 +194,72 @@ impl Ui {
             return;
         };
 
-        let path = self.resolve_source_path(reported_path);
+        let frame = frame.clone();
+        self.open_source_when_ready(Path::new(reported_path), move |ui, document| {
+            let Some(document) = document else {
+                ui.clear_execution_mark();
+                return;
+            };
+            let path = document.path.clone();
+            let same_location = ui.execution_source_line.get() == Some(line)
+                && ui.execution_source_path.borrow().as_ref() == Some(&path);
 
-        let Some(path) = path else {
-            self.clear_execution_mark();
-
-            self.status_detail.set_text(&format!(
-                "Paused in {} · source unavailable: {reported_path}",
-                frame.function
-            ));
-
-            return;
-        };
-
-        let same_location = self.execution_source_line.get() == Some(line)
-            && self.execution_source_path.borrow().as_ref() == Some(&path);
-
-        if !same_location {
-            self.clear_execution_mark();
-        }
-
-        let context = SourceOpenContext {
-            notebook: &self.source_notebook,
-            documents: &self.source_documents,
-            theme: &self.source_theme,
-            style_scheme: self.source_style_scheme.as_ref(),
-            breakpoints: &self.breakpoints,
-            source_index: &self.source_index,
-            insert_handler: &self.breakpoint_insert_handler,
-            jump_handler: &self.source_jump_handler,
-            delete_handler: &self.breakpoint_delete_handler,
-            enabled_handler: &self.breakpoint_enabled_handler,
-            symbol_handler: &self.source_symbol_handler,
-            closed_tabs: &self.closed_source_tabs,
-            reopen_closed: &self.source_navigation.reopen_closed,
-        };
-
-        let Some(document) = open_source_document(&path, context) else {
-            self.clear_execution_mark();
-
-            self.set_status(
-                "Source unavailable",
-                &format!("Could not read {}", path.display()),
-                Some("status-error"),
-            );
-
-            return;
-        };
-
-        document.tab.add_css_class("executing-source-tab");
-
-        document.tab_label.set_tooltip_text(Some(&format!(
-            "{}\n{} at line {line}",
-            path.to_string_lossy(),
-            frame.function
-        )));
-
-        let mark_present = i32::try_from(line.saturating_sub(1))
-            .ok()
-            .is_some_and(|line| {
-                !document
-                    .buffer
-                    .source_marks_at_line(line, Some(EXECUTION_CATEGORY))
-                    .is_empty()
-            });
-
-        if same_location && mark_present {
-            return;
-        }
-
-        let Ok(line) = i32::try_from(line.saturating_sub(1)) else {
-            return;
-        };
-
-        let Some(iter) = document.buffer.iter_at_line(line) else {
-            return;
-        };
-
-        let mark = document
-            .buffer
-            .create_source_mark(None, EXECUTION_CATEGORY, &iter);
-
-        self.execution_source_path.replace(Some(path));
-        self.execution_source_line.set(frame.line);
-        document.breakpoint_renderer.queue_draw();
-        document.buffer.place_cursor(&iter);
-        let source_view = document.view;
-
-        gtk::glib::idle_add_local_once(move || {
-            if mark
-                .buffer()
-                .is_some_and(|buffer| buffer == source_view.buffer())
-            {
-                source_view.scroll_to_mark(&mark, 0.15, true, 0.0, 0.35);
+            if !same_location {
+                ui.clear_execution_mark();
             }
+
+            document.tab.add_css_class("executing-source-tab");
+
+            document.tab_label.set_tooltip_text(Some(&format!(
+                "{}\n{} at line {line}",
+                path.to_string_lossy(),
+                frame.function
+            )));
+
+            let mark_present = i32::try_from(line.saturating_sub(1))
+                .ok()
+                .is_some_and(|line| {
+                    !document
+                        .buffer
+                        .source_marks_at_line(line, Some(EXECUTION_CATEGORY))
+                        .is_empty()
+                });
+
+            if same_location && mark_present {
+                return;
+            }
+
+            let Ok(line) = i32::try_from(line.saturating_sub(1)) else {
+                return;
+            };
+
+            let Some(iter) = document.buffer.iter_at_line(line) else {
+                return;
+            };
+
+            let mark = document
+                .buffer
+                .create_source_mark(None, EXECUTION_CATEGORY, &iter);
+
+            ui.execution_source_path.replace(Some(path));
+            ui.execution_source_line.set(frame.line);
+            document.breakpoint_renderer.queue_draw();
+            document.buffer.place_cursor(&iter);
+            let source_view = document.view;
+
+            gtk::glib::idle_add_local_once(move || {
+                if mark
+                    .buffer()
+                    .is_some_and(|buffer| buffer == source_view.buffer())
+                {
+                    source_view.scroll_to_mark(&mark, 0.15, true, 0.0, 0.35);
+                }
+            });
         });
     }
 
     pub fn clear_execution_location(&self) {
+        self.source_open_generation.fetch_add(1, Ordering::Relaxed);
         self.selected_frame_level.set(u32::MAX);
         self.current_source_is_rust.set(false);
         update_selected_frame_buttons(&self.frame_buttons.borrow(), u32::MAX);
@@ -290,6 +267,7 @@ impl Ui {
     }
 
     pub fn suspend_execution_location(&self) {
+        self.source_open_generation.fetch_add(1, Ordering::Relaxed);
         // Keep the selected frame row stable across a short execution command.
         // The stopped-state refresh updates it when GDB reports the next frame.
         // Removing and immediately restoring this class made the blue row flash
@@ -350,7 +328,7 @@ impl Ui {
         self.show_registers(&[]);
         self.show_stack(&[]);
         self.previous_registers.borrow_mut().clear();
-        self.disassembly_source_cache.borrow_mut().clear();
+        self.invalidate_source_io();
         self.show_instructions(Vec::new(), "", "", None, false);
         self.show_signal(None, None);
         self.memory_region_store.remove_all();
@@ -451,48 +429,22 @@ impl Ui {
                     return;
                 };
 
-                let mut opened = 0_u32;
+                let mut paths = std::collections::VecDeque::new();
                 let mut failed = Vec::new();
-
                 for index in 0..files.n_items() {
-                    let Some(file) = files.item(index).and_downcast::<gio::File>() else {
-                        continue;
-                    };
-
-                    let Some(path) = file.path() else {
-                        failed.push(String::from("non-local source"));
-                        continue;
-                    };
-
-                    let Some(ui) = weak_ui.upgrade() else {
-                        return;
-                    };
-
-                    if ui.navigate_to_source(&path, 1, true) {
-                        opened += 1;
-                    } else {
-                        failed.push(path.display().to_string());
+                    if let Some(file) = files.item(index).and_downcast::<gio::File>() {
+                        if let Some(path) = file.path() {
+                            paths.push_back(path);
+                        } else {
+                            failed.push(String::from("non-local source"));
+                        }
                     }
                 }
 
-                let Some(ui) = weak_ui.upgrade() else {
-                    return;
-                };
-
-                if failed.is_empty() {
-                    ui.set_status(
-                        "Source",
-                        &format!(
-                            "Opened {opened} source file{}",
-                            if opened == 1 { "" } else { "s" }
-                        ),
-                        Some("status-ready"),
-                    );
-                } else {
-                    ui.set_status(
-                        "Source open failed",
-                        &format!("Could not read {}", failed.join(", ")),
-                        Some("status-error"),
+                if let Some(ui) = weak_ui.upgrade() {
+                    ui.open_source_batch(
+                        Rc::new(RefCell::new(paths)),
+                        Rc::new(RefCell::new((0, failed))),
                     );
                 }
             });

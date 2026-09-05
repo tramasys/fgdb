@@ -17,12 +17,28 @@ const MAX_CACHED_LINE_RANGES: usize = 1_000_000;
 const MAX_STABLE_READ_ATTEMPTS: usize = 2;
 
 #[derive(Clone)]
-pub(super) struct CachedSource {
-    pub(super) contents: Arc<String>,
+pub(crate) struct CachedSource {
+    pub(crate) contents: Arc<String>,
     line_ranges: Option<Arc<[(usize, usize)]>>,
 }
 
 impl CachedSource {
+    pub(crate) fn line(&self, index: usize) -> Option<SourceLine> {
+        let &(start, end) = self.line_ranges.as_ref()?.get(index)?;
+        Some(SourceLine {
+            contents: Arc::clone(&self.contents),
+            start,
+            end,
+        })
+    }
+
+    pub(crate) fn exceeds_lines(&self, limit: usize) -> bool {
+        self.line_ranges.as_ref().map_or_else(
+            || self.contents.lines().take(limit + 1).count() > limit,
+            |ranges| ranges.len() > limit,
+        )
+    }
+
     fn from_bytes(bytes: Vec<u8>) -> Self {
         let contents = Arc::new(match String::from_utf8(bytes) {
             Ok(contents) => contents,
@@ -57,6 +73,32 @@ impl CachedSource {
         )
     }
 }
+
+#[derive(Clone)]
+pub(crate) struct SourceLine {
+    contents: Arc<String>,
+    start: usize,
+    end: usize,
+}
+
+impl std::ops::Deref for SourceLine {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.contents[self.start..self.end]
+    }
+}
+
+impl PartialEq for SourceLine {
+    fn eq(&self, other: &Self) -> bool {
+        (self.start == other.start
+            && self.end == other.end
+            && Arc::ptr_eq(&self.contents, &other.contents))
+            || **self == **other
+    }
+}
+
+impl Eq for SourceLine {}
 
 pub(super) enum CachedSourceLines<'a> {
     Indexed {
@@ -418,6 +460,14 @@ mod tests {
         let source = CachedSource::from_bytes(b"one\r\n\ntwo".to_vec());
         let lines = source.lines().collect::<Vec<_>>();
         assert_eq!(lines, ["one", "", "two"]);
+        for (index, text) in lines.iter().enumerate() {
+            let line = source.line(index).unwrap();
+            assert_eq!(&*line, *text);
+            assert!(Arc::ptr_eq(&line.contents, &source.contents));
+        }
+        assert!(source.line(3).is_none());
+        assert!(!source.exceeds_lines(3));
+        assert!(source.exceeds_lines(2));
     }
 
     #[test]

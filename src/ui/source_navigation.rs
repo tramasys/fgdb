@@ -462,19 +462,19 @@ impl Ui {
     }
 
     fn reopen_last_source_tab(&self) {
-        let Some(closed) = self.closed_source_tabs.borrow_mut().pop() else {
+        let Some(closed) = self.closed_source_tabs.borrow().last().cloned() else {
             self.source_navigation.reopen_closed.set_sensitive(false);
             return;
         };
-
-        self.source_navigation
-            .reopen_closed
-            .set_sensitive(!self.closed_source_tabs.borrow().is_empty());
-
-        if !self.navigate_to_source(&closed.path, closed.line, true) {
-            self.closed_source_tabs.borrow_mut().push(closed);
-            self.source_navigation.reopen_closed.set_sensitive(true);
-        }
+        let expected = closed.clone();
+        self.navigate_to_source_then(&closed.path, closed.line, true, move |ui, opened| {
+            if opened && ui.closed_source_tabs.borrow().last() == Some(&expected) {
+                ui.closed_source_tabs.borrow_mut().pop();
+            }
+            ui.source_navigation
+                .reopen_closed
+                .set_sensitive(!ui.closed_source_tabs.borrow().is_empty());
+        });
     }
 
     fn current_source_document(&self) -> Option<SourceDocument> {
@@ -504,78 +504,74 @@ impl Ui {
     }
 
     pub(super) fn navigate_to_source(&self, path: &Path, line: u32, record: bool) -> bool {
+        self.navigate_to_source_then(path, line, record, |_, _| {})
+    }
+
+    pub(super) fn navigate_to_source_then(
+        &self,
+        path: &Path,
+        line: u32,
+        record: bool,
+        completed: impl FnOnce(&Ui, bool) + 'static,
+    ) -> bool {
         let previous = record.then(|| self.current_source_location()).flatten();
 
-        let context = SourceOpenContext {
-            notebook: &self.source_notebook,
-            documents: &self.source_documents,
-            theme: &self.source_theme,
-            style_scheme: self.source_style_scheme.as_ref(),
-            breakpoints: &self.breakpoints,
-            source_index: &self.source_index,
-            insert_handler: &self.breakpoint_insert_handler,
-            jump_handler: &self.source_jump_handler,
-            delete_handler: &self.breakpoint_delete_handler,
-            enabled_handler: &self.breakpoint_enabled_handler,
-            symbol_handler: &self.source_symbol_handler,
-            closed_tabs: &self.closed_source_tabs,
-            reopen_closed: &self.source_navigation.reopen_closed,
-        };
+        self.open_source_when_ready(path, move |ui, document| {
+            let Some(document) = document else {
+                completed(ui, false);
+                return;
+            };
+            let last_line = u32::try_from(document.buffer.line_count())
+                .unwrap_or(u32::MAX)
+                .max(1);
 
-        let Some(document) = open_source_document(path, context) else {
-            self.set_status(
-                "Source unavailable",
-                &format!("Could not read {}", path.display()),
-                Some("status-error"),
-            );
+            let destination = SourceNavigationLocation {
+                path: document.path.clone(),
+                line: line.clamp(1, last_line),
+            };
 
-            return false;
-        };
+            if record
+                && let Some(previous) = previous
+                && previous != destination
+            {
+                push_source_history(&ui.source_back_history, previous);
+                ui.source_forward_history.borrow_mut().clear();
+            }
 
-        let last_line = u32::try_from(document.buffer.line_count())
-            .unwrap_or(u32::MAX)
-            .max(1);
-
-        let destination = SourceNavigationLocation {
-            path: document.path.clone(),
-            line: line.clamp(1, last_line),
-        };
-
-        if record
-            && let Some(previous) = previous
-            && previous != destination
-        {
-            push_source_history(&self.source_back_history, previous);
-            self.source_forward_history.borrow_mut().clear();
-        }
-
-        scroll_source_document(&document, destination.line);
-        self.update_source_history_buttons();
-        self.sync_source_tree_selection();
-
-        true
+            scroll_source_document(&document, destination.line);
+            ui.update_source_history_buttons();
+            ui.sync_source_tree_selection();
+            completed(ui, true);
+        })
     }
 
     fn navigate_source_history(&self, forward: bool) {
-        let (source, destination) = if forward {
-            (&self.source_forward_history, &self.source_back_history)
+        let source = if forward {
+            &self.source_forward_history
         } else {
-            (&self.source_back_history, &self.source_forward_history)
+            &self.source_back_history
         };
-
+        let Some(location) = source.borrow().last().cloned() else {
+            return;
+        };
         let current = self.current_source_location();
+        let expected = location.clone();
 
-        while let Some(location) = source.borrow_mut().pop() {
-            if self.navigate_to_source(&location.path, location.line, false) {
+        self.navigate_to_source_then(&location.path, location.line, false, move |ui, opened| {
+            let (source, destination) = if forward {
+                (&ui.source_forward_history, &ui.source_back_history)
+            } else {
+                (&ui.source_back_history, &ui.source_forward_history)
+            };
+
+            if opened && source.borrow().last() == Some(&expected) {
+                source.borrow_mut().pop();
                 if let Some(current) = current {
                     push_source_history(destination, current);
                 }
-
-                break;
             }
-        }
-
-        self.update_source_history_buttons();
+            ui.update_source_history_buttons();
+        });
     }
 
     fn update_source_history_buttons(&self) {
@@ -932,7 +928,7 @@ impl Ui {
             crate::background::Priority::Background,
             move || queued_generation.load(Ordering::Relaxed) == generation,
             move || {
-                let files =
+                let discovery =
                     source::discover_source_files_while(&roots, MAX_SOURCE_TREE_FILES, || {
                         current_generation.load(Ordering::Relaxed) == generation
                     });
@@ -941,10 +937,10 @@ impl Ui {
                     return;
                 }
 
-                let index = Arc::new(source::SourceIndex::new(&files, &roots));
+                let index = Arc::new(source::SourceIndex::new(&discovery.files, &roots));
                 let search = Arc::new(source::SourceSearchIndex::new(index.files()));
                 let files = Arc::new(index.files().to_vec());
-                let _ = sender.send((files, index, search));
+                let _ = sender.send((files, index, search, discovery.truncated));
             },
         ) {
             self.source_tree_indexing.set(false);
@@ -973,7 +969,7 @@ impl Ui {
             };
 
             match receiver.try_recv() {
-                Ok((files, index, search)) => {
+                Ok((files, index, search, truncated)) => {
                     if ui.source_tree_generation.load(Ordering::Relaxed) != generation {
                         return glib::ControlFlow::Break;
                     }
@@ -984,6 +980,14 @@ impl Ui {
                     ui.source_index.replace(Some(index));
                     ui.resolved_source_paths.borrow_mut().clear();
                     ui.apply_source_tree_index(files, search);
+
+                    if truncated {
+                        ui.record_performance_notice(crate::performance::PerformanceNotice {
+                            outcome: crate::performance::BudgetOutcome::Partial,
+                            operation: String::from("source indexing"),
+                            detail: String::from("The file, directory, or entry budget was reached. Narrow the source roots to index omitted files"),
+                        });
+                    }
 
                     glib::ControlFlow::Break
                 }

@@ -25,7 +25,10 @@ mod domain;
 use domain::{
     LocalVariableCatalog, MemoryRefreshBatch, TerminalSynchronization, VariableNodeIndex,
 };
+#[cfg(test)]
+mod hardening_smoke;
 mod layout;
+mod source_loading;
 mod source_navigation;
 mod value;
 
@@ -264,7 +267,7 @@ type MemoryWatchHandler = Rc<dyn Fn(u64, String, usize)>;
 type InstructionMemoryHandler = Rc<dyn Fn(String)>;
 type DisassemblyHandler = Rc<dyn Fn(DisassemblyRequest)>;
 type DisassemblySourceCache =
-    Rc<RefCell<crate::performance::BoundedLruCache<PathBuf, Rc<Vec<Rc<str>>>>>>;
+    Rc<RefCell<crate::performance::BoundedLruCache<PathBuf, (u64, Option<source::CachedSource>)>>>;
 type KernelRefreshHandler = Rc<dyn Fn()>;
 type MiscRefreshHandler = Rc<dyn Fn()>;
 type HeapInspectionHandler = Rc<dyn Fn(HeapInspectionRequest)>;
@@ -502,14 +505,8 @@ struct StopPointMetadata {
 
 #[derive(Clone)]
 struct StopPointFilterRow {
-    widgets: Vec<gtk::Widget>,
     number: String,
-    searchable: String,
     status: gtk::Label,
-    hardware: bool,
-    watchpoint: bool,
-    catchpoint: bool,
-    enabled: bool,
 }
 
 #[derive(Clone)]
@@ -531,7 +528,7 @@ struct InstructionRowData {
     instruction: Instruction,
     current: bool,
     pointer_bits: u32,
-    source_text: Option<Rc<str>>,
+    source_text: Option<source::SourceLine>,
 }
 
 #[derive(Clone)]
@@ -1427,6 +1424,10 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 
 #[derive(Clone)]
 pub struct Ui {
+    self_weak: Rc<RefCell<std::rc::Weak<Ui>>>,
+    source_open_generation: Arc<AtomicU64>,
+    source_io_epoch: Arc<AtomicU64>,
+    disassembly_source_pending: Rc<RefCell<HashSet<PathBuf>>>,
     pub window: gtk::ApplicationWindow,
     pub terminal: vte4::Terminal,
     session_button: gtk::ToggleButton,
@@ -1519,6 +1520,8 @@ pub struct Ui {
     inferior_parents: Rc<RefCell<HashMap<String, String>>>,
     pending_fork_parents: Rc<RefCell<HashMap<u32, String>>>,
     inferior_refresh_generation: Rc<Cell<u64>>,
+    inferior_refresh_gate: Rc<RefreshGate>,
+    fork_policy_refresh_gate: Rc<RefreshGate>,
     execution_context_visual_generation: Rc<Cell<u64>>,
     execution_context_visual_pending: Rc<Cell<bool>>,
     fork_policy_generation: Rc<Cell<u64>>,

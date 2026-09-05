@@ -243,6 +243,23 @@ pub struct LaunchConfig {
 }
 
 impl LaunchConfig {
+    #[cfg(test)]
+    pub(crate) fn for_ui_test(working_directory: PathBuf) -> Self {
+        Self {
+            gdb_executable: String::from("gdb"),
+            gdb_startup_arguments: Vec::new(),
+            gef_context_visible: false,
+            source_paths: Vec::new(),
+            pretty_printer_paths: Vec::new(),
+            working_directory,
+            safe_mode: true,
+            gcc_pretty_printer: None,
+            rust_toolchain: None,
+            initial_session: None,
+            configuration_report: Arc::new(ConfigurationReport::default()),
+        }
+    }
+
     pub fn from_process() -> Result<StartupAction, StartupError> {
         let arguments: Vec<_> = env::args_os().collect();
 
