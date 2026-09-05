@@ -12,7 +12,7 @@ pub(super) fn cleanup_viewer_variable_objects(
     }
 
     if let Some(ui) = ui.upgrade() {
-        if ui.inferior_is_running() {
+        if ui.model.inferior_is_running() {
             ui.defer_variable_object_deletions(owned);
         } else {
             owned

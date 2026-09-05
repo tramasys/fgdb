@@ -3,7 +3,15 @@ use super::*;
 pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let theme = Theme::graphite();
     theme.install();
-    let ui = Rc::new(Ui::build(application, &launch_config, &theme));
+    let model = Rc::new(crate::model::DebuggerModel::new(
+        launch_config.initial_session(),
+    ));
+    let ui = Rc::new(Ui::build(
+        application,
+        &launch_config,
+        &theme,
+        Rc::clone(&model),
+    ));
     ui.connect_source_loading();
     ui.connect_terminal_synchronization();
     ui.connect_local_paging();
@@ -53,11 +61,12 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
 
     let disassembly_controller =
-        DisassemblyController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
+        DisassemblyController::new(Rc::downgrade(&ui), Rc::clone(&mi_client), Rc::clone(&model));
 
     let controller = Rc::clone(&disassembly_controller);
     ui.set_disassembly_handler(move |request| controller.handle(request));
-    let until_controller = NativeUntilController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
+    let until_controller =
+        NativeUntilController::new(Rc::downgrade(&ui), Rc::clone(&mi_client), Rc::clone(&model));
     let controller = Rc::clone(&until_controller);
     ui.set_until_action_handler(move |action| controller.start(action));
     let controller = Rc::clone(&until_controller);
@@ -70,7 +79,8 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         controller.on_stopped(reason, address, thread_id)
     });
 
-    let session_controller = SessionController::new(Rc::downgrade(&ui), Rc::clone(&mi_client));
+    let session_controller =
+        SessionController::new(Rc::downgrade(&ui), Rc::clone(&mi_client), Rc::clone(&model));
     let controller = Rc::clone(&session_controller);
     ui.set_session_handler(move |session| controller.configure(session));
     let controller = Rc::clone(&session_controller);
@@ -101,7 +111,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             return;
         };
 
-        if !current_ui.frame_selection_can_dispatch(level) {
+        if !current_ui.model.frame_selection_can_dispatch(level) {
             return;
         }
 
@@ -121,7 +131,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                         && weak_ui.upgrade().is_some_and(|ui| {
                             ui.select_frame_in_view(level);
 
-                            !ui.inferior_is_running()
+                            !ui.model.inferior_is_running()
                         })
                     {
                         refresh_stopped_state(&weak_ui, client);
@@ -163,7 +173,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             return;
         };
 
-        if !current_ui.thread_selection_can_dispatch(&id) {
+        if !current_ui.model.thread_selection_can_dispatch(&id) {
             return;
         }
 
@@ -193,7 +203,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                         let stopped = weak_ui.upgrade().is_some_and(|ui| {
                             ui.select_thread_in_view(&selected_id);
 
-                            !ui.inferior_is_running()
+                            !ui.model.inferior_is_running()
                         });
 
                         if stopped {
@@ -258,7 +268,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             return;
         };
 
-        let generation = current_ui.current_stop_refresh_generation();
+        let generation = current_ui.model.current_stop_refresh_generation();
 
         let command = format!(
             "-data-read-memory-bytes {} 32",
@@ -266,6 +276,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         );
 
         let Some(command) = current_ui
+            .model
             .stop_context(generation)
             .map(|context| context.scope_frame(&command))
         else {
@@ -290,14 +301,14 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 move || {
                     weak_ui_for_guard
                         .upgrade()
-                        .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+                        .is_some_and(|ui| ui.model.is_stop_refresh_current(generation))
                 },
                 move |_, record| {
                     let Some(ui) = weak_ui_for_response.upgrade() else {
                         return;
                     };
 
-                    if !ui.is_stop_refresh_current(generation) {
+                    if !ui.model.is_stop_refresh_current(generation) {
                         return;
                     }
 
@@ -313,7 +324,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             )
             .is_err()
             && let Some(ui) = weak_ui.upgrade()
-            && ui.is_stop_refresh_current(generation)
+            && ui.model.is_stop_refresh_current(generation)
         {
             ui.show_instruction_memory(&expression, Err("MI channel is unavailable"));
         }
@@ -327,7 +338,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             return;
         };
 
-        let generation = current_ui.current_stop_refresh_generation();
+        let generation = current_ui.model.current_stop_refresh_generation();
 
         let command = format!(
             "-data-read-memory-bytes {} {byte_count}",
@@ -335,6 +346,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         );
 
         let Some(command) = current_ui
+            .model
             .stop_context(generation)
             .map(|context| context.scope_frame(&command))
         else {
@@ -354,14 +366,14 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 move || {
                     weak_ui_for_guard
                         .upgrade()
-                        .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+                        .is_some_and(|ui| ui.model.is_stop_refresh_current(generation))
                 },
                 move |_, record| {
                     let Some(ui) = weak_ui_for_response.upgrade() else {
                         return;
                     };
 
-                    if !ui.is_stop_refresh_current(generation) {
+                    if !ui.model.is_stop_refresh_current(generation) {
                         return;
                     }
 
@@ -377,7 +389,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             )
             .is_err()
             && let Some(ui) = weak_ui.upgrade()
-            && ui.is_stop_refresh_current(generation)
+            && ui.model.is_stop_refresh_current(generation)
         {
             ui.show_memory_watch(id, Err("MI channel is unavailable"));
         }
@@ -696,13 +708,13 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             return;
         };
 
-        let generation = current_ui.current_stop_refresh_generation();
+        let generation = current_ui.model.current_stop_refresh_generation();
 
-        if !current_ui.can_edit_variable(generation) {
+        if !current_ui.model.can_edit_variable(generation) {
             return;
         }
 
-        let Some(context) = current_ui.stop_context(generation) else {
+        let Some(context) = current_ui.model.stop_context(generation) else {
             return;
         };
 
@@ -736,7 +748,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             move || {
                 weak_ui_for_guard
                     .upgrade()
-                    .is_some_and(|ui| ui.can_edit_variable(generation))
+                    .is_some_and(|ui| ui.model.can_edit_variable(generation))
             },
             move |client, record| {
                 let Some(ui) = weak_ui_for_response.upgrade() else {
@@ -801,7 +813,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             return;
         };
 
-        let generation = current_ui.current_stop_refresh_generation();
+        let generation = current_ui.model.current_stop_refresh_generation();
 
         let Some(expression) = vector_assignment_expression(&register, &field, &changes) else {
             return;
@@ -813,6 +825,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         );
 
         let Some(command) = current_ui
+            .model
             .stop_context(generation)
             .map(|context| context.scope_frame(&command))
         else {
@@ -831,7 +844,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             move || {
                 weak_ui_for_guard
                     .upgrade()
-                    .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+                    .is_some_and(|ui| ui.model.is_stop_refresh_current(generation))
             },
             move |client, record| {
                 let Some(ui) = weak_ui_for_response.upgrade() else {
@@ -900,7 +913,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             return;
         };
 
-        let generation = ui.current_stop_refresh_generation();
+        let generation = ui.model.current_stop_refresh_generation();
         drop(ui);
         let update_batch = variable_update_batch(&weak_ui, generation, 1);
         refresh_expression_watches(weak_ui.clone(), &client, generation, update_batch);
@@ -920,6 +933,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let backend = BackendController::new(
         Rc::downgrade(&ui),
         Rc::clone(&mi_client),
+        Rc::clone(&model),
         Rc::clone(&session_controller),
         launch_config,
     );

@@ -43,7 +43,7 @@ pub(super) fn refresh_thread_policy(ui: &Weak<Ui>, client: &MiClient) {
         return;
     };
 
-    let generation = current_ui.start_thread_policy_refresh();
+    let generation = current_ui.model.start_thread_policy_refresh();
     drop(current_ui);
 
     let refresh = Rc::new(RefCell::new(ThreadPolicyRefresh {
@@ -125,7 +125,7 @@ fn complete_thread_policy_refresh(
 
     if let Some(ui) = ui
         .upgrade()
-        .filter(|ui| ui.is_thread_policy_refresh_current(generation))
+        .filter(|ui| ui.model.is_thread_policy_refresh_current(generation))
     {
         ui.set_thread_control_policy(scheduler, non_stop);
     }
@@ -134,7 +134,7 @@ fn complete_thread_policy_refresh(
 pub(super) fn handle_thread_action(ui: Weak<Ui>, client: Rc<MiClient>, action: ThreadAction) {
     if !ui
         .upgrade()
-        .is_some_and(|ui| ui.thread_action_can_dispatch(&action))
+        .is_some_and(|ui| ui.model.thread_action_can_dispatch(&action))
     {
         return;
     }
@@ -144,7 +144,10 @@ pub(super) fn handle_thread_action(ui: Weak<Ui>, client: Rc<MiClient>, action: T
             refresh_thread_policy(&ui, &client);
             refresh_inferiors(&ui, &client);
 
-            if ui.upgrade().is_some_and(|ui| !ui.inferior_is_running()) {
+            if ui
+                .upgrade()
+                .is_some_and(|ui| !ui.model.inferior_is_running())
+            {
                 refresh_threads(&ui, &client);
             }
         }
@@ -197,8 +200,8 @@ fn set_scheduler_locking(
                 current_ui.clear_thread_action_pending();
 
                 current_ui.set_thread_control_policy(
-                    current_ui.scheduler_locking_mode(),
-                    current_ui.non_stop_mode(),
+                    current_ui.model.scheduler_locking_mode(),
+                    current_ui.model.non_stop_mode(),
                 );
 
                 current_ui.set_status(
@@ -212,7 +215,7 @@ fn set_scheduler_locking(
                 return;
             }
 
-            current_ui.set_thread_control_policy(Some(mode), current_ui.non_stop_mode());
+            current_ui.set_thread_control_policy(Some(mode), current_ui.model.non_stop_mode());
 
             if let Some(next) = then {
                 drop(current_ui);
@@ -245,10 +248,10 @@ fn set_non_stop(ui: Weak<Ui>, client: Rc<MiClient>, enabled: bool) {
         return;
     };
 
-    if current_ui.inferior_has_started() {
+    if current_ui.model.inferior_has_started() {
         current_ui.set_thread_control_policy(
-            current_ui.scheduler_locking_mode(),
-            current_ui.non_stop_mode(),
+            current_ui.model.scheduler_locking_mode(),
+            current_ui.model.non_stop_mode(),
         );
 
         current_ui.set_status(
@@ -275,7 +278,7 @@ fn set_non_stop(ui: Weak<Ui>, client: Rc<MiClient>, enabled: bool) {
             ui.clear_thread_action_pending();
 
             if record.is_done() {
-                ui.set_thread_control_policy(ui.scheduler_locking_mode(), Some(enabled));
+                ui.set_thread_control_policy(ui.model.scheduler_locking_mode(), Some(enabled));
 
                 ui.set_status(
                     "Thread-control mode updated",
@@ -287,7 +290,10 @@ fn set_non_stop(ui: Weak<Ui>, client: Rc<MiClient>, enabled: bool) {
                     Some("status-ready"),
                 );
             } else {
-                ui.set_thread_control_policy(ui.scheduler_locking_mode(), ui.non_stop_mode());
+                ui.set_thread_control_policy(
+                    ui.model.scheduler_locking_mode(),
+                    ui.model.non_stop_mode(),
+                );
 
                 ui.set_status(
                     "Thread-control mode failed",
@@ -302,7 +308,7 @@ fn set_non_stop(ui: Weak<Ui>, client: Rc<MiClient>, enabled: bool) {
         && let Some(ui) = weak_ui_for_error.upgrade()
     {
         ui.clear_thread_action_pending();
-        ui.set_thread_control_policy(ui.scheduler_locking_mode(), ui.non_stop_mode());
+        ui.set_thread_control_policy(ui.model.scheduler_locking_mode(), ui.model.non_stop_mode());
 
         ui.set_status(
             "Thread-control mode failed",
@@ -327,8 +333,8 @@ fn run_only(ui: Weak<Ui>, client: Rc<MiClient>, id: String) {
         return;
     };
 
-    if current_ui.non_stop_mode() == Some(true)
-        || current_ui.scheduler_locking_mode() == Some(SchedulerLockingMode::On)
+    if current_ui.model.non_stop_mode() == Some(true)
+        || current_ui.model.scheduler_locking_mode() == Some(SchedulerLockingMode::On)
     {
         drop(current_ui);
         resume_thread(ui, client, thread, "Running only the selected thread");
@@ -375,7 +381,7 @@ fn control_non_stop_thread(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resum
         return;
     };
 
-    if current_ui.non_stop_mode() != Some(true) {
+    if current_ui.model.non_stop_mode() != Some(true) {
         current_ui.set_status(
             "Individual thread control unavailable",
             "Freeze and thaw require GDB non-stop mode, which must be enabled before the target starts",
@@ -463,7 +469,8 @@ fn pump_backtraces(collection: &Rc<RefCell<BacktraceCollection>>, client: &MiCli
             let mut state = collection.borrow_mut();
 
             let current = state.ui.upgrade().is_some_and(|ui| {
-                ui.is_thread_analysis_current(state.generation) && !ui.inferior_is_running()
+                ui.model.is_thread_analysis_current(state.generation)
+                    && !ui.model.inferior_is_running()
             });
 
             if !current {
@@ -511,8 +518,8 @@ fn pump_backtraces(collection: &Rc<RefCell<BacktraceCollection>>, client: &MiCli
                     let collection = collection_for_guard.borrow();
 
                     collection.ui.upgrade().is_some_and(|ui| {
-                        ui.is_thread_analysis_current(collection.generation)
-                            && !ui.inferior_is_running()
+                        ui.model.is_thread_analysis_current(collection.generation)
+                            && !ui.model.inferior_is_running()
                     })
                 },
                 move |client, record| {
@@ -634,7 +641,7 @@ fn request_thread_comparison(
 
     current_ui.set_thread_action_pending(Some(ThreadActionPending::Analysis));
 
-    if let Some(names) = current_ui.cached_register_names() {
+    if let Some(names) = current_ui.model.cached_register_names() {
         drop(current_ui);
         start_thread_comparison(ui, client, generation, left, right, names);
         return;
@@ -667,9 +674,9 @@ fn request_thread_comparison(
 
             if let Some(ui) = weak_ui
                 .upgrade()
-                .filter(|ui| ui.is_thread_analysis_current(generation))
+                .filter(|ui| ui.model.is_thread_analysis_current(generation))
             {
-                ui.cache_register_names(Rc::clone(&names));
+                ui.model.cache_register_names(Rc::clone(&names));
             } else {
                 return;
             }
@@ -1002,7 +1009,7 @@ fn select_thread_frame(ui: Weak<Ui>, client: Rc<MiClient>, thread: String, frame
         return;
     };
 
-    if !current_ui.thread_is_stopped(&thread) {
+    if !current_ui.model.thread_is_stopped(&thread) {
         current_ui.set_status(
             "Frame selection unavailable",
             "The thread is no longer stopped",

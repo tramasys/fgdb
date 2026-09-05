@@ -210,27 +210,21 @@ fn bounded_stack_frames(
 }
 
 impl Ui {
-    pub(crate) fn current_thread_id(&self) -> Option<String> {
-        self.selected_thread_id.borrow().clone()
-    }
-
-    pub(crate) fn set_current_thread_id(&self, thread_id: Option<&str>) {
-        let mut selected = self.selected_thread_id.borrow_mut();
-
-        if selected.as_deref() != thread_id {
-            *selected = thread_id.map(str::to_owned);
-        }
-    }
-
     pub fn show_frames(&self, frames: &[StackFrame]) {
-        let render_started = Instant::now();
-        self.latest_frames_generation.set(None);
+        self.model.publish_frames(None, frames);
+        self.render_frames();
+    }
 
-        if self.latest_frames.borrow().as_slice() == frames {
+    fn render_frames(&self) {
+        let render_started = Instant::now();
+        let snapshot = self.model.frames();
+        let frames = snapshot.as_ref();
+
+        if self.displayed_frames.borrow().as_ref() == frames {
             return;
         }
 
-        let selected_level = self.selected_frame_level.get();
+        let selected_level = self.model.selected_frame_level();
 
         let widget_limit = self.adaptive_render_limit(
             "call-stack pane",
@@ -241,7 +235,7 @@ impl Ui {
         let rendered_frames = bounded_stack_frames(frames, widget_limit, selected_level);
 
         let can_update_in_place = {
-            let latest = self.latest_frames.borrow();
+            let latest = self.displayed_frames.borrow();
             let previous_frames = bounded_stack_frames(&latest, widget_limit, selected_level);
             let buttons = self.frame_buttons.borrow();
 
@@ -254,7 +248,7 @@ impl Ui {
         };
 
         if can_update_in_place {
-            let latest = self.latest_frames.borrow();
+            let latest = self.displayed_frames.borrow();
             let previous_frames = bounded_stack_frames(&latest, widget_limit, selected_level);
 
             for (((level, button), previous), frame) in self
@@ -272,11 +266,11 @@ impl Ui {
             }
 
             drop(latest);
-            self.latest_frames.replace(frames.to_vec());
+            self.displayed_frames.replace(Rc::clone(&snapshot));
 
             update_selected_frame_buttons(
                 &self.frame_buttons.borrow(),
-                self.selected_frame_level.get(),
+                self.model.selected_frame_level(),
             );
 
             self.update_thread_control_sensitivity();
@@ -284,7 +278,7 @@ impl Ui {
             return;
         }
 
-        self.latest_frames.replace(frames.to_vec());
+        self.displayed_frames.replace(Rc::clone(&snapshot));
         clear_box(&self.call_stack_list);
         self.frame_buttons.borrow_mut().clear();
 
@@ -317,7 +311,7 @@ impl Ui {
             let button = gtk::Button::builder().child(&row).build();
             button.add_css_class("stack-frame");
 
-            if frame.level == self.selected_frame_level.get() {
+            if frame.level == self.model.selected_frame_level() {
                 button.add_css_class("current-debug-item");
             }
 
@@ -362,7 +356,7 @@ impl Ui {
     }
 
     pub(crate) fn select_frame_in_view(&self, level: u32) {
-        self.selected_frame_level.set(level);
+        self.model.select_frame(level);
         update_selected_frame_buttons(&self.frame_buttons.borrow(), level);
         self.update_thread_control_sensitivity();
     }
@@ -471,19 +465,13 @@ impl Ui {
     }
 
     pub fn show_frames_for_refresh(&self, generation: u64, frames: &[StackFrame]) {
-        if self.is_stop_refresh_current(generation) {
-            self.show_frames(frames);
-            self.latest_frames_generation.set(Some(generation));
+        if self.model.publish_frames(Some(generation), frames) {
+            self.render_frames();
         }
     }
 
-    pub(crate) fn frames_for_details(&self, generation: u64) -> Option<Vec<StackFrame>> {
-        (self.latest_frames_generation.get() == Some(generation))
-            .then(|| self.latest_frames.borrow().clone())
-    }
-
     pub fn show_locals_for_refresh(&self, generation: u64, variables: &[Variable]) {
-        if self.is_stop_refresh_current(generation) {
+        if self.model.is_stop_refresh_current(generation) {
             if self.locals_generation.replace(Some(generation)) != Some(generation) {
                 self.locals_render_limit.set(self.adaptive_render_limit(
                     "locals pane",
@@ -498,7 +486,7 @@ impl Ui {
     }
 
     pub fn show_local_root_for_refresh(&self, generation: u64, index: usize, variable: &Variable) {
-        if !self.is_stop_refresh_current(generation) {
+        if !self.model.is_stop_refresh_current(generation) {
             return;
         }
 
@@ -525,7 +513,7 @@ impl Ui {
         generation: u64,
         updates: &[VariableUpdate],
     ) {
-        if !self.is_stop_refresh_current(generation) || updates.is_empty() {
+        if !self.model.is_stop_refresh_current(generation) || updates.is_empty() {
             return;
         }
 
@@ -684,7 +672,7 @@ impl Ui {
             return false;
         };
 
-        self.is_stop_refresh_current(generation)
+        self.model.is_stop_refresh_current(generation)
             && self.has_local_variable_identity(variable)
             && self
                 .pending_local_variable_objects
@@ -706,7 +694,7 @@ impl Ui {
         original: &Variable,
         variable: &Variable,
     ) -> bool {
-        if !self.is_stop_refresh_current(generation) {
+        if !self.model.is_stop_refresh_current(generation) {
             return false;
         }
 
@@ -853,19 +841,14 @@ impl Ui {
         let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
         let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
-        let stop_generation = Rc::clone(&self.stop_refresh_generation);
-        let can_edit = self.variable_edit_guard();
-        let debugger_ready = Rc::clone(&self.debugger_ready);
-        let debugger_state = Rc::clone(&self.debugger_state);
-        let command_pending = Rc::clone(&self.command_pending);
-        let session_pending = Rc::clone(&self.session_pending);
+        let model = Rc::clone(&self.model);
 
         self.locals_view.connect_activate(move |_, position| {
-            if !debugger_ready.get()
-                || !debugger_state.get().inferior_started()
-                || debugger_state.get().inferior_running()
-                || command_pending.get()
-                || session_pending.get()
+            if !model.execution().ready
+                || !model.execution().state.inferior_started()
+                || model.execution().state.inferior_running()
+                || model.execution().command_pending
+                || model.execution().session_pending
             {
                 return;
             }
@@ -917,8 +900,7 @@ impl Ui {
                             current_source_is_rust.get(),
                             None,
                             ValueEditorHandlers {
-                                stop_generation: Rc::clone(&stop_generation),
-                                can_edit: Rc::clone(&can_edit),
+                                model: Rc::clone(&model),
                                 assignment: Rc::clone(&handler),
                                 float: Rc::clone(&float_handler),
                                 string: Rc::clone(&string_handler),
@@ -938,8 +920,7 @@ impl Ui {
         let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
         let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
-        let stop_generation = Rc::clone(&self.stop_refresh_generation);
-        let can_edit = self.variable_edit_guard();
+        let model = Rc::clone(&self.model);
 
         self.locals_edit_button.connect_clicked(move |_| {
             if let Some(variable) = variable_at(&selection, selection.selected())
@@ -958,8 +939,7 @@ impl Ui {
                         current_source_is_rust.get(),
                         None,
                         ValueEditorHandlers {
-                            stop_generation: Rc::clone(&stop_generation),
-                            can_edit: Rc::clone(&can_edit),
+                            model: Rc::clone(&model),
                             assignment: Rc::clone(&handler),
                             float: Rc::clone(&float_handler),
                             string: Rc::clone(&string_handler),
@@ -970,17 +950,15 @@ impl Ui {
         });
 
         let edit_button = self.locals_edit_button.clone();
-        let ready = Rc::clone(&self.debugger_ready);
-        let debugger_state = Rc::clone(&self.debugger_state);
-        let pending = Rc::clone(&self.command_pending);
+        let model = Rc::clone(&self.model);
 
         self.locals_selection
             .connect_selected_notify(move |selection| {
                 edit_button.set_sensitive(
-                    ready.get()
-                        && debugger_state.get().inferior_started()
-                        && !debugger_state.get().inferior_running()
-                        && !pending.get()
+                    model.execution().ready
+                        && model.execution().state.inferior_started()
+                        && !model.execution().state.inferior_running()
+                        && !model.execution().command_pending
                         && variable_at(selection, selection.selected())
                             .is_some_and(|variable| variable.is_available()),
                 );
@@ -998,19 +976,14 @@ impl Ui {
             let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
             let target_architecture = Rc::clone(&self.target_architecture);
             let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
-            let stop_generation = Rc::clone(&self.stop_refresh_generation);
-            let can_edit = self.variable_edit_guard();
-            let debugger_ready = Rc::clone(&self.debugger_ready);
-            let debugger_state = Rc::clone(&self.debugger_state);
-            let command_pending = Rc::clone(&self.command_pending);
-            let session_pending = Rc::clone(&self.session_pending);
+            let model = Rc::clone(&self.model);
 
             group.view.connect_activate(move |_, position| {
-                if !debugger_ready.get()
-                    || !debugger_state.get().inferior_started()
-                    || debugger_state.get().inferior_running()
-                    || command_pending.get()
-                    || session_pending.get()
+                if !model.execution().ready
+                    || !model.execution().state.inferior_started()
+                    || model.execution().state.inferior_running()
+                    || model.execution().command_pending
+                    || model.execution().session_pending
                 {
                     return;
                 }
@@ -1048,8 +1021,7 @@ impl Ui {
                         current_source_is_rust.get(),
                         None,
                         ValueEditorHandlers {
-                            stop_generation: Rc::clone(&stop_generation),
-                            can_edit: Rc::clone(&can_edit),
+                            model: Rc::clone(&model),
                             assignment: Rc::clone(&handler),
                             float: Rc::clone(&float_handler),
                             string: Rc::clone(&string_handler),
@@ -1061,47 +1033,25 @@ impl Ui {
     }
 
     pub fn show_threads(&self, threads: &[ThreadInfo]) {
+        self.model.publish_threads(threads);
+        self.render_threads();
+    }
+
+    pub(super) fn render_threads(&self) {
         let render_started = Instant::now();
-        let explicit_current = threads.iter().find(|thread| thread.current);
-
-        let retained_current = if explicit_current.is_none() {
-            self.current_thread_id()
-                .filter(|selected| threads.iter().any(|thread| thread.id == selected.as_str()))
-        } else {
-            None
-        };
-
-        let normalized_threads = retained_current.as_ref().map(|selected| {
-            let mut normalized = threads.to_vec();
-
-            if let Some(thread) = normalized
-                .iter_mut()
-                .find(|thread| thread.id == selected.as_str())
-            {
-                thread.current = true;
-            }
-
-            normalized
-        });
-
-        let threads = normalized_threads.as_deref().unwrap_or(threads);
-
-        self.set_current_thread_id(
-            explicit_current
-                .map(|thread| thread.id.as_str())
-                .or(retained_current.as_deref()),
-        );
+        let threads = self.model.threads();
+        let threads = threads.as_ref();
 
         let executable_name = self
-            .current_session
-            .borrow()
+            .model
+            .session()
             .as_ref()
             .and_then(DebugSession::executable)
             .and_then(std::path::Path::file_name)
             .and_then(std::ffi::OsStr::to_str)
             .map(str::to_owned);
 
-        let stop_reason = self.thread_stop_reason.borrow().clone();
+        let stop_reason = self.model.thread_stop_reason();
         let (query, state_filter, sort) = self.current_thread_filter_state();
 
         let thread_limit =
@@ -1114,7 +1064,7 @@ impl Ui {
         let omitted_thread_count = visible_thread_count.saturating_sub(rendered_thread_count);
 
         if self.latest_threads.borrow().as_ref().is_some_and(|state| {
-            state.source_threads == threads
+            state.source_threads.as_ref() == threads
                 && state.rendered_threads == rendered_threads
                 && state.stop_reason == stop_reason
                 && state.executable_name == executable_name
@@ -1172,7 +1122,7 @@ impl Ui {
             drop(latest);
 
             self.latest_threads.replace(Some(ThreadRenderState {
-                source_threads: threads.to_vec(),
+                source_threads: self.model.threads(),
                 rendered_threads,
                 stop_reason,
                 executable_name,
@@ -1198,7 +1148,7 @@ impl Ui {
         }
 
         self.latest_threads.replace(Some(ThreadRenderState {
-            source_threads: threads.to_vec(),
+            source_threads: self.model.threads(),
             rendered_threads: rendered_threads.clone(),
             stop_reason: stop_reason.clone(),
             executable_name,
@@ -1381,21 +1331,10 @@ impl Ui {
         true
     }
 
-    pub fn start_thread_refresh(&self) -> u64 {
-        let generation = self.thread_refresh_generation.get().wrapping_add(1);
-        self.thread_refresh_generation.set(generation);
-
-        generation
-    }
-
     pub fn show_threads_for_refresh(&self, generation: u64, threads: &[ThreadInfo]) {
-        if self.is_thread_refresh_current(generation) {
+        if self.model.is_thread_refresh_current(generation) {
             self.show_threads(threads);
         }
-    }
-
-    pub fn is_thread_refresh_current(&self, generation: u64) -> bool {
-        self.thread_refresh_generation.get() == generation
     }
 
     pub fn show_instructions(
@@ -1516,7 +1455,7 @@ impl Ui {
                 }));
 
             self.call_abi_instruction_generation
-                .set(Some(self.current_stop_refresh_generation()));
+                .set(Some(self.model.current_stop_refresh_generation()));
 
             self.refresh_call_abi_transfer();
         }
@@ -1626,7 +1565,7 @@ impl Ui {
             return;
         };
 
-        let registers = self.latest_registers.borrow();
+        let registers = self.model.registers();
         let architecture = self.target_architecture();
         let branch_taken = conditional_branch_taken(&instruction, &registers, architecture);
         let flow = instruction_flow_description(&instruction, &registers, architecture);
@@ -1900,7 +1839,7 @@ impl Ui {
         }
 
         let instruction = row.as_ref().map(|row| &row.instruction);
-        let registers = self.latest_registers.borrow();
+        let registers = self.model.registers();
         let architecture = self.target_architecture();
 
         self.disassembly_controls.follow.set_sensitive(
@@ -1927,7 +1866,7 @@ impl Ui {
 
         let Some(expression) = instruction_memory_expression(
             &instruction,
-            &self.latest_registers.borrow(),
+            &self.model.registers(),
             self.target_architecture(),
         ) else {
             return;
@@ -2013,8 +1952,13 @@ impl Ui {
     }
 
     pub fn show_registers(&self, registers: &[Register]) -> bool {
-        self.latest_registers_generation.set(None);
+        let changed = self.model.publish_registers(registers);
+        self.render_registers(registers);
 
+        changed
+    }
+
+    fn render_registers(&self, registers: &[Register]) {
         if registers.is_empty() {
             for group in &self.register_groups {
                 if group.store.n_items() != 0 {
@@ -2037,7 +1981,7 @@ impl Ui {
             let architecture = self.target_architecture();
             let endian = self.target_endian();
             let pointer_bits = self.target_pointer_bits();
-            let previous = self.previous_registers.borrow();
+            let previous = self.model.previous_registers();
 
             let ring = registers
                 .iter()
@@ -2071,23 +2015,11 @@ impl Ui {
             }
         }
 
-        let values_changed = {
-            let latest = self.latest_registers.borrow();
-
-            !same_register_values(&latest, registers)
-        };
-
-        if values_changed {
-            self.latest_registers.replace(registers.to_vec());
-        }
-
         self.update_instruction_insight();
-
-        values_changed
     }
 
     pub fn start_stop_refresh(&self) -> u64 {
-        self.active_stop_context.borrow_mut().take();
+        let generation = self.model.start_stop_refresh();
 
         self.memory_watch_container
             .refresh_batch
@@ -2109,21 +2041,6 @@ impl Ui {
             roots.len(),
         ));
 
-        let latest = self.latest_registers.borrow();
-        let mut previous = self.previous_registers.borrow_mut();
-        previous.clear();
-        previous.reserve(latest.len());
-
-        previous.extend(
-            latest
-                .iter()
-                .map(|register| (register.name.clone(), register.value.clone())),
-        );
-
-        drop(previous);
-        drop(latest);
-        let generation = self.stop_refresh_generation.get().wrapping_add(1);
-        self.stop_refresh_generation.set(generation);
         self.call_abi_instruction.replace(None);
         self.call_abi_instruction_generation.set(None);
         self.misc_view.show_call_abi_pending();
@@ -2135,100 +2052,29 @@ impl Ui {
         &self,
         transport_epoch: u64,
     ) -> Option<crate::debugger::StopContext> {
-        let generation = self.start_stop_refresh();
-        let thread_id = self.current_thread_id()?;
-
-        let frame_level = match self.selected_frame_level.get() {
-            u32::MAX => 0,
-            level => level,
-        };
-
-        if self.selected_frame_level.get() != frame_level {
-            self.select_frame_in_view(frame_level);
-        }
-
-        let context = crate::debugger::StopContext::new(
-            transport_epoch,
-            generation,
-            self.selected_inferior_id(),
-            thread_id,
-            frame_level,
-        )?;
-
-        self.active_stop_context.replace(Some(context.clone()));
+        self.start_stop_refresh();
+        let context = self.model.bind_stop_context(transport_epoch)?;
+        update_selected_frame_buttons(&self.frame_buttons.borrow(), context.frame_level());
+        self.update_thread_control_sensitivity();
 
         Some(context)
     }
 
-    pub(crate) fn stop_context(&self, generation: u64) -> Option<crate::debugger::StopContext> {
-        self.active_stop_context
-            .borrow()
-            .as_ref()
-            .filter(|context| context.generation() == generation)
-            .cloned()
-    }
-
-    pub fn is_stop_refresh_current(&self, generation: u64) -> bool {
-        if self.stop_refresh_generation.get() != generation {
-            return false;
-        }
-
-        self.active_stop_context
-            .borrow()
-            .as_ref()
-            .is_some_and(|context| {
-                self.current_thread_id().as_deref() == Some(context.thread_id())
-                    && self.selected_frame_level.get() == context.frame_level()
-                    && context.inferior_id().is_none_or(|inferior| {
-                        self.selected_inferior_id().as_deref() == Some(inferior)
-                    })
-            })
-    }
-
-    pub fn current_stop_refresh_generation(&self) -> u64 {
-        self.stop_refresh_generation.get()
-    }
-
-    pub fn cached_register_names(&self) -> Option<Rc<Vec<String>>> {
-        self.cached_register_names.borrow().clone()
-    }
-
-    pub fn cache_register_names(&self, names: Rc<Vec<String>>) {
-        if !names.is_empty() {
-            self.cached_register_names.replace(Some(names));
-        }
-    }
-
     pub fn show_registers_for_refresh(&self, generation: u64, registers: &[Register]) {
-        if self.is_stop_refresh_current(generation) {
-            let first_for_generation = self.latest_registers_generation.get() != Some(generation);
-            let values_changed = self.show_registers(registers);
-            self.latest_registers_generation.set(Some(generation));
+        if let Some(refresh_transfer) = self
+            .model
+            .publish_registers_for_refresh(generation, registers)
+        {
+            self.render_registers(registers);
 
-            if first_for_generation || values_changed {
+            if refresh_transfer {
                 self.refresh_call_abi_transfer();
             }
         }
     }
 
-    pub(crate) fn registers_for_details(&self, generation: u64) -> Option<Vec<Register>> {
-        (self.latest_registers_generation.get() == Some(generation))
-            .then(|| self.latest_registers.borrow().clone())
-            .filter(|registers| !registers.is_empty())
-    }
-
-    pub(crate) fn claim_register_details(&self, generation: u64) -> bool {
-        self.is_stop_refresh_current(generation)
-            && self.register_details_generation.replace(Some(generation)) != Some(generation)
-    }
-
     pub fn show_stack(&self, entries: &[StackEntry]) {
-        self.latest_stack_generation.set(None);
-
-        if self.latest_stack.borrow().as_slice() != entries {
-            self.latest_stack.replace(entries.to_vec());
-        }
-
+        self.model.publish_stack(None, entries);
         self.render_stack(Cow::Borrowed(entries));
     }
 
@@ -2250,83 +2096,34 @@ impl Ui {
     }
 
     pub fn show_stack_for_refresh(&self, generation: u64, entries: &[StackEntry]) {
-        if self.is_stop_refresh_current(generation) {
-            if self.latest_stack.borrow().as_slice() != entries {
-                self.latest_stack.replace(entries.to_vec());
-            }
-
+        if self.model.publish_stack(Some(generation), entries) {
             let mut rendered = entries.to_vec();
             preserve_stack_render_details(&mut rendered, &self.displayed_stack.borrow());
             self.render_stack(Cow::Owned(rendered));
-            self.latest_stack_generation.set(Some(generation));
         }
-    }
-
-    pub(crate) fn stack_for_details(&self, generation: u64) -> Option<Vec<StackEntry>> {
-        (self.latest_stack_generation.get() == Some(generation))
-            .then(|| self.latest_stack.borrow().clone())
-            .filter(|entries| !entries.is_empty())
-    }
-
-    pub(crate) fn claim_stack_details(&self, generation: u64) -> bool {
-        self.is_stop_refresh_current(generation)
-            && self.stack_details_generation.replace(Some(generation)) != Some(generation)
-    }
-
-    pub(crate) fn claim_stack_memory_refresh(&self, generation: u64) -> bool {
-        self.is_stop_refresh_current(generation)
-            && self
-                .stack_memory_refresh_generation
-                .replace(Some(generation))
-                != Some(generation)
     }
 
     pub fn show_stack_unavailable_for_refresh(&self, generation: u64, reason: &str) {
-        if !self.is_stop_refresh_current(generation) {
+        if !self.model.publish_stack(Some(generation), &[]) {
             return;
         }
 
-        self.latest_stack.replace(Vec::new());
         self.displayed_stack.replace(Vec::new());
-        self.latest_stack_generation.set(Some(generation));
         self.stack_store.remove_all();
         self.stack_empty.set_text(reason);
         self.stack_empty.set_visible(true);
     }
 
     pub fn show_memory_regions_for_refresh(&self, generation: u64, regions: &[MemoryRegion]) {
-        if !self.is_stop_refresh_current(generation) {
+        let Some(changed) = self.model.publish_memory_regions(generation, regions) else {
             return;
-        }
+        };
 
-        if self.memory_regions.borrow().as_slice() != regions {
+        if changed {
             replace_boxed_store_if_changed(&self.memory_region_store, regions.iter().cloned());
-            self.memory_regions.replace(regions.to_vec());
         }
 
         self.memory_regions_empty.set_visible(regions.is_empty());
-        self.memory_regions_generation.set(Some(generation));
-    }
-
-    pub(crate) fn memory_regions_for_details(&self, generation: u64) -> Option<Vec<MemoryRegion>> {
-        (self.memory_regions_generation.get() == Some(generation))
-            .then(|| self.memory_regions.borrow().clone())
-    }
-
-    pub(crate) fn claim_memory_watches_refresh(&self, generation: u64) -> bool {
-        self.is_stop_refresh_current(generation)
-            && self
-                .memory_watches_refresh_generation
-                .replace(Some(generation))
-                != Some(generation)
-    }
-
-    pub(crate) fn claim_tls_runtime_refresh(&self, generation: u64) -> bool {
-        self.is_stop_refresh_current(generation)
-            && self
-                .tls_runtime_refresh_generation
-                .replace(Some(generation))
-                != Some(generation)
     }
 
     pub(super) fn connect_memory_controls(&self) {
@@ -2391,16 +2188,14 @@ impl Ui {
         });
 
         let button = self.memory_add_button.clone();
-        let ready = Rc::clone(&self.debugger_ready);
-        let debugger_state = Rc::clone(&self.debugger_state);
-        let pending = Rc::clone(&self.command_pending);
+        let model = Rc::clone(&self.model);
 
         self.memory_address_entry.connect_changed(move |entry| {
             button.set_sensitive(
-                ready.get()
-                    && debugger_state.get().inferior_started()
-                    && !debugger_state.get().inferior_running()
-                    && !pending.get()
+                model.execution().ready
+                    && model.execution().state.inferior_started()
+                    && !model.execution().state.inferior_running()
+                    && !model.execution().command_pending
                     && !entry.text().trim().is_empty(),
             );
         });
@@ -2542,10 +2337,10 @@ impl Ui {
     pub(super) fn connect_breakpoint_bulk_controls(&self) {
         let parent = self.window.clone();
         let handler = Rc::clone(&self.breakpoint_editor_handler);
-        let capabilities = Rc::clone(&self.gdb_capabilities);
+        let model = Rc::clone(&self.model);
 
         self.add_breakpoint_button.connect_clicked(move |_| {
-            let pending_supported = capabilities.borrow().supports("pending-breakpoints");
+            let pending_supported = model.gdb_supports("pending-breakpoints");
             open_breakpoint_editor(&parent, None, pending_supported, Rc::clone(&handler));
         });
 
@@ -2596,19 +2391,15 @@ impl Ui {
 
         let breakpoints = Rc::clone(&self.breakpoints);
         let handler = Rc::clone(&self.breakpoint_bulk_delete_handler);
-        let ready = Rc::clone(&self.debugger_ready);
-        let debugger_state = Rc::clone(&self.debugger_state);
-        let command_pending = Rc::clone(&self.command_pending);
-        let session_pending = Rc::clone(&self.session_pending);
-        let until_active = Rc::clone(&self.native_until_active);
+        let model = Rc::clone(&self.model);
 
         self.delete_all_signal_catchpoints_button
             .connect_clicked(move |_| {
-                if !ready.get()
-                    || debugger_state.get().inferior_running()
-                    || command_pending.get()
-                    || session_pending.get()
-                    || until_active.get()
+                if !model.execution().ready
+                    || model.execution().state.inferior_running()
+                    || model.execution().command_pending
+                    || model.execution().session_pending
+                    || model.execution().native_until_active
                 {
                     return;
                 }
@@ -2687,7 +2478,7 @@ impl Ui {
     }
 
     pub fn refresh_memory_watches(&self) {
-        if !self.stopped_inspection_available() {
+        if !self.model.stopped_inspection_available() {
             update_memory_container_state(&self.memory_watch_container, false);
             return;
         }
@@ -2774,7 +2565,7 @@ impl Ui {
                 show_memory_watch_data(
                     &watch,
                     memory,
-                    &self.memory_regions.borrow(),
+                    &self.model.memory_regions(),
                     self.target_pointer_bits.get(),
                     endian,
                 );
@@ -2850,10 +2641,7 @@ impl Ui {
         self.stop_point_filter_rows.borrow_mut().clear();
         let breakpoints = self.breakpoints.borrow();
 
-        let pending_supported = self
-            .gdb_capabilities
-            .borrow()
-            .supports("pending-breakpoints");
+        let pending_supported = self.model.gdb_supports("pending-breakpoints");
 
         let query = self
             .stop_point_filter

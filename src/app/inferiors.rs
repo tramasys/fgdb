@@ -12,7 +12,7 @@ pub(super) fn refresh_inferiors(ui: &Weak<Ui>, client: &MiClient) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
-    let Some(generation) = current_ui.begin_inferior_refresh() else {
+    let Some(generation) = current_ui.model.begin_inferior_refresh() else {
         return;
     };
     drop(current_ui);
@@ -24,7 +24,7 @@ pub(super) fn refresh_inferiors(ui: &Weak<Ui>, client: &MiClient) {
         move || {
             guard
                 .upgrade()
-                .is_some_and(|ui| ui.is_inferior_refresh_current(generation))
+                .is_some_and(|ui| ui.model.is_inferior_refresh_current(generation))
         },
         move |client, record| {
             let Some(ui) = weak_ui.upgrade() else {
@@ -33,16 +33,17 @@ pub(super) fn refresh_inferiors(ui: &Weak<Ui>, client: &MiClient) {
             let mut selection_changed = false;
             let mut refresh_selected = false;
 
-            if ui.is_inferior_refresh_current(generation) {
+            if ui.model.is_inferior_refresh_current(generation) {
                 if record.is_done() {
-                    let previous = ui.selected_inferior_id();
-                    let current_thread_id = ui.current_thread_id();
+                    let previous = ui.model.selected_inferior_id();
+                    let current_thread_id = ui.model.current_thread_id();
                     ui.show_inferiors(crate::debugger::inferiors(
                         &record,
                         current_thread_id.as_deref(),
                     ));
-                    selection_changed = previous != ui.selected_inferior_id();
-                    refresh_selected = selection_changed && ui.selected_inferior_context_stopped();
+                    selection_changed = previous != ui.model.selected_inferior_id();
+                    refresh_selected =
+                        selection_changed && ui.model.selected_inferior_context_stopped();
                 } else if record.class != "superseded" {
                     ui.set_status(
                         "Inferior refresh failed",
@@ -54,7 +55,7 @@ pub(super) fn refresh_inferiors(ui: &Weak<Ui>, client: &MiClient) {
                 }
             }
 
-            let again = ui.finish_inferior_refresh();
+            let again = ui.model.finish_inferior_refresh();
             drop(ui);
 
             if selection_changed {
@@ -69,7 +70,7 @@ pub(super) fn refresh_inferiors(ui: &Weak<Ui>, client: &MiClient) {
         },
     ) && let Some(ui) = ui.upgrade()
     {
-        ui.finish_inferior_refresh();
+        ui.model.finish_inferior_refresh();
         ui.set_status(
             "Inferior refresh failed",
             &error.to_string(),
@@ -83,7 +84,7 @@ pub(super) fn refresh_fork_policy(ui: &Weak<Ui>, client: &MiClient) {
         return;
     };
 
-    let Some(generation) = current_ui.begin_fork_policy_refresh() else {
+    let Some(generation) = current_ui.model.begin_fork_policy_refresh() else {
         return;
     };
     drop(current_ui);
@@ -175,11 +176,11 @@ fn complete_fork_policy_refresh(
     };
 
     if let Some(current_ui) = ui.upgrade() {
-        if current_ui.is_fork_policy_refresh_current(generation) {
+        if current_ui.model.is_fork_policy_refresh_current(generation) {
             current_ui.set_fork_policy(follow, detach);
         }
 
-        let again = current_ui.finish_fork_policy_refresh();
+        let again = current_ui.model.finish_fork_policy_refresh();
         drop(current_ui);
 
         if again && client.is_ready() {
@@ -191,7 +192,7 @@ fn complete_fork_policy_refresh(
 pub(super) fn handle_inferior_action(ui: Weak<Ui>, client: Rc<MiClient>, action: InferiorAction) {
     if !ui
         .upgrade()
-        .is_some_and(|ui| ui.inferior_action_is_current(&action))
+        .is_some_and(|ui| ui.model.inferior_action_is_current(&action))
     {
         return;
     }
@@ -241,7 +242,10 @@ pub(super) fn handle_inferior_action(ui: Weak<Ui>, client: Rc<MiClient>, action:
             refresh_inferiors(&ui, &client);
             refresh_fork_policy(&ui, &client);
 
-            if ui.upgrade().is_some_and(|ui| !ui.inferior_is_running()) {
+            if ui
+                .upgrade()
+                .is_some_and(|ui| !ui.model.inferior_is_running())
+            {
                 refresh_threads(&ui, &client);
                 refresh_modules(&ui, &client);
             }
@@ -266,7 +270,7 @@ fn select_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String) {
         return;
     };
 
-    if current_ui.selected_inferior_id().as_deref() == Some(id.as_str()) {
+    if current_ui.model.selected_inferior_id().as_deref() == Some(id.as_str()) {
         return;
     }
 
@@ -306,7 +310,7 @@ fn select_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String) {
                 Some("status-ready"),
             );
 
-            let stopped = ui.selected_inferior_context_stopped();
+            let stopped = ui.model.selected_inferior_context_stopped();
             drop(ui);
             refresh_inferiors(&weak_ui, client);
             refresh_modules(&weak_ui, client);
@@ -381,7 +385,7 @@ fn execute_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resume: bool
                     "GDB did not answer the process-level execution command within 30 seconds. The inferior state can no longer be determined safely.",
                 );
             } else if !record.is_success() {
-                ui.set_pending_execution_inferior(None);
+                ui.model.set_pending_execution_inferior(None);
                 ui.clear_inferior_action_pending();
 
                 ui.set_status(
@@ -401,7 +405,7 @@ fn execute_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resume: bool
     if request.is_err() {
         if let Some(ui) = weak_ui_for_error.upgrade() {
             ui.clear_inferior_action_pending();
-            ui.set_pending_execution_inferior(None);
+            ui.model.set_pending_execution_inferior(None);
 
             ui.set_status(
                 "Inferior control failed",
@@ -418,7 +422,10 @@ fn execute_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resume: bool
                 return;
             };
 
-            if ui.inferior_execution_action_pending_for(&id, execution_generation) {
+            if ui
+                .model
+                .inferior_execution_action_pending_for(&id, execution_generation)
+            {
                 let message = "GDB accepted a process-level execution command but did not report a running or stopped transition within 15 seconds. Restart GDB from the Session menu.";
 
                 if let Some(client) = weak_client.upgrade() {
@@ -442,7 +449,7 @@ fn set_fork_setting(
         return;
     };
 
-    current_ui.start_fork_policy_refresh();
+    current_ui.model.start_fork_policy_refresh();
     current_ui.set_inferior_action_pending(Some(InferiorActionPending::Setting));
     drop(current_ui);
     let command = format!("-gdb-set {setting} {value}");

@@ -158,7 +158,7 @@ impl Ui {
     }
 
     pub fn show_execution_location(&self, frame: &StackFrame) {
-        self.selected_frame_level.set(frame.level);
+        self.model.select_frame(frame.level);
 
         self.current_source_is_rust.set(
             frame
@@ -258,7 +258,7 @@ impl Ui {
 
     pub fn clear_execution_location(&self) {
         self.source_open_generation.fetch_add(1, Ordering::Relaxed);
-        self.selected_frame_level.set(u32::MAX);
+        self.model.select_frame(u32::MAX);
         self.current_source_is_rust.set(false);
         update_selected_frame_buttons(&self.frame_buttons.borrow(), u32::MAX);
         self.clear_execution_mark();
@@ -316,7 +316,7 @@ impl Ui {
         }
 
         self.start_stop_refresh();
-        self.start_thread_refresh();
+        self.model.start_thread_refresh();
         self.clear_execution_location();
         self.show_frames(&[]);
         self.show_threads(&[]);
@@ -325,13 +325,12 @@ impl Ui {
         self.show_expression_watches_unavailable("<inferior exited>");
         self.show_registers(&[]);
         self.show_stack(&[]);
-        self.previous_registers.borrow_mut().clear();
+        self.model.clear_previous_registers();
         self.invalidate_source_io();
         self.show_instructions(Vec::new(), "", "", None, false);
         self.show_signal(None, None);
         self.memory_region_store.remove_all();
-        self.memory_regions.borrow_mut().clear();
-        self.memory_regions_generation.set(None);
+        self.model.clear_memory_regions();
         self.memory_regions_empty.set_visible(true);
 
         self.memory_watch_container

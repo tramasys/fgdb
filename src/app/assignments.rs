@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn edit_context_is_current(ui: &Weak<Ui>, generation: u64) -> bool {
     ui.upgrade()
-        .is_some_and(|ui| ui.can_edit_variable(generation))
+        .is_some_and(|ui| ui.model.can_edit_variable(generation))
 }
 
 pub(super) fn assign_string(
@@ -13,9 +13,10 @@ pub(super) fn assign_string(
     kind: crate::ui::StringAssignmentKind,
 ) {
     let Some(generation) = ui.upgrade().and_then(|current_ui| {
-        let generation = current_ui.current_stop_refresh_generation();
+        let generation = current_ui.model.current_stop_refresh_generation();
 
         current_ui
+            .model
             .can_edit_variable(generation)
             .then_some(generation)
     }) else {

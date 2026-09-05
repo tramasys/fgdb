@@ -89,14 +89,6 @@ pub(super) fn register_changed(register: &Register, previous: &HashMap<String, S
         .is_some_and(|value| value != &register.value)
 }
 
-pub(super) fn same_register_values(left: &[Register], right: &[Register]) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|(left, right)| left.name == right.name && left.value == right.value)
-}
-
 pub(super) fn register_value_css(
     register: &Register,
     architecture: TargetArchitecture,

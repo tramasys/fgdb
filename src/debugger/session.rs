@@ -36,7 +36,10 @@ pub fn launch_gdb(
         None::<&gtk::gio::Cancellable>,
         move |result| match result {
             Ok(pid) => {
-                terminal_for_callback.feed_child(format!("new-ui mi2 {mi_path}\n").as_bytes());
+                // MI selections can also print frames on GDB's original console.
+                // Its pager must not block the shared backend waiting for input.
+                terminal_for_callback
+                    .feed_child(format!("set pagination off\nnew-ui mi2 {mi_path}\n").as_bytes());
 
                 match u32::try_from(pid.0) {
                     Ok(pid) => spawn_event(SessionEvent::Spawned(pid)),

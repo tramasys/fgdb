@@ -3668,7 +3668,7 @@ impl Ui {
         mapping: Option<&str>,
         result: Result<&MemoryBlock, &str>,
     ) {
-        if !self.is_stop_refresh_current(generation) {
+        if !self.model.is_stop_refresh_current(generation) {
             return;
         }
 
@@ -3693,7 +3693,7 @@ impl Ui {
     }
 
     pub fn show_tls_runtime_unavailable_for_refresh(&self, generation: u64, error: &str) {
-        if self.is_stop_refresh_current(generation) {
+        if self.model.is_stop_refresh_current(generation) {
             self.kernel_view.set_tls_runtime(
                 (
                     self.target_architecture(),
@@ -3816,10 +3816,10 @@ impl Ui {
     }
 
     fn kernel_refresh_allowed(&self) -> bool {
-        self.debugger_ready.get()
-            && self.inferior_has_started()
-            && !self.inferior_is_running()
-            && !self.command_pending.get()
+        self.model.execution().ready
+            && self.model.inferior_has_started()
+            && !self.model.inferior_is_running()
+            && !self.model.execution().command_pending
     }
 }
 

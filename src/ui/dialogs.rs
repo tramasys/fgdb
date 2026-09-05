@@ -2,9 +2,9 @@ use super::*;
 
 impl Ui {
     pub(crate) fn begin_variable_editor_request(&self) -> Option<VariableEditorRequest> {
-        let generation = self.current_stop_refresh_generation();
+        let generation = self.model.current_stop_refresh_generation();
 
-        if !self.can_edit_variable(generation) {
+        if !self.model.can_edit_variable(generation) {
             return None;
         }
 
@@ -18,29 +18,7 @@ impl Ui {
         request: VariableEditorRequest,
     ) -> bool {
         self.variable_editor_request.get() == request.id
-            && self.can_edit_variable(request.generation)
-    }
-
-    pub(crate) fn can_edit_variable(&self, generation: u64) -> bool {
-        self.is_stop_refresh_current(generation)
-            && self.debugger_ready.get()
-            && !self.inferior_is_running()
-            && !self.command_pending.get()
-            && !self.session_pending.get()
-    }
-
-    pub(super) fn variable_edit_guard(&self) -> Rc<dyn Fn() -> bool> {
-        let ready = Rc::clone(&self.debugger_ready);
-        let state = Rc::clone(&self.debugger_state);
-        let command_pending = Rc::clone(&self.command_pending);
-        let session_pending = Rc::clone(&self.session_pending);
-
-        Rc::new(move || {
-            ready.get()
-                && !state.get().inferior_running()
-                && !command_pending.get()
-                && !session_pending.get()
-        })
+            && self.model.can_edit_variable(request.generation)
     }
 
     pub(crate) fn present_variable_editor(
@@ -61,8 +39,7 @@ impl Ui {
             self.current_source_is_rust.get(),
             metadata.as_ref(),
             ValueEditorHandlers {
-                stop_generation: Rc::clone(&self.stop_refresh_generation),
-                can_edit: self.variable_edit_guard(),
+                model: Rc::clone(&self.model),
                 assignment: Rc::clone(&self.variable_assignment_handler),
                 float: Rc::clone(&self.float_assignment_handler),
                 string: Rc::clone(&self.string_assignment_handler),
@@ -490,11 +467,10 @@ pub(super) fn open_variable_editor(
     metadata: Option<&ValueTypeMetadata>,
     handlers: ValueEditorHandlers,
 ) {
-    let generation = handlers.stop_generation.get();
+    let generation = handlers.model.current_stop_refresh_generation();
     let is_current: Rc<dyn Fn() -> bool> = {
-        let current = Rc::clone(&handlers.stop_generation);
-        let can_edit = Rc::clone(&handlers.can_edit);
-        Rc::new(move || current.get() == generation && can_edit())
+        let current = Rc::clone(&handlers.model);
+        Rc::new(move || current.can_edit_variable(generation))
     };
 
     let assignment = guard_assignment_handler(&handlers.assignment, Rc::clone(&is_current));

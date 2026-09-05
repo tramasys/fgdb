@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(test)]
+pub(super) use crate::model::execution_event_matches_thread;
 
 pub(super) fn breakpoint_command_numbers(
     breakpoints: &[Breakpoint],
@@ -285,7 +287,7 @@ pub(super) fn connect_execution_button(
 
     button.connect_clicked(move |_| {
         if let Some(ui) = weak_ui.upgrade()
-            && ui.movement_commands_available()
+            && ui.model.movement_commands_available()
         {
             issue_execution_command(&ui, &client, command, detail);
         }
@@ -303,31 +305,32 @@ pub(crate) fn issue_execution_command(
     // of stack requests. Its generation guards cancel queued MI work safely.
     ui.reset_thread_analysis();
     let interrupt = execution_interrupt(command);
-    let previous_active_thread = ui.active_thread_execution();
+    let previous_active_thread = ui.model.active_thread_execution();
     let targeted_thread = execution_thread(command).map(str::to_owned);
 
     let pending_group = execution_thread_group(command)
         .map(str::to_owned)
         .or_else(|| {
             execution_targets_selected_group(command)
-                .then(|| ui.selected_inferior_id())
+                .then(|| ui.model.selected_inferior_id())
                 .flatten()
         });
 
-    ui.set_pending_execution_inferior(pending_group);
+    ui.model.set_pending_execution_inferior(pending_group);
 
     if interrupt {
         if previous_active_thread.is_none() {
-            ui.set_active_thread_execution(targeted_thread);
+            ui.model.set_active_thread_execution(targeted_thread);
         }
     } else {
-        ui.set_thread_execution_exit_candidate(None);
+        ui.model.set_thread_execution_exit_candidate(None);
 
-        ui.set_active_thread_execution(targeted_thread.or_else(|| {
-            selected_thread_execution(command)
-                .then(|| ui.current_thread_id())
-                .flatten()
-        }));
+        ui.model
+            .set_active_thread_execution(targeted_thread.or_else(|| {
+                selected_thread_execution(command)
+                    .then(|| ui.model.current_thread_id())
+                    .flatten()
+            }));
     }
 
     match client.send(command) {
@@ -342,7 +345,7 @@ pub(crate) fn issue_execution_command(
                     return;
                 };
 
-                if ui.execution_transition_is_pending(generation) {
+                if ui.model.execution_transition_is_pending(generation) {
                     let message = "GDB accepted an execution command but did not report a running or stopped transition within 15 seconds. Restart GDB from the Session menu.";
 
                     if let Some(client) = weak_client.upgrade() {
@@ -358,8 +361,8 @@ pub(crate) fn issue_execution_command(
             true
         }
         Err(error) => {
-            ui.set_pending_execution_inferior(None);
-            ui.set_active_thread_execution(previous_active_thread);
+            ui.model.set_pending_execution_inferior(None);
+            ui.model.set_active_thread_execution(previous_active_thread);
             ui.set_status("Command failed", &error.to_string(), Some("status-error"));
 
             false
@@ -409,14 +412,6 @@ fn execution_thread(command: &str) -> Option<&str> {
     None
 }
 
-pub(super) fn execution_event_matches_thread(
-    active: Option<&str>,
-    reported: Option<&str>,
-    all_stopped: bool,
-) -> bool {
-    all_stopped || active.is_none() || matches!(reported, None | Some("all")) || active == reported
-}
-
 fn selected_thread_execution(command: &str) -> bool {
     matches!(
         command.split_whitespace().next(),
@@ -444,7 +439,7 @@ fn execution_thread_group(command: &str) -> Option<&str> {
 }
 
 pub(super) fn request_signal_catchpoint_toggle(ui: &Ui, signal: &str) {
-    if !ui.stop_point_commands_available() {
+    if !ui.model.stop_point_commands_available() {
         return;
     }
 

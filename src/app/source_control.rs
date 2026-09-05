@@ -5,7 +5,7 @@ pub(super) fn run_to_source_line(ui: Weak<Ui>, client: &MiClient, path: PathBuf,
         return;
     };
 
-    if !current_ui.movement_commands_available() {
+    if !current_ui.model.movement_commands_available() {
         current_ui.set_status(
             "Run to line unavailable",
             "The inferior must be paused before execution can run to a source line.",

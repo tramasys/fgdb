@@ -136,7 +136,7 @@ pub(super) fn insert_source_breakpoint(
         return;
     };
 
-    if !client.is_ready() || !current_ui.stop_point_commands_available() {
+    if !client.is_ready() || !current_ui.model.stop_point_commands_available() {
         current_ui.set_status(
             "Breakpoint unavailable",
             "Pause the inferior and wait for the current debugger command to finish.",
@@ -1057,7 +1057,7 @@ pub(super) fn refresh_modules(ui: &Weak<Ui>, client: &MiClient) {
         return;
     }
 
-    let inferior_id = current_ui.selected_inferior_id();
+    let inferior_id = current_ui.model.selected_inferior_id();
 
     let command = match inferior_id.as_deref() {
         Some(id) => {
@@ -1090,14 +1090,14 @@ pub(super) fn refresh_modules(ui: &Weak<Ui>, client: &MiClient) {
             move || {
                 weak_ui_for_guard
                     .upgrade()
-                    .is_some_and(|ui| ui.selected_inferior_id() == inferior_id_for_guard)
+                    .is_some_and(|ui| ui.model.selected_inferior_id() == inferior_id_for_guard)
             },
             move |client, record| {
                 let Some(ui) = weak_ui.upgrade() else {
                     return;
                 };
 
-                if record.is_done() && ui.selected_inferior_id() == inferior_id {
+                if record.is_done() && ui.model.selected_inferior_id() == inferior_id {
                     let modules = crate::debugger::shared_libraries(&record);
 
                     if ui.show_modules(&modules) {
@@ -1125,7 +1125,7 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
         return;
     };
 
-    let generation = current_ui.start_thread_refresh();
+    let generation = current_ui.model.start_thread_refresh();
     drop(current_ui);
     let weak_ui = ui.clone();
     let weak_ui_for_guard = ui.clone();
@@ -1135,7 +1135,7 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
         move || {
             weak_ui_for_guard
                 .upgrade()
-                .is_some_and(|ui| ui.is_thread_refresh_current(generation))
+                .is_some_and(|ui| ui.model.is_thread_refresh_current(generation))
         },
         move |client, record| {
             if !record.is_done() {
@@ -1148,14 +1148,14 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
                 return;
             };
 
-            if !ui.is_thread_refresh_current(generation) {
+            if !ui.model.is_thread_refresh_current(generation) {
                 return;
             }
 
             let selection_changed = ui.reconcile_stop_owner_from_threads(&threads);
-            let threads = ui.threads_for_selected_inferior(threads);
+            let threads = ui.model.threads_for_selected_inferior(threads);
 
-            let recovered_stopped_context = ui.debug_state_is_stale()
+            let recovered_stopped_context = ui.model.debug_state_is_stale()
                 && threads
                     .iter()
                     .any(|thread| thread.current && thread.state == "stopped");
@@ -1193,14 +1193,15 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
             }
 
             let Some((stop_generation, command)) = weak_ui.upgrade().and_then(|ui| {
-                let stop_generation = ui.current_stop_refresh_generation();
+                let stop_generation = ui.model.current_stop_refresh_generation();
 
                 let command = format!(
                     "-data-evaluate-expression {}",
                     crate::debugger::quote("(void*)$pc")
                 );
 
-                ui.stop_context(stop_generation)
+                ui.model
+                    .stop_context(stop_generation)
                     .map(|context| (stop_generation, context.scope_frame(&command)))
             }) else {
                 return;
@@ -1214,8 +1215,8 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
                 stop_generation,
                 move || {
                     weak_ui_for_guard.upgrade().is_some_and(|ui| {
-                        ui.is_thread_refresh_current(generation)
-                            && ui.is_stop_refresh_current(stop_generation)
+                        ui.model.is_thread_refresh_current(generation)
+                            && ui.model.is_stop_refresh_current(stop_generation)
                     })
                 },
                 move |_, record| {

@@ -27,8 +27,8 @@ pub(super) fn request_kernel_refresh(ui: Weak<Ui>, client: Rc<MiClient>) {
         return;
     };
 
-    let cached_pid = current_ui.inferior_pid();
-    let debugger_pid = current_ui.debugger_pid();
+    let cached_pid = current_ui.model.inferior_pid();
+    let debugger_pid = current_ui.model.debugger_pid();
     let include_tls_metadata = current_ui.kernel_tls_requested();
     drop(current_ui);
 
@@ -49,7 +49,7 @@ pub(super) fn request_kernel_refresh(ui: Weak<Ui>, client: Rc<MiClient>) {
             return;
         }
 
-        let debugger_pid = current_ui.debugger_pid();
+        let debugger_pid = current_ui.model.debugger_pid();
         let include_tls_metadata = current_ui.kernel_tls_requested();
         drop(current_ui);
 
@@ -66,7 +66,7 @@ pub(super) fn request_kernel_refresh(ui: Weak<Ui>, client: Rc<MiClient>) {
         };
 
         if let Some(current_ui) = ui_for_response.upgrade() {
-            current_ui.set_inferior_pid(Some(pid));
+            current_ui.model.set_inferior_pid(Some(pid));
         }
 
         let Some(debugger_pid) = debugger_pid else {

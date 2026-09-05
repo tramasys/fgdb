@@ -2396,7 +2396,7 @@ impl Ui {
             return None;
         }
 
-        let generation = self.current_stop_refresh_generation();
+        let generation = self.model.current_stop_refresh_generation();
 
         self.misc_view
             .heap_inspector_command
@@ -2426,9 +2426,9 @@ impl Ui {
     }
 
     pub(crate) fn heap_inspection_is_current(&self, generation: u64) -> bool {
-        self.is_stop_refresh_current(generation)
+        self.model.is_stop_refresh_current(generation)
             && self.misc_view.heap_inspector_in_flight.get()
-            && !self.inferior_is_running()
+            && !self.model.inferior_is_running()
     }
 
     pub(crate) fn allocator_identity(&self) -> String {
@@ -2436,7 +2436,7 @@ impl Ui {
     }
 
     pub(crate) fn show_heap_inspection(&self, generation: u64, snapshot: HeapInspectionSnapshot) {
-        if !self.is_stop_refresh_current(generation) {
+        if !self.model.is_stop_refresh_current(generation) {
             self.finish_heap_inspection();
             return;
         }
@@ -2447,7 +2447,7 @@ impl Ui {
     }
 
     pub(crate) fn show_heap_inspection_error(&self, generation: u64, command: &str, error: &str) {
-        if !self.is_stop_refresh_current(generation) {
+        if !self.model.is_stop_refresh_current(generation) {
             self.finish_heap_inspection();
             return;
         }
@@ -2562,14 +2562,14 @@ impl Ui {
     }
 
     pub fn show_call_abi_for_refresh(&self, generation: u64, frames: &[StackFrame]) {
-        if !self.is_stop_refresh_current(generation) {
+        if !self.model.is_stop_refresh_current(generation) {
             return;
         }
 
         self.misc_view.show_call_abi(crate::misc::call_abi_snapshot(
             self.target_architecture(),
             self.target_pointer_bits(),
-            self.selected_frame_level.get(),
+            self.model.selected_frame_level(),
             frames,
         ));
 
@@ -2577,9 +2577,9 @@ impl Ui {
     }
 
     pub(super) fn refresh_call_abi_transfer(&self) {
-        let generation = self.current_stop_refresh_generation();
+        let generation = self.model.current_stop_refresh_generation();
 
-        if self.latest_registers_generation.get() != Some(generation)
+        if !self.model.registers_are_current(generation)
             || self.call_abi_instruction_generation.get() != Some(generation)
         {
             return;
@@ -2596,7 +2596,7 @@ impl Ui {
             replace_call_abi_phase_target(&mut phase, resolution);
         }
 
-        let registers = self.latest_registers.borrow();
+        let registers = self.model.registers();
         let mut transfer = crate::misc::call_abi_transfer(architecture, phase, &registers);
         let address = full_address(&context.current.address, self.target_pointer_bits());
         transfer.context = format!("{}  ·  instruction {address}", transfer.context);
@@ -2612,7 +2612,7 @@ impl Ui {
     }
 
     pub(crate) fn take_call_abi_target_request(&self) -> Option<CallAbiTargetRequest> {
-        let generation = self.current_stop_refresh_generation();
+        let generation = self.model.current_stop_refresh_generation();
 
         if self.call_abi_instruction_generation.get() != Some(generation) {
             return None;
@@ -2647,7 +2647,7 @@ impl Ui {
         request: &CallAbiTargetRequest,
         display: Option<String>,
     ) {
-        if !self.is_stop_refresh_current(request.generation)
+        if !self.model.is_stop_refresh_current(request.generation)
             || self.call_abi_instruction_generation.get() != Some(request.generation)
         {
             return;
@@ -2740,10 +2740,10 @@ impl Ui {
     }
 
     fn misc_refresh_allowed(&self) -> bool {
-        self.debugger_ready.get()
-            && self.inferior_has_started()
-            && !self.inferior_is_running()
-            && !self.command_pending.get()
+        self.model.execution().ready
+            && self.model.inferior_has_started()
+            && !self.model.inferior_is_running()
+            && !self.model.execution().command_pending
     }
 }
 

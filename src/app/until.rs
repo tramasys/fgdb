@@ -88,6 +88,7 @@ struct UntilRun {
 }
 
 pub(super) struct NativeUntilController {
+    model: Rc<crate::model::DebuggerModel>,
     ui: Weak<Ui>,
     client: Rc<MiClient>,
     state: RefCell<Option<UntilRun>>,
@@ -95,8 +96,13 @@ pub(super) struct NativeUntilController {
 }
 
 impl NativeUntilController {
-    pub(super) fn new(ui: Weak<Ui>, client: Rc<MiClient>) -> Rc<Self> {
+    pub(super) fn new(
+        ui: Weak<Ui>,
+        client: Rc<MiClient>,
+        model: Rc<crate::model::DebuggerModel>,
+    ) -> Rc<Self> {
         Rc::new(Self {
+            model,
             ui,
             client,
             state: RefCell::new(None),
@@ -109,7 +115,7 @@ impl NativeUntilController {
             return;
         };
 
-        if ui.native_until_active() || !ui.movement_commands_available() {
+        if self.model.native_until_active() || !self.model.movement_commands_available() {
             return;
         }
 
@@ -154,6 +160,7 @@ impl NativeUntilController {
         let description = action_description(&action);
 
         let thread_id = ui
+            .model
             .current_thread_id()
             .and_then(|id| crate::debugger::thread_id_argument(&id).map(str::to_owned))
             .map(Rc::<str>::from);
@@ -194,7 +201,7 @@ impl NativeUntilController {
         ui.set_native_until_active(true);
         ui.set_debug_state_stale(true);
         ui.start_stop_refresh();
-        ui.start_thread_refresh();
+        ui.model.start_thread_refresh();
         ui.invalidate_kernel_refresh();
         ui.invalidate_misc_refresh();
 
@@ -229,7 +236,7 @@ impl NativeUntilController {
             .as_ref()
             .is_some_and(|run| run.pending_steps > 0);
 
-        if ui.inferior_is_running() || execution_pending {
+        if ui.model.inferior_is_running() || execution_pending {
             if self
                 .state
                 .borrow()
@@ -405,7 +412,7 @@ impl NativeUntilController {
         let cached_process = self
             .ui
             .upgrade()
-            .and_then(|ui| ui.inferior_pid().zip(ui.debugger_pid()));
+            .and_then(|ui| ui.model.inferior_pid().zip(ui.model.debugger_pid()));
 
         if let Some((pid, debugger_pid)) = cached_process {
             self.finish_address_space_preparation(generation, required, pid, debugger_pid);
@@ -437,7 +444,10 @@ impl NativeUntilController {
                     return;
                 };
 
-                let Some(debugger_pid) = controller.ui.upgrade().and_then(|ui| ui.debugger_pid())
+                let Some(debugger_pid) = controller
+                    .ui
+                    .upgrade()
+                    .and_then(|ui| ui.model.debugger_pid())
                 else {
                     controller.address_space_unavailable(
                         generation,
@@ -449,7 +459,7 @@ impl NativeUntilController {
                 };
 
                 if let Some(ui) = controller.ui.upgrade() {
-                    ui.set_inferior_pid(Some(pid));
+                    ui.model.set_inferior_pid(Some(pid));
                 }
 
                 controller.finish_address_space_preparation(
@@ -572,7 +582,7 @@ impl NativeUntilController {
                     progress_detail(state, state.pending_steps),
                     state.cancel_requested,
                     state.pending_steps > 0
-                        && !ui.inferior_is_running()
+                        && !ui.model.inferior_is_running()
                         && state.pending_since.is_some_and(|started| {
                             started.elapsed() >= EXECUTION_TRANSITION_TIMEOUT
                         }),
@@ -980,8 +990,9 @@ impl NativeUntilController {
         };
 
         if let Some(ui) = self.ui.upgrade() {
-            ui.set_active_thread_execution(thread_id.as_deref().map(str::to_owned));
-            ui.set_thread_execution_exit_candidate(None);
+            ui.model
+                .set_active_thread_execution(thread_id.as_deref().map(str::to_owned));
+            ui.model.set_thread_execution_exit_candidate(None);
         }
 
         let controller = Rc::clone(self);
@@ -996,8 +1007,8 @@ impl NativeUntilController {
             }
 
             if let Some(ui) = controller.ui.upgrade() {
-                ui.set_active_thread_execution(None);
-                ui.set_thread_execution_exit_candidate(None);
+                ui.model.set_active_thread_execution(None);
+                ui.model.set_thread_execution_exit_candidate(None);
             }
 
             match command_kind {
@@ -1030,8 +1041,8 @@ impl NativeUntilController {
             }
         }) {
             if let Some(ui) = self.ui.upgrade() {
-                ui.set_active_thread_execution(None);
-                ui.set_thread_execution_exit_candidate(None);
+                ui.model.set_active_thread_execution(None);
+                ui.model.set_thread_execution_exit_candidate(None);
             }
 
             if let Some(run) = self.state.borrow_mut().as_mut() {
@@ -1065,7 +1076,7 @@ impl NativeUntilController {
                         let render_context = controller
                             .ui
                             .upgrade()
-                            .is_some_and(|ui| !ui.inferior_is_running());
+                            .is_some_and(|ui| !ui.model.inferior_is_running());
 
                         controller.restore_context(context_control, render_context);
                     }
@@ -1225,7 +1236,8 @@ impl NativeUntilController {
     fn is_current(&self, generation: u64) -> bool {
         self.generation.get() == generation
             && self.state.borrow().is_some()
-            && self.ui.upgrade().is_some_and(|ui| ui.native_until_active())
+            && self.ui.strong_count() != 0
+            && self.model.native_until_active()
     }
 
     fn recover_timed_out_request(&self, record: &MiRecord) -> bool {

@@ -244,7 +244,7 @@ impl Ui {
         let location = instruction.source.as_ref()?;
         let path = PathBuf::from(location.source_path());
         let index = usize::try_from(location.line).ok()?.checked_sub(1)?;
-        let stop_generation = self.current_stop_refresh_generation();
+        let stop_generation = self.model.current_stop_refresh_generation();
         if let Some((failed_at, snapshot)) =
             self.disassembly_source_cache.borrow_mut().get_cloned(&path)
         {

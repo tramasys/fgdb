@@ -74,7 +74,7 @@ pub(super) fn request_heap_inspection(
         return;
     };
 
-    if !current_ui.stopped_inspection_available() {
+    if !current_ui.model.stopped_inspection_available() {
         return;
     }
 
@@ -82,7 +82,7 @@ pub(super) fn request_heap_inspection(
         HeapInspectionAction::Chunk => match validated_heap_expression(&request.expression) {
             Ok(expression) => Some(expression.to_owned()),
             Err(error) => {
-                let generation = current_ui.current_stop_refresh_generation();
+                let generation = current_ui.model.current_stop_refresh_generation();
                 current_ui.show_heap_inspection_error(generation, "heap chunk", &error);
                 return;
             }
@@ -95,7 +95,7 @@ pub(super) fn request_heap_inspection(
         let normalized = allocator.to_ascii_lowercase();
 
         if !normalized.contains("glibc") && !normalized.contains("ptmalloc") {
-            let generation = current_ui.current_stop_refresh_generation();
+            let generation = current_ui.model.current_stop_refresh_generation();
 
             current_ui.show_heap_inspection_error(
                 generation,
@@ -153,7 +153,7 @@ pub(super) fn request_heap_inspection(
                 return;
             };
 
-            let Some(debugger_pid) = current_ui.debugger_pid() else {
+            let Some(debugger_pid) = current_ui.model.debugger_pid() else {
                 current_ui.set_command_pending(false);
 
                 current_ui.show_heap_inspection_error(
@@ -604,9 +604,9 @@ pub(super) fn request_misc_refresh(ui: Weak<Ui>, client: Rc<MiClient>) {
         return;
     };
 
-    let session = current_ui.current_session();
-    let cached_pid = current_ui.inferior_pid();
-    let debugger_pid = current_ui.debugger_pid();
+    let session = current_ui.model.current_session();
+    let cached_pid = current_ui.model.inferior_pid();
+    let debugger_pid = current_ui.model.debugger_pid();
     drop(current_ui);
 
     if let Some(DebugSession::CoreDump { core_dump, .. }) = session {
@@ -631,7 +631,7 @@ pub(super) fn request_misc_refresh(ui: Weak<Ui>, client: Rc<MiClient>) {
             return;
         }
 
-        let debugger_pid = current_ui.debugger_pid();
+        let debugger_pid = current_ui.model.debugger_pid();
 
         let Some(pid) = crate::debugger::inferior_pid(&record) else {
             show_misc_error(
@@ -645,7 +645,7 @@ pub(super) fn request_misc_refresh(ui: Weak<Ui>, client: Rc<MiClient>) {
             return;
         };
 
-        current_ui.set_inferior_pid(Some(pid));
+        current_ui.model.set_inferior_pid(Some(pid));
         drop(current_ui);
 
         let Some(debugger_pid) = debugger_pid else {

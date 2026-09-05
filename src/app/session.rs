@@ -1,10 +1,11 @@
 use super::*;
 use crate::debugger::{CliCommandBuilder, MiCommandBuilder, console_command};
-use crate::ui::{DebuggerStateDelta, TargetConnection};
+use crate::model::{DebuggerStateDelta, TargetConnection};
 
 use std::cell::Cell;
 
 pub(super) struct SessionController {
+    model: Rc<crate::model::DebuggerModel>,
     ui: Weak<Ui>,
     client: Rc<MiClient>,
     configured_environment: RefCell<HashSet<String>>,
@@ -48,8 +49,13 @@ impl SessionCommand {
 }
 
 impl SessionController {
-    pub fn new(ui: Weak<Ui>, client: Rc<MiClient>) -> Rc<Self> {
+    pub fn new(
+        ui: Weak<Ui>,
+        client: Rc<MiClient>,
+        model: Rc<crate::model::DebuggerModel>,
+    ) -> Rc<Self> {
         Rc::new(Self {
+            model,
             ui,
             client,
             configured_environment: RefCell::new(HashSet::new()),
@@ -68,9 +74,9 @@ impl SessionController {
         }
 
         let mut commands = cleanup_commands(
-            ui.current_session().as_ref(),
-            ui.target_connection(),
-            ui.inferior_has_started(),
+            self.model.current_session().as_ref(),
+            self.model.target_connection(),
+            self.model.inferior_has_started(),
         );
 
         let Ok(setup_commands) = session_commands(&session, &self.configured_environment.borrow())
@@ -181,17 +187,19 @@ impl SessionController {
                 "Terminating the inferior without closing GDB…",
             ),
             SessionAction::Detach => (
-                vec![if ui.target_connection() == TargetConnection::Remote {
-                    SessionCommand::with_state(
-                        "-target-disconnect",
-                        DebuggerStateDelta::clear_target(),
-                    )
-                } else {
-                    SessionCommand::with_state(
-                        "-target-detach",
-                        DebuggerStateDelta::clear_inferior(),
-                    )
-                }],
+                vec![
+                    if self.model.target_connection() == TargetConnection::Remote {
+                        SessionCommand::with_state(
+                            "-target-disconnect",
+                            DebuggerStateDelta::clear_target(),
+                        )
+                    } else {
+                        SessionCommand::with_state(
+                            "-target-detach",
+                            DebuggerStateDelta::clear_inferior(),
+                        )
+                    },
+                ],
                 SequenceCompletion::Detach,
                 "Detaching",
                 "Releasing and resuming the inferior…",
@@ -643,7 +651,7 @@ fn file_command(path: Option<&std::path::Path>) -> String {
 mod tests {
     use super::{SessionCommand, cleanup_commands, session_commands, shutdown_cleanup_command};
     use crate::config::DebugSession;
-    use crate::ui::{DebuggerState, DebuggerStateDelta, TargetConnection};
+    use crate::model::{DebuggerState, DebuggerStateDelta, TargetConnection};
     use std::{collections::HashSet, path::PathBuf};
 
     fn command_texts(commands: Vec<SessionCommand>) -> Vec<String> {

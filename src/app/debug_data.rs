@@ -95,7 +95,7 @@ fn refresh_debug_data(ui: Weak<Ui>, client: Rc<MiClient>) {
     let generation = current_ui.begin_debug_data_refresh();
     let refresh_printers = current_ui.debug_data_pretty_printers_were_requested();
 
-    if !current_ui.gdb_capabilities().pretty_printing {
+    if !current_ui.model.gdb_capabilities().pretty_printing {
         current_ui.add_debug_data_warning(
             "Pretty printing is disabled. Raw values remain available in Locals and Arguments",
         );
@@ -330,6 +330,7 @@ fn load_pretty_printer_script(ui: Weak<Ui>, client: Rc<MiClient>, path: PathBuf)
         path
     } else {
         current_ui
+            .model
             .current_session()
             .as_ref()
             .and_then(DebugSession::working_directory)

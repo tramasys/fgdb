@@ -1,7 +1,12 @@
 use super::*;
 
 impl Ui {
-    pub fn build(application: &gtk::Application, config: &LaunchConfig, theme: &Theme) -> Self {
+    pub fn build(
+        application: &gtk::Application,
+        config: &LaunchConfig,
+        theme: &Theme,
+        model: Rc<crate::model::DebuggerModel>,
+    ) -> Self {
         if let Some(display) = gtk::gdk::Display::default() {
             gtk::IconTheme::for_display(&display)
                 .add_resource_path(&format!("{}/icons", crate::RESOURCE_PREFIX));
@@ -91,11 +96,11 @@ impl Ui {
 
         window.set_child(Some(&root));
         kernel_section_handler.replace(Some(layout.disclosure_handler()));
-        let initial_session = config.initial_session();
         let source_base_roots = source::roots(config);
         let source_tree_base_roots = source::search_roots(config);
 
         let ui = Self {
+            model,
             self_weak: Rc::new(RefCell::new(std::rc::Weak::new())),
             source_open_generation: Arc::new(AtomicU64::new(0)),
             source_io_epoch: Arc::new(AtomicU64::new(0)),
@@ -167,17 +172,11 @@ impl Ui {
             ))),
             call_stack_list: workspace.call_stack_list,
             frame_buttons: Rc::new(RefCell::new(Vec::new())),
-            latest_frames: Rc::new(RefCell::new(Vec::new())),
-            latest_frames_generation: Rc::new(Cell::new(None)),
-            selected_frame_level: Rc::new(Cell::new(0)),
+            displayed_frames: Rc::new(RefCell::new(Rc::from([]))),
             threads_list: workspace.threads_list,
             thread_controls: workspace.thread_controls,
             thread_buttons: Rc::new(RefCell::new(Vec::new())),
             latest_threads: Rc::new(RefCell::new(None)),
-            selected_thread_id: Rc::new(RefCell::new(None)),
-            scheduler_locking: Rc::new(Cell::new(None)),
-            non_stop_mode: Rc::new(Cell::new(None)),
-            thread_policy_generation: Rc::new(Cell::new(0)),
             modules_list: workspace.modules_list,
             latest_modules: Rc::new(RefCell::new(Vec::new())),
             module_debug_metadata: Rc::new(RefCell::new(HashMap::new())),
@@ -185,26 +184,8 @@ impl Ui {
             module_debug_worker_active: Arc::new(AtomicBool::new(false)),
             module_debug_force_pending: Arc::new(AtomicBool::new(false)),
             inferior_controls: workspace.inferior_controls,
-            inferiors: Rc::new(RefCell::new(Vec::new())),
-            thread_inferior_ids: Rc::new(RefCell::new(HashMap::new())),
-            selected_inferior_id: Rc::new(RefCell::new(None)),
-            stop_owner_inferior_id: Rc::new(RefCell::new(None)),
-            stop_owner_thread_id: Rc::new(RefCell::new(None)),
-            inferior_parents: Rc::new(RefCell::new(HashMap::new())),
-            pending_fork_parents: Rc::new(RefCell::new(HashMap::new())),
-            inferior_refresh_generation: Rc::new(Cell::new(0)),
-            inferior_refresh_gate: Rc::new(RefreshGate::default()),
-            fork_policy_refresh_gate: Rc::new(RefreshGate::default()),
             execution_context_visual_generation: Rc::new(Cell::new(0)),
             execution_context_visual_pending: Rc::new(Cell::new(false)),
-            fork_policy_generation: Rc::new(Cell::new(0)),
-            fork_follow_mode: Rc::new(Cell::new(None)),
-            detach_on_fork: Rc::new(Cell::new(None)),
-            inferior_action_pending: Rc::new(Cell::new(None)),
-            inferior_execution_generation: Rc::new(Cell::new(0)),
-            pending_execution_inferior: Rc::new(RefCell::new(None)),
-            active_thread_execution: Rc::new(RefCell::new(None)),
-            thread_execution_exit_candidate: Rc::new(RefCell::new(None)),
             locals_store: workspace.locals_store,
             locals_selection: workspace.locals_selection,
             variable_node_index: Rc::new(RefCell::new(VariableNodeIndex::default())),
@@ -245,9 +226,6 @@ impl Ui {
             call_abi_instruction: Rc::new(RefCell::new(None)),
             call_abi_instruction_generation: Rc::new(Cell::new(None)),
             current_instruction_memory_expression: Rc::new(RefCell::new(None)),
-            latest_registers: Rc::new(RefCell::new(Vec::new())),
-            latest_registers_generation: Rc::new(Cell::new(None)),
-            register_details_generation: Rc::new(Cell::new(None)),
             instruction_memory_handler: Rc::new(RefCell::new(None)),
             disassembly_handler: Rc::new(RefCell::new(None)),
             disassembly_source_cache: Rc::new(RefCell::new(
@@ -258,11 +236,7 @@ impl Ui {
             register_groups: workspace.register_groups,
             registers_empty: workspace.registers_empty,
             stack_store: workspace.stack_store,
-            latest_stack: Rc::new(RefCell::new(Vec::new())),
             displayed_stack: Rc::new(RefCell::new(Vec::new())),
-            latest_stack_generation: Rc::new(Cell::new(None)),
-            stack_memory_refresh_generation: Rc::new(Cell::new(None)),
-            stack_details_generation: Rc::new(Cell::new(None)),
             stack_empty: workspace.stack_empty,
             breakpoints_list: workspace.breakpoints_list,
             stop_point_filter: workspace.stop_point_filter,
@@ -287,10 +261,6 @@ impl Ui {
             memory_region_store: workspace.memory_region_store,
             memory_regions_view: workspace.memory_regions_view,
             memory_regions_empty: workspace.memory_regions_empty,
-            memory_regions: Rc::new(RefCell::new(Vec::new())),
-            memory_regions_generation: Rc::new(Cell::new(None)),
-            memory_watches_refresh_generation: Rc::new(Cell::new(None)),
-            tls_runtime_refresh_generation: Rc::new(Cell::new(None)),
             memory_watches: Rc::new(RefCell::new(Vec::new())),
             memory_watch_container: workspace.memory_watch_container,
             memory_address_entry: workspace.memory_address_entry,
@@ -304,26 +274,15 @@ impl Ui {
             misc_view: workspace.misc_view,
             misc_refresh_handler,
             misc_refresh_generation: Rc::new(Cell::new(0)),
-            debugger_pid: Rc::new(Cell::new(None)),
-            inferior_pid: Rc::new(Cell::new(None)),
             layout,
             breakpoints,
             stop_point_filter_rows: Rc::new(RefCell::new(Vec::new())),
             stop_point_metadata: Rc::new(RefCell::new(HashMap::new())),
-            previous_registers: Rc::new(RefCell::new(HashMap::new())),
-            cached_register_names: Rc::new(RefCell::new(None)),
-            stop_refresh_generation: Rc::new(Cell::new(0)),
             variable_editor_request: Cell::new(0),
-            active_stop_context: Rc::new(RefCell::new(None)),
-            thread_refresh_generation: Rc::new(Cell::new(0)),
             breakpoint_refresh_generation: Rc::new(Cell::new(0)),
             breakpoint_refresh_gate: Rc::new(RefreshGate::default()),
             module_refresh_gate: Rc::new(RefreshGate::default()),
             modules_dirty: Rc::new(Cell::new(false)),
-            command_pending: Rc::new(Cell::new(false)),
-            debugger_state: Rc::new(Cell::new(DebuggerState::default())),
-            execution_transition_generation: Rc::new(Cell::new(0)),
-            session_pending: Rc::new(Cell::new(false)),
             applied_control_state: Rc::new(RefCell::new(None)),
             gef_available: Rc::new(Cell::new(false)),
             gef_capabilities: Rc::new(RefCell::new(HashSet::new())),
@@ -333,9 +292,6 @@ impl Ui {
             heap_inspection_handler: Rc::new(RefCell::new(None)),
             source_roots: Rc::new(RefCell::new(source_base_roots.clone())),
             source_base_roots,
-            current_session: Rc::new(RefCell::new(initial_session)),
-            gdb_capabilities: Rc::new(RefCell::new(GdbCapabilities::default())),
-            gdb_recovery_available: Rc::new(Cell::new(false)),
             configuration_report: config.configuration_report().clone(),
             configuration_dialog: Rc::new(RefCell::new(None)),
             debug_data_view: Rc::new(RefCell::new(None)),
@@ -355,7 +311,6 @@ impl Ui {
             until_cancel_handler: Rc::new(RefCell::new(None)),
             until_abort_handler: Rc::new(RefCell::new(None)),
             until_stop_handler: Rc::new(RefCell::new(None)),
-            native_until_active: Rc::new(Cell::new(false)),
             frame_selection_handler: Rc::new(RefCell::new(None)),
             thread_selection_handler: Rc::new(RefCell::new(None)),
             instruction_handler: Rc::new(RefCell::new(None)),
@@ -381,8 +336,6 @@ impl Ui {
             watchpoint_insert_handler: Rc::new(RefCell::new(None)),
             source_symbol_handler: Rc::new(RefCell::new(None)),
             source_discovery_handler: Rc::new(RefCell::new(None)),
-            thread_stop_reason: Rc::new(RefCell::new(None)),
-            debugger_ready: Rc::new(Cell::new(false)),
         };
 
         ui.connect_instruction_activation();
@@ -424,16 +377,12 @@ impl Ui {
     }
 
     pub fn set_gdb_recovery_available(&self, available: bool) {
-        if self.gdb_recovery_available.replace(available) == available {
+        if !self.model.set_gdb_recovery_available(available) {
             return;
         }
 
         self.restart_gdb_button.set_visible(available);
         self.update_control_sensitivity();
-    }
-
-    pub(crate) fn gdb_recovery_required(&self) -> bool {
-        self.gdb_recovery_available.get()
     }
 
     pub fn set_gdb_capabilities(&self, capabilities: GdbCapabilities) {
@@ -460,15 +409,11 @@ impl Ui {
         let tooltip = format!("{printer_detail}. {feature_detail}");
         self.gdb_capabilities_label.set_text(&summary);
         self.gdb_capabilities_label.set_tooltip_text(Some(&tooltip));
-        self.gdb_capabilities.replace(capabilities);
-    }
-
-    pub(crate) fn gdb_capabilities(&self) -> GdbCapabilities {
-        self.gdb_capabilities.borrow().clone()
+        self.model.set_gdb_capabilities(capabilities);
     }
 
     pub fn clear_gdb_capabilities(&self) {
-        self.gdb_capabilities.replace(GdbCapabilities::default());
+        self.model.set_gdb_capabilities(GdbCapabilities::default());
 
         self.gdb_capabilities_label
             .set_text("GDB capabilities unavailable");
@@ -477,15 +422,14 @@ impl Ui {
     }
 
     pub fn prepare_full_resynchronization(&self) {
-        self.debugger_state
-            .set(self.debugger_state.get().with_resynchronizing(true));
+        self.model.set_resynchronizing(true);
 
         self.reset_target_abi();
         self.invalidate_allocator_probe_cache();
-        self.previous_registers.borrow_mut().clear();
+        self.model.clear_previous_registers();
         self.invalidate_source_io();
         self.start_stop_refresh();
-        self.start_thread_refresh();
+        self.model.start_thread_refresh();
         self.invalidate_kernel_refresh();
         self.invalidate_misc_refresh();
         self.update_control_sensitivity();
@@ -494,9 +438,7 @@ impl Ui {
     }
 
     pub fn finish_full_resynchronization(&self) -> bool {
-        let state = self.debugger_state.get();
-        let pending = state.resynchronizing();
-        self.debugger_state.set(state.with_resynchronizing(false));
+        let pending = self.model.set_resynchronizing(false);
 
         if pending {
             self.update_control_sensitivity();
@@ -505,22 +447,6 @@ impl Ui {
         }
 
         pending
-    }
-
-    pub fn set_debugger_pid(&self, pid: Option<u32>) {
-        self.debugger_pid.set(pid);
-    }
-
-    pub fn debugger_pid(&self) -> Option<u32> {
-        self.debugger_pid.get()
-    }
-
-    pub fn set_inferior_pid(&self, pid: Option<u32>) {
-        self.inferior_pid.set(pid);
-    }
-
-    pub fn inferior_pid(&self) -> Option<u32> {
-        self.inferior_pid.get()
     }
 
     pub fn set_target_endian(&self, endian: Option<TargetEndian>) {
@@ -544,7 +470,7 @@ impl Ui {
             && architecture != TargetArchitecture::Unknown
             && previous != architecture
         {
-            self.cached_register_names.replace(None);
+            self.model.clear_register_names();
         }
     }
 
@@ -569,7 +495,7 @@ impl Ui {
             self.target_architecture.set(refined);
 
             if previous != TargetArchitecture::Unknown && refined != previous {
-                self.cached_register_names.replace(None);
+                self.model.clear_register_names();
             }
         }
     }
@@ -580,7 +506,7 @@ impl Ui {
         self.target_endian.set(None);
         self.target_pointer_bits.set(usize::BITS);
         self.target_pointer_bits_known.set(false);
-        self.cached_register_names.replace(None);
+        self.model.clear_register_names();
         self.resolved_source_paths.borrow_mut().clear();
     }
 
@@ -624,7 +550,7 @@ impl Ui {
                     };
 
                     if ui.inspector_notebook.current_page() == Some(page)
-                        && ui.stopped_inspection_available()
+                        && ui.model.stopped_inspection_available()
                     {
                         crate::app::refresh_cached_inspector_details(
                             &Rc::downgrade(&ui),
@@ -649,7 +575,7 @@ impl Ui {
                         return;
                     };
 
-                    if ui.tls_details_visible() && ui.stopped_inspection_available() {
+                    if ui.tls_details_visible() && ui.model.stopped_inspection_available() {
                         crate::app::refresh_cached_inspector_details(
                             &Rc::downgrade(&ui),
                             &client,
@@ -667,21 +593,21 @@ impl Ui {
                 return;
             };
 
-            let debugger_state = ui.debugger_state.get();
+            let debugger_state = ui.model.execution().state;
 
             if debugger_state.inferior_running()
-                || ui.command_pending.get()
+                || ui.model.execution().command_pending
                 || debugger_state.transition_pending()
                 || debugger_state.stopped_context_is_stale()
-                || ui.session_pending.get()
-                || ui.native_until_active.get()
-                || !ui.debugger_ready.get()
+                || ui.model.execution().session_pending
+                || ui.model.execution().native_until_active
+                || !ui.model.execution().ready
             {
                 return;
             }
 
             let (command, detail) = {
-                let session = ui.current_session.borrow();
+                let session = ui.model.session();
 
                 if debugger_state.inferior_started() {
                     if session
@@ -691,7 +617,7 @@ impl Ui {
                         return;
                     }
 
-                    let command = if let Some(id) = ui.selected_inferior_id() {
+                    let command = if let Some(id) = ui.model.selected_inferior_id() {
                         let Some(id) = crate::debugger::thread_group_argument(&id) else {
                             ui.set_status(
                                 "Continue unavailable",
@@ -729,16 +655,16 @@ impl Ui {
                 return;
             };
 
-            if ui.native_until_active() {
+            if ui.model.native_until_active() {
                 ui.cancel_native_until();
-            } else if ui.debugger_ready.get()
-                && ui.debugger_state.get().inferior_started()
-                && ui.debugger_state.get().inferior_running()
-                && !ui.command_pending.get()
-                && !ui.debugger_state.get().transition_pending()
-                && !ui.session_pending.get()
+            } else if ui.model.execution().ready
+                && ui.model.execution().state.inferior_started()
+                && ui.model.execution().state.inferior_running()
+                && !ui.model.execution().command_pending
+                && !ui.model.execution().state.transition_pending()
+                && !ui.model.execution().session_pending
             {
-                let command = if let Some(id) = ui.selected_inferior_id() {
+                let command = if let Some(id) = ui.model.selected_inferior_id() {
                     let Some(id) = crate::debugger::thread_group_argument(&id) else {
                         ui.set_status(
                             "Pause unavailable",
@@ -855,15 +781,13 @@ impl Ui {
         });
 
         let signal_button = self.signal_add_button.clone();
-        let ready = Rc::clone(&self.debugger_ready);
-        let debugger_state = Rc::clone(&self.debugger_state);
-        let pending = Rc::clone(&self.command_pending);
+        let model = Rc::clone(&self.model);
 
         self.signal_entry.connect_changed(move |entry| {
             signal_button.set_sensitive(
-                ready.get()
-                    && !debugger_state.get().inferior_running()
-                    && !pending.get()
+                model.execution().ready
+                    && !model.execution().state.inferior_running()
+                    && !model.execution().command_pending
                     && normalized_signal_name(&entry.text()).is_some(),
             );
         });
@@ -1072,7 +996,7 @@ impl Ui {
                 Some(true) => {}
             }
 
-            if !ui.debugger_ready.get() || ui.gdb_recovery_available.get() {
+            if !ui.model.execution().ready || ui.model.gdb_recovery_required() {
                 ui.terminal_synchronization.borrow_mut().finish(generation);
                 return glib::ControlFlow::Break;
             }
@@ -1081,7 +1005,7 @@ impl Ui {
                 return glib::ControlFlow::Continue;
             }
 
-            if !ui.debugger_synchronization_available() {
+            if !ui.model.debugger_synchronization_available() {
                 return glib::ControlFlow::Continue;
             }
 
@@ -1144,38 +1068,20 @@ impl Ui {
     }
 
     pub fn set_controls_ready(&self, ready: bool) {
-        if !ready && self.native_until_active.get() {
+        if !ready && self.model.native_until_active() {
             self.abort_native_until();
         }
 
-        let changed = self.debugger_ready.replace(ready) != ready;
+        let changed = self.model.set_controls_ready(ready);
 
         if !ready {
             self.terminal_synchronization.borrow_mut().cancel();
-
             self.memory_watch_container
                 .refresh_batch
                 .borrow_mut()
                 .clear();
-
             self.cancel_running_context_render();
-
-            self.debugger_state
-                .set(self.debugger_state.get().reset_backend());
-
             self.update_run_control_label();
-            self.command_pending.set(false);
-
-            self.execution_transition_generation
-                .set(self.execution_transition_generation.get().wrapping_add(1));
-
-            self.session_pending.set(false);
-            self.native_until_active.set(false);
-            self.pending_execution_inferior.borrow_mut().take();
-            self.active_thread_execution.borrow_mut().take();
-            self.thread_execution_exit_candidate.borrow_mut().take();
-            self.inferior_action_pending.set(None);
-            self.thread_controls.action_pending.set(None);
             self.reset_thread_analysis();
         }
 
@@ -1192,50 +1098,23 @@ impl Ui {
     }
 
     pub fn set_controls_running(&self, running: bool) {
-        let state = self.debugger_state.get();
-
-        if state.inferior_running() == running {
-            self.update_run_control_label();
-            return;
-        }
-
-        let state = state.with_inferior_running(running);
-        self.debugger_state.set(state);
+        self.model.set_controls_running(running);
         self.update_run_control_label();
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
     }
 
-    pub fn inferior_is_running(&self) -> bool {
-        self.debugger_state.get().inferior_running()
-    }
-
     pub(super) fn execution_visual_transition_pending(&self) -> bool {
-        self.command_pending.get()
-            || self.debugger_state.get().transition_pending()
+        self.model.execution().command_pending
+            || self.model.execution().state.transition_pending()
             || self.execution_context_visual_pending.get()
-            || self.inferior_action_pending.get() == Some(InferiorActionPending::Execution)
-            || self.thread_controls.action_pending.get() == Some(ThreadActionPending::Execution)
-    }
-
-    pub fn inferior_has_started(&self) -> bool {
-        self.debugger_state.get().inferior_started()
-    }
-
-    pub(crate) fn target_connection(&self) -> TargetConnection {
-        self.debugger_state.get().target_connection()
-    }
-
-    pub(crate) fn configured_session_can_start(&self) -> bool {
-        configured_target_can_start(
-            self.current_session.borrow().as_ref(),
-            self.debugger_state.get().target_connection(),
-        )
+            || self.model.execution().inferior_action_pending
+                == Some(InferiorActionPending::Execution)
+            || self.model.execution().thread_action_pending == Some(ThreadActionPending::Execution)
     }
 
     pub(crate) fn apply_debugger_state_delta(&self, delta: DebuggerStateDelta) {
-        let state = self.debugger_state.get().applying(delta);
-        self.debugger_state.set(state);
+        self.model.apply_debugger_state_delta(delta);
 
         if delta.changes_target() {
             self.reset_target_abi();
@@ -1244,8 +1123,7 @@ impl Ui {
         self.invalidate_allocator_probe_cache();
 
         if delta.clears_inferior() {
-            self.set_thread_stop_reason(None);
-            self.clear_inferiors();
+            self.cancel_running_context_render();
             self.clear_debugger_state();
         }
 
@@ -1255,74 +1133,16 @@ impl Ui {
         self.render_inferior_controls();
     }
 
-    pub fn movement_commands_available(&self) -> bool {
-        self.debugger_ready.get()
-            && self.inferior_has_started()
-            && !self.inferior_is_running()
-            && !self.command_pending.get()
-            && !self.debugger_state.get().transition_pending()
-            && !self.session_pending.get()
-            && !self.debugger_state.get().resynchronizing()
-            && self.inferior_action_pending.get().is_none()
-            && matches!(
-                self.thread_controls.action_pending.get(),
-                None | Some(ThreadActionPending::Analysis)
-            )
-            && !self.debug_state_is_stale()
-            && self
-                .current_session
-                .borrow()
-                .as_ref()
-                .is_none_or(DebugSession::supports_execution)
-    }
-
-    pub(crate) fn stopped_inspection_available(&self) -> bool {
-        self.debugger_ready.get()
-            && self.inferior_has_started()
-            && !self.inferior_is_running()
-            && !self.command_pending.get()
-            && !self.debugger_state.get().transition_pending()
-            && !self.session_pending.get()
-            && !self.native_until_active.get()
-            && !self.debugger_state.get().resynchronizing()
-            && !self.debug_state_is_stale()
-    }
-
     /// Whether a complete MI snapshot can be requested safely. Unlike normal
     /// stopped inspection this deliberately permits a target-free or stale
     /// state, because synchronization is what repairs changes made through the
     /// interactive GDB terminal.
-    pub(crate) fn debugger_synchronization_available(&self) -> bool {
-        self.debugger_ready.get()
-            && !self.inferior_is_running()
-            && !self.command_pending.get()
-            && !self.debugger_state.get().transition_pending()
-            && !self.session_pending.get()
-            && !self.native_until_active.get()
-            && !self.debugger_state.get().resynchronizing()
-            && self.inferior_action_pending.get().is_none()
-            && self.thread_controls.action_pending.get().is_none()
-    }
-
-    pub(crate) fn stop_point_commands_available(&self) -> bool {
-        let debugger_state = self.debugger_state.get();
-
-        self.debugger_ready.get()
-            && !debugger_state.inferior_running()
-            && !self.command_pending.get()
-            && !debugger_state.transition_pending()
-            && !self.session_pending.get()
-            && !self.native_until_active.get()
-            && !debugger_state.resynchronizing()
-            && !debugger_state.stopped_context_is_stale()
-    }
-
     pub(crate) fn disassembly_commands_available(&self) -> bool {
-        self.stopped_inspection_available() && !self.disassembly_controls.loading.get()
+        self.model.stopped_inspection_available() && !self.disassembly_controls.loading.get()
     }
 
     pub fn set_command_pending(&self, pending: bool) {
-        if self.command_pending.replace(pending) == pending {
+        if !self.model.set_command_pending(pending) {
             return;
         }
 
@@ -1332,7 +1152,7 @@ impl Ui {
     }
 
     pub fn set_session_pending(&self, pending: bool) {
-        if self.session_pending.replace(pending) == pending {
+        if !self.model.set_session_pending(pending) {
             return;
         }
 
@@ -1342,12 +1162,7 @@ impl Ui {
     }
 
     pub(crate) fn begin_execution_transition(&self) -> u64 {
-        let generation = self.execution_transition_generation.get().wrapping_add(1);
-        self.execution_transition_generation.set(generation);
-
-        self.debugger_state
-            .set(self.debugger_state.get().with_transition_pending(true));
-
+        let generation = self.model.begin_execution_transition();
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
         self.render_inferior_controls();
@@ -1356,54 +1171,21 @@ impl Ui {
     }
 
     pub(crate) fn finish_execution_transition(&self) {
-        let state = self.debugger_state.get();
-
-        if state.transition_pending() {
-            self.debugger_state
-                .set(state.with_transition_pending(false));
-
-            self.execution_transition_generation
-                .set(self.execution_transition_generation.get().wrapping_add(1));
-
+        if self.model.finish_execution_transition() {
             self.update_control_sensitivity();
             self.update_thread_control_sensitivity();
             self.render_inferior_controls();
         }
     }
 
-    pub(crate) fn execution_transition_is_pending(&self, generation: u64) -> bool {
-        self.execution_transition_generation.get() == generation
-            && self.debugger_state.get().transition_pending()
-    }
-
-    pub(crate) fn execution_transition_matches_thread(
-        &self,
-        thread_id: Option<&str>,
-        all_stopped: bool,
-    ) -> bool {
-        if !self.debugger_state.get().transition_pending() {
-            return false;
-        }
-
-        if all_stopped {
-            return true;
-        }
-
-        super::controls::execution_event_matches_thread(
-            self.active_thread_execution.borrow().as_deref(),
-            thread_id,
-            false,
-        )
-    }
-
     pub(crate) fn require_gdb_recovery(&self, title: &str, detail: &str) {
-        if self.native_until_active() {
+        if self.model.native_until_active() {
             self.abort_native_until();
         }
 
-        self.set_active_thread_execution(None);
-        self.set_thread_execution_exit_candidate(None);
-        self.set_pending_execution_inferior(None);
+        self.model.set_active_thread_execution(None);
+        self.model.set_thread_execution_exit_candidate(None);
+        self.model.set_pending_execution_inferior(None);
         self.clear_inferior_action_pending();
         self.clear_thread_action_pending();
         self.set_debug_state_stale(true);
@@ -1469,44 +1251,27 @@ impl Ui {
     }
 
     pub fn set_debug_state_stale(&self, stale: bool) {
-        let state = self.debugger_state.get();
-
-        if state.state_stale() == stale {
+        if !self.model.set_debug_state_stale(stale) {
             return;
         }
 
-        self.debugger_state.set(state.with_state_stale(stale));
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
         self.render_inferior_controls();
     }
 
-    pub(crate) fn debug_state_is_stale(&self) -> bool {
-        self.debugger_state.get().state_stale()
-    }
-
     pub fn set_inferior_started(&self, started: bool) {
-        if !started {
-            self.inferior_pid.set(None);
-        }
-
-        let state = self.debugger_state.get();
-
-        if state.inferior_started() == started {
-            self.update_run_control_label();
-            return;
-        }
-
-        self.debugger_state
-            .set(state.with_inferior_started(started));
-
-        self.update_control_sensitivity();
-        self.update_thread_control_sensitivity();
+        let changed = self.model.set_inferior_started(started);
         self.update_run_control_label();
+
+        if changed {
+            self.update_control_sensitivity();
+            self.update_thread_control_sensitivity();
+        }
     }
 
-    fn update_run_control_label(&self) {
-        let label = if self.debugger_state.get().inferior_started() {
+    pub(super) fn update_run_control_label(&self) {
+        let label = if self.model.execution().state.inferior_started() {
             "Continue"
         } else {
             "Run"
@@ -1518,26 +1283,26 @@ impl Ui {
     }
 
     pub(super) fn update_control_sensitivity(&self) {
-        let ready = self.debugger_ready.get();
-        let debugger_state = self.debugger_state.get();
+        let ready = self.model.execution().ready;
+        let debugger_state = self.model.execution().state;
         let started = debugger_state.inferior_started();
         let running = debugger_state.inferior_running();
         let stale = debugger_state.stopped_context_is_stale();
-        let until_active = self.native_until_active.get();
-        let thread_pending = self.thread_controls.action_pending.get();
+        let until_active = self.model.execution().native_until_active;
+        let thread_pending = self.model.execution().thread_action_pending;
         let analysis_pending = thread_pending == Some(ThreadActionPending::Analysis);
 
-        let execution_blocked = self.command_pending.get()
+        let execution_blocked = self.model.execution().command_pending
             || debugger_state.transition_pending()
-            || self.session_pending.get()
+            || self.model.execution().session_pending
             || debugger_state.resynchronizing()
-            || self.inferior_action_pending.get().is_some()
+            || self.model.execution().inferior_action_pending.is_some()
             || (thread_pending.is_some() && !analysis_pending)
             || until_active;
 
         let pending = execution_blocked || analysis_pending;
         let busy = running || pending;
-        let session = self.current_session.borrow();
+        let session = self.model.session();
 
         let supports_execution = session
             .as_ref()
@@ -1547,7 +1312,7 @@ impl Ui {
             configured_target_can_start(session.as_ref(), debugger_state.target_connection());
 
         let can_inspect = ready && started && !running && !pending && !stale;
-        let can_synchronize = self.debugger_synchronization_available();
+        let can_synchronize = self.model.debugger_synchronization_available();
 
         let can_move =
             ready && started && !running && !execution_blocked && !stale && supports_execution;
@@ -1569,8 +1334,8 @@ impl Ui {
                 && ((started && supports_execution) || (!started && can_start && !stale)),
             pause: ready
                 && started
-                && !self.session_pending.get()
-                && (until_active || (running && !self.command_pending.get())),
+                && !self.model.execution().session_pending
+                && (until_active || (running && !self.model.execution().command_pending)),
             move_target: can_move,
             inspect: can_inspect,
             syntax: self.disassembly_controls.syntax_applicable.get(),
@@ -1603,7 +1368,7 @@ impl Ui {
                 )
                 .is_some(),
             add_memory: can_inspect && !self.memory_address_entry.text().trim().is_empty(),
-            session: (ready || self.gdb_recovery_available.get()) && !pending,
+            session: (ready || self.model.gdb_recovery_required()) && !pending,
             new_session: ready && !pending && !running && can_replace_session,
             restart_session: ready
                 && started
@@ -1620,7 +1385,7 @@ impl Ui {
                 && !running
                 && !pending
                 && session.as_ref().is_some_and(DebugSession::supports_detach),
-            restart_gdb: self.gdb_recovery_available.get() && !pending,
+            restart_gdb: self.model.gdb_recovery_required() && !pending,
             resynchronize: can_synchronize,
             edit_stop_points: can_edit_stop_points,
             add_signal: can_edit_stop_points
@@ -1817,18 +1582,15 @@ impl Ui {
             self.pause_button.add_css_class(PENDING_CLASS);
             let current_generation = Rc::clone(&self.pause_visual_generation);
             let button = self.pause_button.downgrade();
-            let ready = Rc::clone(&self.debugger_ready);
-            let debugger_state = Rc::clone(&self.debugger_state);
-            let command_pending = Rc::clone(&self.command_pending);
-            let session_pending = Rc::clone(&self.session_pending);
-            let until_active = Rc::clone(&self.native_until_active);
+            let model = Rc::clone(&self.model);
 
             gtk::glib::timeout_add_local_once(VISUAL_DELAY, move || {
-                let still_available = ready.get()
-                    && debugger_state.get().inferior_started()
-                    && !session_pending.get()
-                    && (until_active.get()
-                        || (debugger_state.get().inferior_running() && !command_pending.get()));
+                let still_available = model.execution().ready
+                    && model.execution().state.inferior_started()
+                    && !model.execution().session_pending
+                    && (model.execution().native_until_active
+                        || (model.execution().state.inferior_running()
+                            && !model.execution().command_pending));
 
                 if current_generation.get() == generation
                     && still_available
@@ -1899,10 +1661,6 @@ impl Ui {
         handler.is_some_and(|handler| handler(reason, address, thread_id))
     }
 
-    pub(crate) fn native_until_active(&self) -> bool {
-        self.native_until_active.get()
-    }
-
     pub(crate) fn gef_context_control(&self) -> GefContextControl {
         if self.gef_context_hidden_by_fgdb.get() {
             GefContextControl::None
@@ -1924,7 +1682,7 @@ impl Ui {
     }
 
     pub(crate) fn set_native_until_active(&self, active: bool) {
-        if self.native_until_active.replace(active) == active {
+        if !self.model.set_native_until_active(active) {
             return;
         }
 
@@ -2107,8 +1865,8 @@ impl Ui {
     }
 
     pub fn set_thread_stop_reason(&self, reason: Option<&str>) {
-        self.thread_stop_reason
-            .replace(reason.map(stop_reason_label));
+        self.model
+            .set_thread_stop_reason(reason.map(stop_reason_label));
     }
 }
 

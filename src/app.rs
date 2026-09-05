@@ -21,16 +21,18 @@ use crate::{
         },
         launch_gdb,
     },
+    model::actions::{
+        ForkFollowMode, InferiorAction, InferiorActionPending, SchedulerLockingMode, SessionAction,
+        ThreadAction, ThreadActionPending,
+    },
     theme::Theme,
     ui::{
         BreakpointEditRequest, BreakpointSpec, CallAbiTargetRequest, DisassemblyRequest,
         DisassemblySyntax, EventCatchpoint, FilteredCatchpointKind, FilteredCatchpointRequest,
-        ForkFollowMode, GefContextControl, HeapInspectionAction, HeapInspectionRequest,
-        InferiorAction, InferiorActionPending, SchedulerLockingMode, SessionAction,
-        SourceDiscoveryRequest, ThreadAction, ThreadActionPending, ThreadBacktrace,
-        ThreadComparison, ThreadComparisonRow, Ui, UntilAction, VariableViewerPlan,
-        VariableViewerRequest, VariableViewerRow, VariableViewerSession, WatchpointAccess,
-        WatchpointRequest, compact_variable_type,
+        GefContextControl, HeapInspectionAction, HeapInspectionRequest, SourceDiscoveryRequest,
+        ThreadBacktrace, ThreadComparison, ThreadComparisonRow, Ui, UntilAction,
+        VariableViewerPlan, VariableViewerRequest, VariableViewerRow, VariableViewerSession,
+        WatchpointAccess, WatchpointRequest, compact_variable_type,
     },
 };
 

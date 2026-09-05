@@ -870,7 +870,7 @@ impl Ui {
         view.modules.set_sensitive(!refreshing);
         view.sources.set_sensitive(!refreshing);
         view.printers.set_sensitive(!refreshing);
-        let capabilities = self.gdb_capabilities.borrow().clone();
+        let capabilities = self.model.gdb_capabilities();
 
         let loaded = self
             .latest_modules
@@ -1514,7 +1514,7 @@ impl Ui {
         };
 
         view.printer_search.set_sensitive(ready && !loading);
-        let printer_supported = self.gdb_capabilities().pretty_printing;
+        let printer_supported = self.model.gdb_capabilities().pretty_printing;
         view.printer_path
             .set_sensitive(printer_supported && !script_loading && !loading);
         view.printer_browse

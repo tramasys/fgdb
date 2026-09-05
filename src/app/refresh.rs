@@ -28,7 +28,7 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
         return;
     };
 
-    if current_ui.inferior_is_running() {
+    if current_ui.model.inferior_is_running() {
         return;
     }
 
@@ -191,11 +191,11 @@ pub(crate) fn refresh_cached_inspector_details(ui: &Weak<Ui>, client: &MiClient,
         return;
     };
 
-    let generation = current_ui.current_stop_refresh_generation();
+    let generation = current_ui.model.current_stop_refresh_generation();
 
     match page {
         2 => {
-            let Some(registers) = current_ui.registers_for_details(generation) else {
+            let Some(registers) = current_ui.model.registers_for_details(generation) else {
                 return;
             };
 
@@ -203,11 +203,11 @@ pub(crate) fn refresh_cached_inspector_details(ui: &Weak<Ui>, client: &MiClient,
             enrich_registers(ui.clone(), client, generation, registers);
         }
         3 | 4 | 7 => {
-            let Some(registers) = current_ui.registers_for_details(generation) else {
+            let Some(registers) = current_ui.model.registers_for_details(generation) else {
                 return;
             };
 
-            let Some(frames) = current_ui.frames_for_details(generation) else {
+            let Some(frames) = current_ui.model.frames_for_details(generation) else {
                 return;
             };
 
@@ -224,7 +224,7 @@ pub(super) fn refresh_registers(
     generation: u64,
     stack_inputs: Rc<RefCell<StackInputs>>,
 ) {
-    if let Some(names) = ui.upgrade().and_then(|ui| ui.cached_register_names()) {
+    if let Some(names) = ui.upgrade().and_then(|ui| ui.model.cached_register_names()) {
         request_register_values(ui.clone(), client, generation, stack_inputs, names);
         return;
     }
@@ -257,7 +257,7 @@ pub(super) fn refresh_registers(
                 let names = Rc::new(crate::debugger::register_names(&record));
 
                 if let Some(ui) = weak_ui.upgrade() {
-                    ui.cache_register_names(Rc::clone(&names));
+                    ui.model.cache_register_names(Rc::clone(&names));
                 }
 
                 request_register_values(
@@ -508,8 +508,8 @@ fn refresh_persistent_variable_objects(
 
 fn variable_refresh_is_current(state: &VariableRefresh) -> bool {
     state.ui.upgrade().is_some_and(|ui| {
-        ui.is_stop_refresh_current(state.generation)
-            && !ui.inferior_is_running()
+        ui.model.is_stop_refresh_current(state.generation)
+            && !ui.model.inferior_is_running()
             && match &state.target {
                 VariableRefreshTarget::Locals => true,
                 VariableRefreshTarget::ExpressionWatches(expressions) => {
@@ -837,10 +837,9 @@ fn has_persistent_variable_objects(variables: &[Variable]) -> bool {
 }
 
 fn variable_update_batch_is_current(batch: &VariableUpdateBatch) -> bool {
-    batch
-        .ui
-        .upgrade()
-        .is_some_and(|ui| ui.is_stop_refresh_current(batch.generation) && !ui.inferior_is_running())
+    batch.ui.upgrade().is_some_and(|ui| {
+        ui.model.is_stop_refresh_current(batch.generation) && !ui.model.inferior_is_running()
+    })
 }
 
 fn apply_bulk_variable_updates(
@@ -1049,7 +1048,7 @@ fn show_variable_root_refresh(
 
 pub(super) fn stop_refresh_is_current(ui: &Weak<Ui>, generation: u64) -> bool {
     ui.upgrade()
-        .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+        .is_some_and(|ui| ui.model.is_stop_refresh_current(generation))
 }
 
 pub(crate) fn frame_scoped_stop_command(
@@ -1058,6 +1057,7 @@ pub(crate) fn frame_scoped_stop_command(
     command: &str,
 ) -> Option<String> {
     ui.upgrade()?
+        .model
         .stop_context(generation)
         .map(|context| context.scope_frame(command))
 }
@@ -1150,9 +1150,12 @@ pub(super) fn request_variable_children(
     };
 
     let Some(generation) = ui.upgrade().and_then(|current_ui| {
-        let generation = current_ui.current_stop_refresh_generation();
+        let generation = current_ui.model.current_stop_refresh_generation();
 
-        current_ui.stop_context(generation).map(|_| generation)
+        current_ui
+            .model
+            .stop_context(generation)
+            .map(|_| generation)
     }) else {
         return;
     };
@@ -1184,7 +1187,7 @@ pub(super) fn request_variable_children(
             generation,
             move || {
                 ui_for_guard.upgrade().is_some_and(|ui| {
-                    ui.is_stop_refresh_current(generation)
+                    ui.model.is_stop_refresh_current(generation)
                         && ui.has_variable_object(&varobj_for_guard)
                 })
             },
@@ -1258,7 +1261,7 @@ pub(super) fn request_variable_children(
             generation,
             move || {
                 ui_for_path_guard.upgrade().is_some_and(|ui| {
-                    ui.is_stop_refresh_current(generation)
+                    ui.model.is_stop_refresh_current(generation)
                         && ui.has_variable_object(&varobj_for_path_guard)
                 })
             },
@@ -1284,7 +1287,8 @@ pub(super) fn request_variable_children(
                 );
 
                 let command = ui_for_path.upgrade().and_then(|ui| {
-                    ui.stop_context(generation)
+                    ui.model
+                        .stop_context(generation)
                         .map(|context| context.scope_frame(&command))
                 });
 
@@ -1314,7 +1318,7 @@ pub(super) fn request_variable_children(
                         generation,
                         move || {
                             ui_for_guard.upgrade().is_some_and(|ui| {
-                                ui.is_stop_refresh_current(generation)
+                                ui.model.is_stop_refresh_current(generation)
                                     && ui.has_variable_object(&varobj_for_guard)
                             })
                         },
@@ -1403,7 +1407,8 @@ fn set_variable_update_range(
         generation,
         move || {
             ui_for_guard.upgrade().is_some_and(|ui| {
-                ui.is_stop_refresh_current(generation) && ui.has_variable_object(&varobj_for_guard)
+                ui.model.is_stop_refresh_current(generation)
+                    && ui.has_variable_object(&varobj_for_guard)
             })
         },
         |_, _| {},
@@ -1427,7 +1432,7 @@ fn request_lazy_local_variable_children(
         return;
     };
 
-    let generation = current_ui.current_stop_refresh_generation();
+    let generation = current_ui.model.current_stop_refresh_generation();
 
     if from != 0 || !current_ui.claim_local_variable_object(generation, &variable) {
         return;
@@ -1463,7 +1468,7 @@ fn request_lazy_local_variable_children(
             generation,
             move || {
                 ui_for_guard.upgrade().is_some_and(|ui| {
-                    ui.is_stop_refresh_current(generation)
+                    ui.model.is_stop_refresh_current(generation)
                         && ui.has_local_variable_identity(&variable_for_guard)
                 })
             },
@@ -1487,7 +1492,7 @@ fn request_lazy_local_variable_children(
                     delete_variable_object(client, &varobj_for_response);
 
                     if let Some(ui) = ui_for_response.upgrade()
-                        && ui.is_stop_refresh_current(generation)
+                        && ui.model.is_stop_refresh_current(generation)
                     {
                         ui.show_lazy_variable_children_error(
                             &variable_for_response,
@@ -1521,7 +1526,8 @@ fn request_lazy_local_variable_children(
     {
         ui.finish_local_variable_object(generation, &variable);
 
-        if ui.is_stop_refresh_current(generation) && ui.has_local_variable_identity(&variable) {
+        if ui.model.is_stop_refresh_current(generation) && ui.has_local_variable_identity(&variable)
+        {
             ui.show_lazy_variable_children_error(&variable, "The MI channel is unavailable");
         }
     }
@@ -1579,7 +1585,7 @@ pub(super) fn enrich_registers(
     // Do not consume this generation's one enrichment attempt until all
     // prerequisites are present and there is actual work to schedule. ABI
     // discovery can finish after the first register response.
-    if indices.is_empty() || !current_ui.claim_register_details(generation) {
+    if indices.is_empty() || !current_ui.model.claim_register_details(generation) {
         return;
     }
 
@@ -1905,9 +1911,9 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
 
     let cached = ui.upgrade().map(|ui| {
         (
-            ui.inferior_pid(),
-            ui.debugger_pid(),
-            ui.selected_inferior_id(),
+            ui.model.inferior_pid(),
+            ui.model.debugger_pid(),
+            ui.model.selected_inferior_id(),
         )
     });
     if let Some((Some(pid), debugger_pid, _)) = cached.as_ref() {
@@ -1940,7 +1946,7 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
                     .as_deref()
                     .and_then(|id| crate::debugger::inferior_pid_for_group(&record, id))
                     .or_else(|| crate::debugger::inferior_pid(&record));
-                let debugger_pid = ui.upgrade().and_then(|ui| ui.debugger_pid());
+                let debugger_pid = ui.upgrade().and_then(|ui| ui.model.debugger_pid());
                 continue_stack_refresh(
                     ui,
                     client,
@@ -1968,11 +1974,11 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
             ui.show_memory_regions_for_refresh(generation, &[]);
         }
 
-        if needs.memory && ui.claim_memory_watches_refresh(generation) {
+        if needs.memory && ui.model.claim_memory_watches_refresh(generation) {
             ui.refresh_memory_watches();
         }
 
-        if needs.tls && ui.claim_tls_runtime_refresh(generation) {
+        if needs.tls && ui.model.claim_tls_runtime_refresh(generation) {
             ui.show_tls_runtime_unavailable_for_refresh(
                 generation,
                 "The inferior process identity is unavailable",
@@ -1998,7 +2004,7 @@ fn continue_stack_refresh(
     }
 
     if let Some(current_ui) = ui.upgrade() {
-        current_ui.set_inferior_pid(pid);
+        current_ui.model.set_inferior_pid(pid);
         if pid.is_some() {
             current_ui.set_inferior_started(true);
         }
@@ -2101,7 +2107,7 @@ fn finish_stop_process_snapshot(
         // Rebind only when ELF discovery actually refined the target. The
         // former unconditional pass rebuilt every register row on each stop.
         if previous != current
-            && let Some(current_registers) = current_ui.registers_for_details(generation)
+            && let Some(current_registers) = current_ui.model.registers_for_details(generation)
         {
             current_ui.show_registers_for_refresh(generation, &current_registers);
             // ABI discovery may make pointer enrichment runnable after the
@@ -2162,11 +2168,11 @@ fn refresh_visible_stop_details(
     };
     let regions = memory_regions_for_stop(&ui, generation);
 
-    if needs.memory && current_ui.claim_memory_watches_refresh(generation) {
+    if needs.memory && current_ui.model.claim_memory_watches_refresh(generation) {
         current_ui.refresh_memory_watches();
     }
 
-    if needs.tls && current_ui.claim_tls_runtime_refresh(generation) {
+    if needs.tls && current_ui.model.claim_tls_runtime_refresh(generation) {
         drop(current_ui);
         request_tls_runtime(&ui, client, generation, &registers, &regions, architecture);
     } else {
@@ -2180,7 +2186,7 @@ fn refresh_visible_stop_details(
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
-    if let Some(entries) = current_ui.stack_for_details(generation) {
+    if let Some(entries) = current_ui.model.stack_for_details(generation) {
         let Some(stack_register) =
             architecture.stack_pointer(registers.iter().map(|register| register.name.as_str()))
         else {
@@ -2202,7 +2208,7 @@ fn refresh_visible_stop_details(
             word_size,
             endian,
         );
-    } else if current_ui.claim_stack_memory_refresh(generation) {
+    } else if current_ui.model.claim_stack_memory_refresh(generation) {
         drop(current_ui);
         request_stack_memory(ui, client, generation, registers, frames, regions);
     }
@@ -2213,6 +2219,7 @@ fn memory_regions_for_stop(ui: &Weak<Ui>, generation: u64) -> Vec<MemoryRegion> 
         return Vec::new();
     };
     current_ui
+        .model
         .memory_regions_for_details(generation)
         .unwrap_or_default()
 }
@@ -2456,7 +2463,7 @@ pub(super) fn enrich_stack(
         })
         .map(|(index, _)| index)
         .collect::<Vec<_>>();
-    if indices.is_empty() || !current_ui.claim_stack_details(generation) {
+    if indices.is_empty() || !current_ui.model.claim_stack_details(generation) {
         return;
     }
 

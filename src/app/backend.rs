@@ -89,6 +89,7 @@ fn signal_matching_process<E>(
 }
 
 pub(super) struct BackendController {
+    model: Rc<crate::model::DebuggerModel>,
     ui: Weak<Ui>,
     client: Rc<MiClient>,
     session: Rc<SessionController>,
@@ -112,12 +113,14 @@ impl BackendController {
     pub fn new(
         ui: Weak<Ui>,
         client: Rc<MiClient>,
+        model: Rc<crate::model::DebuggerModel>,
         session: Rc<SessionController>,
         configuration: LaunchConfig,
     ) -> Rc<Self> {
         let initial_configuration_pending = configuration.needs_deferred_session_configuration();
 
         Rc::new(Self {
+            model,
             ui,
             client,
             session,
@@ -201,11 +204,11 @@ impl BackendController {
 
         self.restart_requested.set(true);
         self.cancel_connection_timeout();
-        self.pending_restore.replace(ui.current_session());
+        self.pending_restore.replace(self.model.current_session());
         ui.clear_gdb_capabilities();
         ui.set_controls_ready(false);
 
-        if ui.debugger_pid().is_some() {
+        if self.model.debugger_pid().is_some() {
             ui.set_status(
                 "Restarting GDB",
                 "Stopping the unresponsive debugger before opening a fresh backend…",
@@ -326,9 +329,9 @@ impl BackendController {
         };
 
         let cleanup = shutdown_cleanup_command(
-            ui.current_session().as_ref(),
-            ui.target_connection(),
-            ui.inferior_has_started(),
+            self.model.current_session().as_ref(),
+            self.model.target_connection(),
+            self.model.inferior_has_started(),
         );
 
         ui.save_layout();
@@ -341,7 +344,7 @@ impl BackendController {
             None,
         );
 
-        if ui.debugger_pid().is_none() {
+        if self.model.debugger_pid().is_none() {
             self.close_allowed.set(true);
             return glib::Propagation::Proceed;
         }

@@ -202,7 +202,7 @@ impl DebuggerState {
         self
     }
 
-    pub(super) fn transition_pending(self) -> bool {
+    pub(crate) fn transition_pending(self) -> bool {
         self.transition == ExecutionTransition::Pending
     }
 
@@ -239,7 +239,7 @@ impl DebuggerState {
         self
     }
 
-    pub(super) fn resynchronizing(self) -> bool {
+    pub(crate) fn resynchronizing(self) -> bool {
         self.freshness == DebugStateFreshness::Resynchronizing
     }
 

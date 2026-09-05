@@ -156,8 +156,6 @@ pub(super) fn build_thread_controls() -> ThreadControls {
         compare_ids: Rc::new(RefCell::new(Vec::new())),
         compare_updating: Rc::new(Cell::new(false)),
         action_handler: Rc::new(RefCell::new(None)),
-        action_pending: Rc::new(Cell::new(None)),
-        analysis_generation: Rc::new(Cell::new(0)),
         analysis_window: Rc::new(RefCell::new(None)),
         analysis_content: Rc::new(RefCell::new(None)),
     }
@@ -253,7 +251,7 @@ impl Ui {
 
         self.thread_controls.run_only.connect_clicked(move |_| {
             if let Some(ui) = weak_ui.upgrade()
-                && let Some(id) = ui.current_thread_id()
+                && let Some(id) = ui.model.current_thread_id()
             {
                 ui.emit_thread_action(ThreadAction::RunOnly(id));
             }
@@ -263,7 +261,7 @@ impl Ui {
 
         self.thread_controls.freeze.connect_clicked(move |_| {
             if let Some(ui) = weak_ui.upgrade()
-                && let Some(id) = ui.current_thread_id()
+                && let Some(id) = ui.model.current_thread_id()
             {
                 ui.emit_thread_action(ThreadAction::Freeze(id));
             }
@@ -273,7 +271,7 @@ impl Ui {
 
         self.thread_controls.thaw.connect_clicked(move |_| {
             if let Some(ui) = weak_ui.upgrade()
-                && let Some(id) = ui.current_thread_id()
+                && let Some(id) = ui.model.current_thread_id()
             {
                 ui.emit_thread_action(ThreadAction::Thaw(id));
             }
@@ -286,7 +284,7 @@ impl Ui {
                 return;
             };
 
-            if !ui.thread_action_dispatch_available() {
+            if !ui.model.thread_action_dispatch_available() {
                 return;
             }
 
@@ -305,7 +303,7 @@ impl Ui {
                 return;
             };
 
-            if !ui.thread_action_dispatch_available() {
+            if !ui.model.thread_action_dispatch_available() {
                 return;
             }
 
@@ -365,7 +363,7 @@ impl Ui {
     }
 
     fn emit_thread_action(&self, action: ThreadAction) -> bool {
-        if !self.thread_action_can_dispatch(&action) {
+        if !self.model.thread_action_can_dispatch(&action) {
             return false;
         }
 
@@ -380,98 +378,8 @@ impl Ui {
         }
     }
 
-    fn thread_action_dispatch_available(&self) -> bool {
-        self.debugger_ready.get()
-            && !self.command_pending.get()
-            && !self.debugger_state.get().transition_pending()
-            && !self.session_pending.get()
-            && !self.native_until_active.get()
-            && !self.debugger_state.get().resynchronizing()
-            && self.thread_controls.action_pending.get().is_none()
-    }
-
-    pub(crate) fn thread_selection_can_dispatch(&self, id: &str) -> bool {
-        self.debugger_ready.get()
-            && !self.command_pending.get()
-            && !self.debugger_state.get().transition_pending()
-            && !self.session_pending.get()
-            && !self.native_until_active.get()
-            && !self.debugger_state.get().resynchronizing()
-            && self.inferior_action_pending.get().is_none()
-            && self.thread_controls.action_pending.get().is_none()
-            && self.current_thread_id().as_deref() != Some(id)
-            && self
-                .latest_threads
-                .borrow()
-                .as_ref()
-                .is_some_and(|state| state.source_threads.iter().any(|thread| thread.id == id))
-    }
-
-    pub(crate) fn frame_selection_can_dispatch(&self, level: u32) -> bool {
-        self.stopped_inspection_available()
-            && self.inferior_action_pending.get().is_none()
-            && self.thread_controls.action_pending.get().is_none()
-            && self.selected_frame_level.get() != level
-            && self
-                .latest_frames
-                .borrow()
-                .iter()
-                .any(|frame| frame.level == level)
-    }
-
-    pub(crate) fn thread_action_can_dispatch(&self, action: &ThreadAction) -> bool {
-        self.thread_action_dispatch_available() && self.thread_action_is_current(action)
-    }
-
-    fn thread_action_is_current(&self, action: &ThreadAction) -> bool {
-        let latest = self.latest_threads.borrow();
-
-        let threads = latest
-            .as_ref()
-            .map(|state| state.source_threads.as_slice())
-            .unwrap_or_default();
-
-        let stopped = |id: &str| {
-            threads
-                .iter()
-                .any(|thread| thread.id == id && thread.state == "stopped")
-        };
-
-        let running = |id: &str| {
-            threads
-                .iter()
-                .any(|thread| thread.id == id && thread.state == "running")
-        };
-
-        match action {
-            ThreadAction::Refresh | ThreadAction::SetSchedulerLocking(_) => true,
-            ThreadAction::SetNonStop(_) => !self.inferior_has_started(),
-            ThreadAction::RunOnly(id) => {
-                stopped(id) && threads.iter().all(|thread| thread.state != "running")
-            }
-            ThreadAction::Freeze(id) => self.non_stop_mode() == Some(true) && running(id),
-            ThreadAction::Thaw(id) => self.non_stop_mode() == Some(true) && stopped(id),
-            ThreadAction::Backtraces { generation } => {
-                self.is_thread_analysis_current(*generation)
-                    && threads.iter().any(|thread| thread.state == "stopped")
-            }
-
-            ThreadAction::Compare {
-                generation,
-                left,
-                right,
-            } => {
-                self.is_thread_analysis_current(*generation)
-                    && left != right
-                    && stopped(left)
-                    && stopped(right)
-            }
-            ThreadAction::SelectFrame { thread, .. } => stopped(thread),
-        }
-    }
-
     pub(crate) fn set_thread_action_pending(&self, pending: Option<ThreadActionPending>) {
-        if self.thread_controls.action_pending.replace(pending) != pending {
+        if self.model.set_thread_action_pending(pending) {
             self.update_control_sensitivity();
             self.update_thread_control_sensitivity();
             self.render_inferior_controls();
@@ -479,27 +387,9 @@ impl Ui {
     }
 
     pub(crate) fn finish_thread_execution_action(&self) {
-        if self.thread_controls.action_pending.get() == Some(ThreadActionPending::Execution) {
+        if self.model.execution().thread_action_pending == Some(ThreadActionPending::Execution) {
             self.set_thread_action_pending(None);
         }
-    }
-
-    pub(crate) fn thread_execution_transition_matches(
-        &self,
-        thread_id: Option<&str>,
-        all_stopped: bool,
-    ) -> bool {
-        if self.thread_controls.action_pending.get() != Some(ThreadActionPending::Execution) {
-            return false;
-        }
-
-        if all_stopped {
-            return true;
-        }
-
-        let active = self.active_thread_execution.borrow();
-
-        super::controls::execution_event_matches_thread(active.as_deref(), thread_id, false)
     }
 
     pub(crate) fn clear_thread_action_pending(&self) {
@@ -507,30 +397,21 @@ impl Ui {
     }
 
     pub(crate) fn finish_thread_analysis_action(&self, generation: u64) -> bool {
-        if self.thread_controls.analysis_generation.get() != generation {
+        if !self.model.is_thread_analysis_current(generation) {
             return false;
         }
 
-        if self.thread_controls.action_pending.get() == Some(ThreadActionPending::Analysis) {
+        if self.model.execution().thread_action_pending == Some(ThreadActionPending::Analysis) {
             self.set_thread_action_pending(None);
         }
 
         true
     }
 
-    pub(crate) fn is_thread_analysis_current(&self, generation: u64) -> bool {
-        self.thread_controls.analysis_generation.get() == generation
-    }
-
     pub(super) fn reset_thread_analysis(&self) {
-        self.thread_controls.analysis_generation.set(
-            self.thread_controls
-                .analysis_generation
-                .get()
-                .wrapping_add(1),
-        );
+        self.model.begin_thread_analysis();
 
-        if self.thread_controls.action_pending.get() == Some(ThreadActionPending::Analysis) {
+        if self.model.execution().thread_action_pending == Some(ThreadActionPending::Analysis) {
             self.set_thread_action_pending(None);
         }
 
@@ -547,8 +428,7 @@ impl Ui {
         scheduler: Option<SchedulerLockingMode>,
         non_stop: Option<bool>,
     ) {
-        self.scheduler_locking.set(scheduler);
-        self.non_stop_mode.set(non_stop);
+        self.model.set_thread_control_policy(scheduler, non_stop);
         self.restore_thread_policy_controls();
 
         let mode_note = match non_stop {
@@ -567,8 +447,8 @@ impl Ui {
         self.thread_controls.scheduler_updating.set(true);
 
         let scheduler = self
-            .scheduler_locking
-            .get()
+            .model
+            .scheduler_locking_mode()
             .map_or(gtk::INVALID_LIST_POSITION, SchedulerLockingMode::index);
 
         if self.thread_controls.scheduler_locking.selected() != scheduler {
@@ -577,7 +457,7 @@ impl Ui {
                 .set_selected(scheduler);
         }
 
-        let non_stop = self.non_stop_mode.get().unwrap_or(false);
+        let non_stop = self.model.non_stop_mode().unwrap_or(false);
 
         if self.thread_controls.non_stop.is_active() != non_stop {
             self.thread_controls.non_stop.set_active(non_stop);
@@ -586,86 +466,20 @@ impl Ui {
         self.thread_controls.scheduler_updating.set(false);
     }
 
-    pub(crate) fn scheduler_locking_mode(&self) -> Option<SchedulerLockingMode> {
-        self.scheduler_locking.get()
-    }
-
-    pub(crate) fn start_thread_policy_refresh(&self) -> u64 {
-        let generation = self.thread_policy_generation.get().wrapping_add(1);
-        self.thread_policy_generation.set(generation);
-
-        generation
-    }
-
-    pub(crate) fn is_thread_policy_refresh_current(&self, generation: u64) -> bool {
-        self.thread_policy_generation.get() == generation
-    }
-
-    pub(crate) fn non_stop_mode(&self) -> Option<bool> {
-        self.non_stop_mode.get()
-    }
-
     pub(crate) fn thread_snapshot(&self) -> Vec<ThreadInfo> {
-        self.latest_threads
-            .borrow()
-            .as_ref()
-            .map(|state| state.source_threads.clone())
-            .unwrap_or_default()
+        self.model.thread_snapshot()
     }
 
     /// Update the authoritative thread state without repainting the rows.
     /// A short step can pass through running and stopped faster than GTK can
     /// present either state usefully, but command validation must still see
     /// the running state immediately.
-    pub(super) fn stage_threads_for_execution(&self, threads: &[ThreadInfo]) {
-        {
-            let mut latest = self.latest_threads.borrow_mut();
-
-            let Some(latest) = latest.as_mut() else {
-                return;
-            };
-
-            latest.source_threads = threads.to_vec();
-        }
-
-        self.update_thread_control_sensitivity();
-    }
-
-    pub(crate) fn thread_is_stopped(&self, id: &str) -> bool {
-        self.latest_threads
-            .borrow()
-            .as_ref()
-            .into_iter()
-            .flat_map(|state| &state.source_threads)
-            .any(|thread| thread.id == id && thread.state == "stopped")
-    }
-
     pub(crate) fn select_thread_in_view(&self, id: &str) {
-        let mut threads = self.thread_snapshot();
-
-        let Some(running) = threads
-            .iter()
-            .find(|thread| thread.id == id)
-            .map(|thread| thread.state == "running")
-        else {
-            return;
-        };
-
-        for thread in &mut threads {
-            thread.current = thread.id == id;
-        }
-
-        for inferior in self.inferiors.borrow_mut().iter_mut() {
-            for thread in &mut inferior.threads {
-                thread.current = thread.id == id;
-            }
-        }
-
-        self.set_current_thread_id(Some(id));
-        self.set_controls_running(running);
-        self.set_debug_state_stale(running);
-        self.latest_threads.borrow_mut().take();
-        self.show_threads(&threads);
+        self.model.select_thread(id);
+        self.update_run_control_label();
+        self.update_control_sensitivity();
+        self.update_thread_control_sensitivity();
+        self.render_threads();
     }
 
     pub(super) fn filtered_sorted_thread_page(
@@ -813,20 +627,20 @@ impl Ui {
     }
 
     pub(super) fn update_thread_control_sensitivity(&self) {
-        let pending = self.thread_controls.action_pending.get().is_some();
-        let ready = self.debugger_ready.get();
+        let pending = self.model.execution().thread_action_pending.is_some();
+        let ready = self.model.execution().ready;
         let visual_transition = self.execution_visual_transition_pending();
 
         let selection_available = ready
-            && !self.command_pending.get()
-            && !self.debugger_state.get().transition_pending()
-            && !self.session_pending.get()
-            && !self.native_until_active.get()
-            && !self.debugger_state.get().resynchronizing()
-            && self.inferior_action_pending.get().is_none()
+            && !self.model.execution().command_pending
+            && !self.model.execution().state.transition_pending()
+            && !self.model.execution().session_pending
+            && !self.model.execution().native_until_active
+            && !self.model.execution().state.resynchronizing()
+            && self.model.execution().inferior_action_pending.is_none()
             && !pending;
 
-        let current_thread = self.current_thread_id();
+        let current_thread = self.model.current_thread_id();
 
         for (id, button) in self.thread_buttons.borrow().iter() {
             set_transient_execution_sensitive(
@@ -837,33 +651,29 @@ impl Ui {
         }
 
         let debugger_available = ready
-            && !self.command_pending.get()
-            && !self.debugger_state.get().transition_pending()
-            && !self.session_pending.get()
-            && !self.native_until_active.get()
-            && !self.debugger_state.get().resynchronizing();
+            && !self.model.execution().command_pending
+            && !self.model.execution().state.transition_pending()
+            && !self.model.execution().session_pending
+            && !self.model.execution().native_until_active
+            && !self.model.execution().state.resynchronizing();
 
-        let stopped_inspection_available = debugger_available && !self.debug_state_is_stale();
+        let stopped_inspection_available = debugger_available && !self.model.debug_state_is_stale();
 
         for (level, button) in self.frame_buttons.borrow().iter() {
             set_transient_execution_sensitive(
                 button,
                 stopped_inspection_available
-                    && self.inferior_action_pending.get().is_none()
+                    && self.model.execution().inferior_action_pending.is_none()
                     && !pending
-                    && self.selected_frame_level.get() != *level,
+                    && self.model.selected_frame_level() != *level,
                 visual_transition,
             );
         }
 
-        let latest = self.latest_threads.borrow();
-
-        let threads = latest
-            .as_ref()
-            .map(|state| state.source_threads.as_slice())
-            .unwrap_or_default();
+        let threads = self.model.threads();
 
         let selected = self
+            .model
             .current_thread_id()
             .and_then(|id| threads.iter().find(|thread| thread.id == id).cloned());
 
@@ -875,7 +685,7 @@ impl Ui {
             .as_ref()
             .is_some_and(|thread| thread.state == "running");
 
-        let non_stop = self.non_stop_mode.get() == Some(true);
+        let non_stop = self.model.non_stop_mode() == Some(true);
         let all_threads_stopped = threads.iter().all(|thread| thread.state != "running");
 
         set_transient_execution_sensitive(
@@ -892,14 +702,14 @@ impl Ui {
 
         set_transient_execution_sensitive(
             &self.thread_controls.non_stop,
-            debugger_available && !pending && !self.inferior_has_started(),
+            debugger_available && !pending && !self.model.inferior_has_started(),
             visual_transition,
         );
 
         set_transient_execution_sensitive(
             &self.thread_controls.run_only,
             debugger_available && !pending && selected_stopped && all_threads_stopped,
-            visual_transition || self.inferior_is_running(),
+            visual_transition || self.model.inferior_is_running(),
         );
 
         set_transient_execution_sensitive(
@@ -945,13 +755,7 @@ impl Ui {
     }
 
     fn begin_thread_analysis(self: &Rc<Self>, title: &str, detail: &str) -> u64 {
-        let generation = self
-            .thread_controls
-            .analysis_generation
-            .get()
-            .wrapping_add(1);
-
-        self.thread_controls.analysis_generation.set(generation);
+        let generation = self.model.begin_thread_analysis();
         self.thread_controls.analysis_content.borrow_mut().take();
         let previous_window = { self.thread_controls.analysis_window.borrow_mut().take() };
 
@@ -995,13 +799,12 @@ impl Ui {
 
         window.connect_close_request(move |_| {
             if let Some(ui) = weak_ui.upgrade()
-                && ui.thread_controls.analysis_generation.get() == generation
+                && ui.model.is_thread_analysis_current(generation)
             {
-                ui.thread_controls
-                    .analysis_generation
-                    .set(generation.wrapping_add(1));
+                ui.model.begin_thread_analysis();
 
-                if ui.thread_controls.action_pending.get() == Some(ThreadActionPending::Analysis) {
+                if ui.model.execution().thread_action_pending == Some(ThreadActionPending::Analysis)
+                {
                     ui.set_thread_action_pending(None);
                 }
 
@@ -1109,7 +912,7 @@ impl Ui {
     }
 
     fn thread_analysis_content(&self, generation: u64) -> Option<gtk::Box> {
-        (self.thread_controls.analysis_generation.get() == generation)
+        (self.model.is_thread_analysis_current(generation))
             .then(|| self.thread_controls.analysis_content.borrow().clone())
             .flatten()
     }
@@ -1211,7 +1014,7 @@ fn append_thread_backtrace_page(
                 return;
             };
 
-            if !ui.is_thread_analysis_current(generation) {
+            if !ui.model.is_thread_analysis_current(generation) {
                 return;
             }
 

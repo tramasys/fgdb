@@ -29,6 +29,7 @@ enum HistoryUpdate {
 }
 
 pub(super) struct DisassemblyController {
+    model: Rc<crate::model::DebuggerModel>,
     ui: Weak<Ui>,
     client: Rc<MiClient>,
     state: RefCell<DisassemblyState>,
@@ -36,8 +37,13 @@ pub(super) struct DisassemblyController {
 }
 
 impl DisassemblyController {
-    pub(super) fn new(ui: Weak<Ui>, client: Rc<MiClient>) -> Rc<Self> {
+    pub(super) fn new(
+        ui: Weak<Ui>,
+        client: Rc<MiClient>,
+        model: Rc<crate::model::DebuggerModel>,
+    ) -> Rc<Self> {
         Rc::new(Self {
+            model,
             ui,
             client,
             state: RefCell::new(DisassemblyState::default()),
@@ -232,7 +238,7 @@ impl DisassemblyController {
             return;
         };
 
-        if !ui.stopped_inspection_available() {
+        if !self.model.stopped_inspection_available() {
             return;
         }
 
@@ -303,13 +309,13 @@ impl DisassemblyController {
             return;
         };
 
-        if !ui.stopped_inspection_available() {
+        if !self.model.stopped_inspection_available() {
             return;
         }
 
         ui.clear_disassembly_error();
         ui.set_disassembly_loading(true);
-        let stop_generation = ui.current_stop_refresh_generation();
+        let stop_generation = ui.model.current_stop_refresh_generation();
         drop(ui);
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
@@ -341,7 +347,7 @@ impl DisassemblyController {
 
                     move || {
                         ui.upgrade()
-                            .is_some_and(|ui| ui.is_stop_refresh_current(stop_generation))
+                            .is_some_and(|ui| ui.model.is_stop_refresh_current(stop_generation))
                     }
                 },
                 move |_, record| {
@@ -402,7 +408,7 @@ impl DisassemblyController {
                     return;
                 };
 
-                if !ui.stopped_inspection_available() {
+                if !controller.model.stopped_inspection_available() {
                     return;
                 }
 
@@ -508,7 +514,7 @@ impl DisassemblyController {
             return;
         };
 
-        if !ui.stopped_inspection_available() {
+        if !self.model.stopped_inspection_available() {
             return;
         }
 
@@ -568,7 +574,7 @@ impl DisassemblyController {
                 move || {
                     weak_ui_for_guard
                         .upgrade()
-                        .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+                        .is_some_and(|ui| ui.model.is_stop_refresh_current(generation))
                 },
                 move |_, record| {
                     let Some(ui) = weak_ui_for_response.upgrade() else {

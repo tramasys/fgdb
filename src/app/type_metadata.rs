@@ -69,9 +69,10 @@ pub(super) fn assign_float_bytes(
     raw_bytes: Vec<u8>,
 ) {
     let Some(generation) = ui.upgrade().and_then(|current_ui| {
-        let generation = current_ui.current_stop_refresh_generation();
+        let generation = current_ui.model.current_stop_refresh_generation();
 
         current_ui
+            .model
             .can_edit_variable(generation)
             .then_some(generation)
     }) else {

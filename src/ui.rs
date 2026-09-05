@@ -20,7 +20,6 @@ mod actions;
 mod configuration;
 mod debug_data;
 pub(crate) use debug_data::DebugDataAction;
-mod debugger_state;
 mod domain;
 use domain::{
     LocalVariableCatalog, MemoryRefreshBatch, TerminalSynchronization, VariableNodeIndex,
@@ -30,8 +29,11 @@ mod source_loading;
 mod source_navigation;
 mod value;
 
-pub use actions::*;
-pub(crate) use debugger_state::{DebuggerState, DebuggerStateDelta, TargetConnection};
+use crate::model::DebuggerStateDelta;
+#[cfg(test)]
+use crate::model::TargetConnection;
+use crate::model::{RefreshGate, configured_target_can_start};
+pub(crate) use actions::*;
 
 #[cfg(test)]
 use value::IntegerFormat;
@@ -129,26 +131,6 @@ fn set_css_class(widget: &impl IsA<gtk::Widget>, class: &str, enabled: bool) {
     }
 }
 
-fn configured_target_can_start(
-    session: Option<&DebugSession>,
-    connection: TargetConnection,
-) -> bool {
-    match session {
-        None => true,
-        Some(DebugSession::Launch { .. }) => connection == TargetConnection::Local,
-        Some(DebugSession::Remote {
-            extended: true,
-            remote_executable: Some(_),
-            ..
-        }) => connection == TargetConnection::Remote,
-        Some(
-            DebugSession::Attach { .. }
-            | DebugSession::CoreDump { .. }
-            | DebugSession::Remote { .. },
-        ) => false,
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ControlState {
     busy: bool,
@@ -182,7 +164,7 @@ struct ControlState {
 
 #[derive(Clone, PartialEq, Eq)]
 struct ThreadRenderState {
-    source_threads: Vec<ThreadInfo>,
+    source_threads: Rc<[ThreadInfo]>,
     rendered_threads: Vec<ThreadInfo>,
     stop_reason: Option<String>,
     executable_name: Option<String>,
@@ -299,8 +281,7 @@ struct InspectorBindings<'a> {
 
 #[derive(Clone)]
 struct ValueEditorHandlers {
-    stop_generation: Rc<Cell<u64>>,
-    can_edit: Rc<dyn Fn() -> bool>,
+    model: Rc<crate::model::DebuggerModel>,
     assignment: Rc<RefCell<Option<VariableAssignmentHandler>>>,
     float: Rc<RefCell<Option<FloatAssignmentHandler>>>,
     string: Rc<RefCell<Option<StringAssignmentHandler>>>,
@@ -310,36 +291,6 @@ struct ValueEditorHandlers {
 pub(crate) struct VariableEditorRequest {
     pub(crate) generation: u64,
     id: u64,
-}
-
-#[derive(Default)]
-struct RefreshGate {
-    in_flight: Cell<bool>,
-    queued: Cell<bool>,
-}
-
-impl RefreshGate {
-    fn begin(&self) -> bool {
-        if self.in_flight.replace(true) {
-            self.queued.set(true);
-
-            false
-        } else {
-            true
-        }
-    }
-
-    fn finish(&self) -> bool {
-        self.in_flight.set(false);
-
-        self.queued.replace(false)
-    }
-
-    fn invalidate(&self) {
-        if self.in_flight.get() {
-            self.queued.set(true);
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -954,8 +905,6 @@ struct ThreadControls {
     compare_ids: Rc<RefCell<Vec<String>>>,
     compare_updating: Rc<Cell<bool>>,
     action_handler: Rc<RefCell<Option<ThreadActionHandler>>>,
-    action_pending: Rc<Cell<Option<ThreadActionPending>>>,
-    analysis_generation: Rc<Cell<u64>>,
     analysis_window: Rc<RefCell<Option<gtk::Window>>>,
     analysis_content: Rc<RefCell<Option<gtk::Box>>>,
 }
@@ -1422,6 +1371,7 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 
 #[derive(Clone)]
 pub struct Ui {
+    pub(crate) model: Rc<crate::model::DebuggerModel>,
     self_weak: Rc<RefCell<std::rc::Weak<Ui>>>,
     source_open_generation: Arc<AtomicU64>,
     source_io_epoch: Arc<AtomicU64>,
@@ -1491,17 +1441,11 @@ pub struct Ui {
     resolved_source_paths: Rc<RefCell<crate::performance::BoundedLruCache<String, PathBuf>>>,
     call_stack_list: gtk::Box,
     frame_buttons: Rc<RefCell<Vec<(u32, gtk::Button)>>>,
-    latest_frames: Rc<RefCell<Vec<StackFrame>>>,
-    latest_frames_generation: Rc<Cell<Option<u64>>>,
-    selected_frame_level: Rc<Cell<u32>>,
+    displayed_frames: Rc<RefCell<Rc<[StackFrame]>>>,
     threads_list: gtk::Box,
     thread_controls: ThreadControls,
     thread_buttons: Rc<RefCell<Vec<(String, gtk::Button)>>>,
     latest_threads: Rc<RefCell<Option<ThreadRenderState>>>,
-    selected_thread_id: Rc<RefCell<Option<String>>>,
-    scheduler_locking: Rc<Cell<Option<SchedulerLockingMode>>>,
-    non_stop_mode: Rc<Cell<Option<bool>>>,
-    thread_policy_generation: Rc<Cell<u64>>,
     modules_list: gtk::Box,
     latest_modules: Rc<RefCell<Vec<SharedLibrary>>>,
     module_debug_metadata: Rc<RefCell<HashMap<PathBuf, ModuleDebugMetadata>>>,
@@ -1509,26 +1453,8 @@ pub struct Ui {
     module_debug_worker_active: Arc<AtomicBool>,
     module_debug_force_pending: Arc<AtomicBool>,
     inferior_controls: InferiorControls,
-    inferiors: Rc<RefCell<Vec<InferiorInfo>>>,
-    thread_inferior_ids: Rc<RefCell<HashMap<String, String>>>,
-    selected_inferior_id: Rc<RefCell<Option<String>>>,
-    stop_owner_inferior_id: Rc<RefCell<Option<String>>>,
-    stop_owner_thread_id: Rc<RefCell<Option<String>>>,
-    inferior_parents: Rc<RefCell<HashMap<String, String>>>,
-    pending_fork_parents: Rc<RefCell<HashMap<u32, String>>>,
-    inferior_refresh_generation: Rc<Cell<u64>>,
-    inferior_refresh_gate: Rc<RefreshGate>,
-    fork_policy_refresh_gate: Rc<RefreshGate>,
     execution_context_visual_generation: Rc<Cell<u64>>,
     execution_context_visual_pending: Rc<Cell<bool>>,
-    fork_policy_generation: Rc<Cell<u64>>,
-    fork_follow_mode: Rc<Cell<Option<ForkFollowMode>>>,
-    detach_on_fork: Rc<Cell<Option<bool>>>,
-    inferior_action_pending: Rc<Cell<Option<InferiorActionPending>>>,
-    inferior_execution_generation: Rc<Cell<u64>>,
-    pending_execution_inferior: Rc<RefCell<Option<String>>>,
-    active_thread_execution: Rc<RefCell<Option<String>>>,
-    thread_execution_exit_candidate: Rc<RefCell<Option<String>>>,
     locals_store: gio::ListStore,
     locals_selection: gtk::SingleSelection,
     variable_node_index: Rc<RefCell<VariableNodeIndex>>,
@@ -1569,20 +1495,13 @@ pub struct Ui {
     call_abi_instruction: Rc<RefCell<Option<CallAbiInstructionContext>>>,
     call_abi_instruction_generation: Rc<Cell<Option<u64>>>,
     current_instruction_memory_expression: Rc<RefCell<Option<String>>>,
-    latest_registers: Rc<RefCell<Vec<Register>>>,
-    latest_registers_generation: Rc<Cell<Option<u64>>>,
-    register_details_generation: Rc<Cell<Option<u64>>>,
     instruction_memory_handler: Rc<RefCell<Option<InstructionMemoryHandler>>>,
     disassembly_handler: Rc<RefCell<Option<DisassemblyHandler>>>,
     disassembly_source_cache: DisassemblySourceCache,
     register_groups: Vec<RegisterGroupView>,
     registers_empty: gtk::Label,
     stack_store: gio::ListStore,
-    latest_stack: Rc<RefCell<Vec<StackEntry>>>,
     displayed_stack: Rc<RefCell<Vec<StackEntry>>>,
-    latest_stack_generation: Rc<Cell<Option<u64>>>,
-    stack_memory_refresh_generation: Rc<Cell<Option<u64>>>,
-    stack_details_generation: Rc<Cell<Option<u64>>>,
     stack_empty: gtk::Label,
     breakpoints_list: gtk::Box,
     stop_point_filter: StopPointFilterControls,
@@ -1607,10 +1526,6 @@ pub struct Ui {
     memory_region_store: gio::ListStore,
     memory_regions_view: gtk::ColumnView,
     memory_regions_empty: gtk::Label,
-    memory_regions: Rc<RefCell<Vec<MemoryRegion>>>,
-    memory_regions_generation: Rc<Cell<Option<u64>>>,
-    memory_watches_refresh_generation: Rc<Cell<Option<u64>>>,
-    tls_runtime_refresh_generation: Rc<Cell<Option<u64>>>,
     memory_watches: Rc<RefCell<Vec<MemoryWatchView>>>,
     memory_watch_container: MemoryWatchContainer,
     memory_address_entry: gtk::Entry,
@@ -1624,26 +1539,15 @@ pub struct Ui {
     misc_view: MiscView,
     misc_refresh_handler: Rc<RefCell<Option<MiscRefreshHandler>>>,
     misc_refresh_generation: Rc<Cell<u64>>,
-    debugger_pid: Rc<Cell<Option<u32>>>,
-    inferior_pid: Rc<Cell<Option<u32>>>,
     layout: layout::Persistence,
     breakpoints: Rc<RefCell<Vec<Breakpoint>>>,
     stop_point_filter_rows: Rc<RefCell<Vec<StopPointFilterRow>>>,
     stop_point_metadata: Rc<RefCell<HashMap<String, StopPointMetadata>>>,
-    previous_registers: Rc<RefCell<HashMap<String, String>>>,
-    cached_register_names: Rc<RefCell<Option<Rc<Vec<String>>>>>,
-    stop_refresh_generation: Rc<Cell<u64>>,
     variable_editor_request: Cell<u64>,
-    active_stop_context: Rc<RefCell<Option<crate::debugger::StopContext>>>,
-    thread_refresh_generation: Rc<Cell<u64>>,
     breakpoint_refresh_generation: Rc<Cell<u64>>,
     breakpoint_refresh_gate: Rc<RefreshGate>,
     module_refresh_gate: Rc<RefreshGate>,
     modules_dirty: Rc<Cell<bool>>,
-    command_pending: Rc<Cell<bool>>,
-    debugger_state: Rc<Cell<DebuggerState>>,
-    execution_transition_generation: Rc<Cell<u64>>,
-    session_pending: Rc<Cell<bool>>,
     applied_control_state: Rc<RefCell<Option<ControlState>>>,
     gef_available: Rc<Cell<bool>>,
     gef_capabilities: Rc<RefCell<HashSet<&'static str>>>,
@@ -1653,9 +1557,6 @@ pub struct Ui {
     heap_inspection_handler: Rc<RefCell<Option<HeapInspectionHandler>>>,
     source_roots: Rc<RefCell<Vec<PathBuf>>>,
     source_base_roots: Vec<PathBuf>,
-    current_session: Rc<RefCell<Option<DebugSession>>>,
-    gdb_capabilities: Rc<RefCell<GdbCapabilities>>,
-    gdb_recovery_available: Rc<Cell<bool>>,
     configuration_report: ConfigurationReport,
     configuration_dialog: Rc<RefCell<Option<gtk::Window>>>,
     debug_data_view: Rc<RefCell<Option<debug_data::DebugDataView>>>,
@@ -1671,7 +1572,6 @@ pub struct Ui {
     until_cancel_handler: Rc<RefCell<Option<UntilCancelHandler>>>,
     until_abort_handler: Rc<RefCell<Option<UntilAbortHandler>>>,
     until_stop_handler: Rc<RefCell<Option<UntilStopHandler>>>,
-    native_until_active: Rc<Cell<bool>>,
     frame_selection_handler: Rc<RefCell<Option<FrameSelectionHandler>>>,
     thread_selection_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
     instruction_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
@@ -1697,8 +1597,6 @@ pub struct Ui {
     watchpoint_insert_handler: Rc<RefCell<Option<WatchpointInsertHandler>>>,
     source_symbol_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
     source_discovery_handler: Rc<RefCell<Option<SourceDiscoveryHandler>>>,
-    thread_stop_reason: Rc<RefCell<Option<String>>>,
-    debugger_ready: Rc<Cell<bool>>,
 }
 
 struct Topbar {

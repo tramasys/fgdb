@@ -26,10 +26,10 @@ pub(super) fn open_variable_viewer(
         return;
     };
 
-    let generation = current_ui.current_stop_refresh_generation();
+    let generation = current_ui.model.current_stop_refresh_generation();
     let session = current_ui.begin_variable_viewer(&request);
 
-    if current_ui.inferior_is_running() {
+    if current_ui.model.inferior_is_running() {
         session.fail("Pause the target before opening a variable viewer");
         return;
     }
@@ -182,9 +182,9 @@ fn start_variable_viewer_plan(
 
 fn viewer_is_current(ui: &Weak<Ui>, session: &VariableViewerSession, generation: u64) -> bool {
     session.is_open()
-        && ui
-            .upgrade()
-            .is_some_and(|ui| ui.is_stop_refresh_current(generation) && !ui.inferior_is_running())
+        && ui.upgrade().is_some_and(|ui| {
+            ui.model.is_stop_refresh_current(generation) && !ui.model.inferior_is_running()
+        })
 }
 
 #[cfg(test)]

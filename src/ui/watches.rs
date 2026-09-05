@@ -14,7 +14,7 @@ impl Ui {
     }
 
     pub fn show_expression_watches_for_refresh(&self, generation: u64, variables: &[Variable]) {
-        if !self.is_stop_refresh_current(generation) {
+        if !self.model.is_stop_refresh_current(generation) {
             return;
         }
 
@@ -60,7 +60,7 @@ impl Ui {
         index: usize,
         variable: &Variable,
     ) {
-        if !self.is_stop_refresh_current(generation) {
+        if !self.model.is_stop_refresh_current(generation) {
             return;
         }
 
@@ -91,7 +91,7 @@ impl Ui {
             .collect::<Vec<_>>();
 
         self.show_expression_watches_for_refresh(
-            self.current_stop_refresh_generation(),
+            self.model.current_stop_refresh_generation(),
             &variables,
         );
     }
@@ -107,17 +107,15 @@ impl Ui {
 
         let button = self.expression_watch_add_button.clone();
         let expressions = Rc::clone(&self.expression_watches);
-        let ready = Rc::clone(&self.debugger_ready);
-        let debugger_state = Rc::clone(&self.debugger_state);
-        let pending = Rc::clone(&self.command_pending);
+        let model = Rc::clone(&self.model);
 
         self.expression_watch_entry.connect_changed(move |entry| {
             let expression = entry.text();
 
             button.set_sensitive(
-                ready.get()
-                    && !debugger_state.get().inferior_running()
-                    && !pending.get()
+                model.execution().ready
+                    && !model.execution().state.inferior_running()
+                    && !model.execution().command_pending
                     && !expression.trim().is_empty()
                     && expressions.borrow().len() < MAX_EXPRESSION_WATCHES
                     && !expressions
@@ -154,16 +152,14 @@ impl Ui {
         });
 
         let remove_button = self.expression_watch_remove_button.clone();
-        let ready = Rc::clone(&self.debugger_ready);
-        let debugger_state = Rc::clone(&self.debugger_state);
-        let pending = Rc::clone(&self.command_pending);
+        let model = Rc::clone(&self.model);
 
         self.expression_watches_selection
             .connect_selected_notify(move |selection| {
                 remove_button.set_sensitive(
-                    ready.get()
-                        && !debugger_state.get().inferior_running()
-                        && !pending.get()
+                    model.execution().ready
+                        && !model.execution().state.inferior_running()
+                        && !model.execution().command_pending
                         && root_variable_at(selection, selection.selected()).is_some(),
                 );
             });
@@ -199,20 +195,15 @@ impl Ui {
         let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
         let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
-        let stop_generation = Rc::clone(&self.stop_refresh_generation);
-        let can_edit = self.variable_edit_guard();
-        let debugger_ready = Rc::clone(&self.debugger_ready);
-        let debugger_state = Rc::clone(&self.debugger_state);
-        let command_pending = Rc::clone(&self.command_pending);
-        let session_pending = Rc::clone(&self.session_pending);
+        let model = Rc::clone(&self.model);
 
         self.expression_watches_view
             .connect_activate(move |_, position| {
-                if !debugger_ready.get()
-                    || !debugger_state.get().inferior_started()
-                    || debugger_state.get().inferior_running()
-                    || command_pending.get()
-                    || session_pending.get()
+                if !model.execution().ready
+                    || !model.execution().state.inferior_started()
+                    || model.execution().state.inferior_running()
+                    || model.execution().command_pending
+                    || model.execution().session_pending
                 {
                     return;
                 }
@@ -251,8 +242,7 @@ impl Ui {
                                 current_source_is_rust.get(),
                                 None,
                                 ValueEditorHandlers {
-                                    stop_generation: Rc::clone(&stop_generation),
-                                    can_edit: Rc::clone(&can_edit),
+                                    model: Rc::clone(&model),
                                     assignment: Rc::clone(&handler),
                                     float: Rc::clone(&float_handler),
                                     string: Rc::clone(&string_handler),

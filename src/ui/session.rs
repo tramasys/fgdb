@@ -9,10 +9,6 @@ impl Ui {
         self.session_action_handler.replace(Some(Rc::new(handler)));
     }
 
-    pub fn current_session(&self) -> Option<DebugSession> {
-        self.current_session.borrow().clone()
-    }
-
     /// Store the desired session and update configuration-derived UI only.
     /// Live target and inferior state is updated from successful GDB commands
     /// and events, so a configured session may legitimately be disconnected.
@@ -49,7 +45,7 @@ impl Ui {
             self.source_tree_generation.fetch_add(1, Ordering::Relaxed);
         }
 
-        self.current_session.replace(Some(session));
+        self.model.set_current_session(session);
         self.update_session_display();
         self.update_control_sensitivity();
 
@@ -98,7 +94,7 @@ impl Ui {
     }
 
     pub(super) fn update_session_display(&self) {
-        let session = self.current_session.borrow();
+        let session = self.model.session();
 
         let (kind, target) = session.as_ref().map_or_else(
             || ("No session", String::from("Choose a debug session")),
@@ -175,7 +171,7 @@ impl Ui {
         root.set_margin_bottom(10);
         root.set_margin_start(10);
         root.set_margin_end(10);
-        let current_session = self.current_session();
+        let current_session = self.model.current_session();
 
         let status_text = current_session.as_ref().map_or_else(
             || String::from("No debug session is configured"),
@@ -443,7 +439,7 @@ impl Ui {
         validation.set_visible(false);
         root.append(&validation);
 
-        let active_live_target = self.inferior_has_started()
+        let active_live_target = self.model.inferior_has_started()
             && !matches!(
                 current_session.as_ref(),
                 Some(DebugSession::CoreDump { .. })

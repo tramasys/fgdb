@@ -9,6 +9,7 @@ mod debug_info;
 mod debugger;
 mod kernel;
 mod misc;
+mod model;
 mod performance;
 mod rust_toolchain;
 mod source;
