@@ -42,6 +42,10 @@ impl StopContext {
         self.generation
     }
 
+    pub(crate) fn transport_epoch(&self) -> u64 {
+        self.transport_epoch
+    }
+
     pub(crate) fn inferior_id(&self) -> Option<&str> {
         self.inferior_id.as_deref()
     }

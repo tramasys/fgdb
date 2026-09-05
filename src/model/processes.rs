@@ -728,7 +728,6 @@ impl DebuggerModel {
         if selected_affected {
             // Observed execution changes immediately, independently of delayed painting.
             self.set_controls_running(true);
-            self.invalidate_stop_context();
         }
 
         (selected_affected, pending_affected)

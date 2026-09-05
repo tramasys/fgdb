@@ -7,6 +7,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
+use crate::debugger::StopRequests;
 use gtk::prelude::*;
 
 use crate::{
@@ -57,7 +58,7 @@ fn next_variable_object_name() -> String {
 
 struct RegisterRefresh {
     ui: Weak<Ui>,
-    generation: u64,
+    requests: StopRequests,
     registers: Vec<Register>,
     pending: VecDeque<usize>,
     active: usize,
@@ -68,7 +69,7 @@ struct RegisterRefresh {
 
 struct StackRefresh {
     ui: Weak<Ui>,
-    generation: u64,
+    requests: StopRequests,
     entries: Vec<StackEntry>,
     stack_register: &'static str,
     pending: VecDeque<usize>,
@@ -79,14 +80,14 @@ struct StackRefresh {
 
 struct StackInputs {
     ui: Weak<Ui>,
-    generation: u64,
+    requests: StopRequests,
     frames: Option<Vec<StackFrame>>,
     registers: Option<Vec<Register>>,
 }
 
 struct VariableRefresh {
     ui: Weak<Ui>,
-    generation: u64,
+    requests: StopRequests,
     target: VariableRefreshTarget,
     variables: Vec<Variable>,
     fallbacks: Vec<Variable>,
@@ -106,8 +107,7 @@ enum VariableRefreshTarget {
 }
 
 struct VariableUpdateBatch {
-    ui: Weak<Ui>,
-    generation: u64,
+    requests: StopRequests,
     remaining_preparations: Cell<usize>,
     states: RefCell<Vec<Rc<RefCell<VariableRefresh>>>>,
     requested: Cell<bool>,
@@ -128,6 +128,8 @@ mod misc;
 mod refresh;
 mod session;
 mod source_control;
+mod stop_requests;
+use stop_requests::{edit_requests, stop_requests};
 mod symbols;
 mod threads;
 mod type_metadata;

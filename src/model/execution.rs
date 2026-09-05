@@ -208,6 +208,12 @@ impl DebuggerModel {
     }
 
     pub(crate) fn set_controls_running(&self, running: bool) -> bool {
+        if running {
+            // Returning to stopped must require a fresh context, even when
+            // execution was observed outside the normal event-reduction path.
+            self.invalidate_stop_context();
+        }
+
         let state = self.execution.debugger_state.get();
 
         if state.inferior_running() == running {

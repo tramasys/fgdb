@@ -1,6 +1,12 @@
 use super::*;
 
 impl DebuggerModel {
+    pub(crate) fn is_stop_context_current(&self, context: &StopContext) -> bool {
+        !self.inferior_is_running()
+            && self.is_stop_refresh_current(context.generation())
+            && self.stopped.active_stop_context.borrow().as_ref() == Some(context)
+    }
+
     pub(crate) fn stop_context(&self, generation: u64) -> Option<crate::debugger::StopContext> {
         self.stopped
             .active_stop_context

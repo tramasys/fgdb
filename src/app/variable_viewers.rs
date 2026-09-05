@@ -34,20 +34,24 @@ pub(super) fn open_variable_viewer(
         return;
     }
 
+    let Some(requests) = stop_requests(&ui, &client, generation) else {
+        session.finish(STALE_VIEWER_MESSAGE);
+        return;
+    };
     drop(current_ui);
 
     if request.variable.varobj.is_none() {
-        create_viewer_root(ui, client, generation, session, request);
+        create_viewer_root(ui, client, requests, session, request);
         return;
     }
 
-    start_variable_viewer_plan(ui, client, generation, session, request, None);
+    start_variable_viewer_plan(ui, client, requests, session, request, None);
 }
 
 fn create_viewer_root(
     ui: Weak<Ui>,
     client: Rc<MiClient>,
-    generation: u64,
+    requests: StopRequests,
     session: Rc<VariableViewerSession>,
     request: VariableViewerRequest,
 ) {
@@ -58,24 +62,17 @@ fn create_viewer_root(
         crate::debugger::quote(&request.variable.name)
     );
 
-    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
-        session.finish(STALE_VIEWER_MESSAGE);
-        return;
-    };
-
-    let ui_for_guard = ui.clone();
+    let requests_for_response = requests.clone();
     let session_for_guard = Rc::clone(&session);
     let ui_for_response = ui;
     let session_for_response = Rc::clone(&session);
     let client_for_response = Rc::clone(&client);
     let varobj_for_response = varobj_name;
 
-    if let Err(error) = client.request_with_print_limit_for_stop(
-        &command,
-        AUTOMATIC_PRINT_ELEMENTS,
-        generation,
-        move || viewer_is_current(&ui_for_guard, &session_for_guard, generation),
-        move |_, record| {
+    if let Err(error) = requests
+        .frame(&command)
+        .when(move || session_for_guard.is_open())
+        .with_print_limit(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
             if record.class == "superseded" {
                 cleanup_viewer_variable_objects(
                     &ui_for_response,
@@ -115,7 +112,7 @@ fn create_viewer_root(
             variable.argument = request.variable.argument;
             let owned = Some(varobj_for_response);
 
-            if !viewer_is_current(&ui_for_response, &session_for_response, generation) {
+            if !viewer_is_current(&requests_for_response, &session_for_response) {
                 cleanup_viewer_variable_objects(&ui_for_response, &client_for_response, owned);
 
                 if session_for_response.is_open() {
@@ -133,13 +130,13 @@ fn create_viewer_root(
             start_variable_viewer_plan(
                 ui_for_response,
                 client_for_response,
-                generation,
+                requests_for_response,
                 session_for_response,
                 request,
                 owned,
             );
-        },
-    ) {
+        })
+    {
         session.fail(&format!("Could not queue variable inspection: {error}"));
     }
 }
@@ -147,7 +144,7 @@ fn create_viewer_root(
 fn start_variable_viewer_plan(
     ui: Weak<Ui>,
     client: Rc<MiClient>,
-    generation: u64,
+    requests: StopRequests,
     session: Rc<VariableViewerSession>,
     request: VariableViewerRequest,
     owned_root: Option<String>,
@@ -156,7 +153,7 @@ fn start_variable_viewer_plan(
         VariableViewerPlan::IndexedChildren { limit } => request_indexed_children(
             ui,
             client,
-            generation,
+            requests,
             session,
             request.variable,
             limit.min(MAX_VIEWER_ITEMS),
@@ -168,7 +165,7 @@ fn start_variable_viewer_plan(
         } => start_linked_list(
             ui,
             client,
-            generation,
+            requests,
             session,
             request.variable,
             LinkedListSettings {
@@ -180,11 +177,8 @@ fn start_variable_viewer_plan(
     }
 }
 
-fn viewer_is_current(ui: &Weak<Ui>, session: &VariableViewerSession, generation: u64) -> bool {
-    session.is_open()
-        && ui.upgrade().is_some_and(|ui| {
-            ui.model.is_stop_refresh_current(generation) && !ui.model.inferior_is_running()
-        })
+fn viewer_is_current(requests: &StopRequests, session: &VariableViewerSession) -> bool {
+    session.is_open() && requests.is_current()
 }
 
 #[cfg(test)]

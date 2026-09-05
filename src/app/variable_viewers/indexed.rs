@@ -3,7 +3,7 @@ use super::*;
 pub(super) fn request_indexed_children(
     ui: Weak<Ui>,
     client: Rc<MiClient>,
-    generation: u64,
+    requests: StopRequests,
     session: Rc<VariableViewerSession>,
     variable: Variable,
     limit: usize,
@@ -24,7 +24,7 @@ pub(super) fn request_indexed_children(
     request_indexed_level(
         ui,
         client,
-        generation,
+        requests,
         session,
         variable.clone(),
         variable,
@@ -39,7 +39,7 @@ pub(super) fn request_indexed_children(
 fn request_indexed_level(
     ui: Weak<Ui>,
     client: Rc<MiClient>,
-    generation: u64,
+    requests: StopRequests,
     session: Rc<VariableViewerSession>,
     root: Variable,
     current: Variable,
@@ -83,18 +83,14 @@ fn request_indexed_level(
         crate::debugger::quote(varobj)
     );
 
-    let ui_for_guard = ui.clone();
+    let requests_for_response = requests.clone();
     let session_for_guard = Rc::clone(&session);
     let session_for_response = Rc::clone(&session);
     let client_for_response = Rc::clone(&client);
     let ui_for_response = ui.clone();
     let owned_for_response = owned_root.clone();
 
-    if let Err(error) = client.request_with_print_limit_for_stop(
-        &command,
-        limit.max(AUTOMATIC_PRINT_ELEMENTS),
-        generation,
-        move || viewer_is_current(&ui_for_guard, &session_for_guard, generation),
+    if let Err(error) = requests.unscoped(&command).when(move || session_for_guard.is_open()).with_print_limit(limit.max(AUTOMATIC_PRINT_ELEMENTS),
         move |_, record| {
             if !session_for_response.is_open() {
                 finish_indexed(
@@ -154,7 +150,7 @@ fn request_indexed_level(
                 request_indexed_level(
                     ui_for_response,
                     client_for_response,
-                    generation,
+                    requests_for_response,
                     session_for_response,
                     root,
                     wrapper,

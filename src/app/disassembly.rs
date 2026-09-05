@@ -242,6 +242,14 @@ impl DisassemblyController {
             return;
         }
 
+        let Some(requests) = stop_requests(
+            &self.ui,
+            &self.client,
+            self.model.current_stop_refresh_generation(),
+        ) else {
+            return;
+        };
+
         ui.set_disassembly_loading(true);
         drop(ui);
         let generation = self.generation.get().wrapping_add(1);
@@ -249,10 +257,16 @@ impl DisassemblyController {
         let command = format!("-data-disassemble -s 0x{start:x} -e 0x{end:x} --opcodes bytes -- 0");
         let controller = Rc::clone(self);
 
-        if self
-            .client
-            .request(&command, move |_, record| {
-                if controller.generation.get() != generation {
+        let guard = Rc::downgrade(self);
+        if requests
+            .frame(&command)
+            .when(move || {
+                guard
+                    .upgrade()
+                    .is_some_and(|controller| controller.generation.get() == generation)
+            })
+            .request(move |_, record| {
+                if record.class == "superseded" || controller.generation.get() != generation {
                     return;
                 }
 
@@ -315,13 +329,20 @@ impl DisassemblyController {
 
         ui.clear_disassembly_error();
         ui.set_disassembly_loading(true);
-        let stop_generation = ui.model.current_stop_refresh_generation();
+        let Some(requests) = stop_requests(
+            &self.ui,
+            &self.client,
+            ui.model.current_stop_refresh_generation(),
+        ) else {
+            ui.set_disassembly_loading(false);
+            return;
+        };
         drop(ui);
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
 
         if let Some(address) = parse_address(expression) {
-            self.request_function(address, generation, history);
+            self.request_function(address, generation, requests, history);
             return;
         }
 
@@ -330,61 +351,57 @@ impl DisassemblyController {
             crate::debugger::quote(&format!("(void*)({expression})"))
         );
 
-        let Some(command) = frame_scoped_stop_command(&self.ui, stop_generation, &command) else {
-            self.fail("The selected stop context changed");
-            return;
-        };
-
         let controller = Rc::clone(self);
+        let requests_for_response = requests.clone();
+        let guard = Rc::downgrade(self);
 
-        if self
-            .client
-            .request_for_stop(
-                &command,
-                stop_generation,
-                {
-                    let ui = self.ui.clone();
+        if requests
+            .frame(&command)
+            .when(move || {
+                guard
+                    .upgrade()
+                    .is_some_and(|controller| controller.generation.get() == generation)
+            })
+            .request(move |_, record| {
+                if record.class == "superseded" || controller.generation.get() != generation {
+                    return;
+                }
 
-                    move || {
-                        ui.upgrade()
-                            .is_some_and(|ui| ui.model.is_stop_refresh_current(stop_generation))
-                    }
-                },
-                move |_, record| {
-                    if controller.generation.get() != generation {
-                        return;
-                    }
+                if !record.is_done() {
+                    controller.fail(
+                        record
+                            .error_message()
+                            .unwrap_or("GDB could not resolve that location"),
+                    );
 
-                    if !record.is_done() {
-                        controller.fail(
-                            record
-                                .error_message()
-                                .unwrap_or("GDB could not resolve that location"),
-                        );
+                    return;
+                }
 
-                        return;
-                    }
+                let Some(value) = crate::debugger::evaluated_value(&record) else {
+                    controller.fail("GDB returned no address for that location");
+                    return;
+                };
 
-                    let Some(value) = crate::debugger::evaluated_value(&record) else {
-                        controller.fail("GDB returned no address for that location");
-                        return;
-                    };
+                let Some(address) = evaluated_address(&value) else {
+                    controller.fail("The expression does not resolve to an address");
+                    return;
+                };
 
-                    let Some(address) = evaluated_address(&value) else {
-                        controller.fail("The expression does not resolve to an address");
-                        return;
-                    };
-
-                    controller.request_function(address, generation, history);
-                },
-            )
+                controller.request_function(address, generation, requests_for_response, history);
+            })
             .is_err()
         {
             self.fail("The GDB/MI channel is unavailable");
         }
     }
 
-    fn request_function(self: &Rc<Self>, address: u64, generation: u64, history: HistoryUpdate) {
+    fn request_function(
+        self: &Rc<Self>,
+        address: u64,
+        generation: u64,
+        requests: StopRequests,
+        history: HistoryUpdate,
+    ) {
         let mixed = self.state.borrow().mixed;
         let start = address.saturating_sub(FUNCTION_DISASSEMBLY_BEFORE_BYTES);
         let end = address.saturating_add(FUNCTION_DISASSEMBLY_AFTER_BYTES);
@@ -396,11 +413,18 @@ impl DisassemblyController {
         };
 
         let controller = Rc::clone(self);
+        let requests_for_response = requests.clone();
+        let guard = Rc::downgrade(self);
 
-        if self
-            .client
-            .request(&command, move |_, record| {
-                if controller.generation.get() != generation {
+        if requests
+            .frame(&command)
+            .when(move || {
+                guard
+                    .upgrade()
+                    .is_some_and(|controller| controller.generation.get() == generation)
+            })
+            .request(move |_, record| {
+                if record.class == "superseded" || controller.generation.get() != generation {
                     return;
                 }
 
@@ -418,6 +442,7 @@ impl DisassemblyController {
                     controller.request_address_window(
                         address,
                         generation,
+                        requests_for_response.clone(),
                         history,
                         SYMBOLLESS_DISASSEMBLY_BYTES,
                     );
@@ -434,6 +459,7 @@ impl DisassemblyController {
                     controller.request_address_window(
                         address,
                         generation,
+                        requests_for_response.clone(),
                         history,
                         SYMBOLLESS_DISASSEMBLY_BYTES,
                     );
@@ -453,6 +479,7 @@ impl DisassemblyController {
         self: &Rc<Self>,
         address: u64,
         generation: u64,
+        requests: StopRequests,
         history: HistoryUpdate,
         bytes: u64,
     ) {
@@ -462,11 +489,18 @@ impl DisassemblyController {
             format!("-data-disassemble -s 0x{address:x} -e 0x{end:x} --opcodes bytes -- 0");
 
         let controller = Rc::clone(self);
+        let requests_for_response = requests.clone();
+        let guard = Rc::downgrade(self);
 
-        if self
-            .client
-            .request(&command, move |_, record| {
-                if controller.generation.get() != generation {
+        if requests
+            .frame(&command)
+            .when(move || {
+                guard
+                    .upgrade()
+                    .is_some_and(|controller| controller.generation.get() == generation)
+            })
+            .request(move |_, record| {
+                if record.class == "superseded" || controller.generation.get() != generation {
                     return;
                 }
 
@@ -481,6 +515,7 @@ impl DisassemblyController {
                         controller.request_address_window(
                             address,
                             generation,
+                            requests_for_response.clone(),
                             history,
                             bytes.div_ceil(2),
                         );
@@ -552,11 +587,10 @@ impl DisassemblyController {
             crate::debugger::quote(&format!("(void*)({})", request.expression))
         );
 
-        let weak_ui_for_guard = self.ui.clone();
         let weak_ui_for_response = self.ui.clone();
         let generation = request.generation;
 
-        let Some(command) = frame_scoped_stop_command(&self.ui, generation, &command) else {
+        let Some(requests) = stop_requests(&self.ui, &self.client, generation) else {
             if let Some(ui) = self.ui.upgrade() {
                 ui.show_call_abi_target_resolution(&request, None);
             }
@@ -566,33 +600,28 @@ impl DisassemblyController {
 
         let request_for_response = request.clone();
 
-        if self
-            .client
-            .request_for_stop(
-                &command,
-                generation,
-                move || {
-                    weak_ui_for_guard
-                        .upgrade()
-                        .is_some_and(|ui| ui.model.is_stop_refresh_current(generation))
-                },
-                move |_, record| {
-                    let Some(ui) = weak_ui_for_response.upgrade() else {
-                        return;
-                    };
+        if requests
+            .frame(&command)
+            .request(move |_, record| {
+                if record.class == "superseded" {
+                    return;
+                }
 
-                    let display = record
-                        .is_done()
-                        .then(|| crate::debugger::evaluated_value(&record))
-                        .flatten()
-                        .as_deref()
-                        .and_then(|value| {
-                            resolved_call_target_display(&request_for_response.expression, value)
-                        });
+                let Some(ui) = weak_ui_for_response.upgrade() else {
+                    return;
+                };
 
-                    ui.show_call_abi_target_resolution(&request_for_response, display);
-                },
-            )
+                let display = record
+                    .is_done()
+                    .then(|| crate::debugger::evaluated_value(&record))
+                    .flatten()
+                    .as_deref()
+                    .and_then(|value| {
+                        resolved_call_target_display(&request_for_response.expression, value)
+                    });
+
+                ui.show_call_abi_target_resolution(&request_for_response, display);
+            })
             .is_err()
             && let Some(ui) = self.ui.upgrade()
         {

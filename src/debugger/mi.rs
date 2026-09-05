@@ -14,7 +14,10 @@ mod input;
 mod parser;
 mod protocol;
 mod requests;
+mod stopped;
 mod transport;
+
+pub(crate) use stopped::StopRequests;
 
 pub use parser::{parse_record, quote};
 pub use protocol::{
@@ -316,7 +319,7 @@ impl MiClient {
         )
     }
 
-    pub(crate) fn request_for_stop(
+    fn request_for_stop(
         &self,
         command: &str,
         generation: u64,
@@ -332,7 +335,7 @@ impl MiClient {
         )
     }
 
-    pub(crate) fn request_control_for_stop(
+    fn request_control_for_stop(
         &self,
         command: &str,
         generation: u64,
@@ -400,10 +403,9 @@ impl MiClient {
         }
 
         for request in cancelled {
-            (request.handler)(
+            request.complete(
                 self,
                 synthetic_error_record("superseded", "request superseded by a newer stop"),
-                request.output,
             );
         }
 
@@ -417,10 +419,9 @@ impl MiClient {
                 let request = { self.scoped_request.borrow_mut().take() };
 
                 if let Some(request) = request {
-                    (request.handler)(
+                    request.complete(
                         self,
                         synthetic_error_record("superseded", "request superseded by a newer stop"),
-                        request.output,
                     );
                 }
 
@@ -798,7 +799,7 @@ impl MiClient {
         }
     }
 
-    pub(crate) fn request_with_print_limit_for_stop(
+    fn request_with_print_limit_for_stop(
         &self,
         command: &str,
         elements: usize,
@@ -902,7 +903,7 @@ impl MiClient {
     }
 
     /// Capture a fully encoded, explicitly thread/frame-scoped console command.
-    pub(crate) fn request_console_for_stop(
+    fn request_console_for_stop(
         &self,
         command: &str,
         generation: u64,
@@ -1006,10 +1007,9 @@ impl MiClient {
         }
 
         if !(request.is_current)() {
-            (request.handler)(
+            request.complete(
                 self,
                 synthetic_error_record("superseded", "request superseded"),
-                String::new(),
             );
 
             return Ok(());
@@ -1064,10 +1064,9 @@ impl MiClient {
         }
 
         for request in stale {
-            (request.handler)(
+            request.complete(
                 self,
                 synthetic_error_record("superseded", "request superseded"),
-                request.output,
             );
         }
     }
@@ -1140,10 +1139,9 @@ impl MiClient {
             };
 
             if !(request.is_current)() {
-                (request.handler)(
+                request.complete(
                     self,
                     synthetic_error_record("superseded", "request superseded"),
-                    String::new(),
                 );
 
                 continue;
@@ -1152,10 +1150,9 @@ impl MiClient {
             if let Err(failure) = self.start_scoped_request(request) {
                 let (error, request) = *failure;
 
-                (request.handler)(
+                request.complete(
                     self,
                     synthetic_error_record("unavailable", &error.to_string()),
-                    String::new(),
                 );
             } else {
                 return;
@@ -1287,10 +1284,9 @@ impl MiClient {
                     let request = client.scoped_request.borrow_mut().take();
 
                     if let Some(request) = request {
-                        (request.handler)(
+                        request.complete(
                             &client,
                             synthetic_error_record("superseded", "request superseded"),
-                            request.output,
                         );
                     }
 
@@ -1456,19 +1452,11 @@ impl MiClient {
         }
 
         if let Some(request) = scoped {
-            (request.handler)(
-                self,
-                synthetic_error_record("unavailable", reason),
-                request.output,
-            );
+            request.complete(self, synthetic_error_record("unavailable", reason));
         }
 
         for request in queued {
-            (request.handler)(
-                self,
-                synthetic_error_record("unavailable", reason),
-                request.output,
-            );
+            request.complete(self, synthetic_error_record("unavailable", reason));
         }
     }
 
@@ -1623,11 +1611,7 @@ impl MiClient {
                     detail: detail.to_owned(),
                 });
 
-                (request.handler)(
-                    self,
-                    synthetic_error_record("resource-limit", detail),
-                    request.output,
-                );
+                request.complete(self, synthetic_error_record("resource-limit", detail));
 
                 self.dispatch_pending_requests();
             }
@@ -1800,7 +1784,7 @@ impl MiClient {
                     ("superseded", "request superseded")
                 };
 
-                (request.handler)(self, synthetic_error_record(class, reason), request.output);
+                request.complete(self, synthetic_error_record(class, reason));
 
                 if self.transport_epoch.get() != epoch {
                     return;
@@ -2161,14 +2145,14 @@ impl MiClient {
                 if scoped {
                     let request = { self.scoped_request.borrow_mut().take() };
 
-                    let Some(request) = request else {
+                    let Some(mut request) = request else {
                         return;
                     };
 
                     let mut response = if request.cancelled || !(request.is_current)() {
                         synthetic_error_record("superseded", "request superseded")
                     } else if request.expect_nested_mi {
-                        request.response.unwrap_or_else(|| {
+                        request.response.take().unwrap_or_else(|| {
                             if record.is_done() {
                                 error_record("scoped MI command returned no result")
                             } else {
@@ -2201,7 +2185,7 @@ impl MiClient {
                         });
                     }
 
-                    (request.handler)(self, response, request.output);
+                    request.complete(self, response);
                     self.dispatch_pending_requests();
                     return;
                 }

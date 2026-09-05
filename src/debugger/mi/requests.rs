@@ -208,6 +208,18 @@ pub(super) struct ScopedMiRequest {
     pub(super) output_truncated: bool,
 }
 
+impl ScopedMiRequest {
+    pub(super) fn complete(self, client: &MiClient, record: MiRecord) {
+        let record = if record.class != "superseded" && (self.cancelled || !(self.is_current)()) {
+            synthetic_error_record("superseded", "request superseded")
+        } else {
+            record
+        };
+
+        (self.handler)(client, record, self.output);
+    }
+}
+
 pub(super) fn error_record(message: &str) -> MiRecord {
     synthetic_error_record("error", message)
 }

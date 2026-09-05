@@ -1,10 +1,5 @@
 use super::*;
 
-pub(super) fn edit_context_is_current(ui: &Weak<Ui>, generation: u64) -> bool {
-    ui.upgrade()
-        .is_some_and(|ui| ui.model.can_edit_variable(generation))
-}
-
 pub(super) fn assign_string(
     ui: Weak<Ui>,
     client: Rc<MiClient>,
@@ -24,6 +19,10 @@ pub(super) fn assign_string(
         return;
     };
 
+    let Some(requests) = edit_requests(&ui, &client, generation) else {
+        return;
+    };
+
     if let Some(varobj) = variable.varobj.as_deref() {
         let command = format!(
             "-var-info-path-expression {}",
@@ -31,52 +30,44 @@ pub(super) fn assign_string(
         );
 
         let ui_for_response = ui.clone();
-        let ui_for_guard = ui.clone();
-        let client_for_response = Rc::clone(&client);
+        let requests_for_response = requests.clone();
 
-        if let Err(error) = client.request_for_stop(
-            &command,
-            generation,
-            move || assignments::edit_context_is_current(&ui_for_guard, generation),
-            move |_, record| {
-                if record.class == "superseded" {
-                    return;
-                }
+        if let Err(error) = requests.unscoped(&command).request(move |_, record| {
+            if record.class == "superseded" {
+                return;
+            }
 
-                let Some(path) = crate::debugger::variable_path_expression(&record) else {
-                    show_string_assignment_error(
-                        &ui_for_response,
-                        record
-                            .error_message()
-                            .unwrap_or("GDB could not resolve the selected string expression"),
-                    );
-
-                    return;
-                };
-
-                assign_resolved_string(
-                    ui_for_response,
-                    client_for_response,
-                    generation,
-                    variable,
-                    path,
-                    bytes,
-                    kind,
+            let Some(path) = crate::debugger::variable_path_expression(&record) else {
+                show_string_assignment_error(
+                    &ui_for_response,
+                    record
+                        .error_message()
+                        .unwrap_or("GDB could not resolve the selected string expression"),
                 );
-            },
-        ) {
+
+                return;
+            };
+
+            assign_resolved_string(
+                ui_for_response,
+                requests_for_response,
+                variable,
+                path,
+                bytes,
+                kind,
+            );
+        }) {
             show_string_assignment_error(&ui, &error.to_string());
         }
     } else {
         let expression = variable.name.clone();
-        assign_resolved_string(ui, client, generation, variable, expression, bytes, kind);
+        assign_resolved_string(ui, requests, variable, expression, bytes, kind);
     }
 }
 
 fn assign_resolved_string(
     ui: Weak<Ui>,
-    client: Rc<MiClient>,
-    generation: u64,
+    requests: StopRequests,
     variable: Variable,
     expression: String,
     bytes: Vec<u8>,
@@ -84,21 +75,20 @@ fn assign_resolved_string(
 ) {
     match kind {
         crate::ui::StringAssignmentKind::Buffer => {
-            resolve_string_address(ui, client, generation, variable, expression, bytes);
+            resolve_string_address(ui, requests, variable, expression, bytes);
         }
         crate::ui::StringAssignmentKind::CppString => {
-            assign_cpp_string(ui, client, generation, variable, expression, bytes);
+            assign_cpp_string(ui, requests, variable, expression, bytes);
         }
         crate::ui::StringAssignmentKind::RustString => {
-            assign_rust_string(ui, client, generation, variable, expression, bytes);
+            assign_rust_string(ui, requests, variable, expression, bytes);
         }
     }
 }
 
 fn assign_rust_string(
     ui: Weak<Ui>,
-    client: Rc<MiClient>,
-    generation: u64,
+    requests: StopRequests,
     variable: Variable,
     expression: String,
     bytes: Vec<u8>,
@@ -114,39 +104,28 @@ fn assign_rust_string(
         type_metadata::hex(python.as_bytes())
     ));
 
-    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
-        show_string_assignment_error(&ui, "The selected stop context changed");
-        return;
-    };
-
     let ui_for_response = ui.clone();
-    let ui_for_guard = ui.clone();
 
-    if let Err(error) = client.request_control_for_stop(
-        &command,
-        generation,
-        move || assignments::edit_context_is_current(&ui_for_guard, generation),
-        move |client, record| {
-            if record.is_done() {
-                if let Some(ui) = ui_for_response.upgrade() {
-                    ui.set_status(
-                        "Paused",
-                        &format!("Updated the contents of {}", variable.name),
-                        Some("status-ready"),
-                    );
-                }
-
-                refresh_stopped_state(&ui_for_response, client);
-            } else if record.class != "superseded" {
-                show_string_assignment_error(
-                    &ui_for_response,
-                    record
-                        .error_message()
-                        .unwrap_or("GDB could not write the Rust String buffer"),
+    if let Err(error) = requests.frame(&command).control(move |client, record| {
+        if record.is_done() {
+            if let Some(ui) = ui_for_response.upgrade() {
+                ui.set_status(
+                    "Paused",
+                    &format!("Updated the contents of {}", variable.name),
+                    Some("status-ready"),
                 );
             }
-        },
-    ) {
+
+            refresh_stopped_state(&ui_for_response, client);
+        } else if record.class != "superseded" {
+            show_string_assignment_error(
+                &ui_for_response,
+                record
+                    .error_message()
+                    .unwrap_or("GDB could not write the Rust String buffer"),
+            );
+        }
+    }) {
         show_string_assignment_error(&ui, &error.to_string());
     }
 }
@@ -173,8 +152,7 @@ if b: gdb.selected_inferior().write_memory(p._data_ptr,b)"#,
 
 fn assign_cpp_string(
     ui: Weak<Ui>,
-    client: Rc<MiClient>,
-    generation: u64,
+    requests: StopRequests,
     variable: Variable,
     expression: String,
     bytes: Vec<u8>,
@@ -198,43 +176,32 @@ fn assign_cpp_string(
         crate::debugger::quote(&assignment)
     );
 
-    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
-        show_string_assignment_error(&ui, "The selected stop context changed");
-        return;
-    };
-
     let name = variable.name;
     let ui_for_response = ui.clone();
-    let ui_for_guard = ui.clone();
 
-    if let Err(error) = client.request_control_for_stop(
-        &command,
-        generation,
-        move || assignments::edit_context_is_current(&ui_for_guard, generation),
-        move |client, record| {
-            let Some(ui) = ui_for_response.upgrade() else {
-                return;
-            };
+    if let Err(error) = requests.frame(&command).control(move |client, record| {
+        let Some(ui) = ui_for_response.upgrade() else {
+            return;
+        };
 
-            if record.is_done() {
-                ui.set_status(
-                    "Paused",
-                    &format!("Updated the contents of {name}"),
-                    Some("status-ready"),
-                );
+        if record.is_done() {
+            ui.set_status(
+                "Paused",
+                &format!("Updated the contents of {name}"),
+                Some("status-ready"),
+            );
 
-                refresh_stopped_state(&ui_for_response, client);
-            } else if record.class != "superseded" {
-                ui.set_status(
-                    "String assignment failed",
-                    record
-                        .error_message()
-                        .unwrap_or("GDB could not call std::string::assign"),
-                    Some("status-error"),
-                );
-            }
-        },
-    ) {
+            refresh_stopped_state(&ui_for_response, client);
+        } else if record.class != "superseded" {
+            ui.set_status(
+                "String assignment failed",
+                record
+                    .error_message()
+                    .unwrap_or("GDB could not call std::string::assign"),
+                Some("status-error"),
+            );
+        }
+    }) {
         show_string_assignment_error(&ui, &error.to_string());
     }
 }
@@ -256,8 +223,7 @@ fn gdb_byte_string_literal(bytes: &[u8]) -> String {
 
 fn resolve_string_address(
     ui: Weak<Ui>,
-    client: Rc<MiClient>,
-    generation: u64,
+    requests: StopRequests,
     variable: Variable,
     expression: String,
     bytes: Vec<u8>,
@@ -273,57 +239,44 @@ fn resolve_string_address(
         crate::debugger::quote(&address_expression)
     );
 
-    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
-        show_string_assignment_error(&ui, "The selected stop context changed");
-        return;
-    };
-
     let ui_for_response = ui.clone();
-    let ui_for_guard = ui.clone();
-    let client_for_response = Rc::clone(&client);
+    let requests_for_response = requests.clone();
 
-    if let Err(error) = client.request_for_stop(
-        &command,
-        generation,
-        move || assignments::edit_context_is_current(&ui_for_guard, generation),
-        move |_, record| {
-            if record.class == "superseded" {
-                return;
-            }
+    if let Err(error) = requests.frame(&command).request(move |_, record| {
+        if record.class == "superseded" {
+            return;
+        }
 
-            let Some(address) = crate::debugger::evaluated_value(&record)
-                .as_deref()
-                .and_then(pointer_address)
-            else {
-                show_string_assignment_error(
-                    &ui_for_response,
-                    record
-                        .error_message()
-                        .unwrap_or("GDB could not resolve the string buffer address"),
-                );
-
-                return;
-            };
-
-            write_string_bytes(
-                ui_for_response,
-                client_for_response,
-                generation,
-                variable.name.clone(),
-                address,
-                bytes,
-                true,
+        let Some(address) = crate::debugger::evaluated_value(&record)
+            .as_deref()
+            .and_then(pointer_address)
+        else {
+            show_string_assignment_error(
+                &ui_for_response,
+                record
+                    .error_message()
+                    .unwrap_or("GDB could not resolve the string buffer address"),
             );
-        },
-    ) {
+
+            return;
+        };
+
+        write_string_bytes(
+            ui_for_response,
+            requests_for_response,
+            variable.name.clone(),
+            address,
+            bytes,
+            true,
+        );
+    }) {
         show_string_assignment_error(&ui, &error.to_string());
     }
 }
 
 fn write_string_bytes(
     ui: Weak<Ui>,
-    client: Rc<MiClient>,
-    generation: u64,
+    requests: StopRequests,
     name: String,
     address: u64,
     mut bytes: Vec<u8>,
@@ -342,42 +295,32 @@ fn write_string_bytes(
     }
 
     let command = format!("-data-write-memory-bytes 0x{address:x} {encoded}");
-    let Some(command) = frame_scoped_stop_command(&ui, generation, &command) else {
-        show_string_assignment_error(&ui, "The selected stop context changed");
-        return;
-    };
 
     let ui_for_response = ui.clone();
-    let ui_for_guard = ui.clone();
 
-    if let Err(error) = client.request_control_for_stop(
-        &command,
-        generation,
-        move || assignments::edit_context_is_current(&ui_for_guard, generation),
-        move |client, record| {
-            let Some(ui) = ui_for_response.upgrade() else {
-                return;
-            };
+    if let Err(error) = requests.frame(&command).control(move |client, record| {
+        let Some(ui) = ui_for_response.upgrade() else {
+            return;
+        };
 
-            if record.is_done() {
-                ui.set_status(
-                    "Paused",
-                    &format!("Updated the contents of {name}"),
-                    Some("status-ready"),
-                );
+        if record.is_done() {
+            ui.set_status(
+                "Paused",
+                &format!("Updated the contents of {name}"),
+                Some("status-ready"),
+            );
 
-                refresh_stopped_state(&ui_for_response, client);
-            } else if record.class != "superseded" {
-                ui.set_status(
-                    "String assignment failed",
-                    record
-                        .error_message()
-                        .unwrap_or("GDB could not write the string buffer"),
-                    Some("status-error"),
-                );
-            }
-        },
-    ) {
+            refresh_stopped_state(&ui_for_response, client);
+        } else if record.class != "superseded" {
+            ui.set_status(
+                "String assignment failed",
+                record
+                    .error_message()
+                    .unwrap_or("GDB could not write the string buffer"),
+                Some("status-error"),
+            );
+        }
+    }) {
         show_string_assignment_error(&ui, &error.to_string());
     }
 }
