@@ -91,7 +91,7 @@ struct VariableRefresh {
     needs_update: Vec<bool>,
     next_index: usize,
     created: usize,
-    automatic_creation_limit: usize,
+    automatic_creation_indices: HashSet<usize>,
     created_varobjs: HashSet<String>,
     update_batch: Option<Rc<VariableUpdateBatch>>,
     bulk_completed: bool,

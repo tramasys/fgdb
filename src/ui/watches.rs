@@ -44,7 +44,7 @@ impl Ui {
             let selected = selected
                 .as_deref()
                 .and_then(|name| {
-                    root_variable_position(&self.expression_watches_selection, name, false)
+                    root_variable_position(&self.expression_watches_selection, name, false, None)
                 })
                 .unwrap_or(0);
 
@@ -77,6 +77,7 @@ impl Ui {
             .borrow()
             .iter()
             .map(|expression| Variable {
+                local_index: None,
                 name: expression.clone(),
                 value: value.to_owned(),
                 type_name: None,
@@ -198,6 +199,8 @@ impl Ui {
         let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
         let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
+        let stop_generation = Rc::clone(&self.stop_refresh_generation);
+        let can_edit = self.variable_edit_guard();
         let debugger_ready = Rc::clone(&self.debugger_ready);
         let debugger_state = Rc::clone(&self.debugger_state);
         let command_pending = Rc::clone(&self.command_pending);
@@ -238,6 +241,8 @@ impl Ui {
                                 current_source_is_rust.get(),
                                 None,
                                 ValueEditorHandlers {
+                                    stop_generation: Rc::clone(&stop_generation),
+                                    can_edit: Rc::clone(&can_edit),
                                     assignment: Rc::clone(&handler),
                                     float: Rc::clone(&float_handler),
                                     string: Rc::clone(&string_handler),

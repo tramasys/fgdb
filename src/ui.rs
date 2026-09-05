@@ -298,9 +298,17 @@ struct InspectorBindings<'a> {
 
 #[derive(Clone)]
 struct ValueEditorHandlers {
+    stop_generation: Rc<Cell<u64>>,
+    can_edit: Rc<dyn Fn() -> bool>,
     assignment: Rc<RefCell<Option<VariableAssignmentHandler>>>,
     float: Rc<RefCell<Option<FloatAssignmentHandler>>>,
     string: Rc<RefCell<Option<StringAssignmentHandler>>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct VariableEditorRequest {
+    pub(crate) generation: u64,
+    id: u64,
 }
 
 #[derive(Default)]
@@ -612,6 +620,7 @@ impl VariableNode {
 
     fn placeholder(name: &str, value: &str) -> Self {
         let variable = Variable {
+            local_index: None,
             name: name.to_owned(),
             value: value.to_owned(),
             type_name: None,
@@ -649,6 +658,7 @@ impl VariableNode {
         };
 
         let variable = Variable {
+            local_index: None,
             name: String::from("Load more…"),
             value: detail,
             type_name: None,
@@ -1537,7 +1547,7 @@ pub struct Ui {
     expression_watches_empty: gtk::Label,
     expression_watches: Rc<RefCell<Vec<String>>>,
     deferred_variable_object_deletions: Rc<RefCell<HashSet<String>>>,
-    pending_local_variable_objects: Rc<RefCell<HashSet<(u64, String, bool)>>>,
+    pending_local_variable_objects: Rc<RefCell<HashSet<(u64, usize)>>>,
     expression_watch_entry: gtk::Entry,
     expression_watch_add_button: gtk::Button,
     expression_watch_remove_button: gtk::Button,
@@ -1623,6 +1633,7 @@ pub struct Ui {
     previous_registers: Rc<RefCell<HashMap<String, String>>>,
     cached_register_names: Rc<RefCell<Option<Rc<Vec<String>>>>>,
     stop_refresh_generation: Rc<Cell<u64>>,
+    variable_editor_request: Cell<u64>,
     active_stop_context: Rc<RefCell<Option<crate::debugger::StopContext>>>,
     thread_refresh_generation: Rc<Cell<u64>>,
     breakpoint_refresh_generation: Rc<Cell<u64>>,
@@ -2115,6 +2126,7 @@ mod tests {
         assert_eq!(variable_value_parts("0x1"), ("0x1", ""));
 
         let integer = |type_name: &str, value: &str| Variable {
+            local_index: None,
             name: String::from("value"),
             value: value.to_owned(),
             type_name: Some(type_name.to_owned()),
@@ -2182,6 +2194,7 @@ mod tests {
     #[test]
     fn filters_variables_across_scope_type_and_pretty_value() {
         let variable = Variable {
+            local_index: None,
             name: String::from("state"),
             value: String::from("PacketKind::Payload"),
             type_name: Some(String::from("core::option::Option<demo::PacketKind>")),
@@ -2202,6 +2215,7 @@ mod tests {
         assert!(!search_text.contains("vector"));
 
         let root = VariableNode::new(Variable {
+            local_index: None,
             name: String::from("fixture"),
             value: String::from("{...}"),
             type_name: Some(String::from("struct Fixture")),
@@ -2223,6 +2237,7 @@ mod tests {
     fn decodes_rust_c_and_cpp_integer_types() {
         let decimal = |type_name: &str, value: &str, pointer_bits| {
             let variable = Variable {
+                local_index: None,
                 name: String::from("value"),
                 value: value.to_owned(),
                 type_name: Some(type_name.to_owned()),
@@ -2335,6 +2350,7 @@ mod tests {
     #[test]
     fn chooses_safe_editor_semantics_from_type_and_register_role() {
         let variable = |name: &str, type_name: &str, value: &str| Variable {
+            local_index: None,
             name: name.to_owned(),
             value: value.to_owned(),
             type_name: Some(type_name.to_owned()),

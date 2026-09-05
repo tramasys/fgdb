@@ -413,6 +413,7 @@ pub(super) fn refresh_expression_variable_objects(
     let fallbacks = expressions
         .iter()
         .map(|expression| Variable {
+            local_index: None,
             name: expression.clone(),
             value: String::from("<not available>"),
             type_name: None,
@@ -440,7 +441,7 @@ fn refresh_persistent_variable_objects(
     ui: Weak<Ui>,
     client: &MiClient,
     generation: u64,
-    fallbacks: Vec<Variable>,
+    mut fallbacks: Vec<Variable>,
     existing: Vec<Variable>,
     target: VariableRefreshTarget,
     update_batch: Rc<VariableUpdateBatch>,
@@ -448,6 +449,12 @@ fn refresh_persistent_variable_objects(
     if let Some(ui) = ui.upgrade() {
         for varobj in ui.take_deferred_variable_object_deletions() {
             delete_variable_object(client, &varobj);
+        }
+    }
+
+    if matches!(target, VariableRefreshTarget::Locals) {
+        for (index, variable) in fallbacks.iter_mut().enumerate() {
+            variable.local_index = Some(index);
         }
     }
 
@@ -461,11 +468,11 @@ fn refresh_persistent_variable_objects(
         show_variable_refresh(&ui, generation, &target, &variables);
     }
 
-    let automatic_creation_limit = match &target {
+    let automatic_creation_indices = match &target {
         VariableRefreshTarget::Locals => ui
             .upgrade()
-            .map_or(0, |ui| ui.rendered_local_variable_count()),
-        VariableRefreshTarget::ExpressionWatches(_) => variables.len(),
+            .map_or_else(HashSet::new, |ui| ui.rendered_local_variable_indices()),
+        VariableRefreshTarget::ExpressionWatches(_) => (0..variables.len()).collect(),
     };
 
     let state = Rc::new(RefCell::new(VariableRefresh {
@@ -477,7 +484,7 @@ fn refresh_persistent_variable_objects(
         needs_update,
         next_index: 0,
         created: 0,
-        automatic_creation_limit,
+        automatic_creation_indices,
         created_varobjs: HashSet::new(),
         update_batch: Some(update_batch),
         bulk_completed: false,
@@ -531,10 +538,14 @@ fn reuse_variable_objects(
     existing: Vec<Variable>,
 ) -> (Vec<Variable>, Vec<bool>, Vec<String>) {
     let mut existing = existing.into_iter().fold(
-        HashMap::<(String, bool), Vec<Variable>>::new(),
+        HashMap::<(String, bool, Option<usize>), Vec<Variable>>::new(),
         |mut by_name, variable| {
             by_name
-                .entry((variable.name.clone(), variable.argument))
+                .entry((
+                    variable.name.clone(),
+                    variable.argument,
+                    variable.local_index,
+                ))
                 .or_default()
                 .push(variable);
 
@@ -549,7 +560,11 @@ fn reuse_variable_objects(
                 return (fallback.clone(), false);
             }
 
-            let key = (fallback.name.clone(), fallback.argument);
+            let key = (
+                fallback.name.clone(),
+                fallback.argument,
+                fallback.local_index,
+            );
 
             let Some(mut variable) = existing.get_mut(&key).and_then(Vec::pop) else {
                 return (fallback.clone(), false);
@@ -557,6 +572,7 @@ fn reuse_variable_objects(
 
             variable.name.clone_from(&fallback.name);
             variable.argument = fallback.argument;
+            variable.local_index = fallback.local_index;
 
             if fallback.type_name.is_some() {
                 variable.type_name.clone_from(&fallback.type_name);
@@ -591,7 +607,7 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
         }
 
         while state.next_index < state.variables.len()
-            && (state.next_index >= state.automatic_creation_limit
+            && (!state.automatic_creation_indices.contains(&state.next_index)
                 || !state
                     .target
                     .creates_missing_variable_object(&state.fallbacks[state.next_index])
@@ -671,6 +687,7 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
                     let (ui, generation, target, shown) = {
                         let mut state = state_for_response.borrow_mut();
                         variable.argument = state.fallbacks[index].argument;
+                        variable.local_index = state.fallbacks[index].local_index;
 
                         if let Some(varobj) = variable.varobj.as_ref() {
                             state.created_varobjs.insert(varobj.clone());
@@ -1457,6 +1474,7 @@ fn request_lazy_local_variable_children(
                     .flatten()
                     .map(|mut created| {
                         created.argument = variable_for_response.argument;
+                        created.local_index = variable_for_response.local_index;
 
                         created
                     });
@@ -2727,6 +2745,7 @@ mod tests {
         varobj: Option<&str>,
     ) -> Variable {
         Variable {
+            local_index: None,
             name: name.to_owned(),
             value: value.to_owned(),
             type_name: type_name.map(str::to_owned),
@@ -2757,6 +2776,26 @@ mod tests {
         assert_eq!(reused[1], fallbacks[1]);
         assert_eq!(needs_update, [true, false]);
         assert_eq!(stale, [String::from("var2")]);
+    }
+
+    #[test]
+    fn duplicate_local_names_reuse_their_own_occurrence() {
+        let mut first = variable("value", "{...}", Some("Value"), Some("var1"));
+        first.local_index = Some(0);
+        let mut second = first.clone();
+        second.local_index = Some(1);
+        second.varobj = Some("var2".into());
+        let mut fallbacks = vec![first.clone(), second.clone()];
+
+        for variable in &mut fallbacks {
+            variable.varobj = None;
+            variable.value = "<not available>".into();
+        }
+
+        let (reused, _, stale) = reuse_variable_objects(&fallbacks, vec![second, first]);
+        assert!(stale.is_empty());
+        assert_eq!(reused[0].varobj.as_deref(), Some("var1"));
+        assert_eq!(reused[1].varobj.as_deref(), Some("var2"));
     }
 
     #[test]

@@ -2,6 +2,7 @@ mod app;
 mod background;
 mod bounded;
 mod breakpoint_gutter;
+mod compiler_probe;
 mod config;
 mod cpp_toolchain;
 mod debug_info;

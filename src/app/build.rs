@@ -688,6 +688,10 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
 
         let generation = current_ui.current_stop_refresh_generation();
 
+        if !current_ui.can_edit_variable(generation) {
+            return;
+        }
+
         let Some(context) = current_ui.stop_context(generation) else {
             return;
         };
@@ -722,7 +726,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             move || {
                 weak_ui_for_guard
                     .upgrade()
-                    .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+                    .is_some_and(|ui| ui.can_edit_variable(generation))
             },
             move |client, record| {
                 let Some(ui) = weak_ui_for_response.upgrade() else {

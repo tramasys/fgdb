@@ -1270,6 +1270,7 @@ mod float_tests {
     #[test]
     fn target_metadata_overrides_host_abi_integer_guesses() {
         let variable = Variable {
+            local_index: None,
             name: String::from("platform_long"),
             value: String::from("1"),
             type_name: Some(String::from("long")),

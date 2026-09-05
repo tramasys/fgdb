@@ -1,11 +1,9 @@
 use std::{
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    thread,
+    process::Command,
     time::{Duration, Instant},
 };
 
-const MAX_RUSTC_OUTPUT_BYTES: usize = 64 * 1024;
 const RUST_GDB_LOADER: &str = "gdb_load_rust_pretty_printers.py";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -113,32 +111,12 @@ fn rustc_output(
     arguments: &[&str],
     timeout: Duration,
 ) -> Option<Vec<u8>> {
-    let mut child = Command::new("rustc")
-        .args(arguments)
-        .current_dir(working_directory)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    let deadline = Instant::now().checked_add(timeout)?;
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child.wait_with_output().ok()?;
-
-                return (status.success() && output.stdout.len() <= MAX_RUSTC_OUTPUT_BYTES)
-                    .then_some(output.stdout);
-            }
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
+    crate::compiler_probe::output(
+        Command::new("rustc")
+            .args(arguments)
+            .current_dir(working_directory),
+        timeout,
+    )
 }
 
 fn parse_rustc_sysroot(output: &str) -> Option<PathBuf> {

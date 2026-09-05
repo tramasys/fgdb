@@ -1,17 +1,22 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use super::*;
 use crate::debugger::{EnumVariant, ValueTypeKind, ValueTypeMetadata};
+use crate::ui::VariableEditorRequest;
 
-static NEXT_METADATA_ID: AtomicU64 = AtomicU64::new(1);
+const METADATA_PREFIX: &str = "FGDB_TYPE_METADATA:";
+const MAX_METADATA_BYTES: usize = 256 * 1024;
 
 pub(super) fn request_value_type_metadata(ui: Weak<Ui>, client: Rc<MiClient>, variable: Variable) {
-    let Some(generation) = ui.upgrade().map(|ui| ui.current_stop_refresh_generation()) else {
+    let Some(request) = ui
+        .upgrade()
+        .and_then(|ui| ui.begin_variable_editor_request())
+    else {
         return;
     };
 
+    let generation = request.generation;
+
     let Some(varobj) = variable.varobj.as_deref() else {
-        request_resolved_metadata(ui, client, generation, variable.name.clone(), variable);
+        request_resolved_metadata(ui, client, request, variable.name.clone(), variable);
         return;
     };
 
@@ -32,16 +37,20 @@ pub(super) fn request_value_type_metadata(ui: Weak<Ui>, client: Rc<MiClient>, va
             move || {
                 ui_for_guard
                     .upgrade()
-                    .is_some_and(|ui| ui.is_stop_refresh_current(generation))
+                    .is_some_and(|ui| ui.variable_editor_request_is_current(request))
             },
             move |_, record| {
+                if !editor_request_is_current(&ui_for_response, request) {
+                    return;
+                }
+
                 let expression = crate::debugger::variable_path_expression(&record)
                     .unwrap_or_else(|| variable_for_response.name.clone());
 
                 request_resolved_metadata(
                     ui_for_response,
                     client_for_response,
-                    generation,
+                    request,
                     expression,
                     variable_for_response,
                 );
@@ -49,7 +58,7 @@ pub(super) fn request_value_type_metadata(ui: Weak<Ui>, client: Rc<MiClient>, va
         )
         .is_err()
     {
-        present_editor(&ui, variable, None);
+        present_editor(&ui, request, variable, None);
     }
 }
 
@@ -62,7 +71,9 @@ pub(super) fn assign_float_bytes(
     let Some(generation) = ui.upgrade().and_then(|current_ui| {
         let generation = current_ui.current_stop_refresh_generation();
 
-        current_ui.stop_context(generation).map(|_| generation)
+        current_ui
+            .can_edit_variable(generation)
+            .then_some(generation)
     }) else {
         show_float_assignment_error(&ui, "The selected stop context changed");
         return;
@@ -96,7 +107,7 @@ pub(super) fn assign_float_bytes(
         .request_for_stop(
             &command,
             generation,
-            move || stop_refresh_is_current(&ui_for_guard, generation),
+            move || assignments::edit_context_is_current(&ui_for_guard, generation),
             move |_, record| {
                 if record.class == "superseded" {
                     return;
@@ -165,7 +176,7 @@ gdb.selected_inferior().write_memory(v.address,b[::-1] if little else b)"#,
     if let Err(error) = client.request_control_for_stop(
         &command,
         generation,
-        move || stop_refresh_is_current(&ui_for_guard, generation),
+        move || assignments::edit_context_is_current(&ui_for_guard, generation),
         move |client, record| {
             let Some(ui) = ui_for_response.upgrade() else {
                 return;
@@ -203,16 +214,19 @@ fn show_float_assignment_error(ui: &Weak<Ui>, message: &str) {
 fn request_resolved_metadata(
     ui: Weak<Ui>,
     client: Rc<MiClient>,
-    generation: u64,
+    request: VariableEditorRequest,
     expression: String,
     variable: Variable,
 ) {
-    let id = NEXT_METADATA_ID.fetch_add(1, Ordering::Relaxed);
-    let convenience = format!("fgdb_type_meta_{id}");
-    let python = metadata_python(&expression, &convenience);
+    if !editor_request_is_current(&ui, request) {
+        return;
+    }
+
+    let generation = request.generation;
+    let python = metadata_python(&expression);
 
     let command = crate::debugger::console_command(&format!(
-        "python exec(bytes.fromhex(\"{}\").decode())",
+        "python exec(bytes.fromhex(\"{}\").decode(), {{}})",
         hex(python.as_bytes())
     ));
 
@@ -222,73 +236,45 @@ fn request_resolved_metadata(
 
     let ui_for_response = ui.clone();
     let ui_for_guard = ui.clone();
-    let client_for_response = Rc::clone(&client);
     let variable_for_response = variable.clone();
 
     if client
-        .request_for_stop(
+        .request_console_for_stop(
             &command,
             generation,
-            move || {
-                ui_for_guard
-                    .upgrade()
-                    .is_some_and(|ui| ui.is_stop_refresh_current(generation))
-            },
-            move |_, record| {
-                if !record.is_done() {
-                    present_editor(&ui_for_response, variable_for_response, None);
-                    return;
-                }
+            move || editor_request_is_current(&ui_for_guard, request),
+            move |_, record, output| {
+                let metadata = (record.is_done()
+                    && record.field("fgdb-output-truncated").is_none())
+                .then(|| parse_metadata_output(&output))
+                .flatten();
 
-                let ui_for_value = ui_for_response.clone();
-                let variable_for_value = variable_for_response.clone();
-                let evaluate = format!("-data-evaluate-expression ${convenience}");
-
-                let Some(evaluate) =
-                    frame_scoped_stop_command(&ui_for_response, generation, &evaluate)
-                else {
-                    return;
-                };
-
-                if client_for_response
-                    .request_for_stop(
-                        &evaluate,
-                        generation,
-                        {
-                            let ui = ui_for_value.clone();
-
-                            move || {
-                                ui.upgrade()
-                                    .is_some_and(|ui| ui.is_stop_refresh_current(generation))
-                            }
-                        },
-                        move |_, record| {
-                            let metadata = crate::debugger::evaluated_value(&record)
-                                .as_deref()
-                                .and_then(parse_metadata);
-
-                            present_editor(&ui_for_value, variable_for_value, metadata);
-                        },
-                    )
-                    .is_err()
-                {
-                    present_editor(&ui_for_response, variable_for_response, None);
-                }
+                present_editor(&ui_for_response, request, variable_for_response, metadata);
             },
         )
         .is_err()
     {
-        present_editor(&ui, variable, None);
+        present_editor(&ui, request, variable, None);
     }
 }
 
-fn present_editor(ui: &Weak<Ui>, variable: Variable, metadata: Option<ValueTypeMetadata>) {
+fn editor_request_is_current(ui: &Weak<Ui>, request: VariableEditorRequest) -> bool {
+    ui.upgrade()
+        .is_some_and(|ui| ui.variable_editor_request_is_current(request))
+}
+
+fn present_editor(
+    ui: &Weak<Ui>,
+    request: VariableEditorRequest,
+    variable: Variable,
+    metadata: Option<ValueTypeMetadata>,
+) {
     if let Some(ui) = ui.upgrade() {
-        ui.present_variable_editor(variable, metadata);
+        ui.present_variable_editor(request, variable, metadata);
     }
 }
 
-fn metadata_python(expression: &str, convenience: &str) -> String {
+pub(super) fn metadata_python(expression: &str) -> String {
     format!(
         r#"import gdb
 e=bytes.fromhex("{}").decode()
@@ -314,18 +300,28 @@ if kind == "float":
 try: language=gdb.current_language().encode("utf-8","surrogateescape").hex()
 except Exception: language=""
 variants=[]
+size=0
 if kind == "enum":
  for f in t.fields()[:512]:
-  if f.name is not None: variants.append(f.name.encode("utf-8","surrogateescape").hex()+"="+str(f.enumval))
+  if f.name is not None:
+   assert len(f.name) <= 8192, "enum variant name exceeds the editor budget"
+   entry=f.name.encode("utf-8","surrogateescape").hex()+"="+str(f.enumval)
+   size+=len(entry)+1
+   assert size <= {MAX_METADATA_BYTES}, "enum variants exceed the editor budget"
+   variants.append(entry)
 meta=";".join(["1",kind,bits,signed,raw,language]+variants)
-gdb.set_convenience_variable("{}",gdb.Value(meta))"#,
+assert len(meta) <= {MAX_METADATA_BYTES}, "type metadata exceeds the editor budget"
+gdb.write("{METADATA_PREFIX}"+meta+"\n")"#,
         hex(expression.as_bytes()),
-        convenience,
     )
 }
 
 fn parse_metadata(value: &str) -> Option<ValueTypeMetadata> {
-    let value = value.trim().strip_prefix('"')?.strip_suffix('"')?;
+    if value.len() > MAX_METADATA_BYTES {
+        return None;
+    }
+
+    let value = value.trim();
     let mut fields = value.split(';');
 
     if fields.next()? != "1" {
@@ -338,38 +334,56 @@ fn parse_metadata(value: &str) -> Option<ValueTypeMetadata> {
         "enum" => ValueTypeKind::Enum,
         "boolean" => ValueTypeKind::Boolean,
         "character" => ValueTypeKind::Character,
-        _ => ValueTypeKind::Other,
+        "other" => ValueTypeKind::Other,
+        _ => return None,
     };
 
-    let bits = fields.next()?.parse().ok().filter(|bits| *bits > 0);
+    let bits = match fields.next()? {
+        "" => None,
+        bits => Some(bits.parse().ok().filter(|bits| *bits > 0)?),
+    };
 
     let signed = match fields.next()? {
         "1" => Some(true),
         "0" => Some(false),
-        _ => None,
+        "" => None,
+        _ => return None,
     };
 
     let raw_bytes = match fields.next()? {
         "" => None,
-        raw => decode_hex(raw),
+        raw => Some(decode_hex(raw)?),
     };
 
     let language = match fields.next()? {
         "" => None,
-        language => String::from_utf8(decode_hex(language)?).ok(),
+        language => Some(String::from_utf8(decode_hex(language)?).ok()?),
     };
 
     let enum_variants = fields
-        .filter_map(|field| {
+        .take(513)
+        .map(|field| {
             let (name, value) = field.split_once('=')?;
             let name = String::from_utf8(decode_hex(name)?).ok()?;
+            let digits = value.strip_prefix('-').unwrap_or(value);
+
+            if name.is_empty()
+                || digits.is_empty()
+                || !digits.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                return None;
+            }
 
             Some(EnumVariant {
                 name,
                 value: value.to_owned(),
             })
         })
-        .collect();
+        .collect::<Option<Vec<_>>>()?;
+
+    if enum_variants.len() > 512 {
+        return None;
+    }
 
     Some(ValueTypeMetadata {
         kind,
@@ -381,7 +395,15 @@ fn parse_metadata(value: &str) -> Option<ValueTypeMetadata> {
     })
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(super) fn parse_metadata_output(output: &str) -> Option<ValueTypeMetadata> {
+    let mut records = output
+        .lines()
+        .filter_map(|line| line.strip_prefix(METADATA_PREFIX));
+    let metadata = parse_metadata(records.next()?)?;
+    records.next().is_none().then_some(metadata)
+}
+
+pub(super) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write;
 
     bytes.iter().fold(
@@ -418,10 +440,9 @@ mod tests {
 
     #[test]
     fn parses_target_type_metadata_and_enum_variants() {
-        let metadata = parse_metadata(
-            r#""1;enum;16;0;;632b2b;4d6f64653a3a4f6666=0;4d6f64653a3a5265616479=3""#,
-        )
-        .unwrap();
+        let metadata =
+            parse_metadata("1;enum;16;0;;632b2b;4d6f64653a3a4f6666=0;4d6f64653a3a5265616479=3")
+                .unwrap();
         assert_eq!(metadata.kind, ValueTypeKind::Enum);
         assert_eq!(metadata.bits, Some(16));
         assert_eq!(metadata.signed, Some(false));
@@ -432,11 +453,41 @@ mod tests {
 
     #[test]
     fn preserves_float_storage_bytes_in_canonical_order() {
-        let metadata = parse_metadata(r#""1;float;64;1;3ff4000000000000;63""#).unwrap();
+        let metadata = parse_metadata("1;float;64;1;3ff4000000000000;63").unwrap();
 
         assert_eq!(
             metadata.raw_bytes.unwrap(),
             1.25_f64.to_bits().to_be_bytes()
         );
+    }
+
+    #[test]
+    fn metadata_transport_preserves_long_enums_without_convenience_variables() {
+        let variants = (0..512)
+            .map(|index| {
+                format!(
+                    "{}={index}",
+                    hex(format!("Mode::Variant{index}").as_bytes())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+        let output =
+            format!("unrelated diagnostic\n{METADATA_PREFIX}1;enum;32;0;;632b2b;{variants}\n");
+        let metadata = parse_metadata_output(&output).unwrap();
+        assert_eq!(metadata.enum_variants.len(), 512);
+        assert_eq!(metadata.enum_variants[511].name, "Mode::Variant511");
+        let python = metadata_python("value");
+        assert!(!python.contains("set_convenience_variable"));
+        assert!(python.contains("gdb.write"));
+    }
+
+    #[test]
+    fn metadata_transport_rejects_partial_ambiguous_and_oversized_records() {
+        let record = format!("{METADATA_PREFIX}1;enum;32;0;;63;4d6f6465=0\n");
+        assert!(parse_metadata_output(&format!("{record}{record}")).is_none());
+        assert!(parse_metadata("1;enum;32;0;;63;4d6f...").is_none());
+        assert!(parse_metadata(&"x".repeat(MAX_METADATA_BYTES + 1)).is_none());
+        assert!(parse_metadata("1;float;32;1;nothex;63").is_none());
     }
 }

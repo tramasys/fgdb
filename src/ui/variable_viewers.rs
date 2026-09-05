@@ -550,6 +550,7 @@ mod tests {
 
     fn variable(type_name: &str) -> Variable {
         Variable {
+            local_index: None,
             name: String::from("value"),
             value: String::from("{...}"),
             type_name: Some(type_name.to_owned()),

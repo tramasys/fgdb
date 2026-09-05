@@ -400,7 +400,7 @@ impl Ui {
         let shown = rendered.len();
 
         let selected_name = variable_at(&self.locals_selection, self.locals_selection.selected())
-            .map(|variable| (variable.name, variable.argument));
+            .map(|variable| (variable.name, variable.argument, variable.local_index));
 
         let changed = replace_variable_roots_if_changed(&self.locals_store, &rendered);
 
@@ -453,8 +453,8 @@ impl Ui {
 
                 let selected = selected_name
                     .as_ref()
-                    .and_then(|(name, argument)| {
-                        root_variable_position(&self.locals_selection, name, *argument)
+                    .and_then(|(name, argument, index)| {
+                        root_variable_position(&self.locals_selection, name, *argument, *index)
                     })
                     .unwrap_or(0);
 
@@ -504,11 +504,18 @@ impl Ui {
 
         self.local_variables.borrow_mut().update(index, variable);
 
-        if index < self.locals_store.n_items() as usize {
-            let previous = variable_root_node(&self.locals_store, index);
+        let position = (0..self.locals_store.n_items() as usize).find(|position| {
+            variable_root_node(&self.locals_store, *position)
+                .is_some_and(|node| node.variable.local_index == Some(index))
+        });
 
-            if replace_variable_root(&self.locals_store, index, variable, false) {
-                self.reindex_variable_root(&self.locals_store, index, previous.as_ref());
+        if let Some(position) = position {
+            let previous = variable_root_node(&self.locals_store, position);
+            let mut variable = variable.clone();
+            variable.local_index = Some(index);
+
+            if replace_variable_root(&self.locals_store, position, &variable, false) {
+                self.reindex_variable_root(&self.locals_store, position, previous.as_ref());
             }
         }
     }
@@ -673,21 +680,24 @@ impl Ui {
     }
 
     pub(crate) fn claim_local_variable_object(&self, generation: u64, variable: &Variable) -> bool {
+        let Some(index) = variable.local_index else {
+            return false;
+        };
+
         self.is_stop_refresh_current(generation)
             && self.has_local_variable_identity(variable)
-            && self.pending_local_variable_objects.borrow_mut().insert((
-                generation,
-                variable.name.clone(),
-                variable.argument,
-            ))
+            && self
+                .pending_local_variable_objects
+                .borrow_mut()
+                .insert((generation, index))
     }
 
     pub(crate) fn finish_local_variable_object(&self, generation: u64, variable: &Variable) {
-        self.pending_local_variable_objects.borrow_mut().remove(&(
-            generation,
-            variable.name.clone(),
-            variable.argument,
-        ));
+        if let Some(index) = variable.local_index {
+            self.pending_local_variable_objects
+                .borrow_mut()
+                .remove(&(generation, index));
+        }
     }
 
     pub(crate) fn attach_local_variable_object(
@@ -704,9 +714,11 @@ impl Ui {
             return false;
         };
 
-        self.local_variables
-            .borrow_mut()
-            .update(position as usize, variable);
+        let Some(index) = original.local_index else {
+            return false;
+        };
+
+        self.local_variables.borrow_mut().update(index, variable);
 
         let previous = variable_root_node(
             &self.locals_store,
@@ -735,8 +747,14 @@ impl Ui {
         self.local_variables.borrow().to_vec()
     }
 
-    pub(crate) fn rendered_local_variable_count(&self) -> usize {
-        self.locals_store.n_items() as usize
+    pub(crate) fn rendered_local_variable_indices(&self) -> HashSet<usize> {
+        (0..self.locals_store.n_items() as usize)
+            .filter_map(|position| {
+                variable_root_node(&self.locals_store, position)?
+                    .variable
+                    .local_index
+            })
+            .collect()
     }
 
     fn find_variable_node(&self, varobj: &str) -> Option<VariableNode> {
@@ -783,6 +801,7 @@ impl Ui {
             let node = item.borrow::<VariableNode>().clone();
 
             (!node.placeholder
+                && node.variable.local_index == variable.local_index
                 && node.variable.name == variable.name
                 && node.variable.argument == variable.argument
                 && node.variable.varobj == variable.varobj)
@@ -834,6 +853,8 @@ impl Ui {
         let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
         let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
+        let stop_generation = Rc::clone(&self.stop_refresh_generation);
+        let can_edit = self.variable_edit_guard();
         let debugger_ready = Rc::clone(&self.debugger_ready);
         let debugger_state = Rc::clone(&self.debugger_state);
         let command_pending = Rc::clone(&self.command_pending);
@@ -896,6 +917,8 @@ impl Ui {
                             current_source_is_rust.get(),
                             None,
                             ValueEditorHandlers {
+                                stop_generation: Rc::clone(&stop_generation),
+                                can_edit: Rc::clone(&can_edit),
                                 assignment: Rc::clone(&handler),
                                 float: Rc::clone(&float_handler),
                                 string: Rc::clone(&string_handler),
@@ -915,6 +938,8 @@ impl Ui {
         let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
         let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
+        let stop_generation = Rc::clone(&self.stop_refresh_generation);
+        let can_edit = self.variable_edit_guard();
 
         self.locals_edit_button.connect_clicked(move |_| {
             if let Some(variable) = variable_at(&selection, selection.selected())
@@ -933,6 +958,8 @@ impl Ui {
                         current_source_is_rust.get(),
                         None,
                         ValueEditorHandlers {
+                            stop_generation: Rc::clone(&stop_generation),
+                            can_edit: Rc::clone(&can_edit),
                             assignment: Rc::clone(&handler),
                             float: Rc::clone(&float_handler),
                             string: Rc::clone(&string_handler),
@@ -971,6 +998,8 @@ impl Ui {
             let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
             let target_architecture = Rc::clone(&self.target_architecture);
             let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
+            let stop_generation = Rc::clone(&self.stop_refresh_generation);
+            let can_edit = self.variable_edit_guard();
             let debugger_ready = Rc::clone(&self.debugger_ready);
             let debugger_state = Rc::clone(&self.debugger_state);
             let command_pending = Rc::clone(&self.command_pending);
@@ -1003,6 +1032,7 @@ impl Ui {
                     open_variable_editor(
                         &parent,
                         Variable {
+                            local_index: None,
                             name: format!("${}", register.name),
                             value: register.value,
                             type_name: None,
@@ -1018,6 +1048,8 @@ impl Ui {
                         current_source_is_rust.get(),
                         None,
                         ValueEditorHandlers {
+                            stop_generation: Rc::clone(&stop_generation),
+                            can_edit: Rc::clone(&can_edit),
                             assignment: Rc::clone(&handler),
                             float: Rc::clone(&float_handler),
                             string: Rc::clone(&string_handler),
@@ -3696,6 +3728,7 @@ mod render_tests {
     #[test]
     fn page_errors_preserve_loaded_children_and_offer_a_retry() {
         let parent = Variable {
+            local_index: None,
             name: String::from("items"),
             value: String::from("{...}"),
             type_name: Some(String::from("Item [256]")),
@@ -3711,6 +3744,7 @@ mod render_tests {
 
         node.children
             .append(&glib::BoxedAnyObject::new(VariableNode::new(Variable {
+                local_index: None,
                 name: String::from("[0]"),
                 value: String::from("1"),
                 type_name: Some(String::from("int")),
@@ -3753,6 +3787,7 @@ mod render_tests {
     #[test]
     fn initial_expansion_errors_can_be_retried() {
         let parent = Variable {
+            local_index: None,
             name: String::from("head"),
             value: String::from("0x20"),
             type_name: Some(String::from("Node *")),

@@ -12,6 +12,8 @@ use gtk::glib;
 
 mod parser;
 mod protocol;
+#[cfg(test)]
+mod regression_tests;
 mod requests;
 mod transport;
 
@@ -268,6 +270,9 @@ impl MiClient {
         }))
     }
 
+    /// Submit a command. All request methods return Err without invoking the
+    /// new handler, or Ok with exactly one terminal callback. Cancellation may
+    /// complete synchronously with a synthetic `superseded` record.
     pub fn request(
         &self,
         command: &str,
@@ -345,10 +350,8 @@ impl MiClient {
         )
     }
 
-    /// Cancel inspection work that belongs to an older stop. Tokened requests
-    /// can be forgotten safely even after being written because their late
-    /// result cannot be mistaken for another command. A sent scoped console
-    /// request remains installed until its un-tokened output is drained.
+    /// Release stale callbacks, but retain sent requests and their deadlines
+    /// until GDB acknowledges them. Cancellation does not release wire credits.
     pub(crate) fn cancel_stale_stop_requests(&self, current_generation: u64) {
         let stale_tokens = self
             .pending
@@ -361,15 +364,7 @@ impl MiClient {
             .collect::<Vec<_>>();
 
         for token in stale_tokens {
-            self.outgoing.borrow_mut().cancel_unstarted(token);
-            let request = { self.pending.borrow_mut().remove(&token) };
-
-            if let Some(request) = request {
-                (request.handler)(
-                    self,
-                    synthetic_error_record("superseded", "request superseded by a newer stop"),
-                );
-            }
+            self.cancel_pending_request(token);
         }
 
         let mut cancelled = Vec::new();
@@ -435,6 +430,23 @@ impl MiClient {
     ) -> io::Result<u64> {
         validate_mi_command(command)?;
         self.cancel_invalid_pending_requests();
+
+        if is_current.as_ref().is_some_and(|is_current| !is_current()) {
+            let token = self.allocate_token();
+            handler(
+                self,
+                synthetic_error_record("superseded", "request superseded"),
+            );
+            return Ok(token);
+        }
+
+        if !self.connected.get() || self.quarantined.get() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "GDB/MI connection is unavailable",
+            ));
+        }
+
         let pending_count = self.pending.borrow().len();
 
         let inspection_count = self
@@ -521,23 +533,15 @@ impl MiClient {
                 started_at: None,
                 deadline: now + class.queue_timeout(),
                 hard_deadline: now + class.maximum_lifetime(),
-                is_current,
-                handler,
+                is_current: is_current.map(Rc::from),
+                handler: Some(handler),
             },
         );
 
-        if self.can_dispatch(class)
+        if self.can_dispatch(class, token)
             && let Err(error) = self.start_pending_request(token)
         {
-            let request = self.pending.borrow_mut().remove(&token);
-
-            if let Some(request) = request {
-                (request.handler)(
-                    self,
-                    synthetic_error_record("unavailable", &error.to_string()),
-                );
-            }
-
+            self.pending.borrow_mut().remove(&token);
             return Err(error);
         }
 
@@ -546,9 +550,21 @@ impl MiClient {
         Ok(token)
     }
 
-    fn can_dispatch(&self, class: CommandClass) -> bool {
+    fn can_dispatch(&self, class: CommandClass, token: u64) -> bool {
         if class == CommandClass::Execution {
             return true;
+        }
+
+        // Console streams have no token. A captured command must drain all
+        // predecessors and exclude ordinary successors until its outer result.
+        // Priority still applies between captures, so diagnostics cannot hold
+        // a backlog of controls behind them.
+        if self.scoped_request.borrow().is_some()
+            || self.scoped_queue.borrow().front().is_some_and(|request| {
+                (request.class.queue_priority(), request.token) < (class.queue_priority(), token)
+            })
+        {
+            return false;
         }
 
         let pending = self.pending.borrow();
@@ -568,6 +584,17 @@ impl MiClient {
     }
 
     fn start_pending_request(&self, token: u64) -> io::Result<()> {
+        let guard = self
+            .pending
+            .borrow()
+            .get(&token)
+            .and_then(|request| request.is_current.clone());
+
+        if guard.is_some_and(|is_current| !is_current()) {
+            self.cancel_pending_request(token);
+            return Ok(());
+        }
+
         let (class, command) = {
             let mut pending = self.pending.borrow_mut();
 
@@ -591,6 +618,14 @@ impl MiClient {
             }
 
             return Err(error);
+        }
+
+        // Interrupts must remain available during a captured query. Discard
+        // its captured result only after execution is accepted by the queue.
+        if class == CommandClass::Execution
+            && let Some(request) = self.scoped_request.borrow_mut().as_mut()
+        {
+            request.cancelled = true;
         }
 
         let now = Instant::now();
@@ -618,6 +653,13 @@ impl MiClient {
 
     fn dispatch_pending_requests(&self) {
         loop {
+            self.start_next_scoped_request();
+            let capture_active = self.scoped_request.borrow().is_some();
+            let capture_priority = self
+                .scoped_queue
+                .borrow()
+                .front()
+                .map(|request| (request.class.queue_priority(), request.token));
             let next = {
                 let pending = self.pending.borrow();
 
@@ -644,9 +686,14 @@ impl MiClient {
 
                 pending
                     .iter()
-                    .filter(|(_, request)| {
+                    .filter(|(token, request)| {
                         request.started_at.is_none()
                             && request.command.is_some()
+                            && (request.class == CommandClass::Execution
+                                || (!capture_active
+                                    && capture_priority.is_none_or(|priority| {
+                                        (request.class.queue_priority(), **token) < priority
+                                    })))
                             && match request.class {
                                 CommandClass::Execution => true,
                                 CommandClass::Control => {
@@ -672,7 +719,7 @@ impl MiClient {
                 let request = self.pending.borrow_mut().remove(&token);
 
                 if let Some(request) = request {
-                    (request.handler)(
+                    request.complete(
                         self,
                         synthetic_error_record("unavailable", &error.to_string()),
                     );
@@ -686,33 +733,58 @@ impl MiClient {
     }
 
     fn cancel_invalid_pending_requests(&self) {
-        let stale = self
-            .pending
-            .borrow()
-            .iter()
-            .filter_map(|(token, request)| {
-                request
-                    .is_current
-                    .as_ref()
-                    .is_some_and(|is_current| !is_current())
-                    .then_some(*token)
-            })
-            .collect::<Vec<_>>();
+        loop {
+            let guards = self
+                .pending
+                .borrow()
+                .iter()
+                .filter_map(|(token, request)| {
+                    request.is_current.clone().map(|guard| (*token, guard))
+                })
+                .collect::<Vec<_>>();
+            let mut cancelled = false;
 
-        for token in stale {
-            self.outgoing.borrow_mut().cancel_unstarted(token);
-            let request = { self.pending.borrow_mut().remove(&token) };
-
-            if let Some(request) = request {
-                (request.handler)(
-                    self,
-                    synthetic_error_record("superseded", "request superseded"),
-                );
+            // Neither guards nor callbacks run under a pending-map borrow.
+            for (token, is_current) in guards {
+                if !is_current() {
+                    self.cancel_pending_request(token);
+                    cancelled = true;
+                }
             }
-        }
 
-        self.dispatch_pending_requests();
-        self.stop_write_source_if_idle();
+            if !cancelled {
+                return;
+            }
+
+            // A cancellation callback can invalidate a previously checked
+            // request. Revalidate before returning to the write boundary.
+        }
+    }
+
+    fn cancel_pending_request(&self, token: u64) {
+        let unwritten = self.outgoing.borrow_mut().cancel_unstarted(token);
+        let handler = {
+            let mut pending = self.pending.borrow_mut();
+            let Some(request) = pending.get_mut(&token) else {
+                return;
+            };
+            let remove = unwritten || request.started_at.is_none();
+            request.is_current = None;
+            let handler = request.handler.take();
+
+            if remove {
+                pending.remove(&token);
+            }
+
+            handler
+        };
+
+        if let Some(handler) = handler {
+            handler(
+                self,
+                synthetic_error_record("superseded", "request superseded"),
+            );
+        }
     }
 
     pub(crate) fn request_with_print_limit_for_stop(
@@ -757,7 +829,7 @@ impl MiClient {
             response: None,
             output: String::new(),
             expect_nested_mi: true,
-            is_current: Box::new(is_current),
+            is_current: Rc::new(is_current),
             handler: Box::new(move |client, record, _| handler(client, record)),
             deadline: now + class.timeout(),
             hard_deadline: now + class.maximum_lifetime(),
@@ -805,7 +877,7 @@ impl MiClient {
             response: None,
             output: String::new(),
             expect_nested_mi: false,
-            is_current: Box::new(is_current),
+            is_current: Rc::new(is_current),
             handler: Box::new(handler),
             deadline: now + CommandClass::Background.timeout(),
             hard_deadline: now + CommandClass::Background.maximum_lifetime(),
@@ -818,8 +890,50 @@ impl MiClient {
         Ok(token)
     }
 
+    /// Capture a fully encoded, explicitly thread/frame-scoped console command.
+    pub(crate) fn request_console_for_stop(
+        &self,
+        command: &str,
+        generation: u64,
+        is_current: impl Fn() -> bool + 'static,
+        handler: impl FnOnce(&MiClient, MiRecord, String) + 'static,
+    ) -> io::Result<u64> {
+        validate_mi_command(command)?;
+        let token = self.allocate_token();
+        let class = CommandClass::Inspection;
+        let now = Instant::now();
+
+        self.queue_scoped_request(ScopedMiRequest {
+            token,
+            class,
+            owner: Some(CommandOwner::Stop(generation)),
+            operation: command_operation(command),
+            command: command.to_owned(),
+            response: None,
+            output: String::new(),
+            expect_nested_mi: false,
+            is_current: Rc::new(is_current),
+            handler: Box::new(handler),
+            deadline: now + class.timeout(),
+            hard_deadline: now + class.maximum_lifetime(),
+            queued_at: now,
+            started_at: None,
+            cancelled: false,
+            output_truncated: false,
+        })?;
+
+        Ok(token)
+    }
+
     fn queue_scoped_request(&self, request: ScopedMiRequest) -> io::Result<()> {
         self.cancel_invalid_scoped_queue();
+
+        if !self.connected.get() || self.quarantined.get() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "GDB/MI connection is unavailable",
+            ));
+        }
 
         let queued_requests = usize::from(self.scoped_request.borrow().is_some())
             .saturating_add(self.scoped_queue.borrow().len());
@@ -890,7 +1004,7 @@ impl MiClient {
             return Ok(());
         }
 
-        if self.scoped_request.borrow().is_some() || !self.scoped_queue.borrow().is_empty() {
+        {
             let position =
                 self.scoped_queue.borrow().iter().position(|queued| {
                     queued.class.queue_priority() > request.class.queue_priority()
@@ -903,14 +1017,24 @@ impl MiClient {
             } else {
                 queue.push_back(request);
             }
-        } else if let Err(failure) = self.start_scoped_request(request) {
-            return Err(failure.0);
         }
+
+        self.dispatch_pending_requests();
 
         Ok(())
     }
 
     fn cancel_invalid_scoped_queue(&self) {
+        let guards = self
+            .scoped_queue
+            .borrow()
+            .iter()
+            .map(|request| (request.token, Rc::clone(&request.is_current)))
+            .collect::<Vec<_>>();
+        let stale_tokens = guards
+            .into_iter()
+            .filter_map(|(token, is_current)| (!is_current()).then_some(token))
+            .collect::<HashSet<_>>();
         let mut stale = Vec::new();
 
         {
@@ -918,7 +1042,7 @@ impl MiClient {
             let mut retained = VecDeque::with_capacity(queue.len());
 
             while let Some(request) = queue.pop_front() {
-                if !(request.is_current)() {
+                if stale_tokens.contains(&request.token) {
                     stale.push(request);
                 } else {
                     retained.push_back(request);
@@ -973,7 +1097,28 @@ impl MiClient {
 
     fn start_next_scoped_request(&self) {
         loop {
-            if self.scoped_request.borrow().is_some() {
+            if self.scoped_request.borrow().is_some()
+                || self
+                    .pending
+                    .borrow()
+                    .values()
+                    .any(|request| request.started_at.is_some())
+            {
+                return;
+            }
+
+            let priority = self
+                .scoped_queue
+                .borrow()
+                .front()
+                .map(|request| (request.class.queue_priority(), request.token));
+
+            if priority.is_some_and(|priority| {
+                self.pending
+                    .borrow()
+                    .iter()
+                    .any(|(token, request)| (request.class.queue_priority(), *token) < priority)
+            }) {
                 return;
             }
 
@@ -1082,6 +1227,51 @@ impl MiClient {
         let Some(client) = weak_client.upgrade() else {
             return glib::ControlFlow::Break;
         };
+
+        let epoch = client.transport_epoch.get();
+
+        loop {
+            client.cancel_invalid_pending_requests();
+            client.dispatch_pending_requests();
+
+            if client.transport_epoch.get() != epoch {
+                return glib::ControlFlow::Break;
+            }
+
+            let scoped_guard = client.scoped_request.borrow().as_ref().map(|request| {
+                (
+                    request.token,
+                    request.cancelled,
+                    Rc::clone(&request.is_current),
+                )
+            });
+
+            if let Some((token, cancelled, is_current)) = scoped_guard
+                && (cancelled || !is_current())
+            {
+                let unwritten = client.outgoing.borrow_mut().cancel_unstarted(token);
+
+                if unwritten {
+                    let request = client.scoped_request.borrow_mut().take();
+
+                    if let Some(request) = request {
+                        (request.handler)(
+                            &client,
+                            synthetic_error_record("superseded", "request superseded"),
+                            request.output,
+                        );
+                    }
+
+                    continue;
+                }
+
+                if let Some(request) = client.scoped_request.borrow_mut().as_mut() {
+                    request.cancelled = true;
+                }
+            }
+
+            break;
+        }
 
         let result = {
             let mut transport = client.transport.borrow_mut();
@@ -1213,7 +1403,7 @@ impl MiClient {
         let queued = self.scoped_queue.borrow_mut().drain(..).collect::<Vec<_>>();
 
         for request in pending.into_values() {
-            (request.handler)(self, synthetic_error_record("unavailable", reason));
+            request.complete(self, synthetic_error_record("unavailable", reason));
         }
 
         if let Some(request) = scoped {
@@ -1385,7 +1575,7 @@ impl MiClient {
                     request.output,
                 );
 
-                self.start_next_scoped_request();
+                self.dispatch_pending_requests();
             }
 
             self.stop_write_source_if_idle();
@@ -1407,7 +1597,7 @@ impl MiClient {
                 detail: detail.to_owned(),
             });
 
-            (request.handler)(self, synthetic_error_record("resource-limit", detail));
+            request.complete(self, synthetic_error_record("resource-limit", detail));
             self.dispatch_pending_requests();
         } else {
             self.report_performance(PerformanceNotice {
@@ -1450,7 +1640,13 @@ impl MiClient {
     }
 
     fn expire_requests(&self) {
+        let epoch = self.transport_epoch.get();
         let now = Instant::now();
+        self.cancel_invalid_pending_requests();
+
+        if self.transport_epoch.get() != epoch {
+            return;
+        }
 
         let expired = {
             let pending = self.pending.borrow();
@@ -1458,28 +1654,19 @@ impl MiClient {
             pending
                 .iter()
                 .filter_map(|(token, request)| {
-                    let stale = request
-                        .is_current
-                        .as_ref()
-                        .is_some_and(|is_current| !is_current());
-
-                    (stale || request.deadline <= now || request.hard_deadline <= now)
-                        .then_some((*token, stale))
+                    (request.deadline <= now || request.hard_deadline <= now).then_some(*token)
                 })
                 .collect::<Vec<_>>()
         };
 
-        let expired_tokens = expired
-            .iter()
-            .map(|(token, _)| *token)
-            .collect::<HashSet<_>>();
+        let expired_tokens = expired.iter().copied().collect::<HashSet<_>>();
 
         let cancelled_before_write = self
             .outgoing
             .borrow_mut()
             .cancel_unstarted_many(&expired_tokens);
 
-        for (token, stale) in expired {
+        for token in expired {
             let cancelled_before_write = cancelled_before_write.contains(&token);
             let request = { self.pending.borrow_mut().remove(&token) };
 
@@ -1487,15 +1674,16 @@ impl MiClient {
                 let safe_to_forget = request.started_at.is_none() || cancelled_before_write;
                 let command_class = request.class;
 
-                let (class, message) = if stale {
-                    ("superseded", "request superseded")
-                } else {
-                    ("timeout", "GDB request timed out")
-                };
+                request.complete(
+                    self,
+                    synthetic_error_record("timeout", "GDB request timed out"),
+                );
 
-                (request.handler)(self, synthetic_error_record(class, message));
+                if self.transport_epoch.get() != epoch {
+                    return;
+                }
 
-                if !stale && !safe_to_forget {
+                if !safe_to_forget {
                     self.report_unusable(format!(
                         "GDB did not complete a {:?} command within its {}-second response budget. The command stream can no longer be synchronized safely.",
                         command_class,
@@ -1509,16 +1697,24 @@ impl MiClient {
 
         self.dispatch_pending_requests();
 
+        if self.transport_epoch.get() != epoch {
+            return;
+        }
+
         let scoped_state = self.scoped_request.borrow().as_ref().map(|request| {
             (
                 request.token,
-                request.cancelled || !(request.is_current)(),
+                request.cancelled,
                 request.deadline <= now,
                 request.hard_deadline <= now,
+                Rc::clone(&request.is_current),
             )
         });
 
-        if let Some((token, stale, idle_timed_out, lifetime_timed_out)) = scoped_state {
+        if let Some((token, cancelled, idle_timed_out, lifetime_timed_out, is_current)) =
+            scoped_state
+        {
+            let stale = cancelled || !is_current();
             let timed_out = idle_timed_out || lifetime_timed_out;
 
             // A scoped request wraps nested MI in `interpreter-exec`. Once any
@@ -1548,6 +1744,10 @@ impl MiClient {
 
                 (request.handler)(self, synthetic_error_record(class, reason), request.output);
 
+                if self.transport_epoch.get() != epoch {
+                    return;
+                }
+
                 if timed_out && !cancelled_before_write {
                     let message = if lifetime_timed_out {
                         format!(
@@ -1566,7 +1766,7 @@ impl MiClient {
                     return;
                 }
 
-                self.start_next_scoped_request();
+                self.dispatch_pending_requests();
             }
         }
 
@@ -1846,6 +2046,7 @@ impl MiClient {
             // constructing a parse error for every ordinary MI record.
             if let Some(output) = output
                 && let Some(request) = self.scoped_request.borrow_mut().as_mut()
+                && !request.cancelled
             {
                 let command_output = matches!(line.as_bytes().first(), Some(b'~' | b'&'));
 
@@ -1950,7 +2151,7 @@ impl MiClient {
                     }
 
                     (request.handler)(self, response, request.output);
-                    self.start_next_scoped_request();
+                    self.dispatch_pending_requests();
                     return;
                 }
 
@@ -1965,7 +2166,7 @@ impl MiClient {
                         request.started_at.unwrap_or(request.queued_at),
                     );
 
-                    (request.handler)(self, record);
+                    request.complete(self, record);
                     self.dispatch_pending_requests();
                 }
             }
@@ -2288,7 +2489,7 @@ mod tests {
     };
     use std::sync::Mutex;
 
-    static MI_CLIENT_TEST_LOCK: Mutex<()> = Mutex::new(());
+    pub(super) static MI_CLIENT_TEST_LOCK: Mutex<()> = Mutex::new(());
     struct BackpressuredWriter;
 
     impl std::io::Write for BackpressuredWriter {

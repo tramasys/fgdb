@@ -8,7 +8,13 @@ pub(super) struct LocalVariableCatalog {
 
 impl LocalVariableCatalog {
     pub(super) fn replace(&mut self, variables: &[Variable]) {
-        let search_text = variables
+        let mut roots = variables.to_vec();
+
+        for (index, variable) in roots.iter_mut().enumerate() {
+            variable.local_index = Some(index);
+        }
+
+        let search_text = roots
             .iter()
             .enumerate()
             .map(|(index, variable)| {
@@ -20,7 +26,7 @@ impl LocalVariableCatalog {
             })
             .collect();
 
-        self.roots = variables.to_vec();
+        self.roots = roots;
         self.search_text = search_text;
     }
 
@@ -31,6 +37,7 @@ impl LocalVariableCatalog {
 
         if existing != variable {
             existing.clone_from(variable);
+            existing.local_index = Some(index);
 
             if let Some(search_text) = self.search_text.get_mut(index) {
                 *search_text = variable_search_text(variable).into();
@@ -245,6 +252,7 @@ mod tests {
 
     fn variable(name: &str, varobj: &str) -> Variable {
         Variable {
+            local_index: None,
             name: name.to_owned(),
             value: String::from("1"),
             type_name: Some(String::from("int")),
@@ -270,6 +278,33 @@ mod tests {
         assert_eq!(total, 1);
         assert_eq!(rendered[0].name, "value_599");
         assert_eq!(catalog.filtered("value", 64).1, 600);
+        assert_eq!(rendered[0].local_index, Some(599));
+        let search = Rc::clone(&catalog.search_text[599]);
+        catalog.replace(&variables);
+        assert!(Rc::ptr_eq(&search, &catalog.search_text[599]));
+    }
+
+    #[test]
+    fn filtered_root_updates_keep_full_catalog_identity_and_duplicates() {
+        let mut catalog = LocalVariableCatalog::default();
+        let first = variable("value", "var1");
+        let mut second = variable("value", "var2");
+        second.type_name = Some("OtherType".into());
+        catalog.replace(&[first, second]);
+
+        let (rendered, count) = catalog.filtered("othertype", 64);
+        assert_eq!(count, 1);
+        let mut selected = rendered[0].clone();
+        assert_eq!(selected.local_index, Some(1));
+        selected.value = "updated".into();
+        catalog.update(selected.local_index.unwrap(), &selected);
+
+        let (roots, count) = catalog.filtered("", 64);
+        assert_eq!(count, 2);
+        assert_eq!(roots[0].varobj.as_deref(), Some("var1"));
+        assert_eq!(roots[0].value, "1");
+        assert_eq!(roots[1].value, "updated");
+        assert_eq!(catalog.filtered("updated", 64).0[0].local_index, Some(1));
     }
 
     #[test]

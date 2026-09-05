@@ -7,6 +7,8 @@ mod target;
 
 pub(crate) use command::{CliCommandBuilder, MiCommandBuilder, console_command, gdb_cli_string};
 pub(crate) use context::StopContext;
+#[cfg(test)]
+pub(crate) use mi::parse_record;
 pub use mi::{GdbCapabilities, MiClient, MiEvent, MiRecord, quote};
 pub use model::{
     Breakpoint, EnumVariant, InferiorInfo, InferiorState, Instruction, MemoryBlock, MemoryKind,

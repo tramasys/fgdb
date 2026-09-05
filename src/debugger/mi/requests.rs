@@ -1,5 +1,6 @@
 use std::{
     io,
+    rc::Rc,
     time::{Duration, Instant},
 };
 
@@ -89,8 +90,22 @@ pub(super) struct PendingRequest {
     pub(super) started_at: Option<Instant>,
     pub(super) deadline: Instant,
     pub(super) hard_deadline: Instant,
-    pub(super) is_current: Option<Box<dyn Fn() -> bool>>,
-    pub(super) handler: ResponseHandler,
+    pub(super) is_current: Option<Rc<dyn Fn() -> bool>>,
+    pub(super) handler: Option<ResponseHandler>,
+}
+
+impl PendingRequest {
+    pub(super) fn complete(self, client: &MiClient, record: MiRecord) {
+        if let Some(handler) = self.handler {
+            let record = if self.is_current.is_some_and(|is_current| !is_current()) {
+                synthetic_error_record("superseded", "request superseded")
+            } else {
+                record
+            };
+
+            handler(client, record);
+        }
+    }
 }
 
 pub(super) struct ScopedMiRequest {
@@ -102,7 +117,7 @@ pub(super) struct ScopedMiRequest {
     pub(super) response: Option<MiRecord>,
     pub(super) output: String,
     pub(super) expect_nested_mi: bool,
-    pub(super) is_current: Box<dyn Fn() -> bool>,
+    pub(super) is_current: Rc<dyn Fn() -> bool>,
     pub(super) handler: ScopedResponseHandler,
     pub(super) deadline: Instant,
     pub(super) hard_deadline: Instant,

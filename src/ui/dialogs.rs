@@ -1,7 +1,58 @@
 use super::*;
 
 impl Ui {
-    pub fn present_variable_editor(&self, variable: Variable, metadata: Option<ValueTypeMetadata>) {
+    pub(crate) fn begin_variable_editor_request(&self) -> Option<VariableEditorRequest> {
+        let generation = self.current_stop_refresh_generation();
+
+        if !self.can_edit_variable(generation) {
+            return None;
+        }
+
+        let id = self.variable_editor_request.get().wrapping_add(1);
+        self.variable_editor_request.set(id);
+        Some(VariableEditorRequest { generation, id })
+    }
+
+    pub(crate) fn variable_editor_request_is_current(
+        &self,
+        request: VariableEditorRequest,
+    ) -> bool {
+        self.variable_editor_request.get() == request.id
+            && self.can_edit_variable(request.generation)
+    }
+
+    pub(crate) fn can_edit_variable(&self, generation: u64) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self.debugger_ready.get()
+            && !self.inferior_is_running()
+            && !self.command_pending.get()
+            && !self.session_pending.get()
+    }
+
+    pub(super) fn variable_edit_guard(&self) -> Rc<dyn Fn() -> bool> {
+        let ready = Rc::clone(&self.debugger_ready);
+        let state = Rc::clone(&self.debugger_state);
+        let command_pending = Rc::clone(&self.command_pending);
+        let session_pending = Rc::clone(&self.session_pending);
+
+        Rc::new(move || {
+            ready.get()
+                && !state.get().inferior_running()
+                && !command_pending.get()
+                && !session_pending.get()
+        })
+    }
+
+    pub(crate) fn present_variable_editor(
+        &self,
+        request: VariableEditorRequest,
+        variable: Variable,
+        metadata: Option<ValueTypeMetadata>,
+    ) {
+        if !self.variable_editor_request_is_current(request) {
+            return;
+        }
+
         open_variable_editor(
             &self.window,
             variable,
@@ -10,6 +61,8 @@ impl Ui {
             self.current_source_is_rust.get(),
             metadata.as_ref(),
             ValueEditorHandlers {
+                stop_generation: Rc::clone(&self.stop_refresh_generation),
+                can_edit: self.variable_edit_guard(),
                 assignment: Rc::clone(&self.variable_assignment_handler),
                 float: Rc::clone(&self.float_assignment_handler),
                 string: Rc::clone(&self.string_assignment_handler),
@@ -164,6 +217,7 @@ pub(super) fn replace_variable_roots(
                     let node = item.borrow::<VariableNode>();
 
                     !node.placeholder
+                        && node.variable.local_index == variable.local_index
                         && node.variable.name == variable.name
                         && node.variable.argument == variable.argument
                 })
@@ -230,6 +284,7 @@ pub(super) fn replace_variable_root(
     let node = item.borrow::<VariableNode>().clone();
 
     if node.placeholder
+        || node.variable.local_index != variable.local_index
         || node.variable.name != variable.name
         || node.variable.argument != variable.argument
     {
@@ -399,12 +454,16 @@ pub(super) fn root_variable_position(
     selection: &gtk::SingleSelection,
     name: &str,
     argument: bool,
+    local_index: Option<usize>,
 ) -> Option<u32> {
     let model = selection.model()?;
 
     (0..model.n_items()).find(|position| {
         variable_node_at(selection, *position).is_some_and(|(row, node)| {
-            row.depth() == 0 && node.variable.name == name && node.variable.argument == argument
+            row.depth() == 0
+                && node.variable.name == name
+                && node.variable.argument == argument
+                && node.variable.local_index == local_index
         })
     })
 }
@@ -431,45 +490,123 @@ pub(super) fn open_variable_editor(
     metadata: Option<&ValueTypeMetadata>,
     handlers: ValueEditorHandlers,
 ) {
+    let generation = handlers.stop_generation.get();
+    let is_current: Rc<dyn Fn() -> bool> = {
+        let current = Rc::clone(&handlers.stop_generation);
+        let can_edit = Rc::clone(&handlers.can_edit);
+        Rc::new(move || current.get() == generation && can_edit())
+    };
+
+    let assignment = guard_assignment_handler(&handlers.assignment, Rc::clone(&is_current));
+    let float = guard_assignment_handler(&handlers.float, Rc::clone(&is_current));
+    let string = {
+        let handler = Rc::clone(&handlers.string);
+        let is_current = Rc::clone(&is_current);
+        let guarded: StringAssignmentHandler = Rc::new(move |variable, bytes, kind| {
+            if is_current() {
+                let handler = handler.borrow().clone();
+
+                if let Some(handler) = handler {
+                    handler(variable, bytes, kind);
+                }
+            }
+        });
+
+        Rc::new(RefCell::new(Some(guarded)))
+    };
+
+    let handlers = ValueEditorHandlers {
+        assignment,
+        float,
+        string,
+        ..handlers
+    };
+    let editor = build_variable_editor(
+        parent,
+        variable,
+        target_pointer_bits,
+        target_architecture,
+        rust_source,
+        metadata,
+        handlers,
+    );
+    let weak_editor = editor.downgrade();
+
+    glib::timeout_add_local(Duration::from_millis(100), move || {
+        let Some(editor) = weak_editor.upgrade().filter(|editor| editor.is_visible()) else {
+            return glib::ControlFlow::Break;
+        };
+
+        if !is_current() {
+            editor.close();
+            return glib::ControlFlow::Break;
+        }
+
+        glib::ControlFlow::Continue
+    });
+}
+
+type EditorAssignment<T> = Rc<RefCell<Option<Rc<dyn Fn(Variable, T)>>>>;
+
+fn guard_assignment_handler<T: 'static>(
+    handler: &EditorAssignment<T>,
+    is_current: Rc<dyn Fn() -> bool>,
+) -> EditorAssignment<T> {
+    let handler = Rc::clone(handler);
+    let guarded: Rc<dyn Fn(Variable, T)> = Rc::new(move |variable, value| {
+        if is_current() {
+            let handler = handler.borrow().clone();
+
+            if let Some(handler) = handler {
+                handler(variable, value);
+            }
+        }
+    });
+
+    Rc::new(RefCell::new(Some(guarded)))
+}
+
+fn build_variable_editor(
+    parent: &gtk::ApplicationWindow,
+    variable: Variable,
+    target_pointer_bits: u32,
+    target_architecture: TargetArchitecture,
+    rust_source: bool,
+    metadata: Option<&ValueTypeMetadata>,
+    handlers: ValueEditorHandlers,
+) -> gtk::Window {
     if let Some(string) = string_edit(&variable) {
-        open_string_editor(
+        return open_string_editor(
             parent,
             variable,
             string,
             Rc::clone(&handlers.assignment),
             Rc::clone(&handlers.string),
         );
-
-        return;
     }
 
     if is_rust_string(&variable) {
-        open_unavailable_rust_string_editor(parent, &variable);
-        return;
+        return open_unavailable_rust_string_editor(parent, &variable);
     }
 
     if let Some(metadata) = metadata.filter(|metadata| {
         metadata.kind == ValueTypeKind::Enum && !metadata.enum_variants.is_empty()
     }) {
-        open_enum_editor(parent, variable, metadata, Rc::clone(&handlers.assignment));
-        return;
+        return open_enum_editor(parent, variable, metadata, Rc::clone(&handlers.assignment));
     }
 
     if let Some(float) = variable_float_edit(&variable, metadata) {
-        open_float_editor(
+        return open_float_editor(
             parent,
             variable,
             float,
             Rc::clone(&handlers.assignment),
             Rc::clone(&handlers.float),
         );
-
-        return;
     }
 
     if let Some(value) = variable_boolean_value(&variable, metadata) {
-        open_boolean_editor(parent, variable, value, Rc::clone(&handlers.assignment));
-        return;
+        return open_boolean_editor(parent, variable, value, Rc::clone(&handlers.assignment));
     }
 
     let editor = gtk::Window::builder()
@@ -733,6 +870,7 @@ pub(super) fn open_variable_editor(
     editor.present();
     entry.grab_focus();
     entry.select_region(0, -1);
+    editor
 }
 
 fn open_float_editor(
@@ -741,7 +879,7 @@ fn open_float_editor(
     float: value::FloatEdit,
     handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
     raw_handler: Rc<RefCell<Option<FloatAssignmentHandler>>>,
-) {
+) -> gtk::Window {
     let editor = gtk::Window::builder()
         .title(format!("Edit {}", variable.name))
         .transient_for(parent)
@@ -922,6 +1060,7 @@ fn open_float_editor(
     editor.present();
     entry.grab_focus();
     entry.select_region(0, -1);
+    editor
 }
 
 fn update_float_validation(
@@ -949,7 +1088,7 @@ fn open_enum_editor(
     variable: Variable,
     metadata: &ValueTypeMetadata,
     handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
-) {
+) -> gtk::Window {
     let editor = gtk::Window::builder()
         .title(format!("Edit {}", variable.name))
         .transient_for(parent)
@@ -1068,6 +1207,7 @@ fn open_enum_editor(
     let editor_for_cancel = editor.clone();
     cancel.connect_clicked(move |_| editor_for_cancel.close());
     editor.present();
+    editor
 }
 
 fn enum_value_matches(current: &str, variant: &str) -> bool {
@@ -1096,7 +1236,7 @@ fn open_boolean_editor(
     variable: Variable,
     original: bool,
     handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
-) {
+) -> gtk::Window {
     let editor = gtk::Window::builder()
         .title(format!("Edit {}", variable.name))
         .transient_for(parent)
@@ -1168,6 +1308,7 @@ fn open_boolean_editor(
     let editor_for_cancel = editor.clone();
     cancel.connect_clicked(move |_| editor_for_cancel.close());
     editor.present();
+    editor
 }
 
 fn scalar_radix(selected: u32, character: bool) -> Option<IntegerRadix> {
@@ -1231,7 +1372,7 @@ fn open_string_editor(
     string: value::StringEdit,
     assignment_handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
     string_handler: Rc<RefCell<Option<StringAssignmentHandler>>>,
-) {
+) -> gtk::Window {
     let editor = gtk::Window::builder()
         .title(format!("Edit {}", variable.name))
         .transient_for(parent)
@@ -1407,6 +1548,7 @@ fn open_string_editor(
     editor.present();
     entry.grab_focus();
     entry.select_region(0, -1);
+    editor
 }
 
 fn update_string_editor(
@@ -1518,7 +1660,10 @@ fn update_string_editor(
     }
 }
 
-fn open_unavailable_rust_string_editor(parent: &gtk::ApplicationWindow, variable: &Variable) {
+fn open_unavailable_rust_string_editor(
+    parent: &gtk::ApplicationWindow,
+    variable: &Variable,
+) -> gtk::Window {
     let editor = gtk::Window::builder()
         .title(format!("Edit {}", variable.name))
         .transient_for(parent)
@@ -1556,6 +1701,7 @@ fn open_unavailable_rust_string_editor(parent: &gtk::ApplicationWindow, variable
     let editor_for_close = editor.clone();
     close.connect_clicked(move |_| editor_for_close.close());
     editor.present();
+    editor
 }
 
 pub(super) fn open_vector_editor(
@@ -1896,6 +2042,7 @@ pub(super) fn open_flag_editor(
     let editor_for_apply = editor.clone();
 
     let variable = Variable {
+        local_index: None,
         name: format!("${}", register.name),
         value: register.value,
         type_name: Some(String::from("flags register")),
@@ -2435,8 +2582,32 @@ pub(super) fn connect_escape_to_close(window: &gtk::Window) {
 mod variable_tree_tests {
     use super::*;
 
+    #[test]
+    fn assignment_handlers_reject_changed_context_and_release_borrows() {
+        let current = Rc::new(Cell::new(true));
+        let calls = Rc::new(Cell::new(0));
+        let original: EditorAssignment<String> = Rc::new(RefCell::new(None));
+        let slot = Rc::clone(&original);
+        let count = Rc::clone(&calls);
+        *original.borrow_mut() = Some(Rc::new(move |_, _| {
+            count.set(count.get() + 1);
+            slot.borrow_mut().take();
+        }));
+        let guard = Rc::clone(&current);
+        let guarded = guard_assignment_handler(&original, Rc::new(move || guard.get()));
+        let callback = guarded.borrow().clone().unwrap();
+        current.set(false);
+        callback(variable("value", "1", None, 0), "2".into());
+        assert_eq!(calls.get(), 0);
+        current.set(true);
+        callback(variable("value", "1", None, 0), "2".into());
+        assert_eq!(calls.get(), 1);
+        assert!(original.borrow().is_none());
+    }
+
     fn variable(name: &str, value: &str, varobj: Option<&str>, children: usize) -> Variable {
         Variable {
+            local_index: None,
             name: name.to_owned(),
             value: value.to_owned(),
             type_name: Some(String::from("demo::Value")),

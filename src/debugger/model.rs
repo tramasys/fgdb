@@ -22,6 +22,9 @@ impl StackFrame {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Variable {
+    /// Full locals-catalog occurrence, valid only within its stop generation.
+    /// Child values and expression watches have no local root identity.
+    pub local_index: Option<usize>,
     pub name: String,
     pub value: String,
     pub type_name: Option<String>,
@@ -382,6 +385,7 @@ pub fn variables(record: &MiRecord) -> Vec<Variable> {
         .filter_map(tuple_from_item)
         .filter_map(|tuple| {
             Some(Variable {
+                local_index: None,
                 name: constant(tuple, "name")?.to_owned(),
                 value: constant(tuple, "value")
                     .unwrap_or("<not available>")
@@ -400,6 +404,7 @@ pub fn variables(record: &MiRecord) -> Vec<Variable> {
 
 pub fn variable_object(record: &MiRecord, display_name: &str) -> Option<Variable> {
     Some(Variable {
+        local_index: None,
         name: display_name.to_owned(),
         value: record
             .field("value")
@@ -479,6 +484,7 @@ pub fn variable_children(record: &MiRecord) -> Vec<Variable> {
             let expression = constant(tuple, "exp").or_else(|| constant(tuple, "name"))?;
 
             Some(Variable {
+                local_index: None,
                 name: variable_child_name(expression),
                 value: constant(tuple, "value")
                     .unwrap_or("<not available>")
@@ -1525,6 +1531,7 @@ mod tests {
         );
 
         let null_pointer = super::Variable {
+            local_index: None,
             name: String::from("pointer"),
             value: String::from("0x0"),
             type_name: Some(String::from("Demo *")),

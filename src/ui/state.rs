@@ -307,6 +307,7 @@ impl Ui {
             previous_registers: Rc::new(RefCell::new(HashMap::new())),
             cached_register_names: Rc::new(RefCell::new(None)),
             stop_refresh_generation: Rc::new(Cell::new(0)),
+            variable_editor_request: Cell::new(0),
             active_stop_context: Rc::new(RefCell::new(None)),
             thread_refresh_generation: Rc::new(Cell::new(0)),
             breakpoint_refresh_generation: Rc::new(Cell::new(0)),

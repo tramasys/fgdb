@@ -3,12 +3,10 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
-    thread,
+    process::Command,
     time::{Duration, Instant},
 };
 
-const MAX_COMPILER_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_AUTO_LOAD_SCRIPT_BYTES: usize = 256 * 1024;
 const LIBSTDCXX_PRINTER: &str = "libstdcxx/v6/printers.py";
 
@@ -79,34 +77,13 @@ fn compiler_output(
     timeout: Duration,
 ) -> Option<Vec<u8>> {
     let (executable, prefix_arguments) = compiler.split_first()?;
-    let mut child = Command::new(executable)
-        .args(prefix_arguments)
-        .arg(argument)
-        .current_dir(working_directory)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    let deadline = Instant::now().checked_add(timeout)?;
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let output = child.wait_with_output().ok()?;
-
-                return (status.success() && output.stdout.len() <= MAX_COMPILER_OUTPUT_BYTES)
-                    .then_some(output.stdout);
-            }
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-
-                return None;
-            }
-        }
-    }
+    crate::compiler_probe::output(
+        Command::new(executable)
+            .args(prefix_arguments)
+            .arg(argument)
+            .current_dir(working_directory),
+        timeout,
+    )
 }
 
 fn compiler_command() -> Vec<OsString> {
