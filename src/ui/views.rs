@@ -166,7 +166,7 @@ pub(super) fn build_locals_view(
 }
 
 pub(super) fn variable_search_text(variable: &Variable) -> String {
-    format!(
+    let mut text = format!(
         "{} {} {} {} {}",
         variable.name,
         variable.type_name.as_deref().unwrap_or_default(),
@@ -177,8 +177,10 @@ pub(super) fn variable_search_text(variable: &Variable) -> String {
         } else {
             "local"
         },
-    )
-    .to_ascii_lowercase()
+    );
+
+    text.make_ascii_lowercase();
+    text
 }
 
 pub(super) fn variable_node_matches_filter(node: &VariableNode, query: &str) -> bool {

@@ -27,16 +27,15 @@ use crate::performance::{
 #[cfg(test)]
 use parser::{MAX_MI_NESTING, parse_stream_output};
 use parser::{MAX_MI_RECORD_BYTES, parse_any_stream_output};
-#[cfg(test)]
-use requests::MAX_MI_COMMAND_BYTES;
 use requests::{
-    CommandClass, CommandOwner, MAX_ACTIVE_BACKGROUND_REQUESTS, MAX_ACTIVE_CONTROL_REQUESTS,
-    MAX_ACTIVE_INSPECTION_REQUESTS, MAX_BACKGROUND_SCOPED_REQUESTS, MAX_CAPTURED_CONSOLE_BYTES,
+    CommandClass, CommandOwner, MAX_BACKGROUND_SCOPED_REQUESTS, MAX_CAPTURED_CONSOLE_BYTES,
     MAX_INSPECTION_REQUESTS, MAX_NON_EXECUTION_REQUESTS, MAX_PENDING_REQUESTS, MAX_SCOPED_REQUESTS,
-    PendingRequest, REQUEST_TIMEOUT, REQUEST_TIMEOUT_POLL, ResponseHandler, ScopedMiRequest,
-    error_record, scoped_mi_command, synthetic_error_record, validate_console_command,
-    validate_mi_command,
+    PendingRequest, REQUEST_TIMEOUT, REQUEST_TIMEOUT_POLL, RequestSchedule, ResponseHandler,
+    ScopedMiRequest, error_record, scoped_mi_command, synthetic_error_record,
+    validate_console_command, validate_mi_command,
 };
+#[cfg(test)]
+use requests::{MAX_ACTIVE_INSPECTION_REQUESTS, MAX_MI_COMMAND_BYTES};
 #[cfg(test)]
 use transport::test_transport;
 use transport::{
@@ -464,12 +463,8 @@ impl MiClient {
 
         let pending_count = self.pending.borrow().len();
 
-        let inspection_count = self
-            .pending
-            .borrow()
-            .values()
-            .filter(|request| request.class == CommandClass::Inspection)
-            .count();
+        let schedule = RequestSchedule::from_pending(self.pending.borrow().iter());
+        let inspection_count = schedule.pending_count(CommandClass::Inspection);
 
         if class == CommandClass::Inspection && inspection_count >= MAX_INSPECTION_REQUESTS {
             let message = format!(
@@ -513,14 +508,9 @@ impl MiClient {
             return Err(io::Error::new(io::ErrorKind::WouldBlock, message));
         }
 
-        let queued_bytes = self
-            .pending
-            .borrow()
-            .values()
-            .filter_map(|request| request.command.as_ref())
-            .fold(self.outgoing.borrow().remaining_bytes, |total, command| {
-                total.saturating_add(command.len())
-            });
+        let queued_bytes = schedule
+            .queued_bytes
+            .saturating_add(self.outgoing.borrow().remaining_bytes);
 
         if queued_bytes.saturating_add(command.len()) > MAX_QUEUED_MI_BYTES {
             let message = String::from("queued GDB commands exceed the 8 MiB memory budget");
@@ -582,20 +572,7 @@ impl MiClient {
             return false;
         }
 
-        let pending = self.pending.borrow();
-
-        let active = pending
-            .values()
-            .filter(|request| request.started_at.is_some() && request.class == class)
-            .count();
-
-        active
-            < match class {
-                CommandClass::Execution => usize::MAX,
-                CommandClass::Control => MAX_ACTIVE_CONTROL_REQUESTS,
-                CommandClass::Inspection => MAX_ACTIVE_INSPECTION_REQUESTS,
-                CommandClass::Background => MAX_ACTIVE_BACKGROUND_REQUESTS,
-            }
+        RequestSchedule::from_pending(self.pending.borrow().iter()).has_capacity(class)
     }
 
     fn start_pending_request(&self, token: u64) -> io::Result<()> {
@@ -675,56 +652,8 @@ impl MiClient {
                 .borrow()
                 .front()
                 .map(|request| (request.class.queue_priority(), request.token));
-            let next = {
-                let pending = self.pending.borrow();
-
-                let active_control = pending
-                    .values()
-                    .filter(|request| {
-                        request.started_at.is_some() && request.class == CommandClass::Control
-                    })
-                    .count();
-
-                let active_inspection = pending
-                    .values()
-                    .filter(|request| {
-                        request.started_at.is_some() && request.class == CommandClass::Inspection
-                    })
-                    .count();
-
-                let active_background = pending
-                    .values()
-                    .filter(|request| {
-                        request.started_at.is_some() && request.class == CommandClass::Background
-                    })
-                    .count();
-
-                pending
-                    .iter()
-                    .filter(|(token, request)| {
-                        request.started_at.is_none()
-                            && request.command.is_some()
-                            && (request.class == CommandClass::Execution
-                                || (!capture_active
-                                    && capture_priority.is_none_or(|priority| {
-                                        (request.class.queue_priority(), **token) < priority
-                                    })))
-                            && match request.class {
-                                CommandClass::Execution => true,
-                                CommandClass::Control => {
-                                    active_control < MAX_ACTIVE_CONTROL_REQUESTS
-                                }
-                                CommandClass::Inspection => {
-                                    active_inspection < MAX_ACTIVE_INSPECTION_REQUESTS
-                                }
-                                CommandClass::Background => {
-                                    active_background < MAX_ACTIVE_BACKGROUND_REQUESTS
-                                }
-                            }
-                    })
-                    .min_by_key(|(token, request)| (request.class.queue_priority(), **token))
-                    .map(|(token, _)| *token)
-            };
+            let next = RequestSchedule::from_pending(self.pending.borrow().iter())
+                .next(capture_active, capture_priority);
 
             let Some(token) = next else {
                 break;

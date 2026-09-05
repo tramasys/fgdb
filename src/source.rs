@@ -1,7 +1,7 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque},
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
 };
 
@@ -220,10 +220,10 @@ impl SourceIndex {
     }
 }
 
-fn normal_components(path: &Path) -> Vec<OsString> {
+fn normal_components(path: &Path) -> Vec<&OsStr> {
     path.components()
         .filter_map(|component| match component {
-            std::path::Component::Normal(component) => Some(component.to_os_string()),
+            std::path::Component::Normal(component) => Some(component),
             _ => None,
         })
         .collect()

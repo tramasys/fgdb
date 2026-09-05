@@ -80,7 +80,7 @@ struct SharedQueue {
 
 struct WorkerPool {
     shared: Arc<SharedQueue>,
-    _workers: Vec<thread::JoinHandle<()>>,
+    workers: Vec<thread::JoinHandle<()>>,
 }
 
 impl WorkerPool {
@@ -93,24 +93,27 @@ impl WorkerPool {
             max_running_noncritical: worker_count.saturating_sub(1).max(1),
         });
 
-        let mut workers = Vec::with_capacity(worker_count);
+        // Own the queue before spawning. If a later spawn fails, Drop closes
+        // it and wakes workers that have already started.
+        let mut pool = Self {
+            shared,
+            workers: Vec::with_capacity(worker_count),
+        };
 
         for index in 0..worker_count {
-            let shared = Arc::clone(&shared);
+            let shared = Arc::clone(&pool.shared);
 
-            workers.push(
+            pool.workers.push(
                 thread::Builder::new()
                     .name(format!("fgdb-worker-{index}"))
                     .spawn(move || worker_loop(&shared))?,
             );
         }
 
-        Ok(Self {
-            shared,
-            _workers: workers,
-        })
+        Ok(pool)
     }
 
+    #[cfg(test)]
     fn submit_with_priority(
         &self,
         priority: Priority,
@@ -238,19 +241,13 @@ fn worker_loop(shared: &SharedQueue) {
     }
 }
 
-static BACKGROUND_POOL: OnceLock<Result<WorkerPool, String>> = OnceLock::new();
+static BACKGROUND_POOL: OnceLock<Option<WorkerPool>> = OnceLock::new();
 
 pub(crate) fn submit_with_priority(
     priority: Priority,
     job: impl FnOnce() + Send + 'static,
 ) -> Result<(), SubmitError> {
-    match BACKGROUND_POOL.get_or_init(|| {
-        WorkerPool::new(BACKGROUND_WORKERS, BACKGROUND_QUEUE_CAPACITY)
-            .map_err(|error| error.to_string())
-    }) {
-        Ok(pool) => pool.submit_with_priority(priority, job),
-        Err(_) => Err(SubmitError::Unavailable),
-    }
+    submit_cancellable_with_priority(priority, || true, job)
 }
 
 /// Like [`submit_with_priority`], but stale queued work is discarded before it
@@ -261,13 +258,12 @@ pub(crate) fn submit_cancellable_with_priority(
     is_current: impl Fn() -> bool + Send + 'static,
     job: impl FnOnce() + Send + 'static,
 ) -> Result<(), SubmitError> {
-    match BACKGROUND_POOL.get_or_init(|| {
-        WorkerPool::new(BACKGROUND_WORKERS, BACKGROUND_QUEUE_CAPACITY)
-            .map_err(|error| error.to_string())
-    }) {
-        Ok(pool) => pool.submit_cancellable_with_priority(priority, is_current, job),
-        Err(_) => Err(SubmitError::Unavailable),
-    }
+    let pool = BACKGROUND_POOL
+        .get_or_init(|| WorkerPool::new(BACKGROUND_WORKERS, BACKGROUND_QUEUE_CAPACITY).ok())
+        .as_ref()
+        .ok_or(SubmitError::Unavailable)?;
+
+    pool.submit_cancellable_with_priority(priority, is_current, job)
 }
 
 #[cfg(test)]

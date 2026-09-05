@@ -123,8 +123,7 @@ impl Ui {
         let cached_path = self
             .resolved_source_paths
             .borrow_mut()
-            .get_cloned(&reported.to_string_lossy().into_owned())
-            .flatten();
+            .get_cloned(reported.to_string_lossy().as_ref());
         let document = self
             .source_documents
             .borrow()
@@ -187,7 +186,7 @@ impl Ui {
                 Ok(Ok((path, snapshot))) => {
                     ui.resolved_source_paths
                         .borrow_mut()
-                        .insert(reported.to_string_lossy().into_owned(), Some(path.clone()));
+                        .insert(reported.to_string_lossy().into_owned(), path.clone());
                     let context = SourceOpenContext {
                         notebook: &ui.source_notebook,
                         documents: &ui.source_documents,

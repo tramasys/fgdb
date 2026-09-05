@@ -97,6 +97,7 @@ struct VariableRefresh {
     bulk_completed: bool,
 }
 
+#[derive(Clone)]
 enum VariableRefreshTarget {
     Locals,
     ExpressionWatches(Vec<String>),

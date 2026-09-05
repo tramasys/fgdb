@@ -1488,8 +1488,7 @@ pub struct Ui {
     execution_source_line: Rc<Cell<Option<u32>>>,
     source_theme: Theme,
     source_style_scheme: Option<sourceview5::StyleScheme>,
-    resolved_source_paths:
-        Rc<RefCell<crate::performance::BoundedLruCache<String, Option<PathBuf>>>>,
+    resolved_source_paths: Rc<RefCell<crate::performance::BoundedLruCache<String, PathBuf>>>,
     call_stack_list: gtk::Box,
     frame_buttons: Rc<RefCell<Vec<(u32, gtk::Button)>>>,
     latest_frames: Rc<RefCell<Vec<StackFrame>>>,

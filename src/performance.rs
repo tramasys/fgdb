@@ -1,4 +1,4 @@
-use std::{collections::HashMap, hash::Hash, time::Duration};
+use std::{borrow::Borrow, collections::HashMap, hash::Hash, time::Duration};
 
 /// Soft responsiveness targets. Crossing one records a diagnostic and causes
 /// the caller to yield, paginate, defer, or shed optional work. These are not
@@ -115,6 +115,10 @@ pub(crate) struct AdaptiveRenderBudgets {
 
 impl AdaptiveRenderBudgets {
     pub(crate) fn limit(&mut self, operation: &str, default: usize, minimum: usize) -> usize {
+        if let Some(limit) = self.limits.get(operation) {
+            return limit.current;
+        }
+
         self.limits
             .entry(operation.to_owned())
             .or_insert(AdaptiveLimit {
@@ -168,18 +172,24 @@ fn format_duration(duration: Duration) -> String {
 }
 
 #[derive(Clone, Debug)]
-struct CacheEntry<V> {
+struct CacheEntry<K, V> {
+    key: K,
     value: V,
-    last_used: u64,
+    previous: Option<usize>,
+    next: Option<usize>,
 }
 
-/// Small dependency-free LRU used for derived UI data. Eviction never touches
-/// authoritative debugger lifecycle state.
+/// Bounded derived data with O(1) expected lookup, promotion, and eviction.
+/// Entries form an index-linked list from least to most recently used. Slots
+/// are reused on eviction, so access history cannot grow memory or wrap a clock.
+/// Eviction never touches authoritative debugger lifecycle state.
 #[derive(Clone, Debug)]
 pub(crate) struct BoundedLruCache<K, V> {
-    entries: HashMap<K, CacheEntry<V>>,
+    indices: HashMap<K, usize>,
+    entries: Vec<CacheEntry<K, V>>,
     capacity: usize,
-    clock: u64,
+    oldest: Option<usize>,
+    newest: Option<usize>,
 }
 
 impl<K, V> BoundedLruCache<K, V>
@@ -188,30 +198,31 @@ where
 {
     pub(crate) fn new(capacity: usize) -> Self {
         Self {
-            entries: HashMap::with_capacity(capacity),
+            indices: HashMap::new(),
+            entries: Vec::new(),
             capacity,
-            clock: 0,
+            oldest: None,
+            newest: None,
         }
     }
 
-    pub(crate) fn get_cloned(&mut self, key: &K) -> Option<V>
+    pub(crate) fn get_cloned<Q>(&mut self, key: &Q) -> Option<V>
     where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
         V: Clone,
     {
-        self.clock = self.clock.wrapping_add(1);
-        let entry = self.entries.get_mut(key)?;
-        entry.last_used = self.clock;
+        let index = *self.indices.get(key)?;
+        self.promote(index);
 
-        Some(entry.value.clone())
+        Some(self.entries[index].value.clone())
     }
 
-    /// Returns true when inserting this entry evicted an older entry.
+    /// Returns true when an entry was evicted or capacity is zero.
     pub(crate) fn insert(&mut self, key: K, value: V) -> bool {
-        self.clock = self.clock.wrapping_add(1);
-
-        if let Some(entry) = self.entries.get_mut(&key) {
-            entry.value = value;
-            entry.last_used = self.clock;
+        if let Some(&index) = self.indices.get(&key) {
+            self.entries[index].value = value;
+            self.promote(index);
             return false;
         }
 
@@ -219,31 +230,80 @@ where
             return true;
         }
 
-        let evicted = if self.entries.len() >= self.capacity {
-            let oldest = self
-                .entries
-                .iter()
-                .min_by_key(|(_, entry)| entry.last_used)
-                .map(|(key, _)| key.clone());
+        let evicted = self.entries.len() == self.capacity;
 
-            oldest.is_some_and(|key| self.entries.remove(&key).is_some())
+        let index = if evicted {
+            let index = self
+                .oldest
+                .expect("a full nonempty cache has an oldest entry");
+            self.indices.remove(&self.entries[index].key);
+            self.detach(index);
+            index
         } else {
-            false
+            self.entries.len()
         };
 
-        self.entries.insert(
+        self.indices.insert(key.clone(), index);
+        let entry = CacheEntry {
             key,
-            CacheEntry {
-                value,
-                last_used: self.clock,
-            },
-        );
+            value,
+            previous: self.newest,
+            next: None,
+        };
+
+        if evicted {
+            self.entries[index] = entry;
+        } else {
+            self.entries.push(entry);
+        }
+
+        self.append(index);
 
         evicted
     }
 
+    fn detach(&mut self, index: usize) {
+        let CacheEntry { previous, next, .. } = self.entries[index];
+
+        if let Some(previous) = previous {
+            self.entries[previous].next = next;
+        } else {
+            self.oldest = next;
+        }
+
+        if let Some(next) = next {
+            self.entries[next].previous = previous;
+        } else {
+            self.newest = previous;
+        }
+    }
+
+    fn append(&mut self, index: usize) {
+        if let Some(newest) = self.newest {
+            self.entries[newest].next = Some(index);
+        } else {
+            self.oldest = Some(index);
+        }
+
+        self.newest = Some(index);
+    }
+
+    fn promote(&mut self, index: usize) {
+        if self.newest == Some(index) {
+            return;
+        }
+
+        self.detach(index);
+        self.entries[index].previous = self.newest;
+        self.entries[index].next = None;
+        self.append(index);
+    }
+
     pub(crate) fn clear(&mut self) {
+        self.indices.clear();
         self.entries.clear();
+        self.oldest = None;
+        self.newest = None;
     }
 
     #[cfg(test)]
@@ -280,14 +340,76 @@ mod tests {
     #[test]
     fn bounded_cache_evicts_the_least_recently_used_entry() {
         let mut cache = BoundedLruCache::new(2);
-        assert!(!cache.insert("a", 1));
-        assert!(!cache.insert("b", 2));
-        assert_eq!(cache.get_cloned(&"a"), Some(1));
-        assert!(cache.insert("c", 3));
+        assert!(!cache.insert(String::from("a"), 1));
+        assert!(!cache.insert(String::from("b"), 2));
+        assert_eq!(cache.get_cloned("a"), Some(1));
+        assert!(cache.insert(String::from("c"), 3));
         assert_eq!(cache.len(), 2);
-        assert_eq!(cache.get_cloned(&"a"), Some(1));
-        assert_eq!(cache.get_cloned(&"b"), None);
-        assert_eq!(cache.get_cloned(&"c"), Some(3));
+        assert_eq!(cache.get_cloned("a"), Some(1));
+        assert_eq!(cache.get_cloned("b"), None);
+        assert_eq!(cache.get_cloned("c"), Some(3));
+    }
+
+    #[test]
+    fn bounded_cache_matches_recency_model_through_updates_and_resets() {
+        for capacity in 0..=8 {
+            let mut cache = BoundedLruCache::new(capacity);
+            let mut model = std::collections::VecDeque::new();
+            let mut random = 123_u32;
+
+            for value in 0..4096 {
+                random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let key = (random >> 16) % 17;
+                let previous = model
+                    .iter()
+                    .position(|(existing, _)| *existing == key)
+                    .and_then(|index| model.remove(index));
+
+                match random % 11 {
+                    0 => {
+                        cache.clear();
+                        model.clear();
+                    }
+                    1..=4 => {
+                        assert_eq!(cache.get_cloned(&key), previous.map(|(_, value)| value));
+
+                        if let Some(previous) = previous {
+                            model.push_back(previous);
+                        }
+                    }
+                    _ => {
+                        let evicted = previous.is_none() && model.len() == capacity;
+                        assert_eq!(cache.insert(key, value), evicted);
+
+                        if evicted {
+                            model.pop_front();
+                        }
+
+                        if capacity != 0 {
+                            model.push_back((key, value));
+                        }
+                    }
+                }
+
+                assert_eq!(cache.len(), model.len());
+                assert_eq!(cache.indices.len(), model.len());
+                let mut index = cache.oldest;
+                let mut previous = None;
+
+                for &(key, value) in &model {
+                    let current = index.unwrap();
+                    let entry = &cache.entries[current];
+                    assert_eq!((entry.key, entry.value), (key, value));
+                    assert_eq!(entry.previous, previous);
+                    assert_eq!(cache.indices.get(&key), Some(&current));
+                    previous = index;
+                    index = entry.next;
+                }
+
+                assert_eq!(index, None);
+                assert_eq!(cache.newest, previous);
+            }
+        }
     }
 
     #[test]

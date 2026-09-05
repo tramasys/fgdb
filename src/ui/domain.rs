@@ -2,67 +2,89 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct LocalVariableCatalog {
-    roots: Vec<Variable>,
-    search_text: Vec<Rc<str>>,
+    entries: Vec<LocalVariableEntry>,
+}
+
+struct LocalVariableEntry {
+    variable: Variable,
+    search_text: String,
+}
+
+impl LocalVariableEntry {
+    fn new(variable: &Variable) -> Self {
+        Self {
+            variable: variable.clone(),
+            search_text: variable_search_text(variable),
+        }
+    }
+
+    fn update(&mut self, variable: &Variable) {
+        if self.variable == *variable {
+            return;
+        }
+
+        // Object identity and child availability do not affect text search.
+        if self.variable.name != variable.name
+            || self.variable.value != variable.value
+            || self.variable.type_name != variable.type_name
+            || self.variable.argument != variable.argument
+        {
+            self.search_text = variable_search_text(variable);
+        }
+
+        self.variable.clone_from(variable);
+    }
+
+    fn root(&self, index: usize) -> Variable {
+        let mut variable = self.variable.clone();
+        // Occurrence identity belongs to this catalog, not the incoming value.
+        variable.local_index = Some(index);
+        variable
+    }
 }
 
 impl LocalVariableCatalog {
     pub(super) fn replace(&mut self, variables: &[Variable]) {
-        let mut roots = variables.to_vec();
+        self.entries.truncate(variables.len());
 
-        for (index, variable) in roots.iter_mut().enumerate() {
-            variable.local_index = Some(index);
+        for (index, variable) in variables.iter().enumerate() {
+            if let Some(entry) = self.entries.get_mut(index) {
+                entry.update(variable);
+            } else {
+                self.entries.push(LocalVariableEntry::new(variable));
+            }
         }
-
-        let search_text = roots
-            .iter()
-            .enumerate()
-            .map(|(index, variable)| {
-                self.roots
-                    .get(index)
-                    .filter(|previous| *previous == variable)
-                    .and_then(|_| self.search_text.get(index).cloned())
-                    .unwrap_or_else(|| variable_search_text(variable).into())
-            })
-            .collect();
-
-        self.roots = roots;
-        self.search_text = search_text;
     }
 
     pub(super) fn update(&mut self, index: usize, variable: &Variable) {
-        let Some(existing) = self.roots.get_mut(index) else {
-            return;
-        };
-
-        if existing != variable {
-            existing.clone_from(variable);
-            existing.local_index = Some(index);
-
-            if let Some(search_text) = self.search_text.get_mut(index) {
-                *search_text = variable_search_text(variable).into();
-            }
+        if let Some(entry) = self.entries.get_mut(index) {
+            entry.update(variable);
         }
     }
 
     pub(super) fn filtered(&self, query: &str, limit: usize) -> (Vec<Variable>, usize) {
         if query.is_empty() {
             return (
-                self.roots.iter().take(limit).cloned().collect(),
-                self.roots.len(),
+                self.entries
+                    .iter()
+                    .take(limit)
+                    .enumerate()
+                    .map(|(index, entry)| entry.root(index))
+                    .collect(),
+                self.entries.len(),
             );
         }
 
         let terms = query.split_whitespace().collect::<Vec<_>>();
         let mut total = 0_usize;
-        let mut rendered = Vec::with_capacity(limit.min(self.roots.len()));
+        let mut rendered = Vec::with_capacity(limit.min(self.entries.len()));
 
-        for (variable, search_text) in self.roots.iter().zip(&self.search_text) {
-            if terms.iter().all(|term| search_text.contains(term)) {
+        for (index, entry) in self.entries.iter().enumerate() {
+            if terms.iter().all(|term| entry.search_text.contains(term)) {
                 total += 1;
 
                 if rendered.len() < limit {
-                    rendered.push(variable.clone());
+                    rendered.push(entry.root(index));
                 }
             }
         }
@@ -71,18 +93,22 @@ impl LocalVariableCatalog {
     }
 
     pub(super) fn len(&self) -> usize {
-        self.roots.len()
+        self.entries.len()
     }
 
     pub(super) fn argument_count(&self) -> usize {
-        self.roots
+        self.entries
             .iter()
-            .filter(|variable| variable.argument)
+            .filter(|entry| entry.variable.argument)
             .count()
     }
 
     pub(super) fn to_vec(&self) -> Vec<Variable> {
-        self.roots.clone()
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| entry.root(index))
+            .collect()
     }
 }
 
@@ -279,9 +305,25 @@ mod tests {
         assert_eq!(rendered[0].name, "value_599");
         assert_eq!(catalog.filtered("value", 64).1, 600);
         assert_eq!(rendered[0].local_index, Some(599));
-        let search = Rc::clone(&catalog.search_text[599]);
+        let search = catalog.entries[599].search_text.as_ptr();
+        let value = catalog.entries[599].variable.value.as_ptr();
         catalog.replace(&variables);
-        assert!(Rc::ptr_eq(&search, &catalog.search_text[599]));
+        assert_eq!(search, catalog.entries[599].search_text.as_ptr());
+        assert_eq!(value, catalog.entries[599].variable.value.as_ptr());
+
+        let mut changed = variables[599].clone();
+        changed.num_children = 4;
+        changed.varobj = Some(String::from("new_object"));
+        catalog.update(599, &changed);
+        assert_eq!(search, catalog.entries[599].search_text.as_ptr());
+        assert_eq!(catalog.to_vec()[599].num_children, 4);
+
+        catalog.replace(&variables[..2]);
+        assert_eq!(catalog.filtered("value_599", 64).1, 0);
+        assert_eq!(catalog.len(), 2);
+        catalog.replace(&variables);
+        assert_eq!(catalog.filtered("value_599", 0).1, 1);
+        assert!(catalog.filtered("value_599", 0).0.is_empty());
     }
 
     #[test]
@@ -297,13 +339,15 @@ mod tests {
         let mut selected = rendered[0].clone();
         assert_eq!(selected.local_index, Some(1));
         selected.value = "updated".into();
-        catalog.update(selected.local_index.unwrap(), &selected);
+        selected.local_index = Some(999);
+        catalog.update(1, &selected);
 
         let (roots, count) = catalog.filtered("", 64);
         assert_eq!(count, 2);
         assert_eq!(roots[0].varobj.as_deref(), Some("var1"));
         assert_eq!(roots[0].value, "1");
         assert_eq!(roots[1].value, "updated");
+        assert_eq!(roots[1].local_index, Some(1));
         assert_eq!(catalog.filtered("updated", 64).0[0].local_index, Some(1));
     }
 

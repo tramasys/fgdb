@@ -537,23 +537,44 @@ fn reuse_variable_objects(
     fallbacks: &[Variable],
     existing: Vec<Variable>,
 ) -> (Vec<Variable>, Vec<bool>, Vec<String>) {
-    let mut existing = existing.into_iter().fold(
-        HashMap::<(String, bool, Option<usize>), Vec<Variable>>::new(),
-        |mut by_name, variable| {
-            by_name
-                .entry((
-                    variable.name.clone(),
-                    variable.argument,
-                    variable.local_index,
-                ))
-                .or_default()
-                .push(variable);
+    // Borrow keys from the stable incoming snapshot. Scalars need no reuse
+    // bucket, and matching an existing object needs no temporary name clone.
+    let mut reusable = HashMap::new();
+    let mut buckets: Vec<Vec<Variable>> = Vec::new();
 
-            by_name
-        },
-    );
+    for variable in fallbacks
+        .iter()
+        .filter(|variable| variable.needs_variable_object())
+    {
+        let key = (
+            variable.name.as_str(),
+            variable.argument,
+            variable.local_index,
+        );
 
-    let reused = fallbacks
+        if let std::collections::hash_map::Entry::Vacant(entry) = reusable.entry(key) {
+            entry.insert(buckets.len());
+            buckets.push(Vec::new());
+        }
+    }
+
+    let mut stale = Vec::new();
+
+    for variable in existing {
+        let key = (
+            variable.name.as_str(),
+            variable.argument,
+            variable.local_index,
+        );
+
+        if let Some(&index) = reusable.get(&key) {
+            buckets[index].push(variable);
+        } else if let Some(varobj) = variable.varobj {
+            stale.push(varobj);
+        }
+    }
+
+    let (variables, needs_update) = fallbacks
         .iter()
         .map(|fallback| {
             if !fallback.needs_variable_object() {
@@ -561,18 +582,15 @@ fn reuse_variable_objects(
             }
 
             let key = (
-                fallback.name.clone(),
+                fallback.name.as_str(),
                 fallback.argument,
                 fallback.local_index,
             );
 
-            let Some(mut variable) = existing.get_mut(&key).and_then(Vec::pop) else {
+            let Some(mut variable) = reusable.get(&key).and_then(|&index| buckets[index].pop())
+            else {
                 return (fallback.clone(), false);
             };
-
-            variable.name.clone_from(&fallback.name);
-            variable.argument = fallback.argument;
-            variable.local_index = fallback.local_index;
 
             if fallback.type_name.is_some() {
                 variable.type_name.clone_from(&fallback.type_name);
@@ -580,15 +598,14 @@ fn reuse_variable_objects(
 
             (variable, true)
         })
-        .collect::<Vec<_>>();
+        .unzip();
 
-    let (variables, needs_update) = reused.into_iter().unzip();
-
-    let stale = existing
-        .into_values()
-        .flatten()
-        .filter_map(|variable| variable.varobj)
-        .collect();
+    stale.extend(
+        buckets
+            .into_iter()
+            .flatten()
+            .filter_map(|variable| variable.varobj),
+    );
 
     (variables, needs_update, stale)
 }
@@ -699,7 +716,7 @@ pub(super) fn request_next_variable_object(client: &MiClient, state: Rc<RefCell<
                         (
                             state.ui.clone(),
                             state.generation,
-                            variable_refresh_target_clone(&state.target),
+                            state.target.clone(),
                             state.variables[index].clone(),
                         )
                     };
@@ -987,22 +1004,13 @@ fn finish_variable_refresh(state: Rc<RefCell<VariableRefresh>>) {
         (
             state.ui.clone(),
             state.generation,
-            variable_refresh_target_clone(&state.target),
+            state.target.clone(),
             std::mem::take(&mut state.variables),
         )
     };
 
     if let Some(ui) = ui.upgrade() {
         show_variable_refresh(&ui, generation, &target, &variables);
-    }
-}
-
-fn variable_refresh_target_clone(target: &VariableRefreshTarget) -> VariableRefreshTarget {
-    match target {
-        VariableRefreshTarget::Locals => VariableRefreshTarget::Locals,
-        VariableRefreshTarget::ExpressionWatches(expressions) => {
-            VariableRefreshTarget::ExpressionWatches(expressions.clone())
-        }
     }
 }
 
@@ -2764,14 +2772,16 @@ mod tests {
         let existing = vec![
             variable("pointer", "0x10", Some("Node *"), Some("var1")),
             variable("removed", "0x30", Some("Node *"), Some("var2")),
+            variable("count", "0x40", Some("Node *"), Some("var3")),
         ];
 
-        let (reused, needs_update, stale) = reuse_variable_objects(&fallbacks, existing);
+        let (reused, needs_update, mut stale) = reuse_variable_objects(&fallbacks, existing);
         assert_eq!(reused[0].varobj.as_deref(), Some("var1"));
         assert_eq!(reused[0].value, "0x10");
         assert_eq!(reused[1], fallbacks[1]);
         assert_eq!(needs_update, [true, false]);
-        assert_eq!(stale, [String::from("var2")]);
+        stale.sort_unstable();
+        assert_eq!(stale, [String::from("var2"), String::from("var3")]);
     }
 
     #[test]
@@ -2792,6 +2802,20 @@ mod tests {
         assert!(stale.is_empty());
         assert_eq!(reused[0].varobj.as_deref(), Some("var1"));
         assert_eq!(reused[1].varobj.as_deref(), Some("var2"));
+
+        let first = variable("pointer", "0x10", Some("Node *"), Some("first"));
+        let mut second = first.clone();
+        second.varobj = Some(String::from("second"));
+        let mut argument = first.clone();
+        argument.argument = true;
+        argument.varobj = Some(String::from("argument"));
+        let fallback = variable("pointer", "0x20", Some("Node *"), None);
+        let (reused, needs_update, stale) =
+            reuse_variable_objects(&[fallback.clone(), fallback], vec![first, second, argument]);
+        assert_eq!(reused[0].varobj.as_deref(), Some("second"));
+        assert_eq!(reused[1].varobj.as_deref(), Some("first"));
+        assert_eq!(needs_update, [true, true]);
+        assert_eq!(stale, [String::from("argument")]);
     }
 
     #[test]

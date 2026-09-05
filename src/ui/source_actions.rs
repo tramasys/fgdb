@@ -6,14 +6,12 @@ impl Ui {
     }
 
     pub(super) fn resolve_source_path(&self, reported_path: &str) -> Option<PathBuf> {
-        let cache_key = reported_path.to_owned();
-
         if let Some(path) = self
             .resolved_source_paths
             .borrow_mut()
-            .get_cloned(&cache_key)
+            .get_cloned(reported_path)
         {
-            return path;
+            return Some(path);
         }
 
         let indexed = self
@@ -47,7 +45,7 @@ impl Ui {
         // Missing files can appear after a build, debuginfod download, or a
         // substitute-path change. Cache successful work, but never make a
         // transient miss sticky for the rest of the session.
-        let evicted = cache.insert(cache_key, Some(path.clone()));
+        let evicted = cache.insert(reported_path.to_owned(), path.clone());
         drop(cache);
 
         if evicted {
