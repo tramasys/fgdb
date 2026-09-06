@@ -7,22 +7,13 @@ impl Ui {
         theme: &Theme,
         model: Rc<crate::model::DebuggerModel>,
     ) -> Self {
-        if let Some(display) = gtk::gdk::Display::default() {
-            gtk::IconTheme::for_display(&display)
-                .add_resource_path(&format!("{}/icons", crate::RESOURCE_PREFIX));
-        }
-
-        gtk::Window::set_default_icon_name(crate::APPLICATION_ID);
-
         let window = gtk::ApplicationWindow::builder()
             .application(application)
             .title("fgdb")
-            .icon_name(crate::APPLICATION_ID)
             .default_width(1380)
             .default_height(820)
             .build();
 
-        crate::install_window_icon(&window);
         window.add_css_class("fgdb-window");
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.add_css_class("debugger-root");

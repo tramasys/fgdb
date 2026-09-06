@@ -40,8 +40,7 @@ headerbar.topbar button.window-control {
 .allocator-detection-caption,
 .allocator-detail-key,
 .allocator-metric-key,
-.heap-inspector-group-title,
-.kernel-memory-unit-header {
+.heap-inspector-group-title {
     font-size: 10px;
     font-weight: 700;
 }

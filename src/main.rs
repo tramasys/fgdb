@@ -16,7 +16,7 @@ mod source;
 mod theme;
 mod ui;
 
-use std::{io::IsTerminal, path::PathBuf};
+use std::{cell::Cell, io::IsTerminal, path::PathBuf, rc::Rc};
 
 use gtk::prelude::*;
 
@@ -26,17 +26,53 @@ pub(crate) const APPLICATION_ID: &str = "dev.fgdb.Fgdb";
 pub(crate) const RESOURCE_PREFIX: &str = "/dev/fgdb/Fgdb";
 const APPLICATION_ICON_SIZES: &[u16] = &[16, 24, 32, 48, 64, 128, 256];
 
-pub(crate) fn install_window_icon(window: &impl IsA<gtk::Window>) {
-    let textures = APPLICATION_ICON_SIZES
+fn install_application_icons(application: &gtk::Application) {
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::IconTheme::for_display(&display)
+            .add_resource_path(&format!("{RESOURCE_PREFIX}/icons"));
+    }
+
+    gtk::Window::set_default_icon_name(APPLICATION_ID);
+
+    let textures: Rc<[gtk::gdk::Texture]> = APPLICATION_ICON_SIZES
         .iter()
         .map(|size| {
             gtk::gdk::Texture::from_resource(&format!(
                 "{RESOURCE_PREFIX}/icons/hicolor/{size}x{size}/apps/{APPLICATION_ID}.png"
             ))
         })
-        .collect::<Vec<_>>();
+        .collect();
 
-    window.as_ref().connect_realize(move |window| {
+    let install = move |windows: &gtk::gio::ListModel, position, added| {
+        for index in position..position + added {
+            if let Some(window) = windows.item(index).and_downcast::<gtk::Window>() {
+                install_window_icon(&window, Rc::clone(&textures));
+            }
+        }
+    };
+
+    // Include transient windows and GTK-created dialogs that are not registered
+    // as application windows. Sharing textures avoids decoding on every open.
+    let windows = gtk::Window::toplevels();
+    install(&windows, 0, windows.n_items());
+
+    let subscription = windows.connect_items_changed(move |windows, position, _, added| {
+        install(windows, position, added);
+    });
+
+    let subscription = Cell::new(Some(subscription));
+
+    application.connect_shutdown(move |_| {
+        if let Some(subscription) = subscription.take() {
+            windows.disconnect(subscription);
+        }
+    });
+}
+
+fn install_window_icon(window: &gtk::Window, textures: Rc<[gtk::gdk::Texture]>) {
+    window.set_icon_name(Some(APPLICATION_ID));
+
+    let apply = move |window: &gtk::Window| {
         let Some(surface) = window.surface() else {
             return;
         };
@@ -46,7 +82,13 @@ pub(crate) fn install_window_icon(window: &impl IsA<gtk::Window>) {
         };
 
         toplevel.set_icon_list(&textures);
-    });
+    };
+
+    if window.is_realized() {
+        apply(window);
+    }
+
+    window.connect_realize(apply);
 }
 
 fn main() -> gtk::glib::ExitCode {
@@ -81,6 +123,8 @@ fn run_application(launch_config: config::LaunchConfig) -> gtk::glib::ExitCode {
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
+    application.connect_startup(install_application_icons);
+
     application.connect_activate(move |application| {
         app::build(application, launch_config.clone());
     });
@@ -96,15 +140,15 @@ fn run_startup_error(message: String, active_config_path: Option<PathBuf>) -> gt
         .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
         .build();
 
+    application.connect_startup(install_application_icons);
+
     application.connect_activate(move |application| {
         let window = gtk::ApplicationWindow::builder()
             .application(application)
             .title("fgdb startup error")
-            .icon_name(APPLICATION_ID)
             .default_width(620)
             .build();
 
-        install_window_icon(&window);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
         content.set_margin_top(18);
         content.set_margin_bottom(18);
@@ -189,14 +233,25 @@ mod tests {
 
         for path in [
             "/dev/fgdb/Fgdb/icons/dev.fgdb.Fgdb.png",
-            "/dev/fgdb/Fgdb/icons/hicolor/16x16/apps/dev.fgdb.Fgdb.png",
-            "/dev/fgdb/Fgdb/icons/hicolor/256x256/apps/dev.fgdb.Fgdb.png",
             "/dev/fgdb/Fgdb/language-specs/assembly.lang",
             "/dev/fgdb/Fgdb/themes/carbon.xml",
         ] {
             assert!(
                 gio::resources_lookup_data(path, gio::ResourceLookupFlags::NONE).is_ok(),
                 "missing bundled resource {path}"
+            );
+        }
+
+        for size in super::APPLICATION_ICON_SIZES {
+            let path = format!(
+                "{}/icons/hicolor/{size}x{size}/apps/{}.png",
+                super::RESOURCE_PREFIX,
+                super::APPLICATION_ID,
+            );
+
+            assert!(
+                gio::resources_lookup_data(&path, gio::ResourceLookupFlags::NONE).is_ok(),
+                "missing bundled icon {path}"
             );
         }
     }

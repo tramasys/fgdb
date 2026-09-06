@@ -1,5 +1,8 @@
 use super::*;
 
+mod memory_summary;
+pub(super) use memory_summary::MemorySummary;
+
 const MIN_MAPPING_DELTA_HEIGHT: i32 = 190;
 const PRIVATE_CATEGORY_TABLE_HEIGHT: i32 = 205;
 const KERNEL_FACT_LABEL_MAX_WIDTH: i32 = 42;
@@ -1427,114 +1430,8 @@ fn build_memory() -> (
     gtk::Label,
     gtk::Label,
 ) {
-    let summary_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    let summary_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    summary_content.add_css_class("kernel-memory-summary");
-    summary_content.set_vexpand(true);
-    let meta = gtk::Label::new(Some("No snapshot"));
-    meta.add_css_class("kernel-memory-meta");
-    meta.add_css_class("muted");
-    meta.set_halign(gtk::Align::Start);
-    meta.set_xalign(0.0);
-    make_responsive_label(&meta, pango::EllipsizeMode::Middle);
-    enable_stable_text_selection(&meta);
-    summary_content.append(&meta);
-    let unit_grid = gtk::Grid::new();
-    unit_grid.add_css_class("kernel-memory-unit-grid");
-    unit_grid.set_hexpand(true);
-
-    for (column, (heading, width)) in [
-        ("METRIC", 24),
-        ("SOURCE", 13),
-        ("KiB", 15),
-        ("MiB", 14),
-        ("GiB", 14),
-        ("BASE-PAGE EQUIV.", 19),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let heading = memory_unit_label(
-            heading,
-            "kernel-memory-unit-header",
-            width,
-            if column >= 2 { 1.0 } else { 0.0 },
-        );
-
-        heading.set_hexpand(column == 5);
-        unit_grid.attach(&heading, column as i32, 0, 1, 1);
-    }
-
-    let mut rows = Vec::new();
-
-    for (index, (metric, source)) in [
-        ("HTOP VIRT", "/proc/statm"),
-        ("HTOP RES", "/proc/statm"),
-        ("VIRTUAL (VSS)", "smaps"),
-        ("RESIDENT (RSS)", "smaps"),
-        ("NOT RESIDENT", "VSS − RSS"),
-        ("PROPORTIONAL (PSS)", "smaps"),
-        ("PROCESS-PRIVATE (USS)", "smaps"),
-        ("PRIVATE CLEAN", "smaps"),
-        ("PRIVATE DIRTY", "smaps"),
-        ("SHARED RSS", "smaps"),
-        ("SHARED CLEAN", "smaps"),
-        ("SHARED DIRTY", "smaps"),
-        ("SWAP", "smaps"),
-        ("ANON HUGE", "smaps"),
-        ("ANONYMOUS", "smaps"),
-        ("REFERENCED", "smaps"),
-        ("LAZY FREE", "smaps"),
-        ("LOCKED", "smaps"),
-        ("KSM", "smaps"),
-        ("HUGE / PMD", "smaps"),
-        ("PAGE TABLES", "/proc/status"),
-        ("PINNED", "/proc/status"),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let row = (index + 1) as i32;
-
-        let row_class = if index % 2 == 0 {
-            "kernel-memory-unit-even"
-        } else {
-            "kernel-memory-unit-odd"
-        };
-
-        unit_grid.attach(&memory_unit_label(metric, row_class, 24, 0.0), 0, row, 1, 1);
-        let source = memory_unit_label(source, row_class, 13, 0.0);
-        source.add_css_class("muted");
-        unit_grid.attach(&source, 1, row, 1, 1);
-        let kib = memory_unit_label("-", row_class, 15, 1.0);
-        let mib = memory_unit_label("-", row_class, 14, 1.0);
-        let gib = memory_unit_label("-", row_class, 14, 1.0);
-        let pages = memory_unit_label("-", row_class, 19, 1.0);
-        pages.set_hexpand(true);
-        unit_grid.attach(&kib, 2, row, 1, 1);
-        unit_grid.attach(&mib, 3, row, 1, 1);
-        unit_grid.attach(&gib, 4, row, 1, 1);
-        unit_grid.attach(&pages, 5, row, 1, 1);
-
-        rows.push(KernelMemoryUnitRow {
-            kib,
-            mib,
-            gib,
-            pages,
-        });
-    }
-
-    let unit_scroll = gtk::ScrolledWindow::new();
-    unit_scroll.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
-    unit_scroll.set_min_content_height(1);
-    unit_scroll.set_min_content_width(0);
-    unit_scroll.set_vexpand(true);
-    unit_scroll.set_propagate_natural_width(false);
-    unit_scroll.set_propagate_natural_height(false);
-    unit_scroll.set_size_request(0, -1);
-    unit_scroll.set_child(Some(&unit_grid));
-    summary_content.append(&unit_scroll);
-    summary_page.append(&summary_content);
+    let summary = MemorySummary::new();
+    let summary_page = summary.root.clone();
     let private_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
     let explanation = gtk::Label::new(Some(
@@ -1677,8 +1574,7 @@ fn build_memory() -> (
         store,
         private_mapping_store,
         KernelMemorySummaryView {
-            meta,
-            rows,
+            summary,
             private_summary,
         },
         empty,
@@ -1731,19 +1627,6 @@ fn build_private_summary() -> (gtk::FlowBox, KernelPrivateSummaryView) {
             mappings,
         },
     )
-}
-
-fn memory_unit_label(text: &str, class: &str, width: i32, xalign: f32) -> gtk::Label {
-    let label = gtk::Label::new(Some(text));
-    label.add_css_class("kernel-memory-unit-cell");
-    label.add_css_class(class);
-    label.set_width_chars(width);
-    label.set_max_width_chars(width);
-    label.set_halign(gtk::Align::Fill);
-    label.set_xalign(xalign);
-    enable_stable_text_selection(&label);
-
-    label
 }
 
 fn build_mappings() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
@@ -3361,45 +3244,7 @@ fn update_memory_summary(
     mapping_count: usize,
     private_mapping_count: usize,
 ) {
-    let not_resident = accounting.virtual_bytes.saturating_sub(accounting.rss);
-
-    let values = [
-        accounting.statm_virtual_bytes,
-        accounting.statm_rss,
-        Some(accounting.virtual_bytes),
-        Some(accounting.rss),
-        Some(not_resident),
-        Some(accounting.pss),
-        Some(accounting.unique_rss()),
-        Some(accounting.private_clean),
-        Some(accounting.private_dirty),
-        Some(accounting.shared_rss()),
-        Some(accounting.shared_clean),
-        Some(accounting.shared_dirty),
-        Some(accounting.swap),
-        Some(accounting.anon_huge_pages),
-        Some(accounting.anonymous),
-        Some(accounting.referenced),
-        Some(accounting.lazy_free),
-        Some(accounting.locked),
-        Some(accounting.ksm),
-        Some(accounting.huge_bytes()),
-        Some(accounting.page_tables),
-        Some(accounting.pinned),
-    ];
-
-    debug_assert_eq!(view.rows.len(), values.len());
-
-    for (row, value) in view.rows.iter().zip(values) {
-        set_memory_unit_row(row, value, accounting.page_size);
-    }
-
-    view.meta.set_text(&format!(
-        "{} VMAs  base page {} ({} bytes)",
-        format_grouped_count(mapping_count as u64),
-        crate::kernel::format_bytes(accounting.page_size),
-        format_grouped_count(accounting.page_size),
-    ));
+    view.summary.update(accounting, mapping_count);
 
     let exclusive_categories = accounting
         .categories
@@ -3428,38 +3273,6 @@ fn update_memory_summary(
     ));
 }
 
-fn set_memory_unit_row(row: &KernelMemoryUnitRow, bytes: Option<u64>, page_size: u64) {
-    let Some(bytes) = bytes else {
-        for label in [&row.kib, &row.mib, &row.gib, &row.pages] {
-            label.set_text("-");
-            label.set_tooltip_text(None);
-        }
-
-        return;
-    };
-
-    row.kib.set_text(&format_scaled_binary(bytes, 1024, 2));
-
-    row.mib
-        .set_text(&format_scaled_binary(bytes, 1024 * 1024, 3));
-
-    row.gib
-        .set_text(&format_scaled_binary(bytes, 1024 * 1024 * 1024, 6));
-
-    row.pages
-        .set_text(&format_page_equivalents(bytes, page_size));
-
-    let tooltip = format!(
-        "{} bytes  {}",
-        format_grouped_count(bytes),
-        crate::kernel::format_bytes(bytes)
-    );
-
-    for label in [&row.kib, &row.mib, &row.gib, &row.pages] {
-        label.set_tooltip_text(Some(&tooltip));
-    }
-}
-
 fn format_scaled_binary(bytes: u64, unit: u64, decimals: usize) -> String {
     if bytes.is_multiple_of(unit) {
         format_grouped_count(bytes / unit)
@@ -3481,11 +3294,7 @@ fn format_page_equivalents(bytes: u64, page_size: u64) -> String {
 }
 
 fn clear_memory_summary(view: &KernelMemorySummaryView) {
-    view.meta.set_text("No snapshot");
-
-    for row in &view.rows {
-        set_memory_unit_row(row, None, 0);
-    }
+    view.summary.clear();
 
     for label in [
         &view.private_summary.total,

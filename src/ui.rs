@@ -1161,8 +1161,7 @@ struct KernelPrivateMappingRow {
 
 #[derive(Clone)]
 struct KernelMemorySummaryView {
-    meta: gtk::Label,
-    rows: Vec<KernelMemoryUnitRow>,
+    summary: MemorySummary,
     private_summary: KernelPrivateSummaryView,
 }
 
@@ -1172,14 +1171,6 @@ struct KernelPrivateSummaryView {
     clean: gtk::Label,
     dirty: gtk::Label,
     mappings: gtk::Label,
-}
-
-#[derive(Clone)]
-struct KernelMemoryUnitRow {
-    kib: gtk::Label,
-    mib: gtk::Label,
-    gib: gtk::Label,
-    pages: gtk::Label,
 }
 
 impl MemoryWatchFormat {

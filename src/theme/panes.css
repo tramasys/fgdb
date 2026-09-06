@@ -2240,39 +2240,39 @@ paned.misc-data-split > separator:hover {
 }
 
 .kernel-memory-summary {
-    padding: 4px 6px;
+    padding: 8px;
     color: @app_fg;
-    background: alpha(@app_fg, 0.018);
+    background: @app_surface;
 }
 
-.kernel-memory-meta {
-    padding: 1px 3px 4px;
+.ui-card.kernel-memory-group {
+    padding: 0;
 }
 
-.kernel-memory-unit-grid {
-    border-top: 1px solid @app_border;
-    border-left: 1px solid @app_border;
+.kernel-memory-cell {
+    min-height: 0;
+    padding: 4px 8px;
 }
 
-.kernel-memory-unit-cell {
-    min-height: 21px;
-    padding: 1px 5px;
-    color: @app_fg;
-    border-right: 1px solid @app_border;
-    border-bottom: 1px solid @app_border;
+.kernel-memory-group-heading,
+.kernel-memory-column-heading {
+    padding: 8px;
 }
 
-.kernel-memory-unit-header {
-    color: @app_muted;
-    background: @app_raised;
+.kernel-memory-divider {
+    min-height: 1px;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: @app_border;
 }
 
-.kernel-memory-unit-even {
-    background: alpha(@app_fg, 0.018);
+.kernel-memory-first-row {
+    margin-top: 4px;
 }
 
-.kernel-memory-unit-odd {
-    background: alpha(@app_fg, 0.042);
+.kernel-memory-last-row {
+    margin-bottom: 4px;
 }
 
 .kernel-memory-explanation {

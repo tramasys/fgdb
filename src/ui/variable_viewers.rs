@@ -343,7 +343,6 @@ impl Ui {
             .default_height(620)
             .build();
 
-        crate::install_window_icon(&window);
         window.add_css_class("variable-viewer-window");
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
         components::inset(&root, components::DIALOG_INSET);
