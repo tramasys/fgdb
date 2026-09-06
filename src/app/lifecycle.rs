@@ -18,6 +18,12 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
 
     match event {
         MiEvent::Ready(capabilities) => {
+            ui.model.reset_replay();
+            ui.model
+                .replay
+                .borrow_mut()
+                .set_backend_direction(crate::model::replay::ExecutionDirection::Forward);
+
             ui.reset_runtime_pretty_printer_scripts();
             ui.finish_execution_transition();
             ui.set_command_pending(false);
@@ -55,6 +61,41 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         }
         MiEvent::CapabilitiesChanged(capabilities) => {
             ui.set_gdb_capabilities(capabilities);
+        }
+        MiEvent::RecordingChanged {
+            group_id,
+            started,
+            method,
+            format,
+        } => {
+            use crate::model::replay::RecordingMethod;
+            let selected = ui.model.selected_inferior_id().as_deref() == Some(&group_id);
+            let mut state = ui.model.replay.borrow_mut();
+            let method = match method.as_deref() {
+                Some("full") => Some(RecordingMethod::Full),
+                Some("btrace") => Some(match format.as_deref() {
+                    Some("pt") => RecordingMethod::ProcessorTrace,
+                    Some("bts") => RecordingMethod::BranchStore,
+                    _ => RecordingMethod::BranchTrace,
+                }),
+                _ => None,
+            };
+
+            if !started {
+                state.recording_stopped(&group_id, selected);
+            } else if let Some(method) = method {
+                state.recordings.insert(group_id.clone(), method);
+            }
+
+            if selected {
+                state.reverse_supported = started;
+                state.reverse_owner = Some(group_id);
+                state.invalidate_query();
+            }
+
+            drop(state);
+            ui.render_replay_controls();
+            replay::refresh(weak_ui, client, false);
         }
         MiEvent::InferiorsChanged => {
             refresh_inferiors(weak_ui, client);
@@ -123,7 +164,14 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 ui.set_debug_state_stale(false);
                 ui.clear_debugger_state();
 
-                let detail = if ui.model.configured_session_can_start() {
+                let detail = if matches!(
+                    ui.model.session().as_ref(),
+                    Some(DebugSession::RrReplay { .. })
+                ) {
+                    String::from(
+                        "The replay reached program exit. Select Run to replay the trace from the beginning.",
+                    )
+                } else if ui.model.configured_session_can_start() {
                     format!(
                         "{id} exited. The configured target remains loaded. Select Run to start it again."
                     )
@@ -137,6 +185,14 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             refresh_inferiors(weak_ui, client);
         }
         MiEvent::Running { thread_id } => {
+            {
+                let mut state = ui.model.replay.borrow_mut();
+
+                if state.querying {
+                    state.invalidate_query();
+                }
+            }
+
             let transition_targets_group = ui.model.pending_execution_inferior().is_some();
 
             let thread_transition_affected = ui
@@ -456,6 +512,23 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                     }
                 }
                 "scheduler-locking" | "non-stop" => refresh_thread_policy(weak_ui, client),
+                "exec-direction" => {
+                    use crate::model::replay::ExecutionDirection;
+
+                    let direction = match value.as_deref() {
+                        Some("forward") => ExecutionDirection::Forward,
+                        Some("reverse") => ExecutionDirection::Reverse,
+                        _ => return,
+                    };
+
+                    {
+                        let mut state = ui.model.replay.borrow_mut();
+                        state.set_backend_direction(direction);
+                        state.invalidate_query();
+                    }
+
+                    ui.render_replay_controls();
+                }
                 "follow-fork-mode" | "detach-on-fork" => refresh_fork_policy(weak_ui, client),
                 "architecture" | "endian" => {
                     ui.reset_target_abi();
@@ -489,6 +562,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             enter_gdb_recovery(&ui, "GDB recovery required", &message);
         }
         MiEvent::Disconnected => {
+            ui.model.reset_replay();
             if ui.model.native_until_active() {
                 ui.abort_native_until();
             }
@@ -588,6 +662,13 @@ pub(super) fn finish_stopped_state(
         );
 
     let detail = status_detail.unwrap_or_else(|| {
+        if exited && matches!(ui.model.session().as_ref(), Some(DebugSession::RrReplay { .. })) {
+            return String::from("The replay reached program exit. Select Run to replay the trace from the beginning.");
+        }
+        if reason == "no-history" {
+            return String::from("Reached the recorded history boundary. Choose Forward to replay or continue recording.");
+        }
+
         let reason = reason.replace('-', " ");
 
         ui.stop_owner_summary().map_or_else(

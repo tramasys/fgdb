@@ -30,6 +30,7 @@ use domain::{
 mod layout;
 mod lifecycle;
 mod log_view;
+mod replay;
 use log_view::{ApplicationLog, LogLevel};
 mod source_breakpoints;
 mod source_loading;
@@ -153,6 +154,7 @@ struct ControlState {
     run: bool,
     pause: bool,
     move_target: bool,
+    until: bool,
     inspect: bool,
     syntax: bool,
     gef_tools: bool,
@@ -1380,6 +1382,7 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 
 #[derive(Clone)]
 pub struct Ui {
+    replay_controls: replay::ReplayControls,
     pub(crate) model: Rc<crate::model::DebuggerModel>,
     self_weak: Rc<RefCell<std::rc::Weak<Ui>>>,
     source_open_generation: Arc<AtomicU64>,
@@ -1613,6 +1616,7 @@ pub struct Ui {
 }
 
 struct Topbar {
+    replay_controls: replay::ReplayControls,
     root: gtk::HeaderBar,
     session_button: gtk::ToggleButton,
     session_popover: gtk::Popover,

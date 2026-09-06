@@ -11,7 +11,7 @@ use clap::{Parser, error::ErrorKind};
 use crate::{cpp_toolchain::GccPrettyPrinter, rust_toolchain::RustToolchain};
 
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
-const DEFAULT_CONFIG: &str = "# fgdb configuration\n# Environment variables override these values for one launch.\ngdb=gdb\ngdb_args=\nsource_path=\n# Pretty-printer scripts execute inside GDB. Use the platform path separator for multiple scripts.\n# pretty_printer_path=/path/to/printer.py\ngef_context=hide\nsafe_mode=false\n# Move source breakpoints to GDB's next executable line in the same file.\n# Set false to require the exact clicked line.\nbreakpoint_auto_relocate=true\n# working_directory=/path/to/project\n\n# Named profiles can contain these settings and a startup session.\n# [profile example]\n# executable=/path/to/program\n# arguments=--flag 'argument with spaces'\n# working_directory=/path/to/project\n";
+const DEFAULT_CONFIG: &str = "# fgdb configuration\n# Environment variables override these values for one launch.\ngdb=gdb\ngdb_args=\nsource_path=\n# Pretty-printer scripts execute inside GDB. Use the platform path separator for multiple scripts.\n# pretty_printer_path=/path/to/printer.py\ngef_context=hide\nsafe_mode=false\n# Move source breakpoints to GDB's next executable line in the same file.\n# Set false to require the exact clicked line.\nbreakpoint_auto_relocate=true\n# working_directory=/path/to/project\n\n# Execution history. Recording is started explicitly from the direction menu.\nrr=rr\nrecord_full_limit=200000\nrecord_btrace_buffer_kib=64\n\n# Named profiles can contain these settings and a startup session.\n# [profile example]\n# executable=/path/to/program\n# arguments=--flag 'argument with spaces'\n# working_directory=/path/to/project\n";
 const DEFAULT_SECTION: &str = "<default>";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,6 +119,9 @@ impl ConfigurationReport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DebugSession {
+    RrReplay {
+        trace_directory: PathBuf,
+    },
     Launch {
         executable: PathBuf,
         arguments: Vec<String>,
@@ -144,6 +147,7 @@ pub enum DebugSession {
 impl DebugSession {
     pub fn executable(&self) -> Option<&std::path::Path> {
         match self {
+            Self::RrReplay { .. } => None,
             Self::Launch { executable, .. } | Self::CoreDump { executable, .. } => Some(executable),
             Self::Attach { executable, .. } | Self::Remote { executable, .. } => {
                 executable.as_deref()
@@ -153,6 +157,7 @@ impl DebugSession {
 
     pub fn title(&self) -> String {
         match self {
+            Self::RrReplay { trace_directory } => trace_directory.display().to_string(),
             Self::Launch { executable, .. } => executable.to_string_lossy().into_owned(),
             Self::Attach { pid, executable } => executable.as_ref().map_or_else(
                 || format!("PID {pid}"),
@@ -179,6 +184,7 @@ impl DebugSession {
 
     pub const fn kind_label(&self) -> &'static str {
         match self {
+            Self::RrReplay { .. } => "rr replay",
             Self::Launch { .. } => "Launch",
             Self::Attach { .. } => "Attached",
             Self::CoreDump { .. } => "Core dump",
@@ -206,11 +212,11 @@ impl DebugSession {
     }
 
     pub const fn supports_restart(&self) -> bool {
-        self.can_start()
+        self.can_start() || matches!(self, Self::RrReplay { .. })
     }
 
     pub const fn supports_kill(&self) -> bool {
-        !matches!(self, Self::CoreDump { .. })
+        !matches!(self, Self::CoreDump { .. } | Self::RrReplay { .. })
     }
 
     pub const fn supports_detach(&self) -> bool {
@@ -222,13 +228,17 @@ impl DebugSession {
             Self::Launch {
                 working_directory, ..
             } => Some(working_directory),
-            Self::Attach { .. } | Self::CoreDump { .. } | Self::Remote { .. } => None,
+            Self::Attach { .. }
+            | Self::CoreDump { .. }
+            | Self::Remote { .. }
+            | Self::RrReplay { .. } => None,
         }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct LaunchConfig {
+    pub replay: ReplayConfig,
     pub gdb_executable: String,
     pub gdb_startup_arguments: Vec<String>,
     pub gef_context_visible: bool,
@@ -241,6 +251,28 @@ pub struct LaunchConfig {
     rust_toolchain: Option<Arc<RustToolchain>>,
     initial_session: Option<DebugSession>,
     configuration_report: Arc<ConfigurationReport>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ReplayConfig {
+    pub rr_executable: String,
+    pub full_instruction_limit: u32,
+    pub btrace_buffer_kib: u32,
+}
+
+impl ReplayConfig {
+    pub(crate) const FULL_INSTRUCTION_LIMIT: std::ops::RangeInclusive<u32> = 1..=10_000_000;
+    pub(crate) const BTRACE_BUFFER_KIB: std::ops::RangeInclusive<u32> = 4..=65_536;
+}
+
+impl Default for ReplayConfig {
+    fn default() -> Self {
+        Self {
+            rr_executable: String::from("rr"),
+            full_instruction_limit: 200_000,
+            btrace_buffer_kib: 64,
+        }
+    }
 }
 
 impl LaunchConfig {
@@ -445,6 +477,10 @@ impl std::error::Error for StartupError {}
     disable_help_subcommand = true
 )]
 struct Cli {
+    /// Open an existing rr recording in a managed replay session
+    #[arg(long = "rr", value_name = "TRACE_DIRECTORY")]
+    rr_trace: Option<PathBuf>,
+
     /// Attach to a local process ID
     #[arg(long, value_name = "PID")]
     attach: Option<u32>,
@@ -488,6 +524,9 @@ struct Cli {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ConfigLayer {
+    rr_executable: Option<String>,
+    record_full_limit: Option<u32>,
+    record_btrace_buffer_kib: Option<u32>,
     gdb_executable: Option<String>,
     gdb_startup_arguments: Option<String>,
     gef_context_visible: Option<bool>,
@@ -520,6 +559,9 @@ impl ConfigLayer {
         }
 
         overlay_fields!(
+            rr_executable,
+            record_full_limit,
+            record_btrace_buffer_kib,
             gdb_executable,
             gdb_startup_arguments,
             gef_context_visible,
@@ -750,6 +792,9 @@ fn parse_profile_header(line: &str) -> Result<String, String> {
 
 fn canonical_config_key(key: &str) -> Option<&'static str> {
     match key {
+        "rr" | "rr_executable" => Some("rr"),
+        "record_full_limit" => Some("record_full_limit"),
+        "record_btrace_buffer_kib" => Some("record_btrace_buffer_kib"),
         "gdb" | "gdb_executable" => Some("gdb"),
         "gdb_args" | "gdb_arguments" => Some("gdb_args"),
         "gef_context" | "gef.context" => Some("gef_context"),
@@ -777,6 +822,41 @@ fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> 
     };
 
     match key {
+        "rr" => {
+            let executable = required()?;
+
+            if executable.contains(['\0', '\r', '\n']) {
+                return Err(String::from(
+                    "'rr' must be an executable path without NUL or line breaks",
+                ));
+            }
+
+            layer.rr_executable = Some(executable.to_owned());
+        }
+        "record_full_limit" | "record_btrace_buffer_kib" => {
+            let number = required()?
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid {key} value '{value}'"))?;
+            let range = if key == "record_full_limit" {
+                ReplayConfig::FULL_INSTRUCTION_LIMIT
+            } else {
+                ReplayConfig::BTRACE_BUFFER_KIB
+            };
+
+            if !range.contains(&number) {
+                return Err(format!(
+                    "{key} must be between {} and {}",
+                    range.start(),
+                    range.end()
+                ));
+            }
+
+            if key == "record_full_limit" {
+                layer.record_full_limit = Some(number);
+            } else {
+                layer.record_btrace_buffer_kib = Some(number);
+            }
+        }
         "gdb" => layer.gdb_executable = Some(required()?.to_owned()),
         "gdb_args" => layer.gdb_startup_arguments = Some(value.to_owned()),
         "gef_context" => {
@@ -1165,6 +1245,19 @@ fn resolve_launch_config(
     let initial_session = resolve_initial_session(&cli, &settings, &working_directory)?;
     let safe_mode = cli.safe_mode || settings.safe_mode.unwrap_or(false);
     let breakpoint_auto_relocate = settings.breakpoint_auto_relocate.unwrap_or(true);
+    let replay_defaults = ReplayConfig::default();
+    let replay = ReplayConfig {
+        rr_executable: settings
+            .rr_executable
+            .clone()
+            .unwrap_or(replay_defaults.rr_executable),
+        full_instruction_limit: settings
+            .record_full_limit
+            .unwrap_or(replay_defaults.full_instruction_limit),
+        btrace_buffer_kib: settings
+            .record_btrace_buffer_kib
+            .unwrap_or(replay_defaults.btrace_buffer_kib),
+    };
 
     let gdb_startup_arguments = if safe_mode {
         Vec::new()
@@ -1233,11 +1326,13 @@ fn resolve_launch_config(
             &working_directory,
             safe_mode,
             breakpoint_auto_relocate,
+            &replay,
             initial_session.as_ref(),
         ),
     });
 
     Ok(LaunchConfig {
+        replay,
         gdb_executable,
         gdb_startup_arguments,
         gef_context_visible: settings.gef_context_visible.unwrap_or(false),
@@ -1358,9 +1453,19 @@ fn effective_configuration(
     working_directory: &Path,
     safe_mode: bool,
     breakpoint_auto_relocate: bool,
+    replay: &ReplayConfig,
     initial_session: Option<&DebugSession>,
 ) -> Vec<EffectiveConfigurationEntry> {
     let mut entries = vec![
+        EffectiveConfigurationEntry::new("rr", &replay.rr_executable),
+        EffectiveConfigurationEntry::new(
+            "record_full_limit",
+            replay.full_instruction_limit.to_string(),
+        ),
+        EffectiveConfigurationEntry::new(
+            "record_btrace_buffer_kib",
+            replay.btrace_buffer_kib.to_string(),
+        ),
         EffectiveConfigurationEntry::new("profile", selected_profile.unwrap_or("none")),
         EffectiveConfigurationEntry::new("gdb", gdb_executable),
         EffectiveConfigurationEntry::new(
@@ -1415,6 +1520,12 @@ fn effective_configuration(
     ];
 
     match initial_session {
+        Some(DebugSession::RrReplay { trace_directory }) => {
+            entries.push(EffectiveConfigurationEntry::new(
+                "rr_trace",
+                trace_directory.display().to_string(),
+            ));
+        }
         Some(DebugSession::Launch {
             executable,
             arguments,
@@ -1487,18 +1598,31 @@ fn resolve_initial_session(
 ) -> Result<Option<DebugSession>, String> {
     let explicit_modes = usize::from(cli.attach.is_some())
         + usize::from(cli.core.is_some())
-        + usize::from(cli.remote.is_some());
+        + usize::from(cli.remote.is_some())
+        + usize::from(cli.rr_trace.is_some());
 
     if explicit_modes > 1 {
         return Err(String::from(
-            "--attach, --core, and --remote cannot be used together",
+            "--attach, --core, --remote, and --rr cannot be used together",
         ));
     }
 
     if cli.target.is_some() && (explicit_modes > 0 || cli.executable.is_some()) {
         return Err(String::from(
-            "A positional executable cannot be combined with --attach, --core, --remote, or --executable",
+            "A positional executable cannot be combined with --attach, --core, --remote, --rr, or --executable",
         ));
+    }
+
+    if let Some(trace_directory) = cli.rr_trace.as_ref() {
+        if cli.executable.is_some() || !cli.target_arguments.is_empty() {
+            return Err(String::from(
+                "rr replay obtains its executable and arguments from the trace",
+            ));
+        }
+
+        return Ok(Some(DebugSession::RrReplay {
+            trace_directory: working_directory.join(trace_directory),
+        }));
     }
 
     if let Some(executable) = cli.target.as_ref() {
@@ -1711,6 +1835,7 @@ mod tests {
     #[test]
     fn assembles_special_gef_startup_before_launch_target() {
         let mut configuration = LaunchConfig {
+            replay: super::ReplayConfig::default(),
             gdb_executable: String::from("/usr/bin/gdb"),
             gdb_startup_arguments: vec![String::from("-ex"), String::from("init-gef-special")],
             gef_context_visible: false,
@@ -1789,6 +1914,53 @@ mod tests {
         );
 
         assert!(configuration.needs_deferred_session_configuration());
+    }
+
+    #[test]
+    fn rr_sessions_and_recording_configuration_are_explicit_and_bounded() {
+        let configuration = resolve(
+            &["fgdb", "--rr", "trace with spaces"],
+            "rr=/opt/rr/bin/rr\nrecord_full_limit=400000\nrecord_btrace_buffer_kib=128\n",
+        );
+        assert_eq!(
+            configuration.initial_session(),
+            Some(DebugSession::RrReplay {
+                trace_directory: PathBuf::from("/current/trace with spaces"),
+            })
+        );
+        assert_eq!(configuration.replay.rr_executable, "/opt/rr/bin/rr");
+        assert_eq!(configuration.replay.full_instruction_limit, 400_000);
+        assert_eq!(configuration.replay.btrace_buffer_kib, 128);
+        assert!(configuration.needs_deferred_session_configuration());
+
+        for args in [
+            vec!["fgdb", "--rr", "trace", "--attach", "42"],
+            vec!["fgdb", "--rr", "trace", "/tmp/program"],
+            vec!["fgdb", "--rr", "trace", "--executable", "/tmp/program"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let loaded = loaded_config_from_contents(PathBuf::from("/tmp/config.conf"), "", false);
+            assert!(
+                resolve_launch_config(
+                    cli,
+                    &loaded,
+                    EnvironmentOverrides::default(),
+                    PathBuf::from("/current")
+                )
+                .is_err()
+            );
+        }
+
+        let configuration = resolve(
+            &["fgdb"],
+            "record_full_limit=0\nrecord_btrace_buffer_kib=4294967295\n",
+        );
+        assert_eq!(configuration.configuration_report().issues().len(), 2);
+        assert_eq!(configuration.replay.full_instruction_limit, 200_000);
+        assert_eq!(configuration.replay.btrace_buffer_kib, 64);
+        assert!(
+            super::set_config_value(&mut ConfigLayer::default(), "rr", "rr\0unexpected").is_err()
+        );
     }
 
     #[test]

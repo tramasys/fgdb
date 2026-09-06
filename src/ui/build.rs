@@ -113,26 +113,36 @@ pub(super) fn build_topbar(
     topbar.pack_start(&leading);
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     controls.add_css_class("execution-controls");
+    let replay_controls = replay::ReplayControls::new(&config.replay);
+    controls.append(&replay_controls.button);
     let run = control_button("Run", "Start or continue the inferior\nF5", true);
     let pause = control_button("Pause", "Interrupt the inferior\nF6", false);
-    let next = control_button("Next", "Step over the current source line\nF10", false);
-    let step = control_button("Step", "Step into the current source line\nF11", false);
+    let next = control_button(
+        "Next",
+        "Step over a source line in the selected direction\nF10",
+        false,
+    );
+    let step = control_button(
+        "Step",
+        "Step into a source line in the selected direction\nF11",
+        false,
+    );
 
     let next_instruction = control_button(
         "Nexti",
-        "Execute one machine instruction, stepping over calls\nCtrl+F10",
+        "Step one instruction in the selected direction, stepping over calls\nCtrl+F10",
         false,
     );
 
     let step_instruction = control_button(
         "Stepi",
-        "Execute one machine instruction, stepping into calls\nCtrl+F11",
+        "Step one instruction in the selected direction, stepping into calls\nCtrl+F11",
         false,
     );
 
     let finish = control_button(
         "Finish",
-        "Run until the current function returns\nShift+F11",
+        "Finish the current function, or reverse to its entry\nShift+F11",
         false,
     );
 
@@ -256,6 +266,7 @@ pub(super) fn build_topbar(
     topbar.pack_end(&trailing);
 
     Topbar {
+        replay_controls,
         root: topbar,
         session_button,
         session_popover,

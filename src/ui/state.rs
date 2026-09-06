@@ -1,4 +1,5 @@
 use super::*;
+use crate::model::TargetConnection;
 
 impl Ui {
     pub fn build(
@@ -83,6 +84,7 @@ impl Ui {
         let source_tree_base_roots = source::search_roots(config);
 
         let ui = Self {
+            replay_controls: topbar.replay_controls,
             model,
             self_weak: Rc::new(RefCell::new(std::rc::Weak::new())),
             source_open_generation: Arc::new(AtomicU64::new(0)),
@@ -596,6 +598,15 @@ impl Ui {
             let (command, detail) = {
                 let session = ui.model.session();
 
+                if !debugger_state.inferior_started()
+                    && matches!(session.as_ref(), Some(DebugSession::RrReplay { .. }))
+                    && debugger_state.target_connection() == TargetConnection::Remote
+                {
+                    drop(session);
+                    ui.restart_rr_replay();
+                    return;
+                }
+
                 if debugger_state.inferior_started() {
                     if session
                         .as_ref()
@@ -631,7 +642,14 @@ impl Ui {
                 }
             };
 
-            issue_execution_command(&ui, &client_for_run, &command, detail);
+            match ui.model.directional_command(&command) {
+                Ok(command) => {
+                    issue_execution_command(&ui, &client_for_run, &command, detail);
+                }
+                Err(message) => {
+                    ui.set_status("Execution unavailable", message, Some("status-error"))
+                }
+            }
         });
 
         let client_for_pause = Rc::clone(client);
@@ -1311,12 +1329,22 @@ impl Ui {
 
         let can_start =
             configured_target_can_start(session.as_ref(), debugger_state.target_connection());
+        let rr_replay = matches!(session.as_ref(), Some(DebugSession::RrReplay { .. }))
+            && debugger_state.target_connection() == TargetConnection::Remote;
 
         let can_inspect = ready && started && !running && !pending && !stale;
         let can_synchronize = self.model.debugger_synchronization_available();
 
-        let can_move =
-            ready && started && !running && !execution_blocked && !stale && supports_execution;
+        let direction_available = self.model.execution_direction()
+            == crate::model::replay::ExecutionDirection::Forward
+            || self.model.reverse_available();
+        let can_move = ready
+            && started
+            && !running
+            && !execution_blocked
+            && !stale
+            && supports_execution
+            && direction_available;
 
         let can_manage_watches = ready && !running && !pending;
         let expression = self.expression_watch_entry.text();
@@ -1331,14 +1359,17 @@ impl Ui {
             busy,
             stop_point_busy: ready && (busy || stale),
             run: ready
+                && direction_available
                 && !running
                 && !execution_blocked
-                && ((started && supports_execution) || (!started && can_start && !stale)),
+                && ((started && supports_execution)
+                    || (!started && (can_start || rr_replay) && !stale)),
             pause: ready
                 && started
                 && !self.model.execution().session_pending
                 && (until_active || (running && !self.model.execution().command_pending)),
             move_target: can_move,
+            until: can_move && self.model.directional_command("-exec-until").is_ok(),
             inspect: can_inspect,
             syntax: self.disassembly_controls.syntax_applicable.get(),
             gef_tools: self.gef_available.get() && ready && !running && !pending,
@@ -1373,7 +1404,7 @@ impl Ui {
             session: (ready || self.model.gdb_recovery_required()) && !pending,
             new_session: ready && !pending && !running && can_replace_session,
             restart_session: ready
-                && started
+                && (started || rr_replay)
                 && !running
                 && !pending
                 && session.as_ref().is_some_and(DebugSession::supports_restart),
@@ -1409,6 +1440,7 @@ impl Ui {
 
         drop(breakpoints);
         drop(session);
+        self.replay_controls.render(&self.model);
         let previous_state = *self.applied_control_state.borrow();
 
         if previous_state.as_ref() == Some(&state) {
@@ -1434,7 +1466,7 @@ impl Ui {
             set_transient_execution_sensitive(button, state.move_target, state.busy);
         }
 
-        set_transient_execution_sensitive(&self.until_button, state.move_target, state.busy);
+        set_transient_execution_sensitive(&self.until_button, state.until, state.busy);
 
         self.disassembly_controls
             .syntax_intel

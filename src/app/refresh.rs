@@ -32,6 +32,8 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
         return;
     }
 
+    replay::refresh(ui, client, false);
+
     let Some(context) = current_ui.begin_stop_refresh(client.transport_epoch()) else {
         current_ui.set_debug_state_stale(true);
 

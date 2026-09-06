@@ -111,6 +111,10 @@ impl NativeUntilController {
     }
 
     pub(super) fn start(self: &Rc<Self>, action: UntilAction) {
+        if self.model.directional_command("-exec-until").is_err() {
+            return;
+        }
+
         let Some(ui) = self.ui.upgrade() else {
             return;
         };

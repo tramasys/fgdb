@@ -11,12 +11,27 @@ pub(super) struct SessionController {
     configured_environment: RefCell<HashSet<String>>,
     busy: Cell<bool>,
     generation: Cell<u64>,
+    rr_executable: String,
+    rr: RefCell<Option<Rc<super::rr::RrServer>>>,
+    rr_integration_loaded: Cell<bool>,
+    rr_starting: Cell<bool>,
 }
 
 enum SequenceCompletion {
+    PrepareRr(DebugSession),
     Configure(DebugSession),
     Kill,
     Detach,
+}
+
+impl SequenceCompletion {
+    fn configure(session: DebugSession) -> Self {
+        if matches!(session, DebugSession::RrReplay { .. }) {
+            Self::PrepareRr(session)
+        } else {
+            Self::Configure(session)
+        }
+    }
 }
 
 struct CommandSequence {
@@ -24,6 +39,14 @@ struct CommandSequence {
     commands: RefCell<VecDeque<SessionCommand>>,
     completion: RefCell<Option<SequenceCompletion>>,
     generation: u64,
+    epoch: u64,
+}
+
+impl CommandSequence {
+    fn current(&self) -> bool {
+        self.controller.generation.get() == self.generation
+            && self.controller.client.transport_epoch() == self.epoch
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -53,8 +76,13 @@ impl SessionController {
         ui: Weak<Ui>,
         client: Rc<MiClient>,
         model: Rc<crate::model::DebuggerModel>,
+        rr_executable: String,
     ) -> Rc<Self> {
         Rc::new(Self {
+            rr_executable,
+            rr: RefCell::new(None),
+            rr_integration_loaded: Cell::new(false),
+            rr_starting: Cell::new(false),
             model,
             ui,
             client,
@@ -94,7 +122,7 @@ impl SessionController {
             None,
         );
 
-        self.run_sequence(commands, SequenceCompletion::Configure(session));
+        self.run_sequence(commands, SequenceCompletion::configure(session));
     }
 
     pub fn configure_initial(self: &Rc<Self>, session: DebugSession) {
@@ -120,7 +148,7 @@ impl SessionController {
             return;
         };
 
-        self.run_sequence(commands, SequenceCompletion::Configure(session));
+        self.run_sequence(commands, SequenceCompletion::configure(session));
     }
 
     pub fn restore(self: &Rc<Self>, session: DebugSession) {
@@ -149,7 +177,7 @@ impl SessionController {
             return;
         };
 
-        self.run_sequence(commands, SequenceCompletion::Configure(session));
+        self.run_sequence(commands, SequenceCompletion::configure(session));
     }
 
     pub fn action(self: &Rc<Self>, action: SessionAction) {
@@ -225,12 +253,17 @@ impl SessionController {
             commands: RefCell::new(commands.into()),
             completion: RefCell::new(Some(completion)),
             generation,
+            epoch: self.client.transport_epoch(),
         });
 
         run_next(sequence);
     }
 
     fn fail(&self, message: &str) {
+        if self.rr_starting.replace(false) {
+            self.stop_rr();
+        }
+
         self.busy.set(false);
 
         if let Some(ui) = self.ui.upgrade() {
@@ -250,7 +283,12 @@ impl SessionController {
         );
     }
 
-    fn finish(&self, completion: SequenceCompletion) {
+    fn finish(self: &Rc<Self>, completion: SequenceCompletion) {
+        if let SequenceCompletion::PrepareRr(session) = completion {
+            self.start_rr(session);
+            return;
+        }
+
         self.busy.set(false);
 
         let Some(ui) = self.ui.upgrade() else {
@@ -261,6 +299,7 @@ impl SessionController {
 
         match completion {
             SequenceCompletion::Configure(session) => {
+                self.rr_starting.set(false);
                 self.client.refresh_pretty_printer_capabilities();
 
                 let environment = match &session {
@@ -269,11 +308,16 @@ impl SessionController {
                     }
 
                     DebugSession::Attach { .. }
+                    | DebugSession::RrReplay { .. }
                     | DebugSession::CoreDump { .. }
                     | DebugSession::Remote { .. } => HashSet::new(),
                 };
 
                 self.configured_environment.replace(environment);
+                if !matches!(session, DebugSession::RrReplay { .. }) {
+                    self.stop_rr();
+                }
+
                 ui.set_current_session(session.clone());
 
                 match session {
@@ -288,6 +332,7 @@ impl SessionController {
                     }
 
                     DebugSession::Attach { .. }
+                    | DebugSession::RrReplay { .. }
                     | DebugSession::CoreDump { .. }
                     | DebugSession::Remote { .. } => {
                         ui.set_status(
@@ -317,6 +362,7 @@ impl SessionController {
                 );
             }
             SequenceCompletion::Detach => {
+                self.stop_rr();
                 ui.set_debug_state_stale(false);
                 refresh_inferiors(&self.ui, &self.client);
 
@@ -326,6 +372,111 @@ impl SessionController {
                     Some("status-ready"),
                 );
             }
+            SequenceCompletion::PrepareRr(_) => unreachable!(),
+        }
+    }
+
+    pub(super) fn stop_rr(&self) {
+        let server = self.rr.borrow_mut().take();
+
+        if let Some(server) = server {
+            server.stop();
+        }
+    }
+
+    pub(super) fn backend_exited(&self) {
+        self.rr_starting.set(false);
+        self.rr_integration_loaded.set(false);
+        self.generation.set(self.generation.get().wrapping_add(1));
+        self.busy.set(false);
+        self.stop_rr();
+    }
+
+    pub(super) fn requires_fresh_backend(&self) -> bool {
+        self.rr_integration_loaded.get()
+    }
+
+    fn start_rr(self: &Rc<Self>, session: DebugSession) {
+        let DebugSession::RrReplay { trace_directory } = &session else {
+            return;
+        };
+
+        self.stop_rr();
+        let generation = self.generation.get();
+        self.rr_starting.set(true);
+        let epoch = self.client.transport_epoch();
+        let weak = Rc::downgrade(self);
+        let weak_exit = Rc::downgrade(self);
+        let session_for_ready = session.clone();
+        let result = super::rr::RrServer::start(
+            &self.rr_executable,
+            trace_directory,
+            move |result| {
+                let Some(controller) = weak.upgrade() else {
+                    return;
+                };
+
+                if controller.generation.get() != generation
+                    || controller.client.transport_epoch() != epoch
+                {
+                    return;
+                }
+
+                match result {
+                    Ok((endpoint, script)) => {
+                        let source = match CliCommandBuilder::new("source").verbatim_tail(&script) {
+                            Ok(script) => script,
+                            Err(error) => {
+                                controller.fail(error);
+                                return;
+                            }
+                        };
+
+                        let commands = vec![
+                            SessionCommand::new(file_command(None)),
+                            SessionCommand::new(console_command("set sysroot /")),
+                            SessionCommand::new(console_command("set non-stop off")),
+                            SessionCommand::new(source.finish()),
+                            SessionCommand::with_state(
+                                CliCommandBuilder::new("target")
+                                    .keyword("extended-remote")
+                                    .verbatim_tail(&endpoint)
+                                    .expect("validated loopback endpoint")
+                                    .finish(),
+                                DebuggerStateDelta::establish_connection(TargetConnection::Remote),
+                            ),
+                        ];
+
+                        // rr installs global Python commands and stop hooks. A later
+                        // session must get a fresh backend rather than inherit them.
+                        controller.rr_integration_loaded.set(true);
+                        controller.run_sequence(
+                            commands,
+                            SequenceCompletion::Configure(session_for_ready),
+                        );
+                    }
+                    Err(error) => controller.fail(&error),
+                }
+            },
+            move |message| {
+                if let Some(controller) = weak_exit.upgrade()
+                    && controller.client.transport_epoch() == epoch
+                    && (controller.rr_starting.get()
+                        || matches!(
+                            controller.model.current_session(),
+                            Some(DebugSession::RrReplay { .. })
+                        ))
+                {
+                    controller.client.quarantine(message);
+                }
+            },
+        );
+
+        match result {
+            Ok(server) => {
+                self.rr.replace(Some(server));
+            }
+            Err(error) => self.fail(&error),
         }
     }
 }
@@ -407,6 +558,10 @@ fn establish_session_target(ui: &Weak<Ui>, client: &MiClient, kind: &'static str
 }
 
 fn run_next(sequence: Rc<CommandSequence>) {
+    if !sequence.current() {
+        return;
+    }
+
     let Some(command) = sequence.commands.borrow_mut().pop_front() else {
         if let Some(completion) = sequence.completion.borrow_mut().take() {
             sequence.controller.finish(completion);
@@ -419,16 +574,15 @@ fn run_next(sequence: Rc<CommandSequence>) {
     let sequence_for_guard = Rc::clone(&sequence);
     let state_after = command.state_after;
 
-    if let Err(error) = sequence
-        .controller
-        .client
-        .request_for_session(
-            &command.text,
-            sequence.generation,
-            move || {
-                sequence_for_guard.controller.generation.get() == sequence_for_guard.generation
-            },
-            move |client, record| {
+    let result = sequence.controller.client.request_for_session(
+        &command.text,
+        sequence.generation,
+        move || sequence_for_guard.current(),
+        move |_, record| {
+            if !sequence_for_response.current() {
+                return;
+            }
+
             if record.is_success() {
                 if let Some(delta) = state_after
                     && let Some(ui) = sequence_for_response.controller.ui.upgrade()
@@ -438,10 +592,10 @@ fn run_next(sequence: Rc<CommandSequence>) {
 
                 run_next(sequence_for_response);
             } else if record.class == "timeout" {
-                sequence_for_response.controller.busy.set(false);
-
-                client.quarantine(
-                    "GDB did not answer a session command within 30 seconds. The target and session state can no longer be determined safely.",
+                // The transport decides whether a timed-out command reached GDB.
+                // An unsent session request can fail without retiring the backend.
+                sequence_for_response.controller.fail(
+                    "GDB did not answer. Refresh debugger state or restart GDB before retrying",
                 );
             } else {
                 sequence_for_response.controller.fail(
@@ -450,9 +604,10 @@ fn run_next(sequence: Rc<CommandSequence>) {
                         .unwrap_or("GDB rejected the session command"),
                 );
             }
-            },
-        )
-    {
+        },
+    );
+
+    if let Err(error) = result {
         sequence
             .controller
             .fail(&format!("Could not queue a GDB command: {error}"));
@@ -484,6 +639,7 @@ fn cleanup_commands(
                 SessionCommand::with_state("-target-detach", DebuggerStateDelta::clear_inferior()),
             ),
             Some(DebugSession::Launch { .. })
+            | Some(DebugSession::RrReplay { .. })
             | Some(DebugSession::Attach { .. })
             | Some(DebugSession::CoreDump { .. })
             | Some(DebugSession::Remote { .. })
@@ -509,6 +665,7 @@ pub(super) fn shutdown_cleanup_command(
             }
 
             Some(DebugSession::Launch { .. })
+            | Some(DebugSession::RrReplay { .. })
             | Some(DebugSession::Attach { .. })
             | Some(DebugSession::CoreDump { .. })
             | Some(DebugSession::Remote { .. })
@@ -534,6 +691,7 @@ fn session_commands(
     }
 
     match session {
+        DebugSession::RrReplay { .. } => {}
         DebugSession::Launch {
             executable,
             arguments,

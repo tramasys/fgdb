@@ -316,6 +316,7 @@ impl DebuggerModel {
     }
 
     pub(crate) fn set_current_session(&self, session: DebugSession) {
+        self.reset_replay();
         self.execution.current_session.replace(Some(session));
     }
 

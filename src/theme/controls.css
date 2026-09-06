@@ -83,11 +83,23 @@ flowbox.ui-action-flow > flowboxchild {
 }
 
 button.debug-control,
+menubutton.debug-control > button,
 button.toolbar-action,
 button.toolbar-toggle {
     min-height: 24px;
     padding: 2px 8px;
     border: 0;
+}
+
+menubutton.debug-control > button > box {
+    margin: 0;
+    padding: 0;
+}
+
+.execution-direction-arrow {
+    margin: 0;
+    padding: 0;
+    -gtk-icon-size: 12px;
 }
 
 button.toolbar-action,

@@ -126,6 +126,8 @@ mod lifecycle;
 mod lifecycle_reducer;
 mod misc;
 mod refresh;
+mod replay;
+mod rr;
 mod session;
 mod source_control;
 mod stop_requests;

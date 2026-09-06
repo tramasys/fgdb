@@ -365,7 +365,25 @@ impl Ui {
         append_page_actions(&remote_page, &connect_remote, &editor);
         notebook.append_page(&remote_page, Some(&gtk::Label::new(Some("Remote"))));
 
+        let rr_page = session_page(Some(
+            "Open an existing rr trace. fgdb starts a private loopback replay server and connects GDB automatically. Record new traces with rr record PROGRAM in a terminal. Switching to another session uses a fresh GDB backend to remove rr's hooks.",
+        ));
+        let rr_trace = gtk::Entry::builder()
+            .placeholder_text("/path/to/rr/trace")
+            .hexpand(true)
+            .build();
+        let rr_grid = form_grid();
+        add_path_field(&rr_grid, 0, "Trace directory", &rr_trace, &editor, true);
+        rr_page.append(&rr_grid);
+        let open_rr = gtk::Button::with_label("Open rr trace");
+        append_page_actions(&rr_page, &open_rr, &editor);
+        notebook.append_page(&rr_page, Some(&gtk::Label::new(Some("rr replay"))));
+
         let selected_page = match current_session.as_ref() {
+            Some(DebugSession::RrReplay { trace_directory }) => {
+                rr_trace.set_text(&trace_directory.to_string_lossy());
+                4
+            }
             Some(DebugSession::Launch {
                 executable,
                 arguments,
@@ -443,7 +461,7 @@ impl Ui {
                 Some(DebugSession::CoreDump { .. })
             );
 
-        for button in [&launch, &attach, &open_core, &connect_remote] {
+        for button in [&launch, &attach, &open_core, &connect_remote, &open_rr] {
             button.set_sensitive(!active_live_target);
 
             if active_live_target {
@@ -499,7 +517,7 @@ impl Ui {
 
         let handler = Rc::clone(&self.session_handler);
         let editor_for_remote = editor.clone();
-        let validation_for_remote = validation;
+        let validation_for_remote = validation.clone();
 
         connect_remote.connect_clicked(move |_| {
             submit_session(
@@ -512,6 +530,18 @@ impl Ui {
                 &handler,
                 &editor_for_remote,
                 &validation_for_remote,
+            );
+        });
+
+        let handler = Rc::clone(&self.session_handler);
+        let editor_for_rr = editor.clone();
+        open_rr.connect_clicked(move |_| {
+            submit_session(
+                required_directory(rr_trace.text().as_str(), "rr trace directory")
+                    .map(|trace_directory| DebugSession::RrReplay { trace_directory }),
+                &handler,
+                &editor_for_rr,
+                &validation,
             );
         });
 

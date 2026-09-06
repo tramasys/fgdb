@@ -2395,6 +2395,25 @@ impl MiClient {
                     },
                 );
             }
+            '=' if matches!(record.class.as_str(), "record-started" | "record-stopped") => {
+                if let Some(group_id) = record.field("thread-group").and_then(MiValue::as_const) {
+                    (self.event_handler)(
+                        self,
+                        MiEvent::RecordingChanged {
+                            group_id: group_id.to_owned(),
+                            started: record.class == "record-started",
+                            method: record
+                                .field("method")
+                                .and_then(MiValue::as_const)
+                                .map(str::to_owned),
+                            format: record
+                                .field("format")
+                                .and_then(MiValue::as_const)
+                                .map(str::to_owned),
+                        },
+                    );
+                }
+            }
             '=' if record.class == "cmd-param-changed" => {
                 let Some(parameter) = record
                     .field("param")

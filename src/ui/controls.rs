@@ -289,7 +289,14 @@ pub(super) fn connect_execution_button(
         if let Some(ui) = weak_ui.upgrade()
             && ui.model.movement_commands_available()
         {
-            issue_execution_command(&ui, &client, command, detail);
+            match ui.model.directional_command(command) {
+                Ok(command) => {
+                    issue_execution_command(&ui, &client, &command, detail);
+                }
+                Err(message) => {
+                    ui.set_status("Execution unavailable", message, Some("status-error"))
+                }
+            }
         }
     });
 }

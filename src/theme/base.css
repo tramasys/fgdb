@@ -23,6 +23,23 @@ popover {
     font-size: 12px;
 }
 
+window.message,
+window.message:backdrop {
+    background: @app_surface;
+    color: @app_fg;
+}
+
+window.message button {
+    background: @app_bg;
+    color: @app_fg;
+    padding: 6px 12px;
+}
+
+window.message button:hover,
+window.message button:focus-visible {
+    background: @app_hover;
+}
+
 window.fgdb-window,
 window.fgdb-window:backdrop,
 window.fgdb-window.csd,

@@ -156,6 +156,20 @@ impl BackendController {
 
         let weak = Rc::downgrade(self);
 
+        ui.set_session_handler(move |session| {
+            let Some(controller) = weak.upgrade() else {
+                return;
+            };
+
+            if controller.session.requires_fresh_backend() {
+                controller.restart_with_session(Some(session));
+            } else {
+                controller.session.configure(session);
+            }
+        });
+
+        let weak = Rc::downgrade(self);
+
         ui.window.connect_close_request(move |_| {
             weak.upgrade()
                 .map_or(glib::Propagation::Proceed, |controller| {
@@ -194,6 +208,10 @@ impl BackendController {
     }
 
     fn restart(self: &Rc<Self>) {
+        self.restart_with_session(self.model.current_session());
+    }
+
+    fn restart_with_session(self: &Rc<Self>, session: Option<DebugSession>) {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
@@ -204,14 +222,14 @@ impl BackendController {
 
         self.restart_requested.set(true);
         self.cancel_connection_timeout();
-        self.pending_restore.replace(self.model.current_session());
+        self.pending_restore.replace(session);
         ui.clear_gdb_capabilities();
         ui.set_controls_ready(false);
 
         if self.model.debugger_pid().is_some() {
             ui.set_status(
                 "Restarting GDB",
-                "Stopping the unresponsive debugger before opening a fresh backend…",
+                "Stopping the debugger before opening a fresh backend…",
                 None,
             );
 
@@ -280,6 +298,7 @@ impl BackendController {
                     .replace(DebuggerProcessHandle::capture(*pid));
             }
             SessionEvent::Failed(_) | SessionEvent::Exited(_) => {
+                self.session.backend_exited();
                 self.debugger_process.borrow_mut().take();
             }
         }

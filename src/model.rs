@@ -19,6 +19,7 @@ use std::{
 pub(crate) mod actions;
 mod execution;
 pub(crate) mod processes;
+pub(crate) mod replay;
 mod state;
 mod stopped;
 #[cfg(test)]
@@ -26,6 +27,7 @@ pub(crate) use execution::execution_event_matches_thread;
 pub(crate) use state::{DebuggerState, DebuggerStateDelta, TargetConnection};
 
 pub(crate) struct DebuggerModel {
+    pub(crate) replay: RefCell<replay::ReplayState>,
     execution: ExecutionState,
     processes: ProcessState,
     stopped: StoppedState,
@@ -34,6 +36,7 @@ pub(crate) struct DebuggerModel {
 impl DebuggerModel {
     pub(crate) fn new(initial_session: Option<DebugSession>) -> Self {
         Self {
+            replay: RefCell::new(replay::ReplayState::default()),
             execution: ExecutionState::new(initial_session),
             processes: ProcessState::new(),
             stopped: StoppedState::new(),
@@ -227,6 +230,7 @@ pub(crate) fn configured_target_can_start(
         }) => connection == TargetConnection::Remote,
         Some(
             DebugSession::Attach { .. }
+            | DebugSession::RrReplay { .. }
             | DebugSession::CoreDump { .. }
             | DebugSession::Remote { .. },
         ) => false,

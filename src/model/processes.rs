@@ -190,6 +190,8 @@ impl DebuggerModel {
     }
 
     pub(crate) fn record_inferior_started(&self, id: &str, pid: Option<u32>) {
+        self.invalidate_replay_target(id);
+
         if let Some(parent) = pid.and_then(|pid| {
             self.processes
                 .pending_fork_parents
@@ -811,6 +813,8 @@ impl DebuggerModel {
     }
 
     pub(crate) fn record_inferior_exited(&self, id: &str) {
+        self.invalidate_replay_target(id);
+
         self.processes
             .thread_inferior_ids
             .borrow_mut()
@@ -840,6 +844,7 @@ impl DebuggerModel {
     }
 
     pub(crate) fn clear_inferiors(&self) {
+        self.reset_replay();
         self.invalidate_stop_context();
         self.processes.threads.replace(Rc::from([]));
         self.processes.selected_thread_id.borrow_mut().take();

@@ -49,6 +49,12 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     };
 
     ui.connect_debug_controls(&mi_client);
+    let weak = Rc::downgrade(&ui);
+    let client = Rc::clone(&mi_client);
+    ui.connect_replay_actions(move |action| {
+        replay::handle(weak.clone(), Rc::clone(&client), action)
+    });
+
     ui.connect_source_actions();
     ui.connect_session_actions();
     ui.connect_configuration_actions();
@@ -97,12 +103,34 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         controller.on_stopped(reason, address, thread_id)
     });
 
-    let session_controller =
-        SessionController::new(Rc::downgrade(&ui), Rc::clone(&mi_client), Rc::clone(&model));
+    let session_controller = SessionController::new(
+        Rc::downgrade(&ui),
+        Rc::clone(&mi_client),
+        Rc::clone(&model),
+        launch_config.replay.rr_executable.clone(),
+    );
     let controller = Rc::clone(&session_controller);
-    ui.set_session_handler(move |session| controller.configure(session));
-    let controller = Rc::clone(&session_controller);
-    ui.set_session_action_handler(move |action| controller.action(action));
+    let weak = Rc::downgrade(&ui);
+    let client = Rc::clone(&mi_client);
+
+    ui.set_session_action_handler(move |action| {
+        if action == SessionAction::Restart
+            && weak.upgrade().is_some_and(|ui| {
+                matches!(
+                    ui.model.session().as_ref(),
+                    Some(DebugSession::RrReplay { .. })
+                )
+            })
+        {
+            replay::handle(
+                weak.clone(),
+                Rc::clone(&client),
+                crate::model::replay::ReplayAction::RestartReplay,
+            );
+        } else {
+            controller.action(action);
+        }
+    });
     let weak_ui = Rc::downgrade(&ui);
     let client = Rc::clone(&mi_client);
 

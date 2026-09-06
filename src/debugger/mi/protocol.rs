@@ -2,6 +2,12 @@
 pub enum MiEvent {
     Ready(GdbCapabilities),
     CapabilitiesChanged(GdbCapabilities),
+    RecordingChanged {
+        group_id: String,
+        started: bool,
+        method: Option<String>,
+        format: Option<String>,
+    },
     InferiorsChanged,
     InferiorStarted {
         id: String,
@@ -125,6 +131,21 @@ pub struct MiRecord {
 }
 
 impl MiRecord {
+    pub fn has_feature(&self, name: &str) -> bool {
+        self.is_done()
+            && self
+                .field("features")
+                .and_then(MiValue::as_list)
+                .is_some_and(|features| {
+                    features.iter().any(|feature| {
+                        matches!(
+                            feature,
+                            MiListItem::Value(MiValue::Const(value)) if value == name
+                        )
+                    })
+                })
+    }
+
     pub fn field(&self, name: &str) -> Option<&MiValue> {
         result_field(&self.results, name)
     }

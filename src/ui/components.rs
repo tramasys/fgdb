@@ -2,6 +2,7 @@
 //! their existing owners, so a visual change cannot change command semantics.
 
 use super::*;
+use gtk::gdk;
 
 pub(super) const CONTROL_GAP: i32 = 6;
 pub(super) const CONTENT_INSET: i32 = 8;
@@ -25,6 +26,65 @@ pub(super) fn section_title(text: &str) -> gtk::Label {
 
 pub(super) fn control_row() -> gtk::Box {
     gtk::Box::new(gtk::Orientation::Horizontal, CONTROL_GAP)
+}
+
+/// Keep an outer popover dismissible after a nested dropdown releases its grab.
+/// GTK can leave the outer surface visible while routing input to the window.
+pub(super) fn keep_popover_dismissible(window: &gtk::ApplicationWindow, popover: &gtk::Popover) {
+    let weak = popover.downgrade();
+    let events = gtk::EventControllerLegacy::new();
+    events.set_propagation_phase(gtk::PropagationPhase::Capture);
+
+    // A retained popover can still be the event target for an outside click.
+    // Receive that event across its native-surface boundary.
+    events.set_propagation_limit(gtk::PropagationLimit::None);
+
+    events.connect_event(move |_, event| {
+        let dismiss = matches!(
+            event.event_type(),
+            gdk::EventType::ButtonPress | gdk::EventType::TouchBegin
+        ) || event.downcast_ref::<gdk::KeyEvent>().is_some_and(|key| {
+            event.event_type() == gdk::EventType::KeyPress && key.keyval() == gdk::Key::Escape
+        });
+
+        if !dismiss {
+            return glib::Propagation::Proceed;
+        }
+
+        let Some(popover) = weak.upgrade().filter(|popover| popover.is_visible()) else {
+            return glib::Propagation::Proceed;
+        };
+
+        let Some(popover_surface) = popover.surface() else {
+            return glib::Propagation::Proceed;
+        };
+
+        let Some(mut surface) = event.surface() else {
+            return glib::Propagation::Proceed;
+        };
+
+        loop {
+            // Dropdowns have their own native surfaces. Their events are still
+            // inside this popover and must reach the dropdown unchanged.
+            if surface == popover_surface {
+                return glib::Propagation::Proceed;
+            }
+
+            let Some(parent) = surface
+                .downcast_ref::<gdk::Popup>()
+                .and_then(|popup| popup.parent())
+            else {
+                break;
+            };
+
+            surface = parent;
+        }
+
+        popover.popdown();
+        glib::Propagation::Stop
+    });
+
+    window.add_controller(events);
 }
 
 pub(super) fn action_flow() -> gtk::FlowBox {
