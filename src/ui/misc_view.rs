@@ -1,12 +1,13 @@
 use super::*;
 
-const MISC_PAGES: [(&str, &str); 7] = [
+const MISC_PAGES: [(&str, &str); 8] = [
     ("startup-vectors", "Args / Env"),
     ("auxv", "Auxv"),
     ("call-abi", "Call ABI"),
     ("cfg", "CFG"),
     ("allocator", "Allocator"),
     ("locks", "Locks"),
+    ("syscalls", "Syscalls"),
     ("core-dump", "Core dump"),
 ];
 const LOCKS_NOTE: &str = "This is a stopped-process wait snapshot from /proc/<pid>/task. It reports futex waiters and shared wait addresses.";
@@ -146,6 +147,8 @@ pub(super) fn build_misc_view(theme: &Theme) -> MiscView {
     pages.add_titled(&allocator.root, Some("allocator"), "Allocator");
     let locks = build_locks_page();
     pages.add_titled(&locks.root, Some("locks"), "Locks");
+    let syscalls = syscall_view::SyscallView::new();
+    pages.add_titled(&syscalls.root, Some("syscalls"), "Syscalls");
     let core = build_core_page();
     pages.add_titled(&core.root, Some("core-dump"), "Core dump");
     root.append(&pages);
@@ -159,6 +162,7 @@ pub(super) fn build_misc_view(theme: &Theme) -> MiscView {
         needs_refresh,
         pages,
         cfg,
+        syscalls,
         allocator_requested,
         allocator_probe_fresh,
         allocator_probe_cache: Rc::new(RefCell::new(None)),
@@ -1687,7 +1691,7 @@ fn build_environment_section(
     (section, store, empty, filter)
 }
 
-fn configure_misc_scroller(scrolled: &gtk::ScrolledWindow) {
+pub(super) fn configure_misc_scroller(scrolled: &gtk::ScrolledWindow) {
     scrolled.set_min_content_width(0);
     scrolled.set_propagate_natural_width(false);
     scrolled.set_size_request(0, -1);

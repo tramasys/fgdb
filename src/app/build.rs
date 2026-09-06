@@ -53,6 +53,24 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     ui.connect_session_actions();
     ui.connect_configuration_actions();
     ui.connect_debug_data_actions();
+    let syscall_controller = syscalls::SyscallController::new(
+        Rc::downgrade(&ui),
+        Rc::clone(&model),
+        Rc::clone(&mi_client),
+    );
+
+    let controller = Rc::clone(&syscall_controller);
+    ui.connect_syscall_actions(move |action| controller.handle(action));
+    let controller = Rc::downgrade(&syscall_controller);
+
+    ui.window.connect_close_request(move |_| {
+        if let Some(controller) = controller.upgrade() {
+            controller.stop();
+        }
+
+        gtk::glib::Propagation::Proceed
+    });
+
     let weak_ui = Rc::downgrade(&ui);
     let client = Rc::clone(&mi_client);
 

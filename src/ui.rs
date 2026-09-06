@@ -34,6 +34,8 @@ use log_view::{ApplicationLog, LogLevel};
 mod source_breakpoints;
 mod source_loading;
 mod source_navigation;
+mod syscall_view;
+pub(crate) use syscall_view::SyscallAction;
 mod value;
 
 use crate::model::DebuggerStateDelta;
@@ -1062,6 +1064,7 @@ struct MiscView {
     needs_refresh: Rc<Cell<bool>>,
     pages: gtk::Stack,
     cfg: CfgView,
+    syscalls: syscall_view::SyscallView,
     allocator_requested: Rc<Cell<bool>>,
     allocator_probe_fresh: Rc<Cell<bool>>,
     allocator_probe_cache: Rc<RefCell<Option<crate::misc::AllocatorProbe>>>,

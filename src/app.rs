@@ -131,6 +131,7 @@ mod source_control;
 mod stop_requests;
 use stop_requests::{edit_requests, stop_requests};
 mod symbols;
+mod syscalls;
 mod threads;
 mod type_metadata;
 mod until;

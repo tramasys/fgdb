@@ -13,6 +13,7 @@ mod model;
 mod performance;
 mod rust_toolchain;
 mod source;
+mod syscalls;
 mod theme;
 mod ui;
 
