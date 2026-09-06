@@ -269,6 +269,12 @@ impl Ui {
         self.cancel_running_context_render();
         let affected = self.model.mark_inferior_stopped(thread_id, all_stopped);
 
+        // Internal Until stops update authority without repainting every step.
+        // The final stopped-state refresh publishes the completed operation.
+        if self.model.native_until_active() {
+            return affected;
+        }
+
         if !self.model.inferiors().is_empty() {
             self.render_selected_inferior_state();
         }

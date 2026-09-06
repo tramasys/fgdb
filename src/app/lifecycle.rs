@@ -262,55 +262,16 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             ui.model.set_current_thread_id(thread_id.as_deref());
             ui.select_frame_in_view(frame_level.unwrap_or(0));
 
-            // The preceding *running event marks the inferior as running, but
-            // stopped-state queries intentionally refuse to run in that state.
-            // Clear it before populating context, source marks, registers and
-            // stack data.
-            ui.set_controls_running(false);
-
-            let handled_until = ui.handle_native_until_stop(
-                reason.as_deref(),
-                address.as_deref(),
-                thread_id.as_deref(),
-            );
-
-            if handled_until {
-                // Internal Until stops deliberately avoid rebuilding every
-                // inspector. The terminal stop that completes the operation
-                // must still reconcile the process/thread model.
-                if !ui.model.native_until_active() {
-                    let inferior_transition_affected =
-                        ui.mark_inferior_stopped(thread_id.as_deref(), terminal_all_stopped);
-
-                    if inferior_transition_affected {
-                        ui.finish_inferior_execution_action();
-                    }
-
-                    if thread_action_affected {
-                        ui.finish_thread_execution_action();
-                    }
-
-                    let execution_transition_affected = if transition_targets_group {
-                        inferior_transition_affected
-                    } else {
-                        thread_transition_affected
-                    };
-
-                    if execution_transition_affected {
-                        ui.finish_execution_transition();
-                        ui.set_command_pending(false);
-                    }
-
-                    refresh_inferiors(weak_ui, client);
-                }
-
-                return;
-            }
-
             ui.model.record_pending_fork(thread_id.as_deref(), fork_pid);
 
+            // Reconcile every stop before Until can inspect or complete it.
+            // Completion may be synchronous or follow an MI reply. Applying
+            // this later either revokes the freshly bound stop context or
+            // leaves the process model running after asynchronous completion.
             let inferior_transition_affected =
                 ui.mark_inferior_stopped(thread_id.as_deref(), terminal_all_stopped);
+
+            ui.set_controls_running(false);
 
             if inferior_transition_affected {
                 ui.finish_inferior_execution_action();
@@ -331,7 +292,14 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 ui.set_command_pending(false);
             }
 
-            refresh_inferiors(weak_ui, client);
+            if ui.handle_native_until_stop(
+                reason.as_deref(),
+                address.as_deref(),
+                thread_id.as_deref(),
+            ) {
+                return;
+            }
+
             drop(ui);
             finish_stopped_state(weak_ui, client, reason, signal_name, signal_meaning, None);
         }
@@ -601,6 +569,7 @@ pub(super) fn finish_stopped_state(
         refresh_breakpoints(weak_ui, client);
     } else {
         ui.set_inferior_started(true);
+        refresh_inferiors(weak_ui, client);
         refresh_stopped_state(weak_ui, client);
     }
 
