@@ -3781,6 +3781,8 @@ impl Ui {
         }
 
         populate_warnings(&self.kernel_view.warnings, &[error.to_owned()]);
+        self.application_log
+            .record(LogLevel::Error, "Kernel snapshot failed", error);
     }
 
     pub fn refresh_kernel_after_stop(&self) {

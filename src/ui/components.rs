@@ -54,6 +54,14 @@ pub(super) fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
         .build()
 }
 
+pub(super) fn workspace_toggle(text: &str, tooltip: &str) -> gtk::ToggleButton {
+    gtk::ToggleButton::builder()
+        .label(text)
+        .tooltip_text(tooltip)
+        .css_classes(["toolbar-toggle", "workspace-pane-toggle"])
+        .build()
+}
+
 /// An entry for immediate filtering. Callers retain their existing debounce
 /// policy. The primary icon is decorative and only the clear icon is active.
 pub(super) fn search_entry(placeholder: &str) -> gtk::Entry {

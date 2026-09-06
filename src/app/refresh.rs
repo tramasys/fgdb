@@ -1770,7 +1770,7 @@ pub(super) fn complete_register_sequence(
     if let Some((ui, generation, registers)) = completed
         && let Some(ui) = ui.upgrade()
     {
-        ui.show_registers_for_refresh(generation, &registers);
+        ui.show_register_details_for_refresh(generation, &registers);
     } else {
         schedule_register_chains(client, Rc::clone(refresh));
     }

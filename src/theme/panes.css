@@ -119,6 +119,10 @@ headerbar.topbar button.window-control.close:active {
     border-bottom: 0;
 }
 
+.panel-header.application-log-header {
+    border-bottom: 0;
+}
+
 .section-title {
     color: @app_muted;
     letter-spacing: 0.6px;
@@ -1589,7 +1593,7 @@ headerbar.topbar .execution-controls {
     border-top: 0;
 }
 
-button.terminal-pane-toggle {
+button.workspace-pane-toggle {
     min-height: 21px;
     padding: 0 10px;
     color: @app_muted;
@@ -1598,12 +1602,12 @@ button.terminal-pane-toggle {
     border-right: 1px solid @app_border;
 }
 
-button.terminal-pane-toggle:hover {
+button.workspace-pane-toggle:hover {
     color: @app_fg;
     background: @app_hover;
 }
 
-button.terminal-pane-toggle:checked {
+button.workspace-pane-toggle:checked {
     color: @app_accent_hover;
     background: alpha(@app_accent, 0.14);
     box-shadow: inset 0 2px @app_accent;

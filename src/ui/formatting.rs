@@ -1,24 +1,25 @@
 use super::*;
 use std::fmt::Write as _;
 
-pub(super) fn populate_register_group<'a>(
+pub(super) fn populate_register_group(
     group: &RegisterGroupView,
-    registers: impl IntoIterator<Item = &'a Register>,
-    previous: &HashMap<String, String>,
-    ring: Option<u64>,
-    architecture: TargetArchitecture,
-    endian: Option<TargetEndian>,
-    pointer_bits: u32,
+    rows: impl IntoIterator<Item = RegisterRowData>,
+    preserve_details: bool,
 ) {
-    let rows = registers
+    let rows = rows
         .into_iter()
-        .map(|register| RegisterRowData {
-            register: register.clone(),
-            changed: register_changed(register, previous),
-            ring,
-            architecture,
-            endian,
-            pointer_bits,
+        .enumerate()
+        .map(|(index, mut row)| {
+            if preserve_details
+                && let Some(previous) = group
+                    .store
+                    .item(index as u32)
+                    .and_downcast::<glib::BoxedAnyObject>()
+            {
+                row.preserve_details_from(&previous.borrow::<RegisterRowData>());
+            }
+
+            row
         })
         .collect::<Vec<_>>();
 
@@ -37,6 +38,22 @@ pub(super) fn populate_register_group<'a>(
 
     if previous_count != count as u32 {
         group.view.set_size_request(-1, 24 + count * 26);
+    }
+}
+
+impl RegisterRowData {
+    pub(super) fn preserve_details_from(&mut self, previous: &Self) {
+        if self.register.pointer_chain.is_empty()
+            && self.register.name == previous.register.name
+            && self.register.value == previous.register.value
+            && self.architecture == previous.architecture
+            && self.endian == previous.endian
+            && self.pointer_bits == previous.pointer_bits
+        {
+            self.register
+                .pointer_chain
+                .clone_from(&previous.register.pointer_chain);
+        }
     }
 }
 

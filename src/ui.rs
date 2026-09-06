@@ -29,6 +29,8 @@ use domain::{
 };
 mod layout;
 mod lifecycle;
+mod log_view;
+use log_view::{ApplicationLog, LogLevel};
 mod source_breakpoints;
 mod source_loading;
 mod source_navigation;
@@ -1391,6 +1393,7 @@ pub struct Ui {
     disassembly_source_pending: Rc<RefCell<HashSet<PathBuf>>>,
     pub window: gtk::ApplicationWindow,
     pub terminal: vte4::Terminal,
+    application_log: ApplicationLog,
     session_button: gtk::ToggleButton,
     session_popover: gtk::Popover,
     session_kind_label: gtk::Label,
@@ -1514,6 +1517,7 @@ pub struct Ui {
     disassembly_handler: Rc<RefCell<Option<DisassemblyHandler>>>,
     disassembly_source_cache: DisassemblySourceCache,
     register_groups: Vec<RegisterGroupView>,
+    register_render_context: Rc<RefCell<Option<crate::debugger::StopContext>>>,
     registers_empty: gtk::Label,
     stack_store: gio::ListStore,
     displayed_stack: Rc<RefCell<Vec<StackEntry>>>,
@@ -1653,7 +1657,8 @@ struct Topbar {
 struct Workspace {
     root: gtk::Paned,
     layout_panes: Vec<layout::Pane>,
-    terminal_panel: gtk::Box,
+    console: gtk::Stack,
+    application_log: ApplicationLog,
     status_detail: gtk::Label,
     source_navigation: SourceNavigationControls,
     source_tree: SourceTreeControls,

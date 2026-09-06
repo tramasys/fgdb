@@ -70,29 +70,21 @@ impl Ui {
         let workspace_footer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         workspace_footer.add_css_class("workspace-footer");
         workspace_footer.append(&topbar.terminal_toggle_button);
+        let log_toggle =
+            components::workspace_toggle("Log", "Show or hide fgdb application messages");
+        workspace_footer.append(&log_toggle);
         workspace.status_detail.set_hexpand(true);
         workspace_footer.append(&workspace.status_detail);
         root.append(&workspace_footer);
-        let terminal_panel = workspace.terminal_panel.clone();
-        let terminal_for_toggle = terminal.clone();
         let layout = layout::Persistence::install(&window, workspace.layout_panes.clone());
         layout.bind_notebook("left_sidebar", &workspace.left_navigation);
-        let terminal_visible = layout.terminal_visible();
-        topbar.terminal_toggle_button.set_active(terminal_visible);
-        terminal_panel.set_visible(terminal_visible);
-        let layout_for_terminal = layout.clone();
-
-        topbar
-            .terminal_toggle_button
-            .connect_toggled(move |button| {
-                let visible = button.is_active();
-                terminal_panel.set_visible(visible);
-                layout_for_terminal.set_terminal_visible(visible);
-
-                if visible {
-                    terminal_for_toggle.grab_focus();
-                }
-            });
+        layout.bind_console(
+            &workspace.console,
+            &topbar.terminal_toggle_button,
+            &log_toggle,
+            terminal.upcast_ref(),
+            workspace.application_log.view().upcast_ref(),
+        );
 
         window.set_child(Some(&root));
         kernel_section_handler.replace(Some(layout.disclosure_handler()));
@@ -107,6 +99,7 @@ impl Ui {
             disassembly_source_pending: Rc::new(RefCell::new(HashSet::new())),
             window,
             terminal,
+            application_log: workspace.application_log,
             session_button: topbar.session_button,
             session_popover: topbar.session_popover,
             session_kind_label: topbar.session_kind_label,
@@ -236,6 +229,7 @@ impl Ui {
                 ),
             )),
             register_groups: workspace.register_groups,
+            register_render_context: Rc::new(RefCell::new(None)),
             registers_empty: workspace.registers_empty,
             stack_store: workspace.stack_store,
             displayed_stack: Rc::new(RefCell::new(Vec::new())),
@@ -1040,6 +1034,18 @@ impl Ui {
     }
 
     pub fn set_status(&self, text: &str, detail: &str, class: Option<&str>) {
+        let level = if class == Some("status-error") {
+            LogLevel::Error
+        } else {
+            LogLevel::Info
+        };
+
+        self.application_log.record(level, text, detail);
+        self.set_transient_status(text, detail, class);
+    }
+
+    // Update the status strip without adding a persistent application log entry.
+    pub(crate) fn set_transient_status(&self, text: &str, detail: &str, class: Option<&str>) {
         self.status_visual_generation
             .set(self.status_visual_generation.get().wrapping_add(1));
 
@@ -1047,6 +1053,8 @@ impl Ui {
     }
 
     pub fn set_execution_status(&self, text: &str, detail: &str) {
+        // Execution progress stays in the status strip. Stops and failures own
+        // the log entries so ordinary stepping does not flood the history.
         const VISUAL_DELAY: Duration = Duration::from_millis(150);
         let generation = self.status_visual_generation.get().wrapping_add(1);
         self.status_visual_generation.set(generation);

@@ -2458,6 +2458,8 @@ impl Ui {
             .add_css_class("heap-inspector-error");
 
         self.misc_view.heap_inspector_status.set_text(error);
+        self.application_log
+            .record(LogLevel::Error, "Heap inspection failed", error);
         self.misc_view.heap_inspector_store.remove_all();
         self.misc_view.heap_inspector_empty.set_visible(true);
         self.update_control_sensitivity();
@@ -2685,6 +2687,8 @@ impl Ui {
         self.misc_view.needs_refresh.set(false);
         self.misc_view.clear();
         self.misc_view.warning.set_text(error);
+        self.application_log
+            .record(LogLevel::Error, "Misc snapshot failed", error);
         self.misc_view.warning.set_visible(true);
         self.misc_view.clear_core();
         self.misc_view.core_warning.set_text(error);

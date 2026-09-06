@@ -20,8 +20,35 @@ const MAX_WINDOW_DIMENSION: i32 = 32_768;
 const DISCLOSURE_PREFIX: &str = "disclosure.";
 const NOTEBOOK_PREFIX: &str = "notebook.";
 const TERMINAL_VISIBLE_KEY: &str = "terminal.visible";
+const CONSOLE_VIEW_KEY: &str = "console.view";
 const MAX_LAYOUT_BYTES: usize = 1024 * 1024;
 const MAX_NOTEBOOK_PAGE: u32 = 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConsoleView {
+    Hidden,
+    Terminal,
+    Log,
+}
+
+impl ConsoleView {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Hidden => "hidden",
+            Self::Terminal => "terminal",
+            Self::Log => "log",
+        }
+    }
+
+    fn parse(text: &str) -> Option<Self> {
+        match text {
+            "hidden" => Some(Self::Hidden),
+            "terminal" => Some(Self::Terminal),
+            "log" => Some(Self::Log),
+            _ => None,
+        }
+    }
+}
 
 fn layout_path() -> PathBuf {
     glib::user_config_dir().join("fgdb/layout.conf")
@@ -182,21 +209,65 @@ impl Persistence {
         self.0.save_now();
     }
 
-    pub(super) fn terminal_visible(&self) -> bool {
-        self.0.remembered.borrow().terminal_visible.unwrap_or(true)
-    }
-
-    pub(super) fn set_terminal_visible(&self, visible: bool) {
-        let changed = self.0.remembered.borrow().terminal_visible != Some(visible);
-
-        if !changed {
-            return;
+    pub(super) fn bind_console(
+        &self,
+        stack: &gtk::Stack,
+        terminal_button: &gtk::ToggleButton,
+        log_button: &gtk::ToggleButton,
+        terminal: &gtk::Widget,
+        log: &gtk::Widget,
+    ) {
+        let selected = self.0.remembered.borrow().console_view();
+        terminal_button.set_active(selected == ConsoleView::Terminal);
+        log_button.set_active(selected == ConsoleView::Log);
+        if selected != ConsoleView::Hidden {
+            stack.set_visible_child_name(selected.name());
         }
+        stack.set_visible(selected != ConsoleView::Hidden);
+        let updating = Rc::new(Cell::new(false));
 
-        self.0.remembered.borrow_mut().terminal_visible = Some(visible);
+        for (button, other, focus, selected) in [
+            (terminal_button, log_button, terminal, ConsoleView::Terminal),
+            (log_button, terminal_button, log, ConsoleView::Log),
+        ] {
+            let weak_state = Rc::downgrade(&self.0);
+            let stack = stack.downgrade();
+            let other = other.downgrade();
+            let focus = focus.downgrade();
+            let updating = Rc::clone(&updating);
+            button.connect_toggled(move |button| {
+                let (Some(state), Some(stack), Some(other)) =
+                    (weak_state.upgrade(), stack.upgrade(), other.upgrade())
+                else {
+                    return;
+                };
+                if updating.replace(true) {
+                    return;
+                }
 
-        if self.0.ready_to_save.get() {
-            self.0.schedule_save();
+                // Switch once without temporarily collapsing the shared pane.
+                let selected = if button.is_active() {
+                    other.set_active(false);
+                    stack.set_visible_child_name(selected.name());
+                    selected
+                } else {
+                    ConsoleView::Hidden
+                };
+                stack.set_visible(selected != ConsoleView::Hidden);
+                state.remembered.borrow_mut().console_view = Some(selected);
+                state.remembered.borrow_mut().terminal_visible =
+                    Some(selected == ConsoleView::Terminal);
+                if state.ready_to_save.get() {
+                    state.schedule_save();
+                }
+                updating.set(false);
+
+                if selected != ConsoleView::Hidden
+                    && let Some(focus) = focus.upgrade()
+                {
+                    focus.grab_focus();
+                }
+            });
         }
     }
 
@@ -511,9 +582,22 @@ struct WindowGeometry {
 struct RememberedLayout {
     window: Option<WindowGeometry>,
     terminal_visible: Option<bool>,
+    console_view: Option<ConsoleView>,
     panes: HashMap<String, PanePosition>,
     notebooks: HashMap<String, u32>,
     disclosures: HashMap<String, bool>,
+}
+
+impl RememberedLayout {
+    fn console_view(&self) -> ConsoleView {
+        self.console_view.unwrap_or_else(|| {
+            if self.terminal_visible.unwrap_or(true) {
+                ConsoleView::Terminal
+            } else {
+                ConsoleView::Hidden
+            }
+        })
+    }
 }
 
 fn scale_position(saved: PanePosition, minimum: i32, maximum: i32) -> i32 {
@@ -583,6 +667,11 @@ fn parse_layout(contents: &str) -> RememberedLayout {
             continue;
         }
 
+        if key.trim() == CONSOLE_VIEW_KEY {
+            remembered.console_view = ConsoleView::parse(geometry.trim());
+            continue;
+        }
+
         if let Some(key) = key.trim().strip_prefix(DISCLOSURE_PREFIX) {
             if !key.is_empty()
                 && let Some(expanded) = parse_bool(geometry.trim())
@@ -633,7 +722,7 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> io::Result<()> {
-    let mut contents = String::from("# fgdb layout v5\n");
+    let mut contents = String::from("# fgdb layout v6\n");
 
     if let Some(window) = remembered.window {
         writeln!(
@@ -648,6 +737,11 @@ fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> i
 
     if let Some(visible) = remembered.terminal_visible {
         writeln!(contents, "{TERMINAL_VISIBLE_KEY}={}", u8::from(visible))
+            .expect("writing to a String cannot fail");
+    }
+
+    if let Some(view) = remembered.console_view {
+        writeln!(contents, "{CONSOLE_VIEW_KEY}={}", view.name())
             .expect("writing to a String cannot fail");
     }
 
@@ -754,6 +848,16 @@ mod tests {
             parse_layout("terminal.visible=maybe\n").terminal_visible,
             None
         );
+        assert_eq!(parse_layout("console.view=invalid\n").console_view, None);
+        assert_eq!(parse_layout("").console_view(), ConsoleView::Terminal);
+        assert_eq!(
+            parse_layout("terminal.visible=0\n").console_view(),
+            ConsoleView::Hidden
+        );
+        for view in [ConsoleView::Hidden, ConsoleView::Terminal, ConsoleView::Log] {
+            let text = format!("console.view={}\nterminal.visible=0\n", view.name());
+            assert_eq!(parse_layout(&text).console_view(), view);
+        }
     }
 
     #[test]

@@ -482,6 +482,13 @@ impl Ui {
 
     fn record_debug_data_activity(&self, kind: DebugDataActivityKind, message: impl Into<String>) {
         let mut message = message.into();
+        let level = match kind {
+            DebugDataActivityKind::Progress | DebugDataActivityKind::Success => LogLevel::Info,
+            DebugDataActivityKind::Warning => LogLevel::Warning,
+            DebugDataActivityKind::Error => LogLevel::Error,
+        };
+
+        self.application_log.record(level, "Debug data", &message);
 
         if message.len() > MAX_DEBUG_DATA_ACTIVITY_BYTES {
             message.truncate(message.floor_char_boundary(MAX_DEBUG_DATA_ACTIVITY_BYTES));

@@ -825,6 +825,8 @@ impl Ui {
             return;
         };
 
+        self.application_log
+            .record(LogLevel::Error, "Thread analysis failed", message);
         clear_box(&content);
         let error = gtk::Label::new(Some(message));
         error.add_css_class("status-error");

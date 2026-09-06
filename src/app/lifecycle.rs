@@ -610,6 +610,14 @@ pub(super) fn finish_stopped_state(
 
     ui.show_signal(signal_name.as_deref(), signal_meaning.as_deref());
 
+    let routine_step = signal_name.is_none()
+        && signal_meaning.is_none()
+        && status_detail.is_none()
+        && matches!(
+            reason.as_str(),
+            "end-stepping-range" | "function-finished" | "location-reached"
+        );
+
     let detail = status_detail.unwrap_or_else(|| {
         let reason = reason.replace('-', " ");
 
@@ -619,11 +627,15 @@ pub(super) fn finish_stopped_state(
         )
     });
 
-    ui.set_status(
-        if exited { "Inferior exited" } else { "Paused" },
-        &detail,
-        Some("status-ready"),
-    );
+    if routine_step {
+        ui.set_transient_status("Paused", &detail, Some("status-ready"));
+    } else {
+        ui.set_status(
+            if exited { "Inferior exited" } else { "Paused" },
+            &detail,
+            Some("status-ready"),
+        );
+    }
 }
 
 pub(super) fn detect_target_abi(ui: &Weak<Ui>, client: &MiClient) {

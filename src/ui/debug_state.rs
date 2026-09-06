@@ -70,6 +70,17 @@ fn preserve_stack_render_details(entries: &mut [StackEntry], previous: &[StackEn
     }
 }
 
+fn same_register_render_context(
+    previous: Option<&crate::debugger::StopContext>,
+    current: Option<&crate::debugger::StopContext>,
+) -> bool {
+    matches!((previous, current), (Some(previous), Some(current))
+        if previous.transport_epoch() == current.transport_epoch()
+            && previous.inferior_id() == current.inferior_id()
+            && previous.thread_id() == current.thread_id()
+            && previous.frame_level() == current.frame_level())
+}
+
 fn locals_summary_text(
     locals: usize,
     arguments: usize,
@@ -499,6 +510,8 @@ impl Ui {
             return;
         }
 
+        self.application_log
+            .record(LogLevel::Error, "Locals refresh failed", error);
         self.locals_view.set_tooltip_text(Some(error));
         self.locals_summary.set_text("Locals refresh failed");
         self.locals_summary.set_tooltip_text(Some(error));
@@ -671,6 +684,11 @@ impl Ui {
             .remove_store(&node.children);
 
         apply_variable_children_page_error(&node, &node.variable, 0, error);
+        self.application_log.record(
+            LogLevel::Error,
+            &format!("Expand {}", node.variable.name),
+            error,
+        );
     }
 
     pub fn show_variable_children_page_error(&self, parent: &Variable, from: usize, error: &str) {
@@ -689,6 +707,8 @@ impl Ui {
         }
 
         apply_variable_children_page_error(&node, parent, from, error);
+        self.application_log
+            .record(LogLevel::Error, &format!("Expand {}", parent.name), error);
     }
 
     pub(crate) fn show_lazy_variable_children_error(&self, variable: &Variable, error: &str) {
@@ -701,6 +721,8 @@ impl Ui {
             .remove_store(&node.children);
 
         apply_variable_children_page_error(&node, variable, 0, error);
+        self.application_log
+            .record(LogLevel::Error, &format!("Expand {}", variable.name), error);
     }
 
     pub(crate) fn has_local_variable_identity(&self, variable: &Variable) -> bool {
@@ -2066,12 +2088,22 @@ impl Ui {
 
     pub fn show_registers(&self, registers: &[Register]) -> bool {
         let changed = self.model.publish_registers(registers);
-        self.render_registers(registers);
+        self.render_registers(registers, false);
 
         changed
     }
 
-    fn render_registers(&self, registers: &[Register]) {
+    fn render_registers(&self, registers: &[Register], details_pending: bool) {
+        let context = self
+            .model
+            .stop_context(self.model.current_stop_refresh_generation());
+        let preserve_details = details_pending
+            && same_register_render_context(
+                self.register_render_context.borrow().as_ref(),
+                context.as_ref(),
+            );
+        self.register_render_context.replace(context);
+
         if registers.is_empty() {
             for group in &self.register_groups {
                 if group.store.n_items() != 0 {
@@ -2116,15 +2148,19 @@ impl Ui {
                             }))
                 });
 
-                populate_register_group(
-                    group,
-                    grouped,
-                    &previous,
-                    ring,
+                let rows = grouped.map(|register| RegisterRowData {
+                    register: register.clone(),
+                    changed: register_changed(register, &previous),
+                    ring: if is_flags_register(&register.name) {
+                        ring
+                    } else {
+                        None
+                    },
                     architecture,
                     endian,
                     pointer_bits,
-                );
+                });
+                populate_register_group(group, rows, preserve_details);
             }
         }
 
@@ -2184,11 +2220,30 @@ impl Ui {
     }
 
     pub fn show_registers_for_refresh(&self, generation: u64, registers: &[Register]) {
+        self.update_registers_for_refresh(generation, registers, true);
+    }
+
+    pub(crate) fn show_register_details_for_refresh(
+        &self,
+        generation: u64,
+        registers: &[Register],
+    ) {
+        self.update_registers_for_refresh(generation, registers, false);
+    }
+
+    fn update_registers_for_refresh(
+        &self,
+        generation: u64,
+        registers: &[Register],
+        details_pending: bool,
+    ) {
         if let Some(refresh_transfer) = self
             .model
             .publish_registers_for_refresh(generation, registers)
         {
-            self.render_registers(registers);
+            // Retained pointer annotations are presentation-only. Publish the
+            // actual response to the model, and accept empty final details too.
+            self.render_registers(registers, details_pending);
 
             if refresh_transfer {
                 self.refresh_call_abi_transfer();
@@ -2256,8 +2311,7 @@ impl Ui {
         let expression = self.memory_address_entry.clone();
         let size = self.memory_size.clone();
         let format = self.memory_format.clone();
-        let status_label = self.status_label.clone();
-        let status_detail = self.status_detail.clone();
+        let weak_ui = Rc::clone(&self.self_weak);
 
         self.memory_add_button.connect_clicked(move |_| {
             let expression_text = expression.text().trim().to_owned();
@@ -2289,10 +2343,8 @@ impl Ui {
 
             if added {
                 expression.set_text("");
-            } else {
-                set_status_widgets(
-                    &status_label,
-                    &status_detail,
+            } else if let Some(ui) = weak_ui.borrow().upgrade() {
+                ui.set_status(
                     "Memory watch limit",
                     "Remove a memory watch before adding another (limit 256)",
                     Some("status-error"),
@@ -2708,7 +2760,11 @@ impl Ui {
                     endian,
                 );
             }
-            Err(error) => show_memory_watch_error(&watch, error),
+            Err(error) => {
+                show_memory_watch_error(&watch, error);
+                self.application_log
+                    .record(LogLevel::Error, "Memory watch failed", error);
+            }
         }
 
         update_memory_container_state(&self.memory_watch_container, reading);
@@ -3635,6 +3691,79 @@ mod render_tests {
         let mut changed_region = vec![stack_entry("0x2000", &[], Some("unmapped"))];
         preserve_stack_render_details(&mut changed_region, &[previous]);
         assert!(changed_region[0].pointer_chain.is_empty());
+    }
+
+    #[test]
+    fn stable_register_rows_survive_raw_refresh_but_accept_final_detail_changes() {
+        let previous = RegisterRowData {
+            register: Register {
+                name: String::from("rax"),
+                value: String::from("0x2000"),
+                pointer_chain: vec![String::from("0x2000 <buffer>"), String::from("0x3000")],
+            },
+            changed: false,
+            ring: None,
+            architecture: TargetArchitecture::X86_64,
+            endian: Some(TargetEndian::Little),
+            pointer_bits: 64,
+        };
+        let mut raw = previous.clone();
+        raw.register.pointer_chain.clear();
+        let mut pending = raw.clone();
+        pending.preserve_details_from(&previous);
+        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        replace_boxed_store_if_changed(&store, [previous.clone()]);
+        let original = store.item(0).unwrap();
+        assert!(!replace_boxed_store_if_changed(&store, [pending]));
+        assert_eq!(store.item(0).unwrap(), original);
+
+        // Memory behind an unchanged register can change or become unreadable.
+        let mut completed = previous.clone();
+        completed.register.pointer_chain[1] = String::from("0x4000");
+        assert!(replace_boxed_store_if_changed(&store, [completed]));
+        assert!(replace_boxed_store_if_changed(&store, [raw.clone()]));
+        assert!(!replace_boxed_store_if_changed(&store, [raw.clone()]));
+
+        for change in 0..5 {
+            let mut different = raw.clone();
+            match change {
+                0 => different.register.value = String::from("0x2008"),
+                1 => different.register.name = String::from("rbx"),
+                2 => different.pointer_bits = 32,
+                3 => different.endian = Some(TargetEndian::Big),
+                _ => different.architecture = TargetArchitecture::AArch64,
+            }
+            different.preserve_details_from(&previous);
+            assert!(different.register.pointer_chain.is_empty());
+        }
+
+        let context = |epoch, generation, inferior: &str, thread: &str, frame| {
+            crate::debugger::StopContext::new(
+                epoch,
+                generation,
+                Some(inferior.to_owned()),
+                thread.to_owned(),
+                frame,
+            )
+            .unwrap()
+        };
+        let previous = context(1, 10, "i1", "1", 0);
+        assert!(same_register_render_context(
+            Some(&previous),
+            Some(&context(1, 11, "i1", "1", 0))
+        ));
+        for different in [
+            None,
+            Some(context(2, 11, "i1", "1", 0)),
+            Some(context(1, 11, "i2", "1", 0)),
+            Some(context(1, 11, "i1", "2", 0)),
+            Some(context(1, 11, "i1", "1", 1)),
+        ] {
+            assert!(!same_register_render_context(
+                Some(&previous),
+                different.as_ref()
+            ));
+        }
     }
 
     #[test]

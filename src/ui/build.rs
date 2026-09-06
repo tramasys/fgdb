@@ -104,11 +104,11 @@ pub(super) fn build_topbar(
     ));
 
     leading.append(&debug_data);
-    let terminal_toggle = gtk::ToggleButton::with_label("Terminal");
-    terminal_toggle.add_css_class("toolbar-toggle");
-    terminal_toggle.add_css_class("terminal-pane-toggle");
+    let terminal_toggle = components::workspace_toggle(
+        "Terminal",
+        "Show or hide the interactive GDB terminal\nCtrl+`",
+    );
     terminal_toggle.set_active(true);
-    terminal_toggle.set_tooltip_text(Some("Show or hide the interactive GDB terminal\nCtrl+`"));
     let gef_tools = build_gef_tools_menu(terminal, &terminal_toggle);
     topbar.pack_start(&leading);
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
@@ -656,7 +656,14 @@ pub(super) fn build_workspace(
     main_and_terminal.set_resize_start_child(true);
     main_and_terminal.set_start_child(Some(&navigation_and_editor));
     let terminal_panel = build_terminal_panel(terminal, gef_tools_button);
-    main_and_terminal.set_end_child(Some(&terminal_panel));
+    let application_log = ApplicationLog::new(inspector_bindings.theme);
+    let console = gtk::Stack::new();
+    console.set_transition_type(gtk::StackTransitionType::None);
+    console.set_hexpand(true);
+    console.set_vexpand(true);
+    console.add_named(&terminal_panel, Some("terminal"));
+    console.add_named(application_log.root(), Some("log"));
+    main_and_terminal.set_end_child(Some(&console));
     workspace.set_start_child(Some(&main_and_terminal));
 
     let layout_panes = vec![
@@ -691,7 +698,8 @@ pub(super) fn build_workspace(
     Workspace {
         root: workspace,
         layout_panes,
-        terminal_panel,
+        console,
+        application_log,
         status_detail: inspector.status_detail,
         source_navigation: source_editor.navigation,
         source_tree: left_sidebar.source_tree,
