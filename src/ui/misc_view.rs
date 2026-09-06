@@ -222,9 +222,7 @@ fn build_startup_page() -> StartupWidgets {
     controls.add_css_class("misc-startup-controls");
     let (summary_view, summary) = build_startup_summary();
 
-    let search = gtk::SearchEntry::builder()
-        .placeholder_text("Filter argument, variable, value, or address")
-        .build();
+    let search = components::delayed_search_entry("Filter argument, variable, value, or address");
 
     search.set_hexpand(true);
     search.add_css_class("kernel-change-search");
@@ -665,10 +663,8 @@ fn build_heap_inspection_table() -> HeapTableWidgets {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     controls.add_css_class("heap-table-controls");
 
-    let search = gtk::SearchEntry::builder()
-        .placeholder_text("Filter structures, addresses, states, or links")
-        .hexpand(true)
-        .build();
+    let search = components::delayed_search_entry("Filter structures, addresses, states, or links");
+    search.set_hexpand(true);
 
     search.add_css_class("kernel-change-search");
     search.add_css_class("kernel-table-search");
@@ -1035,7 +1031,7 @@ fn heap_action_button(
 }
 
 fn allocator_value_label(class: &str) -> gtk::Label {
-    let label = gtk::Label::new(Some("—"));
+    let label = gtk::Label::new(Some("-"));
     label.add_css_class(class);
     label.set_halign(gtk::Align::Fill);
     label.set_xalign(0.0);
@@ -1127,7 +1123,7 @@ fn build_locks_page() -> LocksWidgets {
         false,
         |row| {
             row.address
-                .map_or_else(|| String::from("—"), |value| format!("0x{value:016x}"))
+                .map_or_else(|| String::from("-"), |value| format!("0x{value:016x}"))
         },
     ));
 
@@ -1142,7 +1138,7 @@ fn build_locks_page() -> LocksWidgets {
         false,
         |row| {
             row.expected
-                .map_or_else(|| String::from("—"), |value| format!("0x{value:x}"))
+                .map_or_else(|| String::from("-"), |value| format!("0x{value:x}"))
         },
     ));
 
@@ -1377,9 +1373,7 @@ fn build_searchable_misc_table<T: 'static>(
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_vexpand(true);
 
-    let search = gtk::SearchEntry::builder()
-        .placeholder_text(placeholder)
-        .build();
+    let search = components::delayed_search_entry(placeholder);
 
     search.add_css_class("kernel-change-search");
     search.add_css_class("kernel-table-search");
@@ -1434,7 +1428,7 @@ fn build_searchable_misc_table<T: 'static>(
 }
 
 fn misc_summary_label() -> gtk::Label {
-    let label = gtk::Label::new(Some("—"));
+    let label = gtk::Label::new(Some("-"));
     label.add_css_class("misc-data-summary");
     label.set_halign(gtk::Align::Fill);
     label.set_xalign(0.0);
@@ -1514,10 +1508,10 @@ fn build_startup_summary() -> (gtk::Grid, MiscStartupSummary) {
     let env = append_startup_summary_cell(&summary, "ENV", 1, 1);
     let argv = append_startup_summary_cell(&summary, "ARGV RANGE", 2, 2);
     let envp = append_startup_summary_cell(&summary, "ENVP RANGE", 4, 2);
-    set_startup_summary_value(&argc, "—");
-    set_startup_summary_value(&env, "—");
-    set_startup_summary_value(&argv, "—");
-    set_startup_summary_value(&envp, "—");
+    set_startup_summary_value(&argc, "-");
+    set_startup_summary_value(&env, "-");
+    set_startup_summary_value(&argv, "-");
+    set_startup_summary_value(&envp, "-");
 
     (
         summary,
@@ -1797,7 +1791,7 @@ fn argument_label(index: usize) -> String {
 }
 
 fn format_address(address: Option<u64>) -> String {
-    address.map_or_else(|| String::from("—"), |address| format!("0x{address:016x}"))
+    address.map_or_else(|| String::from("-"), |address| format!("0x{address:016x}"))
 }
 
 fn format_range(range: Option<(u64, u64)>) -> String {
@@ -2027,7 +2021,7 @@ impl MiscView {
                 .iter()
                 .map(|binding| {
                     let resolution = if binding.indirect {
-                        "  [PLT / GOT · owner unproven]"
+                        "  [PLT / GOT  owner unproven]"
                     } else {
                         ""
                     };
@@ -2046,7 +2040,7 @@ impl MiscView {
         let runtimes = if allocator.detected_runtimes.is_empty() {
             String::from("No recognized allocator runtime")
         } else {
-            allocator.detected_runtimes.join("  ·  ")
+            allocator.detected_runtimes.join("  ")
         };
 
         set_allocator_value(&self.allocator_runtimes, &runtimes);
@@ -2054,7 +2048,7 @@ impl MiscView {
         let frontends = if allocator.allocation_frontends.is_empty() {
             String::from("No language or managed-runtime allocation frontend detected")
         } else {
-            allocator.allocation_frontends.join("  ·  ")
+            allocator.allocation_frontends.join("  ")
         };
 
         set_allocator_value(&self.allocator_frontends, &frontends);
@@ -2062,7 +2056,7 @@ impl MiscView {
         let evidence = if allocator.evidence.is_empty() {
             String::from("No additional allocator-specific symbols or modules")
         } else {
-            allocator.evidence.join("  ·  ")
+            allocator.evidence.join("  ")
         };
 
         set_allocator_value(&self.allocator_evidence, &evidence);
@@ -2070,11 +2064,11 @@ impl MiscView {
         set_allocator_value(
             &self.allocator_safety,
             if allocator.probe_dispatch_failures > 0 {
-                "PARTIAL READ-ONLY PROBE  ·  some optional GDB queries were not queued"
+                "PARTIAL READ-ONLY PROBE  some optional GDB queries were not queued"
             } else if allocator.probe_complete {
-                "READ ONLY  ·  resolved for this stop without executing allocator code"
+                "READ ONLY  resolved for this stop without executing allocator code"
             } else {
-                "MAPPING FALLBACK  ·  allocator code was not executed"
+                "MAPPING FALLBACK  allocator code was not executed"
             },
         );
 
@@ -2101,7 +2095,7 @@ impl MiscView {
 
     fn show_heap_inspection(&self, snapshot: HeapInspectionSnapshot) {
         self.heap_inspector_command
-            .set_text(&format!("FGDB  ·  {}", snapshot.command));
+            .set_text(&format!("FGDB  {}", snapshot.command));
 
         self.heap_inspector_command
             .set_tooltip_text(Some(&snapshot.command));
@@ -2144,8 +2138,9 @@ impl MiscView {
             .len();
 
         self.lock_summary.set_text(&format!(
-            "{} threads scanned  ·  {wait_count} kernel-visible waits  ·  {address_count} wait addresses",
-            locks.threads_scanned
+            "{} thread{} scanned  {wait_count} kernel-visible waits  {address_count} wait addresses",
+            locks.threads_scanned,
+            if locks.threads_scanned == 1 { "" } else { "s" }
         ));
 
         let mut note = String::from(LOCKS_NOTE);
@@ -2167,10 +2162,10 @@ impl MiscView {
         self.lock_empty.set_visible(wait_count == 0);
 
         let graph_summary = if deadlock_count == 0 {
-            format!("{dependency_count} reliable wait-for edges  ·  no deadlock cycles detected")
+            format!("{dependency_count} reliable wait-for edges  no deadlock cycles detected")
         } else {
             format!(
-                "{dependency_count} reliable wait-for edges  ·  {deadlock_count} deadlock cycle(s)\n{}",
+                "{dependency_count} reliable wait-for edges  {deadlock_count} deadlock cycle(s)\n{}",
                 locks
                     .deadlocks
                     .iter()
@@ -2199,7 +2194,7 @@ impl MiscView {
         );
 
         self.call_abi_summary.set_text(&format!(
-            "{}  ·  {}  ·  {}-bit pointers  ·  {current}",
+            "{}  {}  {}-bit pointers  {current}",
             snapshot.architecture, snapshot.calling_convention, snapshot.pointer_bits
         ));
 
@@ -2257,7 +2252,7 @@ impl MiscView {
             .map_or_else(String::new, |pid| format!(" PID {pid}"));
 
         self.core_summary.set_text(&format!(
-            "{}  ·  {} / {} / {}  ·  {process}{pid}  ·  {signal}  ·  {} threads  ·  {}  ·  {}",
+            "{}  {} / {} / {}  {process}{pid}  {signal}  {} threads  {}  {}",
             snapshot.path.display(),
             snapshot.class,
             snapshot.architecture,
@@ -2282,7 +2277,7 @@ impl MiscView {
             &self.summary.envp,
             &self.summary.env,
         ] {
-            set_startup_summary_value(value, "—");
+            set_startup_summary_value(value, "-");
         }
 
         self.warning.set_visible(false);
@@ -2291,7 +2286,7 @@ impl MiscView {
         self.environment_store.remove_all();
         self.arguments_empty.set_visible(true);
         self.environment_empty.set_visible(true);
-        self.auxv_summary.set_text("—");
+        self.auxv_summary.set_text("-");
         self.auxv_store.remove_all();
         self.auxv_empty.set_visible(true);
 
@@ -2307,7 +2302,7 @@ impl MiscView {
             &self.allocator_anonymous_bytes,
             &self.allocator_mapping_count,
         ] {
-            set_allocator_value(value, "—");
+            set_allocator_value(value, "-");
         }
 
         self.allocator_store.remove_all();
@@ -2328,7 +2323,7 @@ impl MiscView {
 
         self.heap_inspector_store.remove_all();
         self.heap_inspector_empty.set_visible(true);
-        self.lock_summary.set_text("—");
+        self.lock_summary.set_text("-");
         self.lock_store.remove_all();
         self.lock_empty.set_visible(true);
 
@@ -2342,7 +2337,7 @@ impl MiscView {
     }
 
     fn clear_core(&self) {
-        self.core_summary.set_text("—");
+        self.core_summary.set_text("No core dump loaded");
         self.core_warning.set_text("");
         self.core_warning.set_visible(false);
         self.core_note_store.remove_all();
@@ -2400,7 +2395,7 @@ impl Ui {
 
         self.misc_view
             .heap_inspector_command
-            .set_text(&format!("FGDB  ·  {command}"));
+            .set_text(&format!("FGDB  {command}"));
 
         self.misc_view
             .heap_inspector_command
@@ -2456,7 +2451,7 @@ impl Ui {
 
         self.misc_view
             .heap_inspector_command
-            .set_text(&format!("FGDB  ·  {command}"));
+            .set_text(&format!("FGDB  {command}"));
 
         self.misc_view
             .heap_inspector_status
@@ -2599,7 +2594,7 @@ impl Ui {
         let registers = self.model.registers();
         let mut transfer = crate::misc::call_abi_transfer(architecture, phase, &registers);
         let address = full_address(&context.current.address, self.target_pointer_bits());
-        transfer.context = format!("{}  ·  instruction {address}", transfer.context);
+        transfer.context = format!("{}  instruction {address}", transfer.context);
         let transfer_context = transfer.context.clone();
         self.misc_view.show_call_abi_transfer(transfer);
 
@@ -2731,7 +2726,7 @@ impl Ui {
         self.invalidate_allocator_probe_cache();
         self.misc_view.clear();
         self.misc_view.clear_core();
-        self.misc_view.call_abi_summary.set_text("—");
+        self.misc_view.call_abi_summary.set_text("-");
         self.misc_view.call_abi_context.set_text("");
         self.misc_view.call_abi_context.set_tooltip_text(None);
         self.misc_view.call_abi_register_store.remove_all();

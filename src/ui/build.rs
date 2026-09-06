@@ -8,14 +8,11 @@ pub(super) fn build_topbar(
     let topbar = gtk::HeaderBar::new();
     topbar.add_css_class("topbar");
     topbar.set_show_title_buttons(false);
-    let title_group = gtk::Box::new(gtk::Orientation::Horizontal, 5);
+    let title_group = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     title_group.add_css_class("titlebar-identity");
     let title = gtk::Label::new(Some("fgdb"));
     title.add_css_class("app-title");
     title_group.append(&title);
-    let title_separator = gtk::Label::new(Some("·"));
-    title_separator.add_css_class("muted");
-    title_group.append(&title_separator);
     let target_name = config.target_name();
     let target_label = gtk::Label::new(Some(&target_name));
     target_label.add_css_class("target-label");
@@ -111,31 +108,31 @@ pub(super) fn build_topbar(
     terminal_toggle.add_css_class("toolbar-toggle");
     terminal_toggle.add_css_class("terminal-pane-toggle");
     terminal_toggle.set_active(true);
-    terminal_toggle.set_tooltip_text(Some("Show or hide the interactive GDB terminal · Ctrl+`"));
+    terminal_toggle.set_tooltip_text(Some("Show or hide the interactive GDB terminal\nCtrl+`"));
     let gef_tools = build_gef_tools_menu(terminal, &terminal_toggle);
     topbar.pack_start(&leading);
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     controls.add_css_class("execution-controls");
-    let run = control_button("Run", "Start or continue the inferior · F5", true);
-    let pause = control_button("Pause", "Interrupt the inferior · F6", false);
-    let next = control_button("Next", "Step over the current source line · F10", false);
-    let step = control_button("Step", "Step into the current source line · F11", false);
+    let run = control_button("Run", "Start or continue the inferior\nF5", true);
+    let pause = control_button("Pause", "Interrupt the inferior\nF6", false);
+    let next = control_button("Next", "Step over the current source line\nF10", false);
+    let step = control_button("Step", "Step into the current source line\nF11", false);
 
     let next_instruction = control_button(
         "Nexti",
-        "Execute one machine instruction, stepping over calls · Ctrl+F10",
+        "Execute one machine instruction, stepping over calls\nCtrl+F10",
         false,
     );
 
     let step_instruction = control_button(
         "Stepi",
-        "Execute one machine instruction, stepping into calls · Ctrl+F11",
+        "Execute one machine instruction, stepping into calls\nCtrl+F11",
         false,
     );
 
     let finish = control_button(
         "Finish",
-        "Run until the current function returns · Shift+F11",
+        "Run until the current function returns\nShift+F11",
         false,
     );
 
@@ -151,7 +148,7 @@ pub(super) fn build_topbar(
     let until_kind = gtk::Label::new(Some("Next matching event"));
     until_kind.add_css_class("session-kind");
     until_kind.set_halign(gtk::Align::Start);
-    let until_detail = gtk::Label::new(Some("Live execution path · Pause cancels"));
+    let until_detail = gtk::Label::new(Some("Live execution path  Pause cancels"));
     until_detail.add_css_class("session-target");
     until_detail.set_halign(gtk::Align::Start);
     until_summary.append(&until_caption);
@@ -296,19 +293,8 @@ pub(super) fn build_topbar(
 }
 
 fn session_menu_action(label: &str, detail: &str) -> gtk::Button {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    let label = gtk::Label::new(Some(label));
-    label.add_css_class("session-action-label");
-    label.set_halign(gtk::Align::Start);
-    label.set_hexpand(true);
-    let detail = gtk::Label::new(Some(detail));
-    detail.add_css_class("session-action-detail");
-    detail.set_halign(gtk::Align::End);
-    row.append(&label);
-    row.append(&detail);
-    let button = gtk::Button::builder().child(&row).build();
+    let button = components::menu_action(label, Some(detail));
     button.add_css_class("session-action");
-
     button
 }
 
@@ -562,19 +548,15 @@ pub(super) fn build_context_menu() -> (gtk::Popover, gtk::Box) {
 }
 
 pub(super) fn context_menu_action(text: &str) -> gtk::Button {
-    let label = gtk::Label::new(Some(text));
-    label.set_xalign(0.0);
-
-    gtk::Button::builder()
-        .child(&label)
-        .hexpand(true)
-        .css_classes(["context-menu-action"])
-        .build()
+    let button = components::menu_action(text, None);
+    button.add_css_class("context-menu-action");
+    button
 }
 
 pub(super) fn header_popup_button(label: &str, popover: &gtk::Popover) -> gtk::ToggleButton {
     let button = gtk::ToggleButton::with_label(label);
     button.set_focus_on_click(false);
+    popover.set_has_arrow(false);
     popover.set_parent(&button);
     popover.set_position(gtk::PositionType::Bottom);
     let popover_for_toggle = popover.clone();
@@ -601,17 +583,7 @@ pub(super) fn header_popup_button(label: &str, popover: &gtk::Popover) -> gtk::T
 }
 
 pub(super) fn gef_tool_button(label: &str, detail: &str) -> gtk::Button {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    let label = gtk::Label::new(Some(label));
-    label.set_halign(gtk::Align::Start);
-    label.set_hexpand(true);
-    let detail = gtk::Label::new(Some(detail));
-    detail.add_css_class("gef-command");
-    detail.set_halign(gtk::Align::End);
-    row.append(&label);
-    row.append(&detail);
-
-    gtk::Button::builder().child(&row).build()
+    components::menu_action(label, Some(detail))
 }
 
 pub(super) fn connect_gef_tool(
@@ -866,7 +838,7 @@ pub(super) fn build_left_sidebar() -> LeftSidebar {
         Some(&gtk::Label::new(Some("Inferiors"))),
     );
 
-    navigation.append_page(&stack_scrolled, Some(&gtk::Label::new(Some("Call Stack"))));
+    navigation.append_page(&stack_scrolled, Some(&gtk::Label::new(Some("Call stack"))));
 
     navigation.append_page(
         &thread_controls.root,
@@ -1003,7 +975,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     instructions_title.set_hexpand(true);
     instructions_title.set_xalign(0.0);
     instructions_title.set_tooltip_text(Some("INSTRUCTIONS"));
-    let instructions_header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    let instructions_header = components::control_row();
     instructions_header.add_css_class("subpanel-header");
     instructions_header.append(&instructions_title);
     let disassembly_range = gtk::Label::new(None);
@@ -1012,11 +984,12 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     disassembly_range.set_halign(gtk::Align::End);
     instructions_header.append(&disassembly_range);
     instructions_panel.append(&instructions_header);
-    let disassembly_browser = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    let disassembly_browser = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
     disassembly_browser.add_css_class("disassembly-browser");
     let disassembly_navigation = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     disassembly_navigation.add_css_class("disassembly-browser-row");
-    let disassembly_actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let disassembly_actions = components::action_flow();
+    disassembly_actions.set_max_children_per_line(3);
     disassembly_actions.add_css_class("disassembly-browser-row");
     let disassembly_back = compact_instruction_button("‹", "Back in location history");
     let disassembly_forward = compact_instruction_button("›", "Forward in location history");
@@ -1025,6 +998,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
 
     let disassembly_location = gtk::Entry::builder()
         .placeholder_text("Address, symbol, or expression")
+        .width_chars(8)
         .hexpand(true)
         .build();
 
@@ -1112,9 +1086,9 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         ],
     );
 
-    disassembly_actions.append(&function_group);
-    disassembly_actions.append(&view_group);
-    disassembly_actions.append(&selected_group);
+    disassembly_actions.insert(&function_group, -1);
+    disassembly_actions.insert(&view_group, -1);
+    disassembly_actions.insert(&selected_group, -1);
     disassembly_browser.append(&disassembly_navigation);
     disassembly_browser.append(&disassembly_actions);
 
@@ -1305,8 +1279,10 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     let memory_watch_title = section_title("OPEN INSPECTORS");
     memory_watch_title.set_hexpand(true);
     memory_watch_header.append(&memory_watch_title);
-    let memory_watch_hint = gtk::Label::new(Some("changes are compared with the previous read"));
+    let memory_watch_hint = gtk::Label::new(Some("Changes are compared with the previous read"));
     memory_watch_hint.add_css_class("muted");
+    memory_watch_hint.set_wrap(true);
+    memory_watch_hint.set_xalign(1.0);
     memory_watch_header.append(&memory_watch_hint);
     memory_watch_section.append(&memory_watch_header);
 
@@ -1318,8 +1294,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     memory_watches_empty.set_hexpand(true);
     memory_watches_empty.set_halign(gtk::Align::Fill);
     memory_watches_empty.set_xalign(0.0);
-    memory_watches_empty.set_wrap(false);
-    memory_watches_empty.set_ellipsize(pango::EllipsizeMode::End);
+    memory_watches_empty.set_wrap(true);
     memory_watch_section.append(&memory_watches_empty);
     let memory_watch_notebook = gtk::Notebook::new();
     memory_watch_notebook.add_css_class("memory-watch-notebook");
@@ -1347,12 +1322,12 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     memory_map_header.append(&memory_map_title);
     let memory_map_hint = gtk::Label::new(Some("Double-click a mapping to inspect it"));
     memory_map_hint.add_css_class("muted");
+    memory_map_hint.set_wrap(true);
+    memory_map_hint.set_xalign(1.0);
     memory_map_header.append(&memory_map_hint);
 
-    let memory_map_search = gtk::SearchEntry::builder()
-        .placeholder_text("Filter mappings")
-        .width_request(190)
-        .build();
+    let memory_map_search = components::delayed_search_entry("Filter mappings");
+    memory_map_search.set_width_request(190);
 
     memory_map_search.add_css_class("memory-map-search");
 
@@ -1360,8 +1335,9 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         "Filter by address, permissions, register annotation, or backing path",
     ));
 
-    memory_map_header.append(&memory_map_search);
     memory_map_section.append(&memory_map_header);
+    components::inset(&memory_map_search, components::CONTROL_GAP);
+    memory_map_section.append(&memory_map_search);
 
     let (memory_regions_view, memory_region_store) =
         build_memory_region_view(bindings.target_pointer_bits, &memory_map_search);
@@ -1410,12 +1386,10 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     hint.set_halign(gtk::Align::Start);
     hint.set_wrap(true);
     breakpoints_page.append(&hint);
-    let stop_point_filter_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    let stop_point_filter_row = components::control_row();
 
-    let stop_point_search = gtk::SearchEntry::builder()
-        .placeholder_text("Search stop points, groups, or tags")
-        .hexpand(true)
-        .build();
+    let stop_point_search = components::delayed_search_entry("Search stop points, groups, or tags");
+    stop_point_search.set_hexpand(true);
 
     stop_point_search.add_css_class("stop-point-search");
 
@@ -1454,7 +1428,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
-    let breakpoint_bulk_actions = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+    let breakpoint_bulk_actions = components::action_flow();
     let add_breakpoint_button = gtk::Button::with_label("Add breakpoint");
     add_breakpoint_button.add_css_class("inline-action");
     add_breakpoint_button.add_css_class("primary-control");
@@ -1489,23 +1463,25 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     ));
 
     delete_all_catchpoints_button.set_sensitive(false);
-    let breakpoint_bulk_spacer = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    breakpoint_bulk_spacer.set_hexpand(true);
-    breakpoint_bulk_actions.append(&add_breakpoint_button);
-    breakpoint_bulk_actions.append(&breakpoint_bulk_spacer);
-    breakpoint_bulk_actions.append(&delete_all_breakpoints_button);
-    breakpoint_bulk_actions.append(&delete_all_watchpoints_button);
-    breakpoint_bulk_actions.append(&delete_all_catchpoints_button);
+    for button in [
+        &add_breakpoint_button,
+        &delete_all_breakpoints_button,
+        &delete_all_watchpoints_button,
+        &delete_all_catchpoints_button,
+    ] {
+        breakpoint_bulk_actions.insert(button, -1);
+    }
     breakpoints_page.append(&breakpoint_bulk_actions);
     breakpoints_page.append(&breakpoints_scrolled);
     let watchpoint_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
     watchpoint_section.add_css_class("breakpoint-tool-section");
     watchpoint_section.append(&section_title("ADD WATCHPOINT"));
-    let watchpoint_controls = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    let watchpoint_controls = components::control_row();
     watchpoint_controls.add_css_class("watchpoint-controls");
 
     let watchpoint_expression = gtk::Entry::builder()
         .placeholder_text("variable or address expression")
+        .width_chars(8)
         .hexpand(true)
         .build();
 
@@ -1523,7 +1499,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
 
     let watchpoint_mask = gtk::Entry::builder()
         .placeholder_text("mask, e.g. 0xffffff00")
-        .width_chars(18)
+        .width_chars(8)
         .build();
 
     watchpoint_mask.set_tooltip_text(Some(
@@ -1568,7 +1544,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         .collect::<Vec<_>>();
 
     catchpoint_section.append(&event_catchpoint_grid);
-    let filtered_catchpoint_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    let filtered_catchpoint_row = components::control_row();
 
     let filtered_catchpoint_kind =
         gtk::DropDown::from_strings(&["Syscalls", "Library load", "Library unload"]);
@@ -1578,6 +1554,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
 
     let filtered_catchpoint_filter = gtk::Entry::builder()
         .placeholder_text("syscall names or numbers")
+        .width_chars(8)
         .hexpand(true)
         .build();
 

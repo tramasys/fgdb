@@ -90,11 +90,11 @@ impl GdbCapabilities {
         let support = if available.is_empty() {
             String::from("compatibility mode")
         } else {
-            available.join(" · ")
+            available.join("  ")
         };
 
         if let Some(version) = self.version.as_ref() {
-            format!("GDB {version} · {support}")
+            format!("GDB {version}  {support}")
         } else {
             support
         }

@@ -17,12 +17,15 @@ use sourceview5::prelude::*;
 use vte4::prelude::*;
 
 mod actions;
+mod components;
+use components::section_title;
 mod configuration;
 mod debug_data;
 pub(crate) use debug_data::DebugDataAction;
 mod domain;
 use domain::{
     LocalVariableCatalog, MemoryRefreshBatch, TerminalSynchronization, VariableNodeIndex,
+    local_refresh_indices,
 };
 mod layout;
 mod lifecycle;
@@ -119,6 +122,12 @@ fn set_transient_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive:
     }
 }
 
+fn stop_point_actions_available(model: &crate::model::DebuggerModel) -> bool {
+    model.stop_point_commands_available()
+        && model.execution().inferior_action_pending.is_none()
+        && model.execution().thread_action_pending.is_none()
+}
+
 fn set_label_text(label: &gtk::Label, text: &str) {
     if label.text().as_str() != text {
         label.set_text(text);
@@ -136,6 +145,7 @@ fn set_css_class(widget: &impl IsA<gtk::Widget>, class: &str, enabled: bool) {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ControlState {
     busy: bool,
+    stop_point_busy: bool,
     run: bool,
     pause: bool,
     move_target: bool,
@@ -145,6 +155,7 @@ struct ControlState {
     heap_inspector_in_flight: bool,
     heap_action_visibility: u64,
     edit_local: bool,
+    inspect_locals: bool,
     manage_watches: bool,
     add_watch: bool,
     remove_watch: bool,
@@ -331,22 +342,22 @@ impl EventCatchpoint {
             "Rust panic",
             "Stop at Rust's panic runtime entry point",
         ),
-        (Self::Exec, "exec", "Stop when the inferior calls exec"),
-        (Self::Fork, "fork", "Stop when the inferior forks"),
-        (Self::Vfork, "vfork", "Stop when the inferior calls vfork"),
+        (Self::Exec, "Exec", "Stop when the inferior calls exec"),
+        (Self::Fork, "Fork", "Stop when the inferior forks"),
+        (Self::Vfork, "Vfork", "Stop when the inferior calls vfork"),
         (
             Self::Syscall,
-            "syscall",
+            "Syscall",
             "Stop at every system call. This can trigger very frequently",
         ),
         (
             Self::LibraryLoad,
-            "library load",
+            "Library load",
             "Stop when any shared library is loaded",
         ),
         (
             Self::LibraryUnload,
-            "library unload",
+            "Library unload",
             "Stop when any shared library is unloaded",
         ),
     ];
@@ -1852,6 +1863,46 @@ mod tests {
     use crate::misc::CallAbiPhase;
 
     #[test]
+    fn stop_point_submissions_recheck_execution_and_selection_locks() {
+        use crate::model::{DebuggerModel, DebuggerStateDelta, actions::*};
+
+        let model = DebuggerModel::new(None);
+        let available = || super::stop_point_actions_available(&model);
+        assert!(!available());
+        model.set_controls_ready(true);
+        assert!(available());
+        model.apply_debugger_state_delta(DebuggerStateDelta::establish_stopped_target(
+            TargetConnection::Local,
+        ));
+        model.set_debug_state_stale(false);
+        assert!(available());
+
+        model.set_command_pending(true);
+        assert!(!available());
+        model.set_command_pending(false);
+        model.set_debug_state_stale(true);
+        assert!(!available());
+        model.set_debug_state_stale(false);
+        model.set_thread_action_pending(Some(ThreadActionPending::Analysis));
+        assert!(!available());
+        model.set_thread_action_pending(None);
+        model.set_inferior_action_pending(Some(InferiorActionPending::Selection));
+        assert!(!available());
+        model.set_inferior_action_pending(None);
+        assert!(available());
+
+        model.mark_inferior_running(None);
+        assert!(!available());
+        model.apply_debugger_state_delta(DebuggerStateDelta::establish_stopped_target(
+            TargetConnection::Local,
+        ));
+        model.set_debug_state_stale(false);
+        assert!(available());
+        model.set_controls_ready(false);
+        assert!(!available());
+    }
+
+    #[test]
     fn gef_capability_probes_are_unique() {
         let unique = GEF_COMMAND_CAPABILITIES
             .iter()
@@ -2048,7 +2099,7 @@ mod tests {
 
         assert_eq!(
             details(&integer("char", "0x41 'A'"), "0x41", "'A'"),
-            "65  ·  'A'"
+            "65  'A'"
         );
 
         assert_eq!(details(&integer("pid_t", "-0x1"), "-0x1", ""), "-1");
@@ -2342,7 +2393,7 @@ mod tests {
 
         assert_eq!(
             format_register_value("ymm0", ymm, false),
-            "q0=0x0000000000000001  ·  q1=0x0000000000000002  ·  q2=0x0000000000000003  ·  q3=0x0000000000000004"
+            "q0=0x0000000000000001  q1=0x0000000000000002  q2=0x0000000000000003  q3=0x0000000000000004"
         );
 
         let zero_ymm = "{v4_int64 = {[0x0] = 0x0, [0x1] = 0x0, [0x2] = 0x0, [0x3] = 0x0}}";
@@ -2684,7 +2735,7 @@ mod tests {
                 std::slice::from_ref(&flags),
                 TargetArchitecture::X86_64,
             ),
-            "BRANCH · NOT TAKEN  ▶  0x40100c <main+0x1c>"
+            "BRANCH  NOT TAKEN  ▶  0x40100c <main+0x1c>"
         );
 
         let syscall = Instruction {
@@ -2838,7 +2889,7 @@ mod tests {
 
         assert_eq!(
             instruction_flow_description(&branch, &riscv_registers, TargetArchitecture::RiscV32,),
-            "BRANCH · TAKEN  ▶  a0,a1,0x1010"
+            "BRANCH  TAKEN  ▶  a0,a1,0x1010"
         );
 
         let load = Instruction {

@@ -34,10 +34,7 @@ impl Ui {
 
         dialog.add_css_class("configuration-dialog");
         let root = gtk::Box::new(gtk::Orientation::Vertical, 10);
-        root.set_margin_top(12);
-        root.set_margin_bottom(12);
-        root.set_margin_start(12);
-        root.set_margin_end(12);
+        components::inset(&root, components::DIALOG_INSET);
         let header = gtk::Box::new(gtk::Orientation::Vertical, 3);
         let title = gtk::Label::new(Some("Configuration diagnostics"));
         title.add_css_class("title-2");

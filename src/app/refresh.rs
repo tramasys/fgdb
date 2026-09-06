@@ -138,11 +138,26 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
                     variable_update_batch_for_locals,
                 );
             } else {
+                if record.class != "superseded"
+                    && let Some(ui) = weak_ui.upgrade()
+                {
+                    ui.show_locals_refresh_error(
+                        generation,
+                        record
+                            .error_message()
+                            .unwrap_or("GDB could not load locals and arguments"),
+                    );
+                }
+
                 variable_update_batch_ready(client, &variable_update_batch_for_locals, None);
             }
         })
         .is_err()
     {
+        if let Some(ui) = ui.upgrade() {
+            ui.show_locals_refresh_error(generation, "The locals request could not be submitted");
+        }
+
         variable_update_batch_ready(client, &variable_update_batch, None);
     }
 
@@ -448,14 +463,18 @@ fn refresh_persistent_variable_objects(
         delete_variable_object(client, &varobj);
     }
 
-    if let Some(ui) = ui.upgrade() {
+    // Locals publish one completed snapshot. The simple-values response omits
+    // aggregates, so publishing it here replaces good values with placeholders.
+    if matches!(target, VariableRefreshTarget::ExpressionWatches(_))
+        && let Some(ui) = ui.upgrade()
+    {
         show_variable_refresh(&ui, generation, &target, &variables);
     }
 
     let automatic_creation_indices = match &target {
-        VariableRefreshTarget::Locals => ui
-            .upgrade()
-            .map_or_else(HashSet::new, |ui| ui.rendered_local_variable_indices()),
+        VariableRefreshTarget::Locals => ui.upgrade().map_or_else(HashSet::new, |ui| {
+            ui.local_variable_refresh_indices(&variables)
+        }),
         VariableRefreshTarget::ExpressionWatches(_) => (0..variables.len()).collect(),
     };
 
@@ -1093,6 +1112,13 @@ pub(super) fn request_variable_children(
     variable: Variable,
     from: usize,
 ) {
+    if let Some(ui) = ui.upgrade()
+        && !ui.variable_action_is_current(&variable)
+    {
+        ui.cancel_variable_children_request(&variable);
+        return;
+    }
+
     let Some(varobj) = variable.varobj.clone() else {
         request_lazy_local_variable_children(ui, client, variable, from);
         return;

@@ -1,0 +1,169 @@
+/* Body text is 12px. Secondary data is 11px, uppercase captions and badges
+   are 10px. Bold identifies headings, names, or changed data, never selection. */
+
+.title-2 {
+    font-size: 16px;
+    font-weight: 700;
+}
+
+.menu-action-detail {
+    font-size: 11px;
+}
+
+headerbar.topbar button.window-control {
+    font-size: 15px;
+    font-weight: 400;
+}
+
+.app-title,
+.cfg-legend-sample,
+.allocator-detection-identity {
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.section-title,
+.module-symbol-state,
+.inferior-selected-state,
+.inferior-card-state,
+.disassembly-control-label,
+.local-scope,
+.local-variable-menu-caption,
+.local-variable-menu-section,
+.session-caption,
+.configuration-grid-heading,
+.debug-data-activity-order,
+.debug-data-activity-kind,
+.debug-data-printer-loader-status,
+.debug-data-printer-kind,
+.misc-startup-summary-key,
+.allocator-detection-caption,
+.allocator-detail-key,
+.allocator-metric-key,
+.heap-inspector-group-title,
+.kernel-memory-unit-header {
+    font-size: 10px;
+    font-weight: 700;
+}
+
+button.breakpoint-location-badge,
+.breakpoint-gutter,
+.breakpoint-metadata,
+.thread-detail,
+.module-range,
+.module-path,
+.inferior-detach-policy,
+.inferior-facts,
+.inferior-relationship,
+.instruction-address,
+.instruction-opcodes,
+.instruction-symbol,
+.disassembly-range,
+.instruction-insight-line,
+.local-disclosure,
+.locals-summary,
+.local-variable-menu-type,
+.local-variable-menu-value,
+.stack-inspector-key,
+.legend-swatch,
+.session-target,
+.configuration-issue-location,
+.debug-data-activity-summary-detail,
+.debug-data-activity-detail,
+.debug-data-activity-time,
+.debug-data-activity-occurrences,
+.debug-data-printer-loader-path,
+.debug-data-printer-loader-note,
+.debug-data-printer-count,
+.gef-command,
+.context-menu-heading,
+button.signal-action,
+.status-detail,
+.source-palette-kind,
+.source-palette-secondary,
+.source-tree-status,
+.source-tree-disclosure,
+.cfg-stat,
+.cfg-detail,
+.cfg-legend-detail,
+.cfg-block-label,
+.kernel-warning {
+    font-size: 11px;
+}
+
+button.breakpoint-badge,
+.breakpoint-condition,
+.value-editor-validation,
+.field-label,
+.thread-heading,
+.thread-comparison-changed,
+.inferior-id,
+.instruction-mnemonic,
+.instruction-flow-insight,
+.instruction-insight-line.branch-taken,
+.local-name,
+.local-load-more,
+.local-variable-menu-name,
+.variable-viewer-name,
+.register-name,
+.stack-register-marker,
+.memory-rwx,
+.memory-watch-expression,
+.memory-watch-error,
+.session-kind,
+.configuration-fact-name,
+.debug-data-fact-name,
+.debug-data-printer-loader-name,
+.debug-data-printer-summary-count,
+.debug-data-printer-scope-name,
+.debug-data-printer-provider-name,
+.misc-vector-name,
+.cfg-block-header-label,
+.allocator-metric-value,
+.heap-inspector-command,
+.heap-inspector-structure-cell,
+.heap-inspector-cell.heap-inspector-section-cell,
+.heap-inspector-cell.heap-inspector-error-cell,
+.call-abi-context,
+.kernel-private-summary-value,
+.kernel-memory-category,
+.kernel-change-new,
+.kernel-change-removed,
+.kernel-change-protection,
+.kernel-change-modified,
+.kernel-state-active,
+.kernel-state-warning,
+.kernel-process-target {
+    font-weight: 700;
+}
+
+.thread-workspace-summary,
+.inferior-stop-owner,
+.debug-data-section,
+.debug-data-activity-summary-title,
+.debug-data-printer-loader-heading,
+.cfg-legend-title,
+.allocator-detection-basis,
+.allocator-detection-safety {
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.local-changed-marker,
+.source-tree-loaded {
+    font-size: 10px;
+}
+
+.memory-watch-cell,
+.disclosure-arrow {
+    font-size: 12px;
+}
+
+popover.debugger-context-menu button.context-menu-action {
+    font-weight: 400;
+}
+
+.cfg-summary {
+    font-size: 12px;
+    font-weight: 700;
+}

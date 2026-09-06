@@ -124,7 +124,7 @@ pub(super) fn populate_tls_metadata(
         let detail = if failures.is_empty() {
             String::new()
         } else {
-            format!(" ({})", failures.join(" · "))
+            format!(" ({})", failures.join("  "))
         };
 
         snapshot.warnings.push(format!(

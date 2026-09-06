@@ -26,6 +26,10 @@ pub(super) fn open_variable_viewer(
         return;
     };
 
+    if !current_ui.variable_action_is_current(&request.variable) {
+        return;
+    }
+
     let generation = current_ui.model.current_stop_refresh_generation();
     let session = current_ui.begin_variable_viewer(&request);
 

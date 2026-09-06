@@ -1,5 +1,25 @@
 use super::*;
 
+pub(super) fn local_refresh_indices(
+    variables: &[Variable],
+    query: &str,
+    limit: usize,
+) -> HashSet<usize> {
+    let terms = query.split_whitespace().collect::<Vec<_>>();
+    variables
+        .iter()
+        .enumerate()
+        .filter(|(_, variable)| {
+            terms.is_empty() || {
+                let text = variable_search_text(variable);
+                terms.iter().all(|term| text.contains(term))
+            }
+        })
+        .take(limit)
+        .map(|(index, _)| index)
+        .collect()
+}
+
 #[derive(Default)]
 pub(super) struct LocalVariableCatalog {
     entries: Vec<LocalVariableEntry>,
@@ -324,6 +344,28 @@ mod tests {
         catalog.replace(&variables);
         assert_eq!(catalog.filtered("value_599", 0).1, 1);
         assert!(catalog.filtered("value_599", 0).0.is_empty());
+
+        // Preparation must use the incoming snapshot and the same page/filter
+        // rules without replacing the previous values still being displayed.
+        for (query, limit) in [("", 64), ("value_599 int", 64), ("value_599", 0)] {
+            let expected = catalog
+                .filtered(query, limit)
+                .0
+                .iter()
+                .filter_map(|variable| variable.local_index)
+                .collect::<HashSet<_>>();
+            assert_eq!(local_refresh_indices(&variables, query, limit), expected);
+        }
+        let mut incoming = variables.clone();
+        incoming.insert(0, variable("new_local", "new"));
+        assert_eq!(
+            local_refresh_indices(&incoming, "value_599", 64),
+            HashSet::from([600])
+        );
+        assert_eq!(
+            catalog.filtered("value_599", 64).0[0].local_index,
+            Some(599)
+        );
     }
 
     #[test]

@@ -666,6 +666,7 @@ impl Ui {
         name.set_halign(gtk::Align::Start);
         name.set_hexpand(true);
         name.set_ellipsize(pango::EllipsizeMode::Middle);
+        name.connect_label_notify(|label| label.set_tooltip_text(Some(&label.text())));
         let state = gtk::Label::new(None);
         state.add_css_class("inferior-card-state");
         heading.append(&id);
@@ -676,6 +677,7 @@ impl Ui {
         facts.add_css_class("inferior-facts");
         facts.set_halign(gtk::Align::Start);
         facts.set_ellipsize(pango::EllipsizeMode::End);
+        facts.connect_label_notify(|label| label.set_tooltip_text(Some(&label.text())));
         card.append(&facts);
         let relationship = gtk::Label::new(None);
         relationship.add_css_class("inferior-relationship");
@@ -700,6 +702,7 @@ impl Ui {
         actions.append(&select);
         let execution_button = gtk::Button::with_label("Unavailable");
         execution_button.add_css_class("inferior-inline-action");
+        execution_button.add_css_class("primary-control");
         let execution_action = Rc::new(RefCell::new(None::<InferiorAction>));
         let handler = Rc::clone(&self.inferior_controls.action_handler);
         let action = Rc::clone(&execution_action);

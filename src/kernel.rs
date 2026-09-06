@@ -588,7 +588,7 @@ impl KernelSnapshot {
                 format_count_delta(before, after)
             };
 
-            if delta != "—" {
+            if delta != "-" {
                 self.changes.push(fact(label, delta));
             }
         }
@@ -608,14 +608,14 @@ impl KernelSnapshot {
             ] {
                 let delta = format_duration_delta(before, after, 1);
 
-                if delta != "—" {
+                if delta != "-" {
                     self.changes.push(fact(label, delta));
                 }
             }
 
             let timeslices = format_count_delta(old.sched_timeslices, new.sched_timeslices);
 
-            if timeslices != "—" {
+            if timeslices != "-" {
                 self.changes
                     .push(fact("Main-thread scheduler timeslices", timeslices));
             }
@@ -628,7 +628,7 @@ impl KernelSnapshot {
                 self.changes.push(fact(
                     "Main-thread run-queue wait share",
                     format!(
-                        "{:.1}% · wait / (execution + wait)",
+                        "{:.1}%  wait / (execution + wait)",
                         wait as f64 / runtime.saturating_add(wait) as f64 * 100.0
                     ),
                 ));
@@ -639,7 +639,7 @@ impl KernelSnapshot {
             if old.cgroup_memory_current_available && new.cgroup_memory_current_available {
                 let delta = format_byte_delta(old.cgroup_memory_current, new.cgroup_memory_current);
 
-                if delta != "—" {
+                if delta != "-" {
                     self.cgroup_changes.push(fact("Cgroup memory usage", delta));
                 }
             }
@@ -682,7 +682,7 @@ impl KernelSnapshot {
             ] {
                 let delta = format_count_delta(before, after);
 
-                if delta != "—" {
+                if delta != "-" {
                     self.cgroup_changes.push(fact(label, delta));
                 }
             }
@@ -716,7 +716,7 @@ impl KernelSnapshot {
             ] {
                 let delta = format_duration_delta(before, after, 1_000);
 
-                if delta != "—" {
+                if delta != "-" {
                     self.cgroup_changes.push(fact(label, delta));
                 }
             }
@@ -758,7 +758,7 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
     snapshot.diagnostics.push(fact(
         "Executable mappings",
         format!(
-            "{executable} total · {writable_executable} writable+executable · {anonymous_executable} anonymous"
+            "{executable} total  {writable_executable} writable+executable  {anonymous_executable} anonymous"
         ),
     ));
 
@@ -774,7 +774,7 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
         snapshot.diagnostics.push(fact(
             "Working-set signal",
             format!(
-                "{} referenced ({referenced_share:.1}% of RSS) · {} not marked referenced",
+                "{} referenced ({referenced_share:.1}% of RSS)  {} not marked referenced",
                 format_bytes(memory.referenced),
                 format_bytes(not_referenced),
             ),
@@ -789,7 +789,7 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
         snapshot.diagnostics.push(fact(
             "Reclaim / pinning",
             format!(
-                "swap {} in {swapped_mappings} VMAs · lazy-free {} · locked {} · pinned {}",
+                "swap {} in {swapped_mappings} VMAs  lazy-free {}  locked {}  pinned {}",
                 format_bytes(memory.swap),
                 format_bytes(memory.lazy_free),
                 format_bytes(memory.locked),
@@ -810,7 +810,7 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
         snapshot.diagnostics.push(fact(
             "Page-size mix",
             format!(
-                "{} · huge/PMD-backed {} · {} THP-eligible VMAs",
+                "{}  huge/PMD-backed {}  {} THP-eligible VMAs",
                 page_sizes
                     .into_iter()
                     .map(format_bytes)
@@ -834,7 +834,7 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
                     .find(|category| category.category == name)
                     .map(|category| {
                         format!(
-                            "{name}: VSS {} · RSS {} · USS {}",
+                            "{name}: VSS {}  RSS {}  USS {}",
                             format_bytes(category.virtual_bytes),
                             format_bytes(category.rss),
                             format_bytes(category.unique_rss()),
@@ -859,7 +859,7 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
             snapshot.diagnostics.push(fact(
                 "Largest private mapping",
                 format!(
-                    "0x{:016x}-0x{:016x} · USS {} · RSS {} · {}",
+                    "0x{:016x}-0x{:016x}  USS {}  RSS {}  {}",
                     mapping.start,
                     mapping.end,
                     format_bytes(mapping.private_bytes()),
@@ -881,10 +881,10 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
     snapshot.diagnostics.push(fact(
         "Open-file headroom",
         soft_fd_limit.map_or_else(
-            || format!("{open_descriptors} open · soft limit unavailable"),
+            || format!("{open_descriptors} open  soft limit unavailable"),
             |limit| {
                 format!(
-                    "{open_descriptors} / {limit} · {} remaining",
+                    "{open_descriptors} / {limit}  {} remaining",
                     limit.saturating_sub(open_descriptors)
                 )
             },
@@ -909,7 +909,7 @@ fn summarize_mapping_changes(changes: &[KernelMappingChange]) -> Vec<KernelFact>
     let mut facts = vec![fact(
         "VMA lifecycle",
         format!(
-            "{} new · {} unmapped · {} resized · {} protection changes · {} accounting-only",
+            "{} new  {} unmapped  {} resized  {} protection changes  {} accounting-only",
             count("NEW"),
             count("UNMAPPED"),
             count("RESIZED"),
@@ -965,7 +965,7 @@ fn summarize_mapping_changes(changes: &[KernelMappingChange]) -> Vec<KernelFact>
             facts.push(fact(
                 label,
                 format!(
-                    "gained {} · released {} · net {}",
+                    "gained {}  released {}  net {}",
                     format_signed_bytes(gained),
                     format_signed_bytes(released),
                     format_signed_bytes(gained + released),
@@ -1137,7 +1137,7 @@ fn format_count_delta(before: u64, after: u64) -> String {
     } else if delta < 0 {
         format!("−{}", -delta)
     } else {
-        String::from("—")
+        String::from("-")
     }
 }
 
@@ -1145,13 +1145,13 @@ fn format_byte_delta(before: u64, after: u64) -> String {
     match after.cmp(&before) {
         std::cmp::Ordering::Greater => format!("+{}", format_bytes(after - before)),
         std::cmp::Ordering::Less => format!("−{}", format_bytes(before - after)),
-        std::cmp::Ordering::Equal => String::from("—"),
+        std::cmp::Ordering::Equal => String::from("-"),
     }
 }
 
 fn format_signed_bytes(bytes: i128) -> String {
     if bytes == 0 {
-        return String::from("—");
+        return String::from("-");
     }
 
     let magnitude = u64::try_from(bytes.unsigned_abs()).unwrap_or(u64::MAX);
@@ -1173,7 +1173,7 @@ fn format_duration_delta(before: u64, after: u64, nanos_per_unit: u64) -> String
             "−{}",
             format_duration_ns(before.saturating_sub(after).saturating_mul(nanos_per_unit))
         ),
-        std::cmp::Ordering::Equal => String::from("—"),
+        std::cmp::Ordering::Equal => String::from("-"),
     }
 }
 
@@ -1370,7 +1370,7 @@ mod tests {
 
         assert!(new.mapping_summary.iter().any(|fact| {
             fact.label == "Virtual mapping churn"
-                && fact.value == "gained +8.0 KiB · released — · net +8.0 KiB"
+                && fact.value == "gained +8.0 KiB  released -  net +8.0 KiB"
         }));
 
         assert!(

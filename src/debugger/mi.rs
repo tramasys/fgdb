@@ -2552,7 +2552,7 @@ mod tests {
 
         assert_eq!(
             capabilities.compatibility_summary(),
-            "GDB 17.2 · MI async · pretty printers · Rust printers · feature list"
+            "GDB 17.2  MI async  pretty printers  Rust printers  feature list"
         );
 
         assert!(GdbCapabilities::default().supports("future-mi-command"));

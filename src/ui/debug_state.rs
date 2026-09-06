@@ -1,5 +1,15 @@
 use super::*;
 
+fn local_snapshot_is_inspectable(
+    model: &crate::model::DebuggerModel,
+    generation: Option<u64>,
+) -> bool {
+    generation.is_some_and(|generation| model.is_stop_refresh_current(generation))
+        && model.stopped_inspection_available()
+        && model.execution().inferior_action_pending.is_none()
+        && model.execution().thread_action_pending.is_none()
+}
+
 fn center_scroll_adjustment(scrolled: &gtk::ScrolledWindow, position: u32, item_count: u32) {
     if item_count == 0 {
         return;
@@ -188,7 +198,7 @@ fn breakpoint_status_text(breakpoint: &Breakpoint) -> String {
         ));
     }
 
-    status.join("  ·  ")
+    status.join("  ")
 }
 
 fn bounded_stack_frames(
@@ -363,6 +373,8 @@ impl Ui {
 
     pub fn show_locals(&self, variables: &[Variable]) {
         self.locals_generation.set(None);
+        self.locals_view.set_tooltip_text(None);
+        self.locals_summary.set_tooltip_text(None);
 
         self.locals_render_limit.set(self.adaptive_render_limit(
             "locals pane",
@@ -437,7 +449,6 @@ impl Ui {
             });
 
             self.locals_empty.set_visible(true);
-            self.locals_edit_button.set_sensitive(false);
         } else {
             self.locals_empty.set_visible(false);
 
@@ -454,13 +465,9 @@ impl Ui {
 
                 self.locals_selection.set_selected(selected);
             }
-
-            self.locals_edit_button.set_sensitive(
-                variable_at(&self.locals_selection, self.locals_selection.selected())
-                    .is_some_and(|variable| variable.is_available()),
-            );
         }
 
+        self.update_control_sensitivity();
         self.record_ui_render_duration("locals pane", render_started);
     }
 
@@ -482,11 +489,44 @@ impl Ui {
 
             self.local_variables.borrow_mut().replace(variables);
             self.render_locals();
+            self.locals_view.set_tooltip_text(None);
+            self.locals_summary.set_tooltip_text(None);
         }
     }
 
-    pub fn show_local_root_for_refresh(&self, generation: u64, index: usize, variable: &Variable) {
+    pub(crate) fn show_locals_refresh_error(&self, generation: u64, error: &str) {
         if !self.model.is_stop_refresh_current(generation) {
+            return;
+        }
+
+        self.locals_view.set_tooltip_text(Some(error));
+        self.locals_summary.set_text("Locals refresh failed");
+        self.locals_summary.set_tooltip_text(Some(error));
+
+        if self.locals_store.n_items() == 0 {
+            self.locals_empty.set_text(error);
+            self.locals_empty.set_visible(true);
+        }
+
+        self.update_control_sensitivity();
+    }
+
+    pub(super) fn locals_are_current(&self) -> bool {
+        self.locals_generation
+            .get()
+            .is_some_and(|generation| self.model.is_stop_refresh_current(generation))
+    }
+
+    pub(super) fn locals_inspection_available(&self) -> bool {
+        local_snapshot_is_inspectable(&self.model, self.locals_generation.get())
+    }
+
+    pub fn show_local_root_for_refresh(&self, generation: u64, index: usize, variable: &Variable) {
+        // Automatic root creation is staged by the refresh owner until the
+        // complete snapshot arrives. Do not patch a previous stop's rows.
+        if self.locals_generation.get() != Some(generation)
+            || !self.model.is_stop_refresh_current(generation)
+        {
             return;
         }
 
@@ -664,7 +704,50 @@ impl Ui {
     }
 
     pub(crate) fn has_local_variable_identity(&self, variable: &Variable) -> bool {
-        self.local_variable_node(variable).is_some()
+        self.locals_are_current() && self.local_variable_node(variable).is_some()
+    }
+
+    /// The model authorizes the stop. Displayed variables must additionally
+    /// belong to the published snapshot, not the previous stop kept on screen.
+    pub(crate) fn variable_action_is_current(&self, variable: &Variable) -> bool {
+        let generation = self.model.current_stop_refresh_generation();
+        if !self.model.can_edit_variable(generation) {
+            return false;
+        }
+
+        if variable.local_index.is_some() {
+            return self.locals_inspection_available()
+                && self
+                    .local_variable_node(variable)
+                    .is_some_and(|(_, node)| node.variable.type_name == variable.type_name);
+        }
+
+        let Some(varobj) = variable.varobj.as_deref() else {
+            return true;
+        };
+        let Some(node) = self.find_variable_node(varobj) else {
+            return false;
+        };
+        let root = varobj.split('.').next().unwrap_or(varobj);
+        let local = self
+            .find_variable_node(root)
+            .is_some_and(|node| node.variable.local_index.is_some());
+
+        (!local || self.locals_inspection_available())
+            && node.variable.name == variable.name
+            && node.variable.argument == variable.argument
+            && node.variable.type_name == variable.type_name
+    }
+
+    pub(crate) fn cancel_variable_children_request(&self, variable: &Variable) {
+        let node = variable
+            .varobj
+            .as_deref()
+            .and_then(|varobj| self.find_variable_node(varobj))
+            .or_else(|| self.local_variable_node(variable).map(|(_, node)| node));
+        if let Some(node) = node {
+            node.children_loading.set(false);
+        }
     }
 
     pub(crate) fn claim_local_variable_object(&self, generation: u64, variable: &Variable) -> bool {
@@ -735,14 +818,14 @@ impl Ui {
         self.local_variables.borrow().to_vec()
     }
 
-    pub(crate) fn rendered_local_variable_indices(&self) -> HashSet<usize> {
-        (0..self.locals_store.n_items() as usize)
-            .filter_map(|position| {
-                variable_root_node(&self.locals_store, position)?
-                    .variable
-                    .local_index
-            })
-            .collect()
+    pub(crate) fn local_variable_refresh_indices(&self, variables: &[Variable]) -> HashSet<usize> {
+        let query = self.locals_filter.text().trim().to_ascii_lowercase();
+        let limit = self.adaptive_render_limit(
+            "locals pane",
+            crate::performance::LOCALS_ROOT_PAGE_SIZE,
+            64,
+        );
+        local_refresh_indices(variables, &query, limit)
     }
 
     fn find_variable_node(&self, varobj: &str) -> Option<VariableNode> {
@@ -800,6 +883,14 @@ impl Ui {
     pub(crate) fn connect_local_paging(self: &Rc<Self>) {
         let weak_ui = Rc::downgrade(self);
 
+        self.locals_selection.connect_selected_notify(move |_| {
+            if let Some(ui) = weak_ui.upgrade() {
+                ui.update_control_sensitivity();
+            }
+        });
+
+        let weak_ui = Rc::downgrade(self);
+
         self.locals_more_button.connect_clicked(move |_| {
             if let Some(ui) = weak_ui.upgrade() {
                 let page = ui.adaptive_render_limit(
@@ -831,6 +922,48 @@ impl Ui {
     }
 
     pub(super) fn connect_local_activation(&self) {
+        // Keep GTK sensitivity stable across steps. Reject new interactions
+        // with the retained snapshot before they reach row/button controllers.
+        // Let releases finish existing gestures, and retain scrolling and Tab
+        // navigation. Action handlers also guard non-pointer activation.
+        for widget in [
+            self.locals_view.upcast_ref::<gtk::Widget>(),
+            self.locals_edit_button.upcast_ref::<gtk::Widget>(),
+        ] {
+            let events = gtk::EventControllerLegacy::new();
+            events.set_propagation_phase(gtk::PropagationPhase::Capture);
+            let model = Rc::clone(&self.model);
+            let locals_generation = Rc::clone(&self.locals_generation);
+
+            events.connect_event(move |_, event| {
+                let starts_interaction = match event.event_type() {
+                    gtk::gdk::EventType::ButtonPress
+                    | gtk::gdk::EventType::TouchBegin
+                    | gtk::gdk::EventType::PadButtonPress => true,
+                    gtk::gdk::EventType::KeyPress => event
+                        .downcast_ref::<gtk::gdk::KeyEvent>()
+                        .is_some_and(|event| {
+                            !matches!(
+                                event.keyval(),
+                                gtk::gdk::Key::Tab
+                                    | gtk::gdk::Key::ISO_Left_Tab
+                                    | gtk::gdk::Key::Escape
+                            )
+                        }),
+                    _ => false,
+                };
+
+                if starts_interaction
+                    && !local_snapshot_is_inspectable(&model, locals_generation.get())
+                {
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            });
+            widget.add_controller(events);
+        }
+
         let window = self.window.clone();
         let selection = self.locals_selection.clone();
         let handler = Rc::clone(&self.variable_assignment_handler);
@@ -842,14 +975,10 @@ impl Ui {
         let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
         let model = Rc::clone(&self.model);
+        let locals_generation = Rc::clone(&self.locals_generation);
 
         self.locals_view.connect_activate(move |_, position| {
-            if !model.execution().ready
-                || !model.execution().state.inferior_started()
-                || model.execution().state.inferior_running()
-                || model.execution().command_pending
-                || model.execution().session_pending
-            {
+            if !local_snapshot_is_inspectable(&model, locals_generation.get()) {
                 return;
             }
 
@@ -915,8 +1044,13 @@ impl Ui {
         let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
         let model = Rc::clone(&self.model);
+        let locals_generation = Rc::clone(&self.locals_generation);
 
         self.locals_edit_button.connect_clicked(move |_| {
+            if !local_snapshot_is_inspectable(&model, locals_generation.get()) {
+                return;
+            }
+
             if let Some(variable) = variable_at(&selection, selection.selected())
                 && variable.is_available()
             {
@@ -942,21 +1076,6 @@ impl Ui {
                 }
             }
         });
-
-        let edit_button = self.locals_edit_button.clone();
-        let model = Rc::clone(&self.model);
-
-        self.locals_selection
-            .connect_selected_notify(move |selection| {
-                edit_button.set_sensitive(
-                    model.execution().ready
-                        && model.execution().state.inferior_started()
-                        && !model.execution().state.inferior_running()
-                        && !model.execution().command_pending
-                        && variable_at(selection, selection.selected())
-                            .is_some_and(|variable| variable.is_available()),
-                );
-            });
     }
 
     pub(super) fn connect_register_activation(&self) {
@@ -1378,7 +1497,7 @@ impl Ui {
 
         let title = architecture.map_or_else(
             || String::from("INSTRUCTIONS"),
-            |architecture| format!("INSTRUCTIONS · {architecture}"),
+            |architecture| format!("INSTRUCTIONS  {architecture}"),
         );
 
         self.instructions_title.set_text(&title);
@@ -1492,7 +1611,7 @@ impl Ui {
             };
 
             let range = format!(
-                "{function} · {}-{} · {} instructions",
+                "{function}  {}-{}  {} instructions",
                 full_address(&first.instruction.address, self.target_pointer_bits()),
                 full_address(&last.instruction.address, self.target_pointer_bits()),
                 self.instructions_store.n_items()
@@ -1604,7 +1723,7 @@ impl Ui {
         };
 
         self.instruction_memory
-            .set_text(&format!("MEMORY  {expression} · reading…"));
+            .set_text(&format!("MEMORY  {expression}  reading…"));
 
         self.instruction_memory.set_visible(true);
         let handler = self.instruction_memory_handler.borrow().clone();
@@ -1636,7 +1755,7 @@ impl Ui {
                     compact_memory_preview(&memory.bytes)
                 )
             }
-            Err(error) => format!("MEMORY  {expression} · {error}"),
+            Err(error) => format!("MEMORY  {expression}  {error}"),
         };
 
         self.instruction_memory.set_text(&text);
@@ -1931,7 +2050,7 @@ impl Ui {
 
     pub fn show_signal(&self, name: Option<&str>, meaning: Option<&str>) {
         let text = match (name, meaning) {
-            (Some(name), Some(meaning)) => format!("{name} · {meaning}"),
+            (Some(name), Some(meaning)) => format!("{name}  {meaning}"),
             (Some(name), None) => name.to_owned(),
             (None, _) => String::from("No signal at the current stop"),
         };
@@ -2038,6 +2157,7 @@ impl Ui {
         self.call_abi_instruction.replace(None);
         self.call_abi_instruction_generation.set(None);
         self.misc_view.show_call_abi_pending();
+        self.update_control_sensitivity();
 
         generation
     }
@@ -2048,6 +2168,15 @@ impl Ui {
     ) -> Option<crate::debugger::StopContext> {
         self.start_stop_refresh();
         let context = self.model.bind_stop_context(transport_epoch)?;
+        let tooltip =
+            "Refreshing locals and arguments. Previous values remain visible and cannot be edited";
+        self.locals_view.set_tooltip_text(Some(tooltip));
+        self.locals_summary.set_tooltip_text(Some(tooltip));
+
+        if self.locals_store.n_items() == 0 {
+            self.locals_empty.set_text("Loading locals and arguments…");
+        }
+
         update_selected_frame_buttons(&self.frame_buttons.borrow(), context.frame_level());
         self.update_thread_control_sensitivity();
 
@@ -2247,8 +2376,13 @@ impl Ui {
         let access = self.watchpoint_access.clone();
         let mask = self.watchpoint_mask.clone();
         let handler = Rc::clone(&self.watchpoint_insert_handler);
+        let model = Rc::clone(&self.model);
 
         self.watchpoint_add_button.connect_clicked(move |_| {
+            if !stop_point_actions_available(&model) || !model.inferior_has_started() {
+                return;
+            }
+
             let expression = expression.text().trim().to_owned();
 
             if expression.is_empty() {
@@ -2414,8 +2548,13 @@ impl Ui {
             let event = *event;
             let breakpoints = Rc::clone(&self.breakpoints);
             let handler = Rc::clone(&self.event_catchpoint_handler);
+            let model = Rc::clone(&self.model);
 
             button.connect_clicked(move |_| {
+                if !stop_point_actions_available(&model) {
+                    return;
+                }
+
                 let existing = event_catchpoint_command_number(&breakpoints.borrow(), event);
                 let handler = handler.borrow().clone();
 
@@ -2430,8 +2569,13 @@ impl Ui {
         let filter = self.filtered_catchpoint.filter.clone();
         let kind = self.filtered_catchpoint.kind.clone();
         let handler = Rc::clone(&self.filtered_catchpoint_handler);
+        let model = Rc::clone(&self.model);
 
         self.filtered_catchpoint.add.connect_clicked(move |_| {
+            if !stop_point_actions_available(&model) {
+                return;
+            }
+
             let filter_text = filter.text().trim().to_owned();
 
             if filter_text.is_empty() {
@@ -2772,7 +2916,7 @@ impl Ui {
                         }
                     ),
                     _ if let Some(pending) = breakpoint.pending.as_deref() => {
-                        format!("pending · {pending}")
+                        format!("pending  {pending}")
                     }
                     _ if breakpoint.is_watchpoint() => breakpoint.kind.clone(),
                     _ if breakpoint.is_catchpoint() => {
@@ -2923,7 +3067,7 @@ impl Ui {
                         .iter()
                         .map(|command| command.trim())
                         .collect::<Vec<_>>()
-                        .join("  ·  ");
+                        .join("  ");
 
                     let commands = gtk::Label::new(Some(&format!("DO  {command_text}")));
                     commands.add_css_class("breakpoint-commands");
@@ -3063,7 +3207,7 @@ impl Ui {
 
                     let source = match (location.source_path(), location.line) {
                         (Some(path), Some(line)) => format!(
-                            "{path}:{line}  ·  {}",
+                            "{path}:{line}  {}",
                             location.address.as_deref().unwrap_or("resolved")
                         ),
                         _ => location
@@ -3291,8 +3435,11 @@ fn thread_button_content(thread: &ThreadInfo, stop_reason: Option<&str>) -> gtk:
     heading.set_ellipsize(pango::EllipsizeMode::End);
     let name = gtk::Label::new(Some(&format!("Name: \"{name}\"")));
     name.add_css_class("thread-name");
-    name.set_halign(gtk::Align::Start);
-    name.set_ellipsize(pango::EllipsizeMode::End);
+    name.set_halign(gtk::Align::Fill);
+    name.set_xalign(0.0);
+    name.set_wrap(true);
+    name.set_wrap_mode(pango::WrapMode::WordChar);
+    name.set_tooltip_text(thread.name.as_deref());
     let detail_widget = thread_detail_widget(thread, stop_reason);
     let full_symbol = thread.frame.as_ref().map(|frame| frame.function.as_str());
 
@@ -3338,6 +3485,7 @@ fn update_thread_button(button: &gtk::Button, thread: &ThreadInfo, stop_reason: 
     );
 
     set_label_text(&name, &format!("Name: \"{thread_name}\""));
+    name.set_tooltip_text(thread.name.as_deref());
 
     if !update_thread_detail_widget(&detail_widget, thread, stop_reason) {
         return;
@@ -3501,7 +3649,7 @@ mod render_tests {
             std::slice::from_ref(&updated)
         ));
 
-        assert_eq!(breakpoint_status_text(&updated), "2 HITS  ·  STOP ON HIT 4");
+        assert_eq!(breakpoint_status_text(&updated), "2 HITS  STOP ON HIT 4");
         updated.enabled = false;
         assert!(!breakpoint_layout_matches(&[current], &[updated]));
     }

@@ -355,7 +355,7 @@ pub(super) fn memory_region_column(
         label.set_text(&text);
 
         label.set_tooltip_text(Some(&format!(
-            "0x{:0address_width$x}-0x{:0address_width$x} · {}",
+            "0x{:0address_width$x}-0x{:0address_width$x}  {}",
             region.start,
             region.end,
             region.description()
@@ -1270,7 +1270,7 @@ pub(super) fn variable_details(
     if details.is_empty() {
         decimal
     } else {
-        format!("{decimal}  ·  {details}")
+        format!("{decimal}  {details}")
     }
 }
 
@@ -1498,7 +1498,7 @@ pub(super) fn register_column(
 
         match column {
             RegisterColumn::Name => {
-                label.set_text(&format!("${}:", data.register.name));
+                label.set_text(&format!("${}", data.register.name));
                 label.set_tooltip_text(Some(&format!(
                     "{}\nDouble-click or press Enter to edit",
                     data.register.name
@@ -1669,7 +1669,7 @@ impl StackWordInspector {
             .unwrap_or(16)
             .clamp(8, 16);
         self.address.set_text(&format!(
-            "0x{:0width$x}  ·  SP+0x{:x}  ·  word {}",
+            "0x{:0width$x}  SP+0x{:x}  word {}",
             entry.address,
             entry.offset,
             entry.index,
@@ -1857,7 +1857,7 @@ pub(super) fn instruction_column(
 
         label.set_text(&text(&data));
         label.set_tooltip_text(Some(&format!(
-            "{} · {}\n{}\nSelect text to copy. Press Enter or double-click outside a text selection to toggle an instruction breakpoint",
+            "{}  {}\n{}\nSelect text to copy. Press Enter or double-click outside a text selection to toggle an instruction breakpoint",
             data.instruction.address,
             data.instruction.text,
             instruction_symbol_full(&data.instruction),
@@ -1876,16 +1876,16 @@ pub(super) fn build_editor_panel(notebook: &gtk::Notebook) -> SourceEditorPanel 
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 1);
     toolbar.add_css_class("source-navigation-toolbar");
     let back = gtk::Button::with_label("‹");
-    back.set_tooltip_text(Some("Back in source navigation history · Alt+Left"));
+    back.set_tooltip_text(Some("Back in source navigation history\nAlt+Left"));
     back.set_sensitive(false);
     let forward = gtk::Button::with_label("›");
-    forward.set_tooltip_text(Some("Forward in source navigation history · Alt+Right"));
+    forward.set_tooltip_text(Some("Forward in source navigation history\nAlt+Right"));
     forward.set_sensitive(false);
     let quick_open = gtk::Button::with_label("Quick open");
-    quick_open.set_tooltip_text(Some("Find a loaded or project source file · Ctrl+P"));
+    quick_open.set_tooltip_text(Some("Find a loaded or project source file\nCtrl+P"));
     let open_file = gtk::Button::with_label("Open file…");
     open_file.set_tooltip_text(Some(
-        "Open one or more source files from disk in editor tabs · Ctrl+O",
+        "Open one or more source files from disk in editor tabs  Ctrl+O",
     ));
     for button in [&back, &forward, &quick_open, &open_file] {
         button.add_css_class("source-navigation-action");
@@ -1973,34 +1973,14 @@ pub(super) fn build_editor_panel(notebook: &gtk::Notebook) -> SourceEditorPanel 
 }
 
 fn source_navigation_menu_action(label: &str, shortcut: &str) -> gtk::Button {
-    let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    let label = gtk::Label::new(Some(label));
-    label.set_halign(gtk::Align::Start);
-    label.set_hexpand(true);
-    let shortcut = gtk::Label::new(Some(shortcut));
-    shortcut.add_css_class("muted");
-    shortcut.set_halign(gtk::Align::End);
-    row.append(&label);
-    row.append(&shortcut);
-    let button = gtk::Button::builder().child(&row).hexpand(true).build();
+    let button = components::menu_action(label, Some(shortcut));
     button.add_css_class("source-navigation-menu-action");
     button
 }
 
 pub(super) fn source_search_entry(placeholder: &str) -> gtk::Entry {
-    let entry = gtk::Entry::builder()
-        .placeholder_text(placeholder)
-        .primary_icon_name("system-search-symbolic")
-        .build();
+    let entry = components::search_entry(placeholder);
     entry.add_css_class("source-search-entry");
-    entry.connect_changed(|entry| {
-        entry.set_secondary_icon_name((!entry.text().is_empty()).then_some("edit-clear-symbolic"));
-    });
-    entry.connect_icon_release(|entry, position| {
-        if position == gtk::EntryIconPosition::Secondary {
-            entry.set_text("");
-        }
-    });
     entry
 }
 
@@ -2037,16 +2017,17 @@ pub(super) fn build_inferior_controls() -> InferiorControls {
     header.add_css_class("inferior-page-header");
     let heading = section_title("PROCESS DEBUGGING");
     heading.set_hexpand(true);
-    let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
-    refresh.add_css_class("inferior-refresh");
-    refresh.set_tooltip_text(Some("Refresh inferiors and fork settings"));
+    let refresh = components::icon_button(
+        "view-refresh-symbolic",
+        "Refresh inferiors and fork settings",
+    );
     header.append(&heading);
     header.append(&refresh);
     page.append(&header);
-    let navigation = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    let navigation = components::card();
     navigation.add_css_class("inferior-navigation");
     navigation.append(&section_title("RELATIONSHIP NAVIGATION"));
-    let navigation_actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let navigation_actions = components::control_row();
     navigation_actions.set_homogeneous(true);
     let switch_parent = gtk::Button::with_label("Switch parent");
     let switch_child = gtk::Button::with_label("Switch child");
@@ -2058,10 +2039,10 @@ pub(super) fn build_inferior_controls() -> InferiorControls {
 
     navigation.append(&navigation_actions);
     page.append(&navigation);
-    let policy = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    let policy = components::card();
     policy.add_css_class("inferior-policy");
     policy.append(&section_title("FORK POLICY"));
-    let follow = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let follow = components::control_row();
     follow.set_homogeneous(true);
     let follow_parent = gtk::ToggleButton::with_label("Follow parent");
     let follow_child = gtk::ToggleButton::with_label("Follow child");
@@ -2122,10 +2103,8 @@ pub(super) fn build_source_tree_view() -> SourceTreeControls {
     toolbar.add_css_class("source-tree-toolbar");
     let search = source_search_entry("Filter source files");
     search.set_hexpand(true);
-    let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
-    refresh.add_css_class("source-tree-refresh");
+    let refresh = components::icon_button("view-refresh-symbolic", "Refresh source tree");
     refresh.set_halign(gtk::Align::End);
-    refresh.set_tooltip_text(Some("Refresh source tree"));
     toolbar.append(&search);
     toolbar.append(&refresh);
     root.append(&toolbar);
@@ -2593,9 +2572,9 @@ fn open_terminal_context_menu(terminal: &vte4::Terminal, x: f64, y: f64) {
     popover.add_css_class("terminal-context-menu");
     let copy = context_menu_action("Copy");
     copy.set_sensitive(terminal.has_selection());
-    copy.set_tooltip_text(Some("Copy selected terminal text · Ctrl+Shift+C"));
+    copy.set_tooltip_text(Some("Copy selected terminal text\nCtrl+Shift+C"));
     let paste = context_menu_action("Paste");
-    paste.set_tooltip_text(Some("Paste clipboard text · Ctrl+V or Ctrl+Shift+V"));
+    paste.set_tooltip_text(Some("Paste clipboard text\nCtrl+V or Ctrl+Shift+V"));
     let select_all = context_menu_action("Select all");
 
     for button in [&copy, &paste, &select_all] {
@@ -2657,12 +2636,4 @@ pub(super) fn control_button(label: &str, tooltip: &str, suggested: bool) -> gtk
     }
 
     button
-}
-
-pub(super) fn section_title(text: &str) -> gtk::Label {
-    let label = gtk::Label::new(Some(text));
-    label.add_css_class("section-title");
-    label.set_halign(gtk::Align::Start);
-
-    label
 }

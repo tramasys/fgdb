@@ -104,7 +104,7 @@ pub(super) fn add_memory_watch(
     enable_stable_text_selection(&status);
 
     let range = gtk::Label::new(Some(&format!(
-        "{} · {}",
+        "{}  {}",
         format_memory_size(byte_count as u64),
         format.label()
     )));
@@ -489,18 +489,18 @@ pub(super) fn show_memory_watch_data(
         .unwrap_or_else(|| String::from("unmapped"));
 
     watch.status.remove_css_class("memory-watch-error");
-    let status = format!("0x{:0width$x} · {region}", memory.begin);
+    let status = format!("0x{:0width$x}  {region}", memory.begin);
     watch.status.set_text(&status);
     watch.status.set_tooltip_text(Some(&status));
 
     let change_text = if previous_begin == Some(memory.begin) {
-        format!(" · {changed} changed row(s)")
+        format!("  {changed} changed row(s)")
     } else {
         String::new()
     };
 
     let range = format!(
-        "[0x{:0width$x}, 0x{:0width$x}) · {} · {}{change_text}",
+        "[0x{:0width$x}, 0x{:0width$x})  {}  {}{change_text}",
         memory.begin,
         end,
         format_memory_size(byte_count as u64),
@@ -768,17 +768,17 @@ fn memory_interpretation(
         MemoryWatchFormat::Bytes => {}
         MemoryWatchFormat::U16 => {
             if let Some(value) = decode_memory_integer(bytes, endian) {
-                parts.push(format!("u16 {value} · i16 {}", value as u16 as i16));
+                parts.push(format!("u16 {value}  i16 {}", value as u16 as i16));
             }
         }
         MemoryWatchFormat::U32 => {
             if let Some(value) = decode_memory_integer(bytes, endian) {
-                parts.push(format!("u32 {value} · i32 {}", value as u32 as i32));
+                parts.push(format!("u32 {value}  i32 {}", value as u32 as i32));
             }
         }
         MemoryWatchFormat::U64 => {
             if let Some(value) = decode_memory_integer(bytes, endian) {
-                parts.push(format!("u64 {value} · i64 {}", value as i64));
+                parts.push(format!("u64 {value}  i64 {}", value as i64));
             }
         }
         MemoryWatchFormat::F32 => {
@@ -818,7 +818,7 @@ fn memory_interpretation(
         parts.push(String::from("changed"));
     }
 
-    parts.join(" · ")
+    parts.join("  ")
 }
 
 pub(super) fn push_hex_bytes(output: &mut String, bytes: &[u8]) {

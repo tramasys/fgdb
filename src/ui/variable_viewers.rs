@@ -346,10 +346,7 @@ impl Ui {
         crate::install_window_icon(&window);
         window.add_css_class("variable-viewer-window");
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        root.set_margin_top(12);
-        root.set_margin_bottom(12);
-        root.set_margin_start(12);
-        root.set_margin_end(12);
+        components::inset(&root, components::DIALOG_INSET);
         let identity = gtk::Box::new(gtk::Orientation::Vertical, 3);
         identity.add_css_class("variable-viewer-identity");
         let caption = gtk::Label::new(Some(&request.descriptor.title.to_ascii_uppercase()));
@@ -437,8 +434,10 @@ impl Ui {
         root.append(&scrolled);
         let status = gtk::Label::new(Some("Loading bounded debugger data..."));
         status.add_css_class("muted");
-        status.set_halign(gtk::Align::Start);
-        status.set_ellipsize(pango::EllipsizeMode::End);
+        status.set_halign(gtk::Align::Fill);
+        status.set_xalign(0.0);
+        status.set_wrap(true);
+        status.set_wrap_mode(pango::WrapMode::WordChar);
         root.append(&status);
         window.set_child(Some(&root));
         connect_escape_to_close(&window);

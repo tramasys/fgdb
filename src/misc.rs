@@ -304,7 +304,7 @@ fn parse_heap_inspection(command: &str, output: &str) -> HeapInspectionSnapshot 
 
     HeapInspectionSnapshot {
         command: command.to_owned(),
-        summary: counts.join("  ·  "),
+        summary: counts.join("  "),
         diagnostic,
         rows,
         truncated,
@@ -352,7 +352,7 @@ fn parse_heap_chunk_row(line: &str) -> Option<HeapInspectionRow> {
     .into_iter()
     .filter(|value| !value.is_empty())
     .collect::<Vec<_>>()
-    .join("  ·  ");
+    .join("  ");
 
     Some(heap_inspection_row(
         "Chunk", &location, &metric, &flags, &details,
@@ -378,7 +378,7 @@ fn parse_heap_bin_row(line: &str) -> Option<HeapInspectionRow> {
         if size.is_empty() {
             format!("count {count}")
         } else {
-            format!("{size}  ·  count {count}")
+            format!("{size}  count {count}")
         }
     });
 
@@ -544,7 +544,7 @@ fn format_heap_fields(fields: &[(String, String)], excluded: &[&str]) -> String 
         .filter(|(name, _)| !excluded.contains(&name.as_str()))
         .map(|(name, value)| format!("{name} {value}"))
         .collect::<Vec<_>>()
-        .join("  ·  ")
+        .join("  ")
 }
 
 #[cfg(test)]
@@ -980,8 +980,8 @@ pub(crate) fn call_abi_transfer(
         CallAbiPhase::OutgoingCall { target } => {
             transfer_context("OUTGOING CALL", target.as_deref())
         }
-        CallAbiPhase::IncomingEntry { function } => format!("FUNCTION ENTRY  ·  {function}"),
-        CallAbiPhase::Returning => String::from("FUNCTION RETURN  ·  outgoing return value"),
+        CallAbiPhase::IncomingEntry { function } => format!("FUNCTION ENTRY  {function}"),
+        CallAbiPhase::Returning => String::from("FUNCTION RETURN  outgoing return value"),
         CallAbiPhase::Returned { target } => {
             transfer_context("RETURNED FROM CALL", target.as_deref())
         }
@@ -1062,7 +1062,7 @@ fn add_stack_pointer(
 }
 
 fn transfer_context(kind: &str, target: Option<&str>) -> String {
-    target.map_or_else(|| kind.to_owned(), |target| format!("{kind}  ·  {target}"))
+    target.map_or_else(|| kind.to_owned(), |target| format!("{kind}  {target}"))
 }
 
 fn call_abi_contract(architecture: TargetArchitecture) -> Vec<CallAbiFact> {
@@ -1123,25 +1123,23 @@ fn call_linkage(architecture: TargetArchitecture) -> &'static str {
 
 fn call_stack_contract(architecture: TargetArchitecture) -> &'static str {
     match architecture {
-        TargetArchitecture::X86 => "downward-growing · arguments continue on stack",
-        TargetArchitecture::X86_64 => {
-            "downward-growing · 16-byte call alignment · 128-byte red zone"
-        }
-        TargetArchitecture::Arm => "downward-growing · 8-byte public-interface alignment",
-        TargetArchitecture::AArch64 => "downward-growing · 16-byte alignment",
+        TargetArchitecture::X86 => "downward-growing  arguments continue on stack",
+        TargetArchitecture::X86_64 => "downward-growing  16-byte call alignment  128-byte red zone",
+        TargetArchitecture::Arm => "downward-growing  8-byte public-interface alignment",
+        TargetArchitecture::AArch64 => "downward-growing  16-byte alignment",
         TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64 => {
-            "downward-growing · 16-byte alignment"
+            "downward-growing  16-byte alignment"
         }
         TargetArchitecture::Mips32 | TargetArchitecture::Mips64 => {
-            "downward-growing · ABI argument area"
+            "downward-growing  ABI argument area"
         }
         TargetArchitecture::PowerPc32 | TargetArchitecture::PowerPc64 => {
-            "downward-growing · stack-frame back chain"
+            "downward-growing  stack-frame back chain"
         }
         TargetArchitecture::S390 | TargetArchitecture::S390x => {
-            "downward-growing · register save area"
+            "downward-growing  register save area"
         }
-        TargetArchitecture::LoongArch64 => "downward-growing · 16-byte alignment",
+        TargetArchitecture::LoongArch64 => "downward-growing  16-byte alignment",
         TargetArchitecture::Unknown => "target-defined",
     }
 }
@@ -2403,7 +2401,7 @@ fn parse_lock_wait(
         }
 
         if !wchan.is_empty() && wchan != "0" {
-            let _ = write!(details, " · {wchan}");
+            let _ = write!(details, "  {wchan}");
         }
 
         return Some(LockWait {
@@ -2451,7 +2449,7 @@ fn parse_lock_wait(
         address: arguments.first().copied(),
         operation: futex_operation(base).to_owned(),
         expected: arguments.get(2).copied(),
-        details: flags.join(" · "),
+        details: flags.join("  "),
     })
 }
 
@@ -3031,7 +3029,7 @@ mod tests {
         assert_eq!(snapshot.rows[1].location, "0x7ffff7e19ac0");
         assert_eq!(snapshot.rows[2].kind, "Tcache bin");
         assert_eq!(snapshot.rows[2].location, "index 3");
-        assert_eq!(snapshot.rows[2].metric, "0x50  ·  count 2");
+        assert_eq!(snapshot.rows[2].metric, "0x50  count 2");
         assert_eq!(snapshot.rows[3].metric, "0x70");
         assert_eq!(snapshot.rows[3].state, "Used");
         assert_eq!(snapshot.rows[4].kind, "Chunk");
@@ -3640,7 +3638,7 @@ mod tests {
             &registers,
         );
 
-        assert_eq!(transfer.context, "OUTGOING CALL  ·  malloc");
+        assert_eq!(transfer.context, "OUTGOING CALL  malloc");
         assert_eq!(transfer.registers.len(), 2);
         assert_eq!(transfer.registers[0].name, "$rdi");
         assert_eq!(transfer.registers[0].value, "0x2a");

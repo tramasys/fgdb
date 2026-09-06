@@ -122,7 +122,7 @@ impl Ui {
 
             match receiver.try_recv() {
                 Ok(Some((_, path, location))) => {
-                    let detail = format!("{} · {}:{}", location.function, path.display(), location.line);
+                    let detail = format!("{}  {}:{}", location.function, path.display(), location.line);
                     ui.navigate_to_source_then(&path, location.line, true, move |ui, opened| {
                         if opened { ui.set_status("Source", &detail, Some("status-ready")); }
                     });

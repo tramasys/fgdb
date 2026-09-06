@@ -144,7 +144,7 @@ pub(super) fn stop_point_metadata_text(metadata: &StopPointMetadata) -> String {
 
     parts.extend(metadata.tags.iter().map(|tag| format!("#{tag}")));
 
-    parts.join("  ·  ")
+    parts.join("  ")
 }
 
 pub(super) fn event_catchpoint_command_number(

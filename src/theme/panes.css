@@ -1,0 +1,2482 @@
+/* Pane-specific layout and debugger data semantics. Common control geometry,
+   interaction colors, and typography live in the adjacent shared styles. */
+
+.ui-card,
+.inferior-summary,
+.inferior-navigation,
+.inferior-policy,
+.thread-backtrace-section,
+.breakpoint-tool-section,
+.signal-tool-section,
+.debug-data-control-card,
+.debug-data-printer-loaders,
+.variable-viewer-identity,
+.configuration-files,
+.configuration-issues,
+.configuration-grid {
+    padding: 8px;
+    background: @app_card;
+    border: 1px solid @app_border;
+}
+
+.locals-toolbar,
+.source-find-bar,
+.source-tree-toolbar,
+.memory-watch-command,
+.memory-watch-toolbar,
+.misc-startup-controls,
+.heap-table-controls,
+.kernel-table-controls,
+.disassembly-browser {
+    padding: 4px 6px;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}
+
+.panel-header,
+.subpanel-header,
+.locals-header {
+    min-height: 26px;
+    padding: 2px 6px;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}
+
+headerbar.topbar {
+    min-height: 34px;
+    padding: 0;
+    background: @app_bg;
+    background-image: none;
+    box-shadow: none;
+    border-top: 0;
+    border-left: 0;
+    border-right: 0;
+    border-bottom: 1px solid @app_border;
+}
+
+headerbar.topbar .titlebar-identity {
+    padding: 0 8px;
+}
+
+headerbar.topbar .titlebar-actions {
+    min-height: 33px;
+}
+
+headerbar.topbar .window-controls {
+    margin: 0;
+    padding: 0;
+    border-spacing: 0;
+}
+
+headerbar.topbar button.window-control {
+    min-width: 42px;
+    min-height: 33px;
+    margin: 0;
+    padding: 0;
+    color: @app_muted;
+    background: transparent;
+    border: 0;
+    font-family: sans-serif;
+}
+
+headerbar.topbar button.window-control:hover,
+headerbar.topbar button.window-control:focus-visible {
+    color: @app_fg;
+    background: @app_raised;
+}
+
+headerbar.topbar button.window-control:active {
+    color: @app_fg;
+    background: alpha(@app_fg, 0.18);
+}
+
+headerbar.topbar button.window-control.close:hover,
+headerbar.topbar button.window-control.close:active {
+    color: @app_bg;
+    background: @app_danger;
+}
+
+.target-label,
+.muted {
+    color: @app_muted;
+}
+
+.performance-partial {
+    margin: 3px 4px;
+    padding: 4px 6px;
+    color: @app_warning;
+    background: alpha(@app_warning, 0.06);
+    border-left: 2px solid alpha(@app_warning, 0.62);
+}
+
+.panel {
+    background: @app_surface;
+    border: 0;
+}
+
+.panel-header.terminal-header {
+    padding-right: 0;
+    border-bottom: 0;
+}
+
+.section-title {
+    color: @app_muted;
+    letter-spacing: 0.6px;
+}
+
+.sidebar {
+    padding: 4px;
+    background: @app_surface;
+}
+
+.stack-row {
+    min-height: 31px;
+    padding: 3px 4px;
+}
+
+.breakpoint-row {
+    min-height: 42px;
+    background: alpha(@app_fg, 0.018);
+}
+
+.stack-row.breakpoint-row:nth-child(odd) {
+    background: alpha(@app_fg, 0.055);
+}
+
+.stack-row.breakpoint-row:nth-child(even) {
+    background: alpha(@app_fg, 0.018);
+}
+
+.stack-row.breakpoint-row:hover {
+    background: @app_hover;
+}
+
+.breakpoint-row-disabled {
+    color: @app_muted;
+}
+
+.breakpoint-row-pending {
+    border-left: 2px solid @app_warning;
+}
+
+.breakpoint-location-row {
+    min-height: 34px;
+    padding: 2px 4px 2px 22px;
+    background: alpha(@app_fg, 0.025);
+    border-left: 1px solid alpha(@app_accent, 0.34);
+}
+
+.breakpoint-location-row:hover {
+    background: @app_hover;
+}
+
+button.breakpoint-location-badge {
+    min-width: 36px;
+}
+
+button.breakpoint-badge {
+    min-width: 24px;
+    min-height: 20px;
+    padding: 1px 4px;
+    border: 0;
+}
+
+button.breakpoint-badge-enabled {
+    color: @app_surface;
+    background: @app_success;
+}
+
+button.breakpoint-badge-enabled:hover,
+button.breakpoint-badge-enabled:focus,
+button.breakpoint-badge-enabled:focus-visible,
+button.breakpoint-badge-enabled:active,
+button.breakpoint-badge-enabled:checked {
+    color: @app_bg;
+    background: @app_success;
+}
+
+button.breakpoint-badge-disabled {
+    color: @app_muted;
+    background: @app_raised;
+}
+
+button.breakpoint-badge-disabled:hover,
+button.breakpoint-badge-disabled:focus,
+button.breakpoint-badge-disabled:focus-visible,
+button.breakpoint-badge-disabled:active,
+button.breakpoint-badge-disabled:checked {
+    color: @app_muted;
+    background: @app_raised;
+}
+
+.breakpoint-gutter {
+    color: @app_fg;
+    background: transparent;
+    border: 0;
+}
+
+.breakpoint-condition {
+    color: @app_warning;
+    background: alpha(@app_warning, 0.055);
+    padding: 1px 3px;
+}
+
+.breakpoint-metadata {
+    color: @app_accent;
+    padding: 1px 3px;
+}
+
+.breakpoint-commands {
+    color: @app_success;
+    padding: 1px 3px;
+}
+
+.value-editor-validation {
+    color: @app_danger;
+}
+
+.field-label {
+    color: @app_muted;
+}
+
+.watchpoint-row {
+    background: alpha(@app_accent, 0.06);
+}
+
+button.stack-frame {
+    min-height: 31px;
+    padding: 3px 4px;
+    background: transparent;
+    border: 0;
+}
+
+button.stack-frame:hover {
+    background: @app_hover;
+}
+
+button.stack-frame:nth-child(odd),
+.stack-row:nth-child(odd) {
+    background: alpha(@app_fg, 0.035);
+}
+
+/* The current frame is disabled only because selecting it is a no-op. */
+button.stack-frame.current-debug-item,
+button.stack-frame.current-debug-item:disabled {
+    color: @app_accent_hover;
+    background: @app_selected;
+}
+
+button.stack-frame:hover {
+    background: @app_hover;
+}
+
+button.stack-frame.current-debug-item:hover {
+    background: @app_selected_hover;
+}
+
+.thread-heading {
+    color: @app_accent;
+}
+
+.thread-name {
+    color: @app_fg;
+}
+
+.thread-detail {
+    color: @app_muted;
+}
+
+.thread-workspace {
+    padding: 6px;
+    background: @app_bg;
+}
+
+.thread-workspace-summary {
+    min-height: 20px;
+    color: @app_accent_hover;
+}
+
+.thread-controls-disclosure > box:last-child {
+    padding: 6px 0;
+}
+
+window.thread-analysis-window,
+window.thread-analysis-window > box,
+window.thread-analysis-window notebook,
+window.thread-analysis-window scrolledwindow,
+window.thread-analysis-window viewport {
+    color: @app_fg;
+    background: @app_bg;
+}
+
+window.thread-analysis-window columnview.debug-table row {
+    color: @app_fg;
+    background: @app_surface;
+}
+
+window.thread-analysis-window columnview.debug-table row:nth-child(odd) {
+    background: alpha(@app_fg, 0.04);
+}
+
+window.thread-analysis-window columnview.debug-table row:hover {
+    background: @app_hover;
+}
+
+button.thread-backtrace-frame {
+    min-height: 34px;
+    padding: 4px 7px;
+    color: @app_fg;
+    background: alpha(@app_fg, 0.025);
+    border: 0;
+    border-left: 2px solid @app_border;
+}
+
+button.thread-backtrace-frame:hover {
+    background: @app_hover;
+    border-left-color: @app_accent;
+}
+
+.thread-comparison-changed {
+    color: @app_warning;
+}
+
+.lock-graph {
+    padding: 5px 0 0;
+    background: @app_surface;
+    border-top: 1px solid @app_border;
+}
+
+.module-row {
+    padding: 3px 4px;
+    border-bottom: 1px solid @app_border;
+}
+
+.module-row:hover {
+    background: @app_hover;
+}
+
+.module-name {
+    color: @app_fg;
+}
+
+.module-range,
+.module-path {
+    color: @app_muted;
+}
+
+.module-symbol-state {
+    padding: 0 3px;
+}
+
+.module-symbols-loaded {
+    color: @app_success;
+}
+
+.module-symbols-missing {
+    color: @app_warning;
+}
+
+.inferior-summary {
+    margin: 4px;
+}
+
+.inferior-selected-state,
+.inferior-card-state {
+    padding: 0 3px;
+    color: @app_muted;
+}
+
+.inferior-selected-state {
+    min-height: 16px;
+    padding: 1px 5px;
+    background: alpha(@app_fg, 0.035);
+}
+
+.inferior-stop-owner {
+    min-height: 18px;
+    margin: 0;
+    padding: 3px 6px;
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.055);
+    border-left: 2px solid alpha(@app_accent, 0.7);
+}
+
+.inferior-page {
+    background: @app_bg;
+}
+
+.inferior-page-header {
+    min-height: 28px;
+    margin: 4px 6px;
+    padding: 2px 7px;
+    background: alpha(@app_fg, 0.018);
+    border: 1px solid @app_border;
+}
+
+.inferior-navigation,
+.inferior-policy {
+    margin: 0 6px 6px;
+}
+
+.inferior-list-title {
+    margin: 0 6px;
+    padding: 6px 8px;
+}
+
+.inferior-list-scroll {
+    background: @app_bg;
+}
+
+.inferior-list {
+    margin: 0 6px 6px;
+}
+
+.inferior-detach-policy {
+    min-height: 26px;
+    margin-top: 1px;
+    color: @app_fg;
+}
+
+.inferior-card {
+    margin-top: 6px;
+    padding: 7px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+    border-left: 2px solid transparent;
+}
+
+.inferior-card:nth-child(odd) {
+    background: alpha(@app_fg, 0.045);
+}
+
+.inferior-card-selected {
+    border-left-color: @app_accent;
+}
+
+.inferior-card-stop-owner {
+    background: alpha(@app_accent, 0.10);
+}
+
+.inferior-id {
+    color: @app_accent_hover;
+}
+
+.inferior-name {
+    color: @app_fg;
+}
+
+.inferior-facts,
+.inferior-relationship {
+    color: @app_muted;
+}
+
+.inferior-running {
+    color: @app_success;
+}
+
+.inferior-stopped {
+    color: @app_accent_hover;
+}
+
+.inferior-exited {
+    color: @app_danger;
+}
+
+.inferior-unknown {
+    color: @app_muted;
+}
+
+button.instruction-row {
+    min-height: 34px;
+    padding: 2px 3px;
+    background: transparent;
+    border: 0;
+}
+
+button.instruction-row:hover {
+    background: @app_hover;
+}
+
+button.instruction-row.current-instruction {
+    background: @app_selected;
+}
+
+button.instruction-row.current-instruction:hover {
+    background: @app_selected_hover;
+}
+
+.instruction-address {
+    color: @app_muted;
+}
+
+.instruction-mnemonic {
+    color: @app_success;
+}
+
+.instruction-opcodes {
+    color: @app_warning;
+}
+
+.instruction-symbol {
+    color: @app_accent;
+}
+
+.instruction-operands {
+    color: @app_fg;
+}
+
+.instruction-source {
+    color: @app_muted;
+}
+
+.function-boundary-cell {
+    box-shadow: inset 2px 0 alpha(@app_accent, 0.48);
+}
+
+.disassembly-range {
+    color: @app_muted;
+}
+
+.disassembly-browser-row {
+    min-height: 23px;
+}
+
+.disassembly-control-group {
+    min-height: 23px;
+    background: @app_bg;
+    border: 1px solid @app_border;
+}
+
+.disassembly-control-label {
+    padding: 0 6px;
+    color: @app_muted;
+}
+
+.instruction-insight {
+    padding: 4px 5px;
+    background: alpha(@app_fg, 0.025);
+    border-top: 1px solid alpha(@app_fg, 0.05);
+    border-bottom: 1px solid @app_border;
+}
+
+.instruction-insight-line {
+    min-height: 24px;
+    padding: 3px 7px;
+    color: @app_muted;
+    background: @app_surface;
+    border-left: 2px solid @app_border;
+}
+
+.instruction-flow-insight {
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.10);
+    border-left-color: @app_accent;
+}
+
+.instruction-arguments-insight {
+    color: @app_fg;
+    background: alpha(@app_warning, 0.055);
+    border-left-color: alpha(@app_warning, 0.70);
+}
+
+.instruction-memory-insight {
+    color: @app_fg;
+    background: alpha(@app_success, 0.055);
+    border-left-color: alpha(@app_success, 0.70);
+}
+
+.instruction-insight-line.branch-taken {
+    color: @app_success;
+    background: alpha(@app_success, 0.10);
+    border-left-color: @app_success;
+}
+
+.instruction-insight-line.branch-not-taken {
+    color: @app_muted;
+    background: alpha(@app_fg, 0.035);
+    border-left-color: @app_muted;
+}
+
+.instruction-cell {
+    min-height: 22px;
+    padding: 2px 4px;
+}
+
+columnview.debug-table {
+    color: @app_fg;
+    background: @app_surface;
+    border: 0;
+}
+
+columnview.debug-table > header {
+    min-height: 23px;
+    color: @app_muted;
+    background: @app_raised;
+    border: 0;
+}
+
+columnview.debug-table.view > header > button {
+    min-height: 23px;
+    padding: 0 4px;
+    color: @app_muted;
+    background: @app_raised;
+    background-image: none;
+    border-style: none;
+    border-width: 0;
+    border-color: transparent;
+    border-right: 1px solid @app_border;
+    border-bottom: 0;
+    outline-style: none;
+    outline-width: 0;
+    outline-color: transparent;
+    outline-offset: 0;
+    box-shadow: none;
+    transition: none;
+}
+
+columnview.debug-table.view > header > button:hover,
+columnview.debug-table.view > header > button:focus,
+columnview.debug-table.view > header > button:focus-visible,
+columnview.debug-table.view > header > button:active,
+columnview.debug-table.view > header > button:checked {
+    color: @app_fg;
+    background: @app_hover;
+    background-image: none;
+    border-style: none;
+    border-width: 0;
+    border-color: transparent;
+    border-right: 1px solid @app_border;
+    border-bottom: 0;
+    outline-style: none;
+    outline-width: 0;
+    outline-color: transparent;
+    outline-offset: 0;
+    box-shadow: none;
+}
+
+columnview.debug-table.view > header > button sort-indicator:not(.ascending):not(.descending) {
+    min-width: 0;
+    min-height: 0;
+    opacity: 0;
+}
+
+/* GTK's inner list can otherwise inherit a light desktop theme's text color.
+   Cells own no extra spacing, since their content supplies symmetric padding. */
+columnview.debug-table > listview {
+    color: @app_fg;
+    background: transparent;
+}
+
+columnview.debug-table cell {
+    padding: 0;
+}
+
+columnview.debug-table row {
+    min-height: 26px;
+    color: @app_fg;
+    background: transparent;
+}
+
+columnview.debug-table row:nth-child(odd) {
+    background: alpha(@app_fg, 0.035);
+}
+
+columnview.debug-table row:hover {
+    background: @app_hover;
+}
+
+columnview.debug-table row:selected {
+    color: @app_fg;
+    background: @app_selected;
+}
+
+.debug-table-cell {
+    min-height: 22px;
+    padding: 2px 4px;
+}
+
+.local-name {
+    color: @app_accent;
+}
+
+.local-type {
+    color: mix(@app_warning, @app_fg, 0.24);
+}
+
+.local-value {
+    color: @app_fg;
+}
+
+.local-details {
+    color: @app_muted;
+}
+
+.local-details-error {
+    color: @app_danger;
+}
+
+.local-changed-value {
+    color: @app_warning;
+}
+
+.local-load-more {
+    color: @app_accent_hover;
+}
+
+.locals-table treeexpander {
+    min-height: 25px;
+    padding: 0;
+}
+
+.local-name-cell {
+    min-height: 25px;
+    padding: 0 4px;
+}
+
+.local-name-cell.local-expandable:hover .local-name {
+    color: @app_accent_hover;
+}
+
+.local-disclosure {
+    min-width: 8px;
+    color: @app_muted;
+}
+
+.local-scope {
+    min-width: 31px;
+    padding: 0 3px;
+    color: @app_muted;
+    background: alpha(@app_fg, 0.055);
+    border: 1px solid alpha(@app_border, 0.8);
+    border-radius: 2px;
+}
+
+.local-changed-marker {
+    color: @app_warning;
+}
+
+.locals-panel {
+    background: @app_surface;
+}
+
+.locals-summary {
+    color: @app_muted;
+}
+
+popover.debugger-context-menu.local-variable-menu > contents {
+    min-width: 260px;
+}
+
+.local-variable-menu-summary {
+    padding: 5px 8px;
+}
+
+.local-variable-menu-caption,
+.local-variable-menu-section {
+    color: @app_muted;
+}
+
+.local-variable-menu-section {
+    padding: 3px 8px;
+}
+
+.local-variable-menu-name {
+    color: @app_accent_hover;
+}
+
+.local-variable-menu-type,
+.local-variable-menu-value {
+    color: @app_muted;
+}
+
+popover.debugger-context-menu button.local-variable-viewer-action:not(:disabled) {
+    color: @app_accent_hover;
+}
+
+.variable-viewer-window {
+    color: @app_fg;
+    background: @app_bg;
+}
+
+.variable-viewer-name {
+    color: @app_accent_hover;
+}
+
+.vector-lane-index {
+    min-width: 28px;
+    color: @app_muted;
+}
+
+.register-group-panel {
+    background: @app_surface;
+    border: 0;
+}
+
+.register-row {
+    min-height: 23px;
+    padding: 1px 4px;
+    background: transparent;
+}
+
+.register-row:hover {
+    background: @app_hover;
+}
+
+.register-name {
+    color: @app_accent;
+}
+
+.register-value {
+    color: @app_fg;
+}
+
+.register-details {
+    color: @app_fg;
+}
+
+.register-zero {
+    color: @app_muted;
+}
+
+.modified-register {
+    color: @app_warning;
+}
+
+.stack-memory-row {
+    min-height: 42px;
+    padding: 3px 4px;
+    background: transparent;
+}
+
+.stack-memory-row:hover {
+    background: @app_hover;
+}
+
+.stack-register-marker {
+    color: @app_accent;
+}
+
+.stack-position,
+.stack-region {
+    color: @app_muted;
+}
+
+.stack-references {
+    color: @app_accent_hover;
+}
+
+.stack-word-inspector {
+    min-height: 112px;
+    padding: 4px 5px;
+    background: @app_bg;
+    border-top: 1px solid @app_border;
+}
+
+.stack-word-inspector grid {
+    margin-top: 2px;
+}
+
+.stack-inspector-key {
+    min-width: 92px;
+    color: @app_muted;
+}
+
+.stack-inspector-value {
+    min-height: 18px;
+    color: @app_fg;
+}
+
+.legend-modified {
+    color: @app_warning;
+}
+
+.memory-code {
+    color: @app_success;
+}
+
+.memory-heap {
+    color: @app_warning;
+}
+
+.memory-stack {
+    color: @app_accent;
+}
+
+.memory-writable {
+    color: @app_accent_hover;
+}
+
+.memory-readonly {
+    color: @app_muted;
+}
+
+.memory-rwx {
+    color: @app_danger;
+}
+
+.memory-string {
+    color: @app_warning;
+}
+
+.memory-none {
+    color: @app_fg;
+}
+
+.memory-watch-options {
+    min-height: 26px;
+}
+
+.memory-inspector-section,
+.memory-map-section,
+.memory-watch-page {
+    background: @app_surface;
+}
+
+.memory-inspector-section > .subpanel-header,
+.memory-map-section > .subpanel-header {
+    min-height: 25px;
+    padding: 0 6px;
+    background: @app_raised;
+    border-bottom: 1px solid @app_border;
+}
+
+.memory-map-search {
+    min-height: 23px;
+    margin: 1px 0;
+}
+
+.memory-inspector-split > separator {
+    min-height: 3px;
+    background: @app_border;
+    border: 0;
+}
+
+.memory-inspector-split > separator:hover {
+    background: @app_accent;
+}
+
+.memory-watch-expression {
+    color: @app_accent_hover;
+}
+
+.memory-watch-offset {
+    min-width: 54px;
+    padding: 0 5px;
+    color: @app_warning;
+    background: alpha(@app_warning, 0.08);
+}
+
+.memory-watch-summary {
+    min-height: 27px;
+    padding: 2px 7px;
+    color: @app_fg;
+    background: alpha(@app_fg, 0.025);
+    border-bottom: 1px solid @app_border;
+}
+
+.memory-watch-range {
+    color: @app_muted;
+}
+
+.memory-watch-error {
+    color: @app_danger;
+}
+
+columnview.memory-watch-table row,
+columnview.memory-map-table row {
+    min-height: 28px;
+}
+
+.memory-watch-cell {
+    min-height: 24px;
+    padding: 3px 6px;
+}
+
+.memory-row-changed {
+    color: @app_warning;
+    background: alpha(@app_warning, 0.10);
+}
+
+.until-menu {
+    min-width: 330px;
+    padding: 0;
+    color: @app_fg;
+    background: @app_surface;
+    border: 0;
+}
+
+.until-summary {
+    padding: 4px 7px;
+    background: alpha(@app_fg, 0.025);
+}
+
+.until-menu > separator {
+    min-height: 1px;
+    margin: 2px 0;
+    background: @app_border;
+}
+
+.session-menu {
+    min-width: 320px;
+    padding: 0;
+    color: @app_fg;
+    background: @app_surface;
+    border: 0;
+}
+
+.session-summary {
+    padding: 6px 8px;
+    background: alpha(@app_fg, 0.025);
+}
+
+.session-caption {
+    color: @app_muted;
+}
+
+.session-kind {
+    color: @app_accent_hover;
+}
+
+.session-target {
+    color: @app_fg;
+}
+
+.session-menu > separator {
+    min-height: 1px;
+    margin: 4px 8px;
+    background: @app_border;
+}
+
+.session-capabilities {
+    margin: 7px 8px;
+    color: @app_muted;
+}
+
+.menu-action-detail {
+    color: @app_muted;
+}
+
+.session-menu > button.session-primary-action .menu-action-label {
+    color: @app_accent_hover;
+}
+
+.session-menu > button.session-action.danger-action .menu-action-label {
+    color: @app_danger;
+}
+
+.session-menu > button.session-action.configuration-warning .menu-action-label,
+.session-menu > button.session-action.configuration-warning .menu-action-detail {
+    color: @app_danger;
+}
+
+.configuration-dialog {
+    color: @app_fg;
+    background: @app_bg;
+}
+
+.configuration-ok {
+    color: @app_success;
+}
+
+.configuration-error {
+    color: @app_danger;
+}
+
+.configuration-fact {
+    min-height: 24px;
+    padding: 1px 5px;
+}
+
+.configuration-fact-name {
+    min-width: 120px;
+    color: @app_muted;
+}
+
+.configuration-fact-value,
+.configuration-value {
+    color: @app_fg;
+    font-family: monospace;
+}
+
+.configuration-issue {
+    padding: 6px 8px;
+    background: alpha(@app_danger, 0.06);
+    border-left: 2px solid @app_danger;
+}
+
+.configuration-issue-location {
+    color: @app_danger;
+    font-family: monospace;
+}
+
+.configuration-grid > label {
+    min-height: 23px;
+    padding: 3px 6px;
+}
+
+.configuration-grid-heading {
+    color: @app_muted;
+    background: @app_raised;
+}
+
+.configuration-setting {
+    min-width: 145px;
+    color: @app_accent_hover;
+    font-family: monospace;
+}
+
+.debug-data-window {
+    color: @app_fg;
+    background: @app_bg;
+}
+
+.debug-data-heading {
+    min-height: 32px;
+    padding: 5px 7px;
+    background: alpha(@app_fg, 0.018);
+    border: 1px solid @app_border;
+}
+
+.debug-data-title {
+    color: @app_fg;
+}
+
+.debug-data-window notebook {
+    background: @app_bg;
+    border: 1px solid @app_border;
+}
+
+.debug-data-window notebook > stack {
+    background: @app_bg;
+}
+
+.debug-data-section {
+    min-height: 20px;
+    padding: 4px 7px;
+    color: @app_muted;
+    background: alpha(@app_fg, 0.018);
+    border: 1px solid @app_border;
+}
+
+.debug-data-fact {
+    min-height: 29px;
+    padding: 5px 7px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+}
+
+.debug-data-fact-name {
+    min-width: 135px;
+    color: @app_muted;
+}
+
+.debug-data-control-card {
+    min-height: 31px;
+}
+
+.debug-data-row {
+    padding: 8px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+    border-left: 2px solid transparent;
+}
+
+.debug-data-row:nth-child(odd) {
+    background: alpha(@app_fg, 0.045);
+}
+
+.debug-data-row .debug-data-fact {
+    min-height: 22px;
+    padding: 2px 0;
+    background: transparent;
+    border: 0;
+    border-top: 1px solid alpha(@app_border, 0.58);
+}
+
+.debug-data-source {
+    min-height: 25px;
+    padding: 5px 7px;
+    color: @app_fg;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+}
+
+.debug-data-activity-summary {
+    padding: 8px 10px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+}
+
+.debug-data-activity-summary-title {
+    color: @app_accent_hover;
+    letter-spacing: 0.6px;
+}
+
+.debug-data-activity-summary-detail {
+    color: @app_muted;
+}
+
+.debug-data-activity-order {
+    color: alpha(@app_muted, 0.82);
+}
+
+.debug-data-activity-feed {
+    background: @app_bg;
+    border: 1px solid @app_border;
+}
+
+.debug-data-activity-row {
+    padding: 8px 10px;
+    background: alpha(@app_fg, 0.018);
+    border-bottom: 1px solid alpha(@app_border, 0.82);
+    border-left: 2px solid @app_border;
+}
+
+.debug-data-activity-row:nth-child(odd) {
+    background: alpha(@app_fg, 0.034);
+}
+
+.debug-data-activity-row.activity-progress {
+    border-left-color: @app_accent_hover;
+}
+
+.debug-data-activity-row.activity-success {
+    border-left-color: @app_success;
+}
+
+.debug-data-activity-row.activity-warning {
+    border-left-color: @app_warning;
+}
+
+.debug-data-activity-row.activity-error {
+    border-left-color: @app_danger;
+}
+
+.debug-data-activity-kind {
+    min-width: 54px;
+    min-height: 17px;
+    padding: 1px 5px;
+    color: @app_muted;
+    background: alpha(@app_fg, 0.055);
+    border: 1px solid @app_border;
+}
+
+.activity-progress .debug-data-activity-kind {
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.14);
+    border-color: alpha(@app_accent, 0.48);
+}
+
+.activity-success .debug-data-activity-kind {
+    color: @app_success;
+    background: alpha(@app_success, 0.10);
+    border-color: alpha(@app_success, 0.34);
+}
+
+.activity-warning .debug-data-activity-kind {
+    color: @app_warning;
+    background: alpha(@app_warning, 0.10);
+    border-color: alpha(@app_warning, 0.38);
+}
+
+.activity-error .debug-data-activity-kind {
+    color: @app_danger;
+    background: alpha(@app_danger, 0.10);
+    border-color: alpha(@app_danger, 0.38);
+}
+
+.debug-data-activity-message {
+    color: @app_fg;
+}
+
+.debug-data-activity-detail {
+    color: @app_muted;
+}
+
+.debug-data-activity-time,
+.debug-data-activity-occurrences {
+    min-width: 54px;
+    color: @app_muted;
+}
+
+.debug-data-activity-occurrences {
+    color: @app_accent_hover;
+}
+
+.debug-data-activity-empty {
+    min-height: 52px;
+    padding: 12px;
+    background: alpha(@app_fg, 0.018);
+    border: 1px solid @app_border;
+}
+
+.debug-data-printer-summary {
+    min-height: 29px;
+    padding: 5px 8px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+}
+
+.debug-data-printer-loader-heading {
+    color: @app_accent_hover;
+    letter-spacing: 0.5px;
+}
+
+.debug-data-printer-loader-row {
+    min-height: 34px;
+    padding: 6px 7px;
+    background: alpha(@app_bg, 0.45);
+    border: 1px solid alpha(@app_border, 0.72);
+}
+
+.debug-data-printer-loader-name {
+    color: @app_fg;
+}
+
+.debug-data-printer-loader-path,
+.debug-data-printer-loader-note {
+    color: @app_muted;
+}
+
+.debug-data-printer-loader-status {
+    min-width: 58px;
+    padding: 2px 6px;
+    color: @app_muted;
+    background: alpha(@app_fg, 0.04);
+    border: 1px solid @app_border;
+}
+
+.debug-data-printer-loader-status.loader-loaded {
+    color: @app_success;
+    background: alpha(@app_success, 0.09);
+    border-color: alpha(@app_success, 0.34);
+}
+
+.debug-data-printer-loader-status.loader-discovered {
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.10);
+    border-color: alpha(@app_accent, 0.36);
+}
+
+.debug-data-printer-loader-status.loader-missing,
+.debug-data-printer-loader-status.loader-disabled {
+    color: @app_muted;
+}
+
+.debug-data-printer-loader-controls {
+    margin-top: 2px;
+}
+
+.debug-data-printer-summary-count,
+.debug-data-printer-scope-name,
+.debug-data-printer-provider-name {
+    color: @app_fg;
+}
+
+.debug-data-printer-match-count {
+    margin: 0 3px;
+}
+
+.debug-data-printer-scope {
+    padding: 8px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid @app_border;
+    border-left: 2px solid alpha(@app_accent, 0.72);
+}
+
+.debug-data-printer-scope-header {
+    min-height: 25px;
+}
+
+.debug-data-printer-kind {
+    min-width: 52px;
+    padding: 2px 6px;
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.12);
+    border: 1px solid alpha(@app_accent, 0.35);
+}
+
+.debug-data-printer-count {
+    color: @app_muted;
+}
+
+.debug-data-printer-path {
+    min-height: 23px;
+    padding: 3px 6px;
+    color: @app_muted;
+    background: alpha(@app_bg, 0.42);
+    border: 1px solid alpha(@app_border, 0.65);
+}
+
+.debug-data-printer-provider {
+    min-height: 24px;
+    padding: 3px 5px;
+    background: alpha(@app_fg, 0.018);
+    border-bottom: 1px solid alpha(@app_border, 0.72);
+}
+
+.debug-data-printer-grid {
+    margin: 0;
+}
+
+.debug-data-printer {
+    min-height: 25px;
+    padding: 4px 7px;
+    color: @app_fg;
+    background: alpha(@app_bg, 0.5);
+    border: 1px solid alpha(@app_border, 0.72);
+    font-family: monospace;
+}
+
+.gef-tools-menu {
+    min-width: 300px;
+    padding: 0;
+    background: @app_surface;
+}
+
+.gef-tools-menu > separator {
+    margin: 0;
+}
+
+.gef-tools-tabs > header {
+    min-height: 20px;
+    background: @app_bg;
+    border-bottom: 1px solid @app_border;
+}
+
+.gef-tools-tabs > header > tabs > tab {
+    min-height: 19px;
+    padding: 0 5px;
+    border: 0;
+    border-bottom: 1px solid transparent;
+}
+
+.gef-tools-tabs > header > tabs > tab:checked {
+    color: @app_fg;
+    background: @app_raised;
+    border-bottom-color: @app_accent;
+}
+
+popover.debugger-context-menu > contents {
+    min-width: 168px;
+}
+
+.context-menu-heading {
+    padding: 5px 8px;
+    color: @app_muted;
+}
+
+.context-menu-content > separator {
+    min-height: 1px;
+    margin: 3px 8px;
+    background: @app_border;
+}
+
+.until-condition {
+    padding: 2px 0 0;
+}
+
+.stack-row:hover {
+    background: @app_hover;
+}
+
+button.until-control {
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.055);
+    box-shadow: inset 0 -1px alpha(@app_accent, 0.42);
+}
+
+button.until-control:hover,
+button.until-control:focus,
+button.until-control:focus-visible {
+    color: @app_fg;
+    background: alpha(@app_accent, 0.12);
+    box-shadow: inset 0 -1px alpha(@app_accent, 0.7);
+}
+
+button.until-control:active,
+button.until-control:checked {
+    color: @app_fg;
+    background: alpha(@app_accent, 0.17);
+    box-shadow: inset 0 -2px @app_accent;
+}
+
+button.until-control:disabled {
+    color: alpha(@app_accent_hover, 0.42);
+    background: alpha(@app_accent, 0.025);
+    box-shadow: inset 0 -1px alpha(@app_accent, 0.16);
+}
+
+.signal-detail {
+    min-height: 27px;
+    padding: 2px 5px;
+    color: @app_muted;
+    background: @app_bg;
+    border-left: 2px solid @app_border;
+}
+
+.signal-detail.signal-active {
+    color: @app_warning;
+    border-left-color: @app_warning;
+}
+
+.signal-disclosure > box:last-child {
+    padding-top: 4px;
+}
+
+.signal-disclosure grid {
+    padding: 0;
+}
+
+window.value-editor,
+window.value-editor > box {
+    color: @app_fg;
+    background: @app_surface;
+}
+
+window.session-editor,
+window.session-editor > box {
+    color: @app_fg;
+    background: @app_surface;
+}
+
+window.session-editor textview {
+    padding: 4px;
+    color: @app_fg;
+    background: @app_bg;
+}
+
+window.session-editor scrolledwindow {
+    border: 1px solid @app_border;
+}
+
+window.breakpoint-editor textview {
+    border: 1px solid @app_border;
+}
+
+window.breakpoint-editor textview:focus-within {
+    border-color: @app_accent;
+}
+
+.status-readout {
+    min-height: 23px;
+    margin: 0 6px 0 0;
+    padding: 0 10px;
+    color: @app_muted;
+    background: alpha(@app_fg, 0.025);
+    border-right: 1px solid @app_border;
+}
+
+headerbar.topbar .execution-controls {
+    border-spacing: 1px;
+}
+
+.status-detail {
+    min-height: 21px;
+    padding: 0 7px;
+    color: @app_muted;
+    background: @app_bg;
+    border-top: 1px solid @app_border;
+}
+
+.workspace-footer {
+    min-height: 22px;
+    background: @app_bg;
+    border-top: 1px solid @app_border;
+}
+
+.workspace-footer .status-detail {
+    border-top: 0;
+}
+
+button.terminal-pane-toggle {
+    min-height: 21px;
+    padding: 0 10px;
+    color: @app_muted;
+    background: @app_surface;
+    border: 0;
+    border-right: 1px solid @app_border;
+}
+
+button.terminal-pane-toggle:hover {
+    color: @app_fg;
+    background: @app_hover;
+}
+
+button.terminal-pane-toggle:checked {
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.14);
+    box-shadow: inset 0 2px @app_accent;
+}
+
+.status-ready {
+    color: @app_success;
+}
+
+.status-running {
+    color: @app_accent_hover;
+}
+
+.status-error {
+    color: @app_danger;
+}
+
+.source-navigation-toolbar {
+    min-height: 25px;
+    padding: 0;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}
+
+button.source-navigation-action,
+menubutton.source-navigation-menu-button > button {
+    min-height: 24px;
+    padding: 0 8px;
+    color: @app_muted;
+    background: transparent;
+    border: 0;
+    border-right: 1px solid alpha(@app_border, 0.75);
+}
+
+button.source-navigation-action:hover,
+button.source-navigation-action:focus-visible,
+menubutton.source-navigation-menu-button > button:hover,
+menubutton.source-navigation-menu-button > button:focus-visible {
+    color: @app_accent_hover;
+    background: @app_hover;
+}
+
+button.source-navigation-action:disabled {
+    color: alpha(@app_muted, 0.40);
+    background: transparent;
+}
+
+popover > contents .source-navigation-menu {
+    min-width: 310px;
+    padding: 0;
+    background: @app_surface;
+}
+
+.source-find-count {
+    min-width: 82px;
+    color: @app_muted;
+}
+
+window.source-palette,
+window.source-palette > box {
+    color: @app_fg;
+    background: @app_bg;
+}
+
+.source-palette-results {
+    padding: 1px;
+    background: @app_surface;
+}
+
+button.source-palette-result {
+    min-height: 43px;
+    padding: 4px 7px;
+    color: @app_fg;
+    background: transparent;
+    border: 0;
+    border-bottom: 1px solid alpha(@app_border, 0.65);
+}
+
+button.source-palette-result:hover,
+button.source-palette-result:focus-visible {
+    background: @app_hover;
+}
+
+.source-palette-primary {
+    color: @app_accent_hover;
+}
+
+.source-palette-kind {
+    color: @app_muted;
+}
+
+.source-palette-secondary {
+    color: @app_muted;
+}
+
+.source-tree-panel {
+    background: @app_surface;
+}
+
+.source-tree-status {
+    min-height: 20px;
+    padding: 0 5px;
+    color: @app_muted;
+    background: @app_bg;
+    border-bottom: 1px solid alpha(@app_border, 0.55);
+}
+
+listview.source-tree-view {
+    color: @app_fg;
+    background: @app_surface;
+}
+
+listview.source-tree-view row {
+    min-height: 23px;
+    padding: 0 3px;
+    background: transparent;
+}
+
+listview.source-tree-view row:hover {
+    background: @app_hover;
+}
+
+listview.source-tree-view row:selected {
+    background: @app_selected;
+}
+
+.source-tree-row {
+    min-height: 22px;
+}
+
+.source-tree-disclosure {
+    min-width: 8px;
+    color: @app_muted;
+}
+
+.source-tree-icon {
+    color: @app_muted; -gtk-icon-size: 13px;
+}
+
+.source-tree-name {
+    color: @app_fg;
+}
+
+.source-tree-loaded {
+    color: @app_success;
+}
+
+.source-tab {
+    padding: 0 2px;
+    color: @app_fg;
+}
+
+.executing-source-tab {
+    color: @app_accent_hover;
+}
+
+textview,
+textview text {
+    background: @app_bg;
+    color: @app_fg;
+}
+
+notebook,
+notebook > stack {
+    background: @app_surface;
+    border: 0;
+    box-shadow: none;
+}
+
+.kernel-page,
+stackswitcher.kernel-tabs {
+    background: @app_surface;
+}
+
+.kernel-tab-navigation {
+    min-height: 26px;
+    background: @app_surface;
+}
+
+scrolledwindow.kernel-tabs-scroll,
+scrolledwindow.kernel-tabs-scroll > viewport {
+    min-width: 0;
+    min-height: 26px;
+    background: @app_surface;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+}
+
+scrolledwindow.inspector-page-viewport,
+scrolledwindow.inspector-page-viewport > viewport {
+    min-width: 0;
+    background: @app_surface;
+    border: 0;
+    outline: 0;
+    box-shadow: none;
+}
+
+.kernel-page.inspector-compact .subpanel-header {
+    padding-left: 2px;
+    padding-right: 2px;
+}
+
+.misc-startup-summary-cell {
+    min-height: 22px;
+    padding: 2px 6px;
+    background: @app_raised;
+}
+
+.misc-startup-summary-key {
+    color: @app_muted;
+}
+
+.misc-startup-summary-value {
+    min-width: 0;
+    color: @app_fg;
+}
+
+.misc-startup-warning {
+    padding: 4px 6px;
+    color: @app_danger;
+    background: alpha(@app_danger, 0.08);
+    border-bottom: 1px solid alpha(@app_danger, 0.28);
+}
+
+.misc-vector-section > .section-title {
+    min-height: 22px;
+    padding: 2px 6px;
+    color: @app_accent;
+    background: @app_raised;
+    border-bottom: 1px solid @app_border;
+}
+
+.misc-vector-name {
+    color: @app_accent;
+}
+
+.misc-vector-table label.debug-table-cell {
+    min-height: 23px;
+}
+
+paned.misc-startup-split > separator {
+    min-height: 1px;
+    margin: 0;
+    padding: 0;
+    background: @app_surface;
+    background-image: none;
+    border: 0;
+}
+
+paned.misc-startup-split > separator:hover {
+    background: alpha(@app_accent, 0.35);
+}
+
+.misc-data-summary {
+    min-height: 24px;
+    padding: 3px 7px;
+    color: @app_fg;
+    background: @app_raised;
+    border-bottom: 1px solid @app_border;
+}
+
+.misc-data-note {
+    padding: 3px 7px;
+}
+
+.cfg-page {
+    min-width: 0;
+    background: @app_bg;
+}
+
+.cfg-toolbar {
+    min-height: 52px;
+    padding: 9px 10px;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}
+
+.cfg-summary {
+    color: @app_accent_hover;
+}
+
+.cfg-stat {
+    min-height: 20px;
+    padding: 1px 7px;
+    color: @app_fg;
+    background: alpha(@app_fg, 0.045);
+    border: 1px solid alpha(@app_border, 0.86);
+}
+
+.cfg-summary-row,
+.cfg-detail-row {
+    min-height: 20px;
+}
+
+.cfg-detail {
+    color: @app_muted;
+}
+
+.cfg-block-detail {
+    color: @app_accent_hover;
+}
+
+.cfg-bounded-detail {
+    color: @app_warning;
+}
+
+.cfg-legend {
+    background: alpha(@app_fg, 0.025);
+    border-bottom: 1px solid @app_border;
+}
+
+button.cfg-legend-toggle,
+button.cfg-legend-toggle:hover,
+button.cfg-legend-toggle:focus-visible,
+button.cfg-legend-toggle:checked {
+    min-height: 32px;
+    margin: 0;
+    padding: 6px 10px;
+    color: @app_muted;
+    background: transparent;
+    border: 0;
+}
+
+button.cfg-legend-toggle:hover,
+button.cfg-legend-toggle:focus-visible {
+    color: @app_fg;
+    background: @app_hover;
+}
+
+button.cfg-legend-toggle:checked {
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.05);
+}
+
+.cfg-legend-items {
+    padding: 9px 10px;
+    border-top: 1px solid alpha(@app_border, 0.72);
+}
+
+.cfg-legend-item {
+    min-height: 46px;
+    padding: 6px 9px;
+    background: alpha(@app_fg, 0.025);
+    border: 1px solid alpha(@app_border, 0.78);
+}
+
+.cfg-legend-sample {
+    min-width: 28px;
+}
+
+.cfg-legend-sample.branch {
+    color: @app_accent;
+}
+
+.cfg-legend-sample.fallthrough {
+    color: @app_muted;
+}
+
+.cfg-legend-sample.current {
+    color: @app_accent_hover;
+}
+
+.cfg-legend-title {
+    color: @app_fg;
+}
+
+.cfg-legend-detail {
+    color: @app_muted;
+}
+
+scrolledwindow.cfg-scroll,
+scrolledwindow.cfg-scroll > viewport,
+.cfg-canvas-layer,
+.cfg-canvas {
+    background: @app_bg;
+    border: 0;
+}
+
+.cfg-block-label {
+    background: transparent;
+}
+
+.cfg-block-header-label {
+    color: @app_accent_hover;
+}
+
+.cfg-block-body-label {
+    color: @app_fg;
+}
+
+.cfg-empty {
+    margin: 16px;
+    padding: 10px;
+}
+
+.allocator-detection-card {
+    padding: 6px 8px;
+    background: @app_raised;
+    border-bottom: 1px solid @app_border;
+}
+
+.allocator-detection-caption,
+.allocator-detail-key,
+.allocator-metric-key {
+    color: @app_muted;
+}
+
+.allocator-detection-identity {
+    color: @app_accent;
+}
+
+.allocator-detection-basis {
+    margin-top: 1px;
+    padding: 2px 5px;
+    color: @app_accent;
+    background: alpha(@app_accent, 0.10);
+    border-left: 2px solid @app_accent;
+}
+
+.allocator-detection-basis.allocator-detection-warning {
+    color: @app_warning;
+    background: alpha(@app_warning, 0.10);
+    border-left-color: @app_warning;
+}
+
+.allocator-detection-basis.allocator-detection-error {
+    color: @app_danger;
+    background: alpha(@app_danger, 0.10);
+    border-left-color: @app_danger;
+}
+
+.allocator-detail {
+    margin-top: 3px;
+    padding-top: 3px;
+    border-top: 1px solid alpha(@app_border, 0.72);
+}
+
+.allocator-detail-value {
+    color: @app_fg;
+}
+
+.allocator-evidence-value {
+    color: @app_muted;
+}
+
+.allocator-frontend-value {
+    color: @app_accent_hover;
+}
+
+.allocator-detection-safety {
+    margin-top: 4px;
+    padding: 3px 5px;
+    color: @app_success;
+    background: alpha(@app_success, 0.07);
+    border-left: 2px solid alpha(@app_success, 0.72);
+}
+
+.allocator-detection-safety.allocator-safety-warning {
+    color: @app_warning;
+    background: alpha(@app_warning, 0.08);
+    border-left-color: alpha(@app_warning, 0.72);
+}
+
+flowbox.allocator-metrics {
+    background: @app_border;
+}
+
+flowbox.allocator-metrics > flowboxchild {
+    min-width: 0;
+    padding: 0;
+    background: transparent;
+}
+
+.allocator-metric-cell {
+    min-height: 35px;
+    padding: 3px 7px;
+    background: @app_surface;
+}
+
+.allocator-metric-value {
+    color: @app_fg;
+}
+
+.heap-inspector-controls {
+    padding: 6px 7px;
+    background: @app_surface;
+    border-bottom: 1px solid @app_border;
+}
+
+.heap-inspector-note {
+    padding-bottom: 2px;
+    color: @app_muted;
+}
+
+.heap-inspector-group-title {
+    color: @app_muted;
+    letter-spacing: 0.4px;
+}
+
+flowbox.heap-inspector-actions {
+    background: transparent;
+}
+
+flowbox.heap-inspector-actions > flowboxchild {
+    min-width: 0;
+    padding: 0;
+    background: transparent;
+}
+
+.heap-inspector-result-header {
+    min-height: 38px;
+    padding: 4px 7px;
+    background: @app_raised;
+    border-bottom: 1px solid @app_border;
+}
+
+.heap-inspector-command {
+    color: @app_accent;
+}
+
+.heap-inspector-status {
+    color: @app_muted;
+}
+
+.heap-inspector-status.heap-inspector-error {
+    color: @app_danger;
+}
+
+.heap-inspector-status.heap-inspector-warning {
+    color: @app_warning;
+}
+
+.heap-inspector-table label.debug-table-cell {
+    min-height: 23px;
+}
+
+.heap-inspector-cell {
+    color: @app_fg;
+}
+
+.heap-inspector-location-cell {
+    color: @app_accent_hover;
+}
+
+.heap-inspector-metric-cell,
+.heap-inspector-details-cell {
+    color: @app_muted;
+}
+
+.heap-inspector-state-cell {
+    margin: 3px 4px;
+    min-height: 18px;
+    padding: 0 5px;
+    color: @app_muted;
+    background: alpha(@app_fg, 0.045);
+}
+
+.heap-inspector-state-cell.heap-state-active {
+    color: @app_success;
+    background: alpha(@app_success, 0.10);
+}
+
+.heap-inspector-state-cell.heap-state-idle {
+    color: @app_muted;
+    background: alpha(@app_fg, 0.035);
+}
+
+.heap-inspector-state-cell.heap-state-free {
+    color: @app_warning;
+    background: alpha(@app_warning, 0.09);
+}
+
+.heap-inspector-state-cell.heap-state-special {
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.10);
+}
+
+.heap-inspector-cell.heap-inspector-section-cell {
+    color: @app_accent;
+}
+
+.heap-inspector-cell.heap-inspector-error-cell {
+    color: @app_danger;
+}
+
+.heap-inspector-cell.heap-inspector-warning-cell {
+    color: @app_warning;
+}
+
+.call-abi-context {
+    min-height: 24px;
+    padding: 4px 7px;
+    color: @app_accent;
+    background: alpha(@app_accent, 0.08);
+}
+
+.misc-data-table label.debug-table-cell {
+    min-height: 23px;
+}
+
+paned.misc-data-split > separator {
+    min-height: 1px;
+    margin: 0;
+    padding: 0;
+    background: @app_surface;
+    background-image: none;
+    border: 0;
+}
+
+paned.misc-data-split > separator:hover {
+    background: alpha(@app_accent, 0.35);
+}
+
+.kernel-table-summary {
+    padding: 3px 4px;
+}
+
+.kernel-change-controls {
+    min-height: 28px;
+    padding: 2px 6px;
+    background: @app_raised;
+    border-top: 1px solid @app_border;
+    border-bottom: 1px solid @app_border;
+}
+
+.kernel-change-empty {
+    padding: 8px 12px;
+    background: alpha(@app_surface, 0.88);
+}
+
+.kernel-memory-summary {
+    padding: 4px 6px;
+    color: @app_fg;
+    background: alpha(@app_fg, 0.018);
+}
+
+.kernel-memory-meta {
+    padding: 1px 3px 4px;
+}
+
+.kernel-memory-unit-grid {
+    border-top: 1px solid @app_border;
+    border-left: 1px solid @app_border;
+}
+
+.kernel-memory-unit-cell {
+    min-height: 21px;
+    padding: 1px 5px;
+    color: @app_fg;
+    border-right: 1px solid @app_border;
+    border-bottom: 1px solid @app_border;
+}
+
+.kernel-memory-unit-header {
+    color: @app_muted;
+    background: @app_raised;
+}
+
+.kernel-memory-unit-even {
+    background: alpha(@app_fg, 0.018);
+}
+
+.kernel-memory-unit-odd {
+    background: alpha(@app_fg, 0.042);
+}
+
+.kernel-memory-explanation {
+    padding: 4px 7px;
+    border-bottom: 1px solid @app_border;
+}
+
+.kernel-private-summary-grid {
+    background: @app_border;
+}
+
+.kernel-private-summary-cell {
+    min-height: 0;
+    padding: 3px 7px;
+    background: alpha(@app_success, 0.045);
+}
+
+.kernel-private-summary-value {
+    color: @app_success;
+}
+
+.kernel-memory-subtitle {
+    min-height: 22px;
+    padding: 2px 7px;
+    background: @app_raised;
+    border-top: 1px solid @app_border;
+    border-bottom: 1px solid @app_border;
+}
+
+.kernel-memory-category {
+    color: @app_accent_hover;
+}
+
+.kernel-memory-exclusive {
+    color: @app_success;
+}
+
+.kernel-memory-table label.debug-table-cell {
+    min-height: 23px;
+}
+
+.kernel-change-table label.debug-table-cell {
+    min-height: 23px;
+}
+
+.kernel-change-growth {
+    color: @app_accent_hover;
+}
+
+.kernel-change-release {
+    color: @app_success;
+}
+
+.kernel-change-idle {
+    color: @app_muted;
+}
+
+.kernel-change-new {
+    color: @app_success;
+}
+
+.kernel-change-removed {
+    color: @app_danger;
+}
+
+.kernel-change-protection {
+    color: @app_warning;
+}
+
+.kernel-change-modified {
+    color: @app_accent_hover;
+}
+
+.kernel-fact-row {
+    min-height: 23px;
+    padding: 1px 4px;
+}
+
+.kernel-fact-row:nth-child(odd) {
+    background: alpha(@app_fg, 0.035);
+}
+
+listview.kernel-overview-list > row {
+    color: @app_fg;
+    background: transparent;
+}
+
+listview.kernel-overview-list > row:hover {
+    color: @app_fg;
+    background: @app_hover;
+}
+
+listview.kernel-overview-list > row:selected {
+    color: @app_fg;
+    background: @app_selected;
+}
+
+listview.kernel-overview-list > row:hover .muted,
+listview.kernel-overview-list > row:selected .muted {
+    color: @app_fg;
+}
+
+listview.kernel-overview-list > row:hover .kernel-section-heading {
+    background: @app_hover;
+}
+
+.kernel-warnings {
+    padding: 3px 5px;
+    background: alpha(@app_warning, 0.08);
+    border-bottom: 1px solid alpha(@app_warning, 0.24);
+}
+
+.kernel-warning {
+    color: @app_warning;
+}
+
+.kernel-state-active {
+    color: @app_success;
+}
+
+.kernel-state-warning {
+    color: @app_warning;
+}
+
+.kernel-tls-table label.debug-table-cell {
+    min-height: 22px;
+}
+
+.kernel-tls-metadata-header {
+    min-height: 27px;
+    padding: 2px 6px;
+    background: @app_raised;
+    border-bottom: 1px solid @app_border;
+}
+
+.kernel-tls-empty {
+    padding: 18px;
+    color: @app_muted;
+}
+
+.kernel-process-target {
+    color: @app_accent;
+}
+
+.kernel-numeric {
+    color: @app_accent_hover;
+}
+
+.kernel-signals-table label.debug-table-cell,
+.kernel-process-table label.debug-table-cell {
+    min-height: 22px;
+}
+
+.context-legend grid {
+    padding: 2px 4px 4px;
+}
+
+.disclosure-arrow {
+    color: @app_muted;
+}
+
+paned > separator {
+    min-width: 1px;
+    min-height: 1px;
+    background: alpha(@app_fg, 0.10);
+}
+
+paned.workspace-columns > separator:hover {
+    background: @app_accent;
+}
+
+paned.workspace-inspector-split > separator {
+    min-width: 1px;
+    margin: 0;
+    padding: 0;
+    background: @app_surface;
+    background-image: none;
+    border: 0;
+}
+
+paned.workspace-inspector-split > separator:hover {
+    background: @app_accent;
+}
+
+paned.context-split > separator {
+    min-height: 3px;
+    background: alpha(@app_fg, 0.06);
+    border-top: 1px solid alpha(@app_fg, 0.10);
+}
+
+paned.context-split > separator:hover {
+    background: alpha(@app_accent, 0.20);
+    border-top-color: @app_accent;
+}
+
+scrollbar {
+    background: @app_surface;
+}
+
+scrollbar slider {
+    min-width: 6px;
+    min-height: 6px;
+    margin: 2px;
+    padding: 0;
+    background: alpha(@app_fg, 0.38);
+    border: 0;
+}
+
+scrollbar slider:hover {
+    background: alpha(@app_fg, 0.58);
+}

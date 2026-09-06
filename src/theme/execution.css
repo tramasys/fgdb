@@ -1,0 +1,75 @@
+/* These widgets remain insensitive while a short execution transition runs.
+   Match their enabled paint to avoid flashing the chrome at every step. */
+
+button.pause-availability-pending,
+button.pause-availability-pending:hover,
+button.pause-availability-pending:focus,
+button.pause-availability-pending:focus-visible,
+button.pause-availability-pending:active {
+    color: alpha(@app_muted, 0.45);
+    background: transparent;
+}
+
+.execution-interlocked:disabled {
+    opacity: 1;
+}
+
+.execution-interlocked:disabled * {
+    opacity: 1;
+}
+
+entry.execution-interlocked:disabled,
+checkbutton.execution-interlocked:disabled,
+dropdown.execution-interlocked:disabled > button,
+.execution-interlocked:disabled entry:disabled,
+.execution-interlocked:disabled checkbutton:disabled,
+.execution-interlocked:disabled dropdown:disabled > button {
+    color: @app_fg;
+}
+
+button.execution-interlocked:disabled,
+.execution-interlocked:disabled button:disabled {
+    color: @app_fg;
+    background: @app_card;
+}
+
+button.inline-action.danger-action.execution-interlocked:disabled {
+    color: @app_danger;
+}
+
+.session-menu > button.session-action.execution-interlocked:disabled {
+    color: @app_fg;
+    background: transparent;
+}
+
+button.signal-action.signal-caught.execution-interlocked:disabled {
+    color: @app_success;
+    background: alpha(@app_success, 0.10);
+    border-color: alpha(@app_success, 0.42);
+}
+
+button.until-control.execution-interlocked:disabled {
+    color: @app_accent_hover;
+    background: alpha(@app_accent, 0.055);
+    box-shadow: inset 0 -1px alpha(@app_accent, 0.42);
+}
+
+button.primary-control.execution-interlocked:disabled,
+button.suggested-action.execution-interlocked:disabled,
+.execution-interlocked:disabled button.primary-control:disabled,
+.execution-interlocked:disabled button.suggested-action:disabled {
+    color: @app_accent_hover;
+    background: @app_selected;
+    border-color: alpha(@app_accent, 0.45);
+}
+
+button.menu-action.execution-interlocked:disabled {
+    background: transparent;
+}
+
+button.execution-interlocked:disabled:checked,
+.execution-interlocked:disabled button:disabled:checked {
+    color: @app_fg;
+    background: @app_selected;
+    border-color: alpha(@app_accent, 0.55);
+}

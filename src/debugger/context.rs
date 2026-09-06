@@ -134,7 +134,7 @@ impl MemoryRegion {
 
     pub fn description(&self) -> String {
         match self.path.as_deref() {
-            Some(path) => format!("{} · {path}", self.permissions),
+            Some(path) => format!("{}  {path}", self.permissions),
             None => self.permissions.clone(),
         }
     }

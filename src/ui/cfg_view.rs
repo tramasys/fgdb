@@ -34,10 +34,17 @@ pub(super) struct CfgView {
     empty: gtk::Label,
     follow: gtk::ToggleButton,
     graph: Rc<RefCell<Option<ControlFlowGraph>>>,
-    text_widgets: Rc<RefCell<Vec<gtk::Label>>>,
+    block_widgets: Rc<RefCell<Vec<CfgBlockWidgets>>>,
     text_current_block: Rc<Cell<Option<usize>>>,
     text_palette: CfgTextPalette,
+    palette: CfgPalette,
     scroll_generation: Rc<Cell<u64>>,
+}
+
+struct CfgBlockWidgets {
+    root: gtk::Overlay,
+    drawing: gtk::DrawingArea,
+    body: gtk::Label,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -328,7 +335,7 @@ pub(super) fn build_cfg_view(theme: &Theme) -> CfgView {
     let canvas = gtk::Fixed::new();
     canvas.add_css_class("cfg-canvas-layer");
     canvas.put(&drawing, 0.0, 0.0);
-    let text_widgets = Rc::new(RefCell::new(Vec::new()));
+    let block_widgets = Rc::new(RefCell::new(Vec::new()));
     let text_current_block = Rc::new(Cell::new(None));
     let scrolled = gtk::ScrolledWindow::new();
     scrolled.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Automatic);
@@ -395,9 +402,10 @@ pub(super) fn build_cfg_view(theme: &Theme) -> CfgView {
         empty,
         follow,
         graph,
-        text_widgets,
+        block_widgets,
         text_current_block,
         text_palette: CfgTextPalette::new(theme),
+        palette,
         scroll_generation,
     }
 }
@@ -532,16 +540,17 @@ impl CfgView {
             .and_then(|graph| graph.current_block);
 
         if !reused {
-            rebuild_cfg_text_widgets(
+            rebuild_cfg_blocks(
                 &self.canvas,
-                &self.text_widgets,
-                self.graph.borrow().as_ref(),
+                &self.block_widgets,
+                &self.graph,
                 self.text_palette,
+                self.palette,
                 f64::from(width),
             );
         } else {
-            refresh_cfg_dynamic_text(
-                &self.text_widgets,
+            refresh_cfg_blocks(
+                &self.block_widgets,
                 self.graph.borrow().as_ref(),
                 self.text_palette,
                 self.text_current_block.get(),
@@ -560,7 +569,7 @@ impl CfgView {
 
     pub(super) fn clear(&self) {
         self.graph.replace(None);
-        clear_cfg_text_widgets(&self.canvas, &self.text_widgets);
+        clear_cfg_blocks(&self.canvas, &self.block_widgets);
         self.text_current_block.set(None);
         self.summary.set_text("CONTROL FLOW GRAPH");
         self.summary.set_tooltip_text(None);
@@ -1030,30 +1039,64 @@ fn rendered_instructions(graph: &ControlFlowGraph, block: &CfgBlock) -> Vec<Rend
     rendered
 }
 
-fn clear_cfg_text_widgets(canvas: &gtk::Fixed, text_widgets: &Rc<RefCell<Vec<gtk::Label>>>) {
-    for label in text_widgets.borrow_mut().drain(..) {
-        canvas.remove(&label);
+fn clear_cfg_blocks(canvas: &gtk::Fixed, block_widgets: &Rc<RefCell<Vec<CfgBlockWidgets>>>) {
+    for block in block_widgets.borrow_mut().drain(..) {
+        canvas.remove(&block.root);
     }
 }
 
-fn rebuild_cfg_text_widgets(
+fn rebuild_cfg_blocks(
     canvas: &gtk::Fixed,
-    text_widgets: &Rc<RefCell<Vec<gtk::Label>>>,
-    graph: Option<&ControlFlowGraph>,
+    block_widgets: &Rc<RefCell<Vec<CfgBlockWidgets>>>,
+    graph_state: &Rc<RefCell<Option<ControlFlowGraph>>>,
     palette: CfgTextPalette,
+    block_palette: CfgPalette,
     width: f64,
 ) {
-    clear_cfg_text_widgets(canvas, text_widgets);
+    clear_cfg_blocks(canvas, block_widgets);
 
-    let Some(graph) = graph else {
+    let graph = graph_state.borrow();
+    let Some(graph) = graph.as_ref() else {
         return;
     };
 
     let layouts = graph_layout(graph, width);
-    let mut widgets = text_widgets.borrow_mut();
-    widgets.reserve(graph.blocks.len().saturating_mul(2));
+    let mut widgets = block_widgets.borrow_mut();
+    widgets.reserve(graph.blocks.len());
 
     for (block_index, (block, layout)) in graph.blocks.iter().zip(layouts).enumerate() {
+        let drawing = gtk::DrawingArea::new();
+        drawing.set_content_width(layout.width as i32);
+        drawing.set_content_height(layout.height as i32);
+        let graph_for_drawing = Rc::clone(graph_state);
+        drawing.set_draw_func(move |_, context, width, height| {
+            let graph = graph_for_drawing.borrow();
+            if let Some(graph) = graph.as_ref()
+                && let Some(block) = graph.blocks.get(block_index)
+            {
+                draw_cfg_block(
+                    context,
+                    graph,
+                    block_index,
+                    block,
+                    CfgBlockLayout {
+                        x: 0.0,
+                        y: 0.0,
+                        width: f64::from(width),
+                        height: f64::from(height),
+                    },
+                    block_palette,
+                );
+            }
+        });
+
+        // Keep text and its painted header in the same local coordinate space.
+        // The scrolling canvas only positions the complete block.
+        let root = gtk::Overlay::new();
+        root.set_child(Some(&drawing));
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.set_valign(gtk::Align::Start);
+        root.add_overlay(&content);
         let first = graph.instructions[block.start].address;
         let last = graph.instructions[block.end - 1].address;
 
@@ -1064,17 +1107,19 @@ fn rebuild_cfg_text_widgets(
         );
 
         let header = gtk::Label::new(Some(&truncate_cfg_text(&title, 76)));
-        header.set_halign(gtk::Align::Start);
-        header.set_valign(gtk::Align::Start);
         header.set_xalign(0.0);
-        header.set_yalign(0.0);
+        header.set_yalign(0.5);
         enable_stable_text_selection(&header);
         header.set_ellipsize(pango::EllipsizeMode::End);
-        header.set_size_request((layout.width - 20.0).max(1.0) as i32, 18);
+        header.set_size_request(
+            (layout.width - 20.0).max(1.0) as i32,
+            BLOCK_HEADER_HEIGHT as i32,
+        );
         header.add_css_class("cfg-block-label");
         header.add_css_class("cfg-block-header-label");
-        canvas.put(&header, layout.x + 10.0, layout.y + 4.0);
-        widgets.push(header);
+        header.set_margin_start(10);
+        header.set_margin_end(10);
+        content.append(&header);
         let body = gtk::Label::new(None);
         body.set_markup(&cfg_block_body_markup(graph, block, palette, layout.width));
         body.set_halign(gtk::Align::Start);
@@ -1098,18 +1143,22 @@ fn rebuild_cfg_text_widgets(
         body.add_css_class("cfg-block-label");
         body.add_css_class("cfg-block-body-label");
 
-        canvas.put(
-            &body,
-            layout.x + 8.0,
-            layout.y + BLOCK_HEADER_HEIGHT + BLOCK_VERTICAL_PADDING,
-        );
-
-        widgets.push(body);
+        body.set_margin_start(8);
+        body.set_margin_end(8);
+        body.set_margin_top(BLOCK_VERTICAL_PADDING as i32);
+        body.set_margin_bottom(BLOCK_VERTICAL_PADDING as i32);
+        content.append(&body);
+        canvas.put(&root, layout.x, layout.y);
+        widgets.push(CfgBlockWidgets {
+            root,
+            drawing,
+            body,
+        });
     }
 }
 
-fn refresh_cfg_dynamic_text(
-    text_widgets: &Rc<RefCell<Vec<gtk::Label>>>,
+fn refresh_cfg_blocks(
+    block_widgets: &Rc<RefCell<Vec<CfgBlockWidgets>>>,
     graph: Option<&ControlFlowGraph>,
     palette: CfgTextPalette,
     previous_block: Option<usize>,
@@ -1121,7 +1170,7 @@ fn refresh_cfg_dynamic_text(
     };
 
     let layouts = graph_layout(graph, width);
-    let widgets = text_widgets.borrow();
+    let widgets = block_widgets.borrow();
     let mut updated = None;
 
     for block_index in [previous_block, current_block].into_iter().flatten() {
@@ -1139,11 +1188,14 @@ fn refresh_cfg_dynamic_text(
             continue;
         };
 
-        let Some(body) = widgets.get(block_index.saturating_mul(2).saturating_add(1)) else {
+        let Some(widgets) = widgets.get(block_index) else {
             continue;
         };
 
-        body.set_markup(&cfg_block_body_markup(graph, block, palette, layout.width));
+        widgets
+            .body
+            .set_markup(&cfg_block_body_markup(graph, block, palette, layout.width));
+        widgets.drawing.queue_draw();
     }
 }
 
@@ -1204,10 +1256,6 @@ fn draw_cfg(
 
     let layouts = graph_layout(graph, width);
     draw_cfg_edges(context, graph, &layouts, palette);
-
-    for (index, (block, layout)) in graph.blocks.iter().zip(&layouts).enumerate() {
-        draw_cfg_block(context, graph, index, block, *layout, palette);
-    }
 }
 
 fn draw_cfg_edges(
@@ -1482,6 +1530,110 @@ mod tests {
             cfg_signature(instructions, architecture, 64),
         )
         .expect("test disassembly must produce a CFG")
+    }
+
+    #[test]
+    #[ignore = "requires a GTK display"]
+    fn block_text_stays_aligned_after_scrolling_and_remapping() {
+        gtk::init().unwrap();
+        let theme = Theme::graphite();
+        theme.install();
+        let misc = super::super::misc_view::build_misc_view(&theme);
+        misc.pages.set_visible_child_name("cfg");
+        let view = &misc.cfg;
+        view.follow.set_active(false);
+        let instructions = (0..120)
+            .flat_map(|block| {
+                let length = [1, 5, 13][block % 3];
+                (0..length).map(move |line| {
+                    if line + 1 == length {
+                        "jne 0x100 <worker>"
+                    } else {
+                        "mov DWORD PTR [rbp+0x20],eax"
+                    }
+                })
+            })
+            .enumerate()
+            .map(|(index, text)| instruction(0x100 + index as u64 * 2, text))
+            .collect::<Vec<_>>();
+        view.show(&instructions, "0x102", TargetArchitecture::X86_64, 64);
+        let window = gtk::Window::builder()
+            .default_width(960)
+            .default_height(650)
+            .child(&misc.root)
+            .build();
+        window.present();
+        let context = glib::MainContext::default();
+
+        let settle = || {
+            for _ in 0..8 {
+                while context.pending() {
+                    context.iteration(false);
+                }
+
+                std::thread::sleep(Duration::from_millis(8));
+            }
+        };
+        let check_alignment = || {
+            let graph = view.graph.borrow();
+            let graph = graph.as_ref().unwrap();
+            let layouts = graph_layout(graph, f64::from(graph_content_width(graph)));
+            let widgets = view.block_widgets.borrow();
+            assert_eq!(widgets.len(), layouts.len());
+
+            for (widgets, block) in widgets.iter().zip(layouts) {
+                let header = widgets
+                    .body
+                    .parent()
+                    .unwrap()
+                    .first_child()
+                    .unwrap()
+                    .downcast::<gtk::Label>()
+                    .unwrap();
+                let bounds = header.compute_bounds(&widgets.drawing).unwrap();
+                let (_, text) = header.layout().pixel_extents();
+                let (_, text_y) = header.layout_offsets();
+                let center = f64::from(bounds.y())
+                    + f64::from(text_y + text.y())
+                    + f64::from(text.height()) / 2.0;
+                let expected = BLOCK_HEADER_HEIGHT / 2.0;
+                assert!((center - expected).abs() <= 1.0, "{center} != {expected}");
+                assert_eq!(header.height(), BLOCK_HEADER_HEIGHT as i32);
+                assert!(header.is_selectable());
+                assert!(widgets.body.is_selectable());
+                let body = widgets.body.compute_bounds(&widgets.drawing).unwrap();
+                assert!(
+                    (f64::from(body.y()) - BLOCK_HEADER_HEIGHT - BLOCK_VERTICAL_PADDING).abs()
+                        < 0.01
+                );
+                assert!(
+                    (f64::from(widgets.drawing.height())
+                        - f64::from(body.y() + body.height())
+                        - BLOCK_VERTICAL_PADDING)
+                        .abs()
+                        < 0.01
+                );
+                let bounds = widgets.drawing.compute_bounds(&view.drawing).unwrap();
+                assert!((f64::from(bounds.x()) - block.x).abs() < 0.01);
+                assert!((f64::from(bounds.y()) - block.y).abs() < 0.01);
+            }
+        };
+        settle();
+        check_alignment();
+
+        for scroll in [12_000.5, 6_000.0, 16_000.25, 0.0] {
+            view.scrolled.vadjustment().set_value(scroll);
+            settle();
+            check_alignment();
+            misc.pages.set_visible_child_name("startup-vectors");
+            settle();
+            view.show(&instructions, "0x106", TargetArchitecture::X86_64, 64);
+            misc.pages.set_visible_child_name("cfg");
+            settle();
+            check_alignment();
+        }
+
+        window.close();
     }
 
     #[test]

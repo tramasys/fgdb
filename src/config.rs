@@ -156,7 +156,7 @@ impl DebugSession {
             Self::Launch { executable, .. } => executable.to_string_lossy().into_owned(),
             Self::Attach { pid, executable } => executable.as_ref().map_or_else(
                 || format!("PID {pid}"),
-                |path| format!("{} · PID {pid}", path.to_string_lossy()),
+                |path| format!("{}  PID {pid}", path.to_string_lossy()),
             ),
             Self::Remote {
                 endpoint,
@@ -164,13 +164,13 @@ impl DebugSession {
                 ..
             } => executable.as_ref().map_or_else(
                 || endpoint.clone(),
-                |path| format!("{} · {endpoint}", path.to_string_lossy()),
+                |path| format!("{}  {endpoint}", path.to_string_lossy()),
             ),
             Self::CoreDump {
                 executable,
                 core_dump,
             } => format!(
-                "{} · {}",
+                "{}  {}",
                 executable.to_string_lossy(),
                 core_dump.to_string_lossy()
             ),

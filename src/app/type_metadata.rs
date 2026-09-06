@@ -8,6 +8,7 @@ const MAX_METADATA_BYTES: usize = 256 * 1024;
 pub(super) fn request_value_type_metadata(ui: Weak<Ui>, client: Rc<MiClient>, variable: Variable) {
     let Some(request) = ui
         .upgrade()
+        .filter(|ui| ui.variable_action_is_current(&variable))
         .and_then(|ui| ui.begin_variable_editor_request())
     else {
         return;
@@ -72,6 +73,10 @@ pub(super) fn assign_float_bytes(
     raw_bytes: Vec<u8>,
 ) {
     let Some(generation) = ui.upgrade().and_then(|current_ui| {
+        if !current_ui.variable_action_is_current(&variable) {
+            return None;
+        }
+
         let generation = current_ui.model.current_stop_refresh_generation();
 
         current_ui

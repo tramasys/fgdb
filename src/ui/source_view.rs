@@ -56,10 +56,13 @@ pub(super) fn build_signal_grid(
 pub(super) fn empty_label(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.add_css_class("muted");
-    label.set_halign(gtk::Align::Start);
+    label.set_halign(gtk::Align::Fill);
+    label.set_xalign(0.0);
     label.set_wrap(true);
     label.set_margin_start(4);
+    label.set_margin_end(4);
     label.set_margin_top(3);
+    label.set_margin_bottom(3);
 
     label
 }
@@ -679,7 +682,7 @@ pub(super) fn build_breakpoint_gutter(
     );
 
     renderer.set_tooltip_text(Some(
-        "Left-click to add or delete a breakpoint · Right-click for line actions",
+        "Left-click to add or delete a breakpoint  Right-click for line actions",
     ));
 
     renderer

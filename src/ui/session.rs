@@ -168,17 +168,14 @@ impl Ui {
 
         editor.add_css_class("session-editor");
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        root.set_margin_top(10);
-        root.set_margin_bottom(10);
-        root.set_margin_start(10);
-        root.set_margin_end(10);
+        components::inset(&root, components::DIALOG_INSET);
         let current_session = self.model.current_session();
 
         let status_text = current_session.as_ref().map_or_else(
             || String::from("No debug session is configured"),
             |session| {
                 format!(
-                    "Current {} session · {}",
+                    "Current {} session  {}",
                     session.kind_label(),
                     session.title()
                 )
@@ -561,7 +558,7 @@ fn page_action(label: &str) -> gtk::Button {
 }
 
 fn append_page_actions(page: &gtk::Box, primary: &gtk::Button, editor: &gtk::Window) {
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let actions = components::control_row();
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
     let editor = editor.clone();

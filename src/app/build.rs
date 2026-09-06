@@ -684,7 +684,9 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
 
         let generation = current_ui.model.current_stop_refresh_generation();
 
-        if !current_ui.model.can_edit_variable(generation) {
+        if !current_ui.model.can_edit_variable(generation)
+            || !current_ui.variable_action_is_current(&variable)
+        {
             return;
         }
 

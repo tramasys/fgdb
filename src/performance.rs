@@ -75,7 +75,7 @@ impl PerformanceNotice {
 
     pub(crate) fn message(&self) -> String {
         format!(
-            "Performance budget: {} was {} — {}",
+            "Performance budget: {} was {} - {}",
             self.operation,
             self.outcome.label(),
             self.detail
@@ -333,7 +333,7 @@ mod tests {
 
         assert_eq!(
             notice.message(),
-            "Performance budget: threads was partial — showing 256 of 1024 entries"
+            "Performance budget: threads was partial - showing 256 of 1024 entries"
         );
     }
 

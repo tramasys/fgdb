@@ -6,7 +6,7 @@ const SCHEDULER_LOCKING_MODES: [&str; 4] = ["Off", "On", "Step", "Replay"];
 const THREAD_BACKTRACE_PAGE_SIZE: usize = 16;
 
 pub(super) fn build_thread_controls() -> ThreadControls {
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    let root = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
     root.add_css_class("thread-workspace");
     root.set_vexpand(true);
     let summary = gtk::Label::new(Some("Threads appear when the target is paused"));
@@ -15,14 +15,12 @@ pub(super) fn build_thread_controls() -> ThreadControls {
     summary.set_xalign(0.0);
     root.append(&summary);
 
-    let search = gtk::SearchEntry::builder()
-        .placeholder_text("Filter ID, name, state, core, or frame")
-        .build();
+    let search = components::delayed_search_entry("Filter ID, name, state, core, or frame");
 
     search.add_css_class("thread-search");
     search.set_hexpand(true);
     root.append(&search);
-    let filters = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let filters = components::control_row();
     let state_filter = gtk::DropDown::from_strings(&THREAD_STATE_FILTERS);
     state_filter.add_css_class("thread-dropdown");
     state_filter.set_hexpand(true);
@@ -39,7 +37,7 @@ pub(super) fn build_thread_controls() -> ThreadControls {
     policy_title.add_css_class("section-title");
     policy_title.set_halign(gtk::Align::Start);
     advanced.append(&policy_title);
-    let policy = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let policy = components::control_row();
     let scheduler_locking = gtk::DropDown::from_strings(&SCHEDULER_LOCKING_MODES);
     scheduler_locking.add_css_class("thread-dropdown");
     scheduler_locking.set_hexpand(true);
@@ -74,6 +72,7 @@ pub(super) fn build_thread_controls() -> ThreadControls {
         .build();
 
     let run_only = gtk::Button::with_label("Run only");
+    run_only.add_css_class("primary-control");
 
     run_only.set_tooltip_text(Some(
         "Resume only the selected thread and enable scheduler locking when needed",
@@ -82,6 +81,7 @@ pub(super) fn build_thread_controls() -> ThreadControls {
     let freeze = gtk::Button::with_label("Freeze");
     freeze.set_tooltip_text(Some("Stop the selected running thread in non-stop mode"));
     let thaw = gtk::Button::with_label("Thaw");
+    thaw.add_css_class("primary-control");
     thaw.set_tooltip_text(Some("Resume the selected stopped thread in non-stop mode"));
     let backtraces = gtk::Button::with_label("All backtraces");
     backtraces.set_tooltip_text(Some("Collect bounded backtraces for every stopped thread"));
@@ -107,7 +107,7 @@ pub(super) fn build_thread_controls() -> ThreadControls {
     compare_right.add_css_class("thread-dropdown");
     compare_left.set_hexpand(true);
     compare_right.set_hexpand(true);
-    let compare_selectors = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let compare_selectors = components::control_row();
     compare_selectors.append(&compare_left);
     compare_selectors.append(&compare_right);
     advanced.append(&compare_selectors);

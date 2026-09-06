@@ -1326,10 +1326,11 @@ impl Ui {
             !started || matches!(session.as_ref(), Some(DebugSession::CoreDump { .. }));
 
         let breakpoints = self.breakpoints.borrow();
-        let can_edit_stop_points = ready && !running && !pending && !stale;
+        let can_edit_stop_points = stop_point_actions_available(&self.model);
 
         let state = ControlState {
             busy,
+            stop_point_busy: ready && (busy || stale),
             run: ready
                 && !running
                 && !execution_blocked
@@ -1351,9 +1352,9 @@ impl Ui {
                 .fold(0_u64, |mask, (index, (button, _))| {
                     mask | (u64::from(button.is_visible()) << index.min(63))
                 }),
-            edit_local: can_inspect
-                && variable_at(&self.locals_selection, self.locals_selection.selected())
-                    .is_some_and(|variable| variable.is_available()),
+            edit_local: variable_at(&self.locals_selection, self.locals_selection.selected())
+                .is_some_and(|variable| variable.is_available()),
+            inspect_locals: self.locals_inspection_available(),
             manage_watches: can_manage_watches,
             add_watch: can_manage_watches
                 && self.expression_watches.borrow().len() < MAX_EXPRESSION_WATCHES
@@ -1462,7 +1463,15 @@ impl Ui {
                 .is_pending(),
         );
 
-        set_execution_sensitive(&self.locals_edit_button, state.edit_local, state.busy);
+        // The snapshot's content determines appearance. Input and action guards
+        // own the execution lock without restyling the table and its headers.
+        self.locals_edit_button.set_sensitive(state.edit_local);
+        self.locals_view
+            .update_state(&[gtk::accessible::State::Disabled(!state.inspect_locals)]);
+        self.locals_edit_button
+            .update_state(&[gtk::accessible::State::Disabled(
+                !state.inspect_locals || !state.edit_local,
+            )]);
 
         set_execution_sensitive(
             &self.expression_watch_entry,
@@ -1483,8 +1492,14 @@ impl Ui {
         );
 
         set_execution_sensitive(&self.memory_add_button, state.add_memory, state.busy);
-        set_execution_sensitive(&self.watchpoint_add_button, state.inspect, state.busy);
-        set_execution_sensitive(&self.watchpoint_mask, state.inspect, state.busy);
+        let add_watchpoint = state.inspect && state.edit_stop_points;
+        set_transient_execution_sensitive(
+            &self.watchpoint_add_button,
+            add_watchpoint,
+            state.stop_point_busy,
+        );
+        self.watchpoint_add_button
+            .update_state(&[gtk::accessible::State::Disabled(!add_watchpoint)]);
 
         // Keep the top-level session affordance visually stable during a
         // short execution transition. Its mutating actions remain genuinely
@@ -1520,26 +1535,24 @@ impl Ui {
         }
 
         for (button, _) in &self.event_catchpoint_buttons {
-            set_execution_sensitive(button, state.edit_stop_points, state.busy);
+            set_transient_execution_sensitive(
+                button,
+                state.edit_stop_points,
+                state.stop_point_busy,
+            );
+            button.update_state(&[gtk::accessible::State::Disabled(!state.edit_stop_points)]);
         }
 
-        set_execution_sensitive(
-            &self.filtered_catchpoint.kind,
-            state.edit_stop_points,
-            state.busy,
-        );
-
-        set_execution_sensitive(
-            &self.filtered_catchpoint.filter,
-            state.edit_stop_points,
-            state.busy,
-        );
-
-        set_execution_sensitive(
+        // These fields only edit drafts. Keep their focus and dropdown popups
+        // intact during execution, and guard submission in the action handlers.
+        set_transient_execution_sensitive(
             &self.filtered_catchpoint.add,
             state.edit_stop_points,
-            state.busy,
+            state.stop_point_busy,
         );
+        self.filtered_catchpoint
+            .add
+            .update_state(&[gtk::accessible::State::Disabled(!state.edit_stop_points)]);
 
         set_execution_sensitive(&self.signal_entry, state.edit_stop_points, state.busy);
         set_transient_execution_sensitive(&self.signal_add_button, state.add_signal, state.busy);

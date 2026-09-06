@@ -382,13 +382,10 @@ impl Ui {
             .build();
 
         let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
-        content.set_margin_top(10);
-        content.set_margin_bottom(10);
-        content.set_margin_start(10);
-        content.set_margin_end(10);
+        components::inset(&content, components::DIALOG_INSET);
 
         let detail = gtk::Label::new(Some(&format!(
-            "{} · lines 1 to {}",
+            "{}  lines 1 to {}",
             document.path.display(),
             document.buffer.line_count()
         )));
@@ -652,10 +649,7 @@ impl Ui {
 
         window.add_css_class("source-palette");
         let root = gtk::Box::new(gtk::Orientation::Vertical, 7);
-        root.set_margin_top(9);
-        root.set_margin_bottom(9);
-        root.set_margin_start(9);
-        root.set_margin_end(9);
+        components::inset(&root, components::DIALOG_INSET);
         let heading = gtk::Label::new(Some(title));
         heading.add_css_class("title-2");
         heading.set_halign(gtk::Align::Start);

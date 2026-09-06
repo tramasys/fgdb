@@ -97,7 +97,7 @@ pub(super) fn populate_constraints(snapshot: &mut KernelSnapshot, root: &Path) {
         snapshot.constraints.push(fact(
             "Cgroup memory headroom",
             format!(
-                "{} remaining · {used:.1}% used",
+                "{} remaining  {used:.1}% used",
                 format_bytes(limit.saturating_sub(current))
             ),
         ));
@@ -171,7 +171,7 @@ pub(super) fn populate_constraints(snapshot: &mut KernelSnapshot, root: &Path) {
         snapshot.constraints.push(fact(
             "Cgroup fault / reclaim counters",
             format!(
-                "faults {} · major {} · refaults {} · scanned {} · reclaimed {}",
+                "faults {}  major {}  refaults {}  scanned {}  reclaimed {}",
                 snapshot.metrics.cgroup_pgfault,
                 snapshot.metrics.cgroup_pgmajfault,
                 snapshot.metrics.cgroup_workingset_refault,
@@ -325,7 +325,7 @@ fn read_file_descriptors(
             let socket = socket_inode(&target).and_then(|inode| sockets.get(inode));
 
             let details = match (socket, info.details.is_empty()) {
-                (Some(socket), false) => format!("{socket} · {}", info.details),
+                (Some(socket), false) => format!("{socket}  {}", info.details),
                 (Some(socket), true) => socket.clone(),
                 (None, _) => info.details,
             };
@@ -386,7 +386,7 @@ fn parse_descriptor_info(fdinfo: &str) -> DescriptorInfo {
                 | "cq_entries"
         ) {
             if !info.details.is_empty() {
-                info.details.push_str(" · ");
+                info.details.push_str("  ");
             }
 
             push_compact_whitespace(&mut info.details, trimmed);
@@ -394,7 +394,7 @@ fn parse_descriptor_info(fdinfo: &str) -> DescriptorInfo {
         }
 
         if detail_count >= 10 {
-            info.details.push_str(" · …");
+            info.details.push_str("  …");
             break;
         }
     }
@@ -500,7 +500,7 @@ fn read_socket_endpoints(
 
             endpoints.insert(
                 inode.to_owned(),
-                format!("{protocol} {local} → {remote} · {state}"),
+                format!("{protocol} {local} → {remote}  {state}"),
             );
         }
     }
@@ -533,7 +533,7 @@ fn read_socket_endpoints(
 
             endpoints.insert(
                 inode.to_owned(),
-                format!("UNIX {path} · state {state} · type {socket_type}"),
+                format!("UNIX {path}  state {state}  type {socket_type}"),
             );
         }
     }
@@ -543,7 +543,7 @@ fn read_socket_endpoints(
 
 fn descriptor_flags(flags: Option<u64>) -> String {
     let Some(flags) = flags else {
-        return String::from("—");
+        return String::from("-");
     };
 
     let mut names = Vec::new();
@@ -575,7 +575,7 @@ fn descriptor_flags(flags: Option<u64>) -> String {
     if names.is_empty() {
         format!("0{flags:o}")
     } else {
-        format!("0{flags:o} · {}", names.join(" "))
+        format!("0{flags:o}  {}", names.join(" "))
     }
 }
 
@@ -650,7 +650,7 @@ fn fixed_column(line: &str, start: usize, end: usize) -> &str {
 
 fn push_compact_whitespace(output: &mut String, value: &str) {
     for word in value.split_whitespace() {
-        if !output.is_empty() && !output.ends_with(" · ") {
+        if !output.is_empty() && !output.ends_with("  ") {
             output.push(' ');
         }
 
@@ -664,7 +664,7 @@ fn compact_lines(value: &str) -> String {
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
-        .join(" · ")
+        .join("  ")
 }
 
 fn compact_psi(value: &str) -> String {
@@ -682,7 +682,7 @@ fn compact_psi(value: &str) -> String {
             Some(format!("{scope} {selected}"))
         })
         .collect::<Vec<_>>()
-        .join(" · ")
+        .join("  ")
 }
 
 fn parse_flat_counters(input: &str) -> HashMap<String, u64> {
@@ -742,11 +742,11 @@ mod tests {
 
         assert_eq!(
             descriptor_flags(Some(0o2004002)),
-            "02004002 · NONBLOCK CLOEXEC"
+            "02004002  NONBLOCK CLOEXEC"
         );
 
         assert_eq!(descriptor_flags(Some(0)), "00");
-        assert_eq!(descriptor_flags(None), "—");
+        assert_eq!(descriptor_flags(None), "-");
 
         let info = parse_descriptor_info(
             "pos:\t17\nflags:\t02004002\nmnt_id:\t  12   34\nino:\t99\nignored:\tlarge\n",
@@ -754,14 +754,14 @@ mod tests {
 
         assert_eq!(info.position, Some(17));
         assert_eq!(info.flags, Some(0o2004002));
-        assert_eq!(info.details, "mnt_id: 12 34 · ino: 99");
+        assert_eq!(info.details, "mnt_id: 12 34  ino: 99");
     }
 
     #[test]
     fn compacts_pressure_without_losing_scope() {
         assert_eq!(
             compact_psi("some avg10=0.10 avg60=0.20 total=4\nfull avg10=0.00 total=0\n"),
-            "some avg10=0.10 total=4 · full avg10=0.00 total=0"
+            "some avg10=0.10 total=4  full avg10=0.00 total=0"
         );
 
         assert_eq!(

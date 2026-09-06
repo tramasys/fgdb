@@ -490,7 +490,7 @@ pub(super) fn populate_threads_and_signals(
             wait_channel,
             syscall,
             switches: format!(
-                "{} voluntary · {} involuntary",
+                "{} voluntary  {} involuntary",
                 status.voluntary_switches, status.involuntary_switches
             ),
             runtime_ns: schedstat.map(|value| value.0),
@@ -875,7 +875,7 @@ fn decode_syscall(value: &str, architecture: TargetArchitecture) -> String {
     if arguments.is_empty() {
         format!("{name} ({number})")
     } else {
-        format!("{name} ({number}) · {arguments}")
+        format!("{name} ({number})  {arguments}")
     }
 }
 
@@ -953,7 +953,7 @@ fn parse_elf_identity(bytes: &[u8]) -> Option<ElfIdentity> {
 
     Some(ElfIdentity {
         description: format!(
-            "ELF{} · {} · {} endian",
+            "ELF{}  {}  {} endian",
             word_size * 8,
             architecture.display_name(),
             if little { "little" } else { "big" },
@@ -1083,9 +1083,9 @@ fn decode_capabilities(value: &str) -> String {
         .collect::<Vec<_>>();
 
     if enabled.is_empty() {
-        format!("0x{mask:x} · none")
+        format!("0x{mask:x}  none")
     } else {
-        format!("0x{mask:x} · {}", enabled.join(" "))
+        format!("0x{mask:x}  {}", enabled.join(" "))
     }
 }
 

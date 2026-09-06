@@ -1,0 +1,441 @@
+/* The control height is 28px: 22px content, 2px vertical padding, 1px border.
+   State selectors change paint only, never padding, border width, or weight. */
+button,
+entry,
+dropdown > button {
+    min-height: 22px;
+    min-width: 0;
+    margin: 0;
+    padding: 2px 6px;
+    color: @app_fg;
+    background: @app_card;
+    background-image: none;
+    border: 1px solid @app_border;
+    font-weight: 400;
+    outline: none;
+    box-shadow: none;
+    transition: none;
+}
+
+button:hover {
+    background: @app_hover;
+    border-color: alpha(@app_accent, 0.45);
+}
+
+button:focus-visible {
+    box-shadow: inset 0 0 0 1px @app_accent;
+}
+
+button:active,
+button:checked {
+    color: @app_fg;
+    background: @app_selected;
+    border-color: alpha(@app_accent, 0.55);
+}
+
+button:checked:hover {
+    background: @app_selected_hover;
+}
+
+button:disabled {
+    color: @app_disabled;
+    background: transparent;
+    border-color: @app_border;
+}
+
+/* Execution and form submission have emphasis. Ordinary inspection actions
+   remain neutral, including Refresh, Copy, filters, and window navigation. */
+button.primary-control,
+button.suggested-action {
+    color: @app_accent_hover;
+    background: @app_selected;
+    border-color: alpha(@app_accent, 0.45);
+}
+
+button.primary-control:hover,
+button.suggested-action:hover {
+    background: @app_selected_hover;
+}
+
+button.danger-action:not(:disabled),
+button.menu-action.danger-action:not(:disabled) .menu-action-label {
+    color: @app_danger;
+}
+
+button.danger-action:hover {
+    background: alpha(@app_danger, 0.10);
+    border-color: alpha(@app_danger, 0.45);
+}
+
+button.primary-control:disabled,
+button.suggested-action:disabled {
+    color: @app_disabled;
+    background: transparent;
+    border-color: @app_border;
+}
+
+/* Toolbar controls deliberately omit an outer box to retain the dense chrome. */
+flowbox.ui-action-flow > flowboxchild {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+}
+
+button.debug-control,
+button.toolbar-action,
+button.toolbar-toggle {
+    min-height: 24px;
+    padding: 2px 8px;
+    border: 0;
+}
+
+button.toolbar-action,
+button.toolbar-toggle {
+    background: transparent;
+}
+
+button.toolbar-action:hover,
+button.toolbar-toggle:hover {
+    background: @app_hover;
+}
+
+button.toolbar-toggle:checked {
+    background: @app_selected;
+}
+
+button.icon-action,
+button.source-tab-close,
+button.memory-watch-tab-close,
+button.kernel-tab-nav-button {
+    min-width: 22px;
+    min-height: 22px;
+    margin: 0;
+    padding: 2px;
+    color: @app_muted;
+    background: transparent;
+    border: 1px solid transparent;
+    -gtk-icon-size: 12px;
+}
+
+button.icon-action:hover,
+button.source-tab-close:hover,
+button.memory-watch-tab-close:hover,
+button.kernel-tab-nav-button:hover {
+    color: @app_fg;
+    background: @app_hover;
+}
+
+button.icon-action:disabled,
+button.kernel-tab-nav-button:disabled {
+    color: @app_disabled;
+    background: transparent;
+}
+
+entry {
+    background: @app_bg;
+    caret-color: @app_fg;
+}
+
+entry:focus-within,
+spinbutton:focus-within,
+dropdown > button:focus-visible {
+    border-color: @app_accent;
+}
+
+entry.input-error,
+entry.input-error:focus-within {
+    border-color: @app_danger;
+}
+
+entry > text > placeholder {
+    color: @app_placeholder;
+}
+
+entry image.left,
+entry > image:first-child {
+    margin-right: 6px;
+    -gtk-icon-size: 12px;
+}
+
+entry image.right {
+    margin-left: 6px;
+    -gtk-icon-size: 12px;
+}
+
+entry:disabled,
+dropdown:disabled > button {
+    color: @app_disabled;
+}
+
+dropdown {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+}
+
+dropdown > button {
+    background: @app_bg;
+}
+
+dropdown > button > box {
+    border-spacing: 6px;
+}
+
+dropdown > button arrow {
+    min-width: 12px;
+    min-height: 12px;
+    margin: 0;
+    padding: 0;
+    color: @app_muted;
+    -gtk-icon-size: 12px;
+}
+
+/* The selected cell must not repaint the platform theme's bright blue layer. */
+dropdown > button cellview,
+dropdown > button > box > stack,
+dropdown > button > box > stack > * {
+    color: inherit;
+    background: transparent;
+    background-image: none;
+}
+
+dropdown popover > contents,
+dropdown popover listview {
+    color: @app_fg;
+    background: @app_surface;
+    background-image: none;
+}
+
+dropdown popover > contents {
+    padding: 2px;
+    border: 1px solid @app_border;
+    box-shadow: none;
+}
+
+dropdown popover listview > row {
+    min-height: 22px;
+    padding: 2px 6px;
+    color: @app_fg;
+    background: transparent;
+}
+
+dropdown popover listview > row box {
+    border-spacing: 6px;
+}
+
+dropdown popover listview > row:hover {
+    background: @app_hover;
+}
+
+dropdown popover listview > row:selected {
+    color: @app_fg;
+    background: @app_selected;
+}
+
+dropdown popover listview > row:selected:hover {
+    background: @app_selected_hover;
+}
+
+spinbutton {
+    min-height: 26px;
+    padding: 0;
+    color: @app_fg;
+    background: @app_bg;
+    border: 1px solid @app_border;
+}
+
+spinbutton > text {
+    min-height: 22px;
+    padding: 2px 6px;
+}
+
+spinbutton > button {
+    min-width: 22px;
+    min-height: 22px;
+    padding: 2px;
+    border: 0;
+    background: transparent;
+}
+
+spinbutton > button:hover {
+    background: @app_hover;
+}
+
+checkbutton {
+    min-height: 24px;
+    margin: 0;
+    padding: 0;
+    color: @app_fg;
+    background: transparent;
+    border: 0;
+}
+
+checkbutton > check {
+    min-width: 14px;
+    min-height: 14px;
+    margin: 0 6px 0 0;
+    padding: 0;
+    color: @app_fg;
+    background: @app_bg;
+    border: 1px solid @app_border;
+    box-shadow: none;
+}
+
+checkbutton > check:checked {
+    background: @app_selected;
+    border-color: alpha(@app_accent, 0.55);
+}
+
+checkbutton:hover > check,
+checkbutton:focus-visible > check {
+    border-color: @app_accent;
+}
+
+checkbutton:disabled {
+    color: @app_disabled;
+}
+
+/* A common navigation treatment for both notebook tabs and stack switchers. */
+notebook > header,
+stackswitcher {
+    padding: 0;
+    background: @app_surface;
+    border: 0;
+    box-shadow: none;
+}
+
+notebook > header > tabs {
+    margin: 0;
+    padding: 2px;
+}
+
+stackswitcher {
+    padding: 2px;
+}
+
+notebook > header > tabs > tab,
+stackswitcher button {
+    min-height: 24px;
+    margin: 0;
+    padding: 2px 8px;
+    color: @app_muted;
+    background: transparent;
+    background-image: none;
+    border: 0;
+    box-shadow: none;
+    font-weight: 400;
+    transition: none;
+}
+
+notebook > header > tabs > tab > label,
+stackswitcher button > label {
+    padding: 0;
+    margin: 0;
+}
+
+notebook > header > tabs > tab:hover,
+stackswitcher button:hover {
+    color: @app_fg;
+    background: @app_hover;
+}
+
+notebook > header > tabs > tab:checked,
+stackswitcher button:checked {
+    color: @app_fg;
+    background: @app_selected;
+}
+
+notebook > header > tabs > arrow {
+    min-width: 20px;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+}
+
+button.disclosure-header,
+.kernel-section-heading {
+    min-height: 24px;
+    padding: 2px 6px;
+    color: @app_muted;
+    background: @app_card;
+    border: 1px solid @app_border;
+}
+
+button.disclosure-header .section-title,
+.kernel-section-heading .section-title {
+    color: inherit;
+}
+
+button.disclosure-header:hover {
+    color: @app_fg;
+    background: @app_hover;
+}
+
+button.disclosure-header.disclosure-expanded,
+.kernel-section-heading.kernel-section-expanded {
+    color: @app_accent_hover;
+    background: @app_hover;
+}
+
+/* Menus share row geometry and alignment, regardless of their entry point. */
+popover > contents {
+    padding: 3px;
+    color: @app_fg;
+    background: @app_surface;
+    border: 1px solid @app_border;
+    border-radius: 4px;
+}
+
+button.menu-action {
+    min-height: 22px;
+    min-width: 0;
+    margin: 0;
+    padding: 2px 8px;
+    color: @app_fg;
+    background: transparent;
+    border: 0;
+    border-radius: 2px;
+}
+
+button.menu-action:hover,
+button.menu-action:focus-visible {
+    background: @app_hover;
+}
+
+button.menu-action:active {
+    background: @app_selected;
+}
+
+button.menu-action:disabled {
+    color: @app_disabled;
+    background: transparent;
+}
+
+.menu-action-detail {
+    color: @app_muted;
+}
+
+button.menu-action:disabled .menu-action-detail {
+    color: @app_disabled;
+}
+
+button.signal-action.signal-caught,
+button.catchpoint-action.signal-caught {
+    color: @app_success;
+    background: alpha(@app_success, 0.10);
+    border-color: alpha(@app_success, 0.42);
+}
+
+button.signal-action.signal-caught:hover,
+button.catchpoint-action.signal-caught:hover {
+    background: alpha(@app_success, 0.17);
+}
+
+/* Filter activation is selection, not a successful debugger operation. */
+button.locals-changed-filter:checked,
+button.kernel-signal-filter:checked {
+    color: @app_fg;
+    background: @app_selected;
+}

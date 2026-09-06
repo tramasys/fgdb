@@ -181,7 +181,7 @@ pub(super) fn populate_memory(
         snapshot.advanced.push(fact(
             "Huge-page coverage",
             format!(
-                "{} backed · {thp_eligible} THP-eligible VMAs",
+                "{} backed  {thp_eligible} THP-eligible VMAs",
                 format_bytes(accounting.huge_bytes())
             ),
         ));
@@ -377,10 +377,10 @@ fn summarize_paths(paths: &BTreeSet<&str>) -> String {
         .take(SHOWN_PATHS)
         .copied()
         .collect::<Vec<_>>()
-        .join(" · ");
+        .join("  ");
 
     if paths.len() > SHOWN_PATHS {
-        summary.push_str(&format!(" · +{} more", paths.len() - SHOWN_PATHS));
+        summary.push_str(&format!("  +{} more", paths.len() - SHOWN_PATHS));
     }
 
     summary
@@ -438,7 +438,7 @@ pub(super) fn populate_numa(snapshot: &mut KernelSnapshot, root: &Path, work: &W
         }
 
         if !details.is_empty() {
-            mapping.numa_nodes.push_str(&format!(" · {details}"));
+            mapping.numa_nodes.push_str(&format!("  {details}"));
         }
     }
 
@@ -456,7 +456,7 @@ pub(super) fn populate_numa(snapshot: &mut KernelSnapshot, root: &Path, work: &W
                 .into_iter()
                 .map(|(node, pages)| format!("N{node} {pages} pages"))
                 .collect::<Vec<_>>()
-                .join(" · "),
+                .join("  "),
         ));
     }
 }
@@ -541,7 +541,7 @@ pub(super) fn populate_page_samples(
             String::from("Up to four evenly spaced probes per resident VMA")
         } else {
             format!(
-                "Up to four probes per resident VMA · {skipped_by_budget} VMAs skipped by the {MAX_SAMPLED_MAPPINGS}-mapping / 150 ms responsiveness budget"
+                "Up to four probes per resident VMA  {skipped_by_budget} VMAs skipped by the {MAX_SAMPLED_MAPPINGS}-mapping / 150 ms responsiveness budget"
             )
         },
     ));
@@ -626,7 +626,7 @@ fn sample_mapping(
             fields.push(String::from("soft-dirty"));
         }
 
-        return Some(fields.join(" · "));
+        return Some(fields.join("  "));
     }
 
     Some(String::from("sampled pages not resident"))

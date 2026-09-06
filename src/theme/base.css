@@ -1,0 +1,57 @@
+/* Palette-derived roles. Blue is navigation or selection, green is enabled or
+   successful, amber is changed or caution, and red is an error or destructive
+   action. Debugger data keeps its existing memory and syntax color meanings. */
+@define-color app_placeholder alpha(@app_muted, 0.80);
+@define-color app_disabled alpha(@app_muted, 0.60);
+@define-color app_hover alpha(@app_accent, 0.10);
+@define-color app_selected alpha(@app_accent, 0.16);
+@define-color app_selected_hover alpha(@app_accent, 0.23);
+@define-color app_row_alt alpha(@app_fg, 0.035);
+@define-color app_card alpha(@app_fg, 0.025);
+
+* {
+    font-family: monospace;
+    border-radius: 0;
+    box-shadow: none;
+    outline-width: 0;
+    text-shadow: none;
+}
+
+window,
+popover {
+    color: @app_fg;
+    font-size: 12px;
+}
+
+window.fgdb-window,
+window.fgdb-window:backdrop,
+window.fgdb-window.csd,
+window.fgdb-window.csd:backdrop,
+window.fgdb-window.solid-csd,
+window.fgdb-window.solid-csd:backdrop,
+.debugger-root {
+    background: @app_bg;
+    border: 0;
+    box-shadow: none;
+}
+
+/* Text selection is intentionally distinct from the blue current-item state.
+   The foreground remains readable even inside semantic, colored values. */
+selection,
+label selection,
+entry selection,
+textview text selection {
+    color: @app_fg;
+    background: alpha(@app_fg, 0.22);
+}
+
+tooltip,
+tooltip > box {
+    color: @app_fg;
+    background: @app_surface;
+}
+
+tooltip {
+    padding: 6px 8px;
+    border: 1px solid @app_border;
+}

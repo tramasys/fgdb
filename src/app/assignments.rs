@@ -8,6 +8,10 @@ pub(super) fn assign_string(
     kind: crate::ui::StringAssignmentKind,
 ) {
     let Some(generation) = ui.upgrade().and_then(|current_ui| {
+        if !current_ui.variable_action_is_current(&variable) {
+            return None;
+        }
+
         let generation = current_ui.model.current_stop_refresh_generation();
 
         current_ui

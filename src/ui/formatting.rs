@@ -313,7 +313,7 @@ pub(super) fn format_vector_register_value(register: &str, value: &str) -> Optio
     let mut formatted = String::with_capacity(lanes.iter().map(String::len).sum::<usize>() + 8);
     for (index, lane) in lanes.iter().enumerate() {
         if index != 0 {
-            formatted.push_str("  ·  ");
+            formatted.push_str("  ");
         }
 
         let _ = write!(formatted, "q{index}={lane}");
@@ -715,7 +715,7 @@ pub(super) fn stack_references(entry: &StackEntry) -> String {
         references.push(format!("retaddr[{frame}]"));
     }
 
-    references.join(" · ")
+    references.join("  ")
 }
 
 pub(super) fn stack_word_role(entry: &StackEntry) -> String {
@@ -738,7 +738,7 @@ pub(super) fn stack_word_role(entry: &StackEntry) -> String {
         roles.push(format!("return address for frame #{frame}"));
     }
 
-    roles.join("  ·  ")
+    roles.join("  ")
 }
 
 pub(super) const fn memory_kind_label(kind: MemoryKind) -> &'static str {
@@ -762,7 +762,7 @@ pub(super) fn stack_tooltip(entry: &StackEntry) -> String {
         .unwrap_or(16)
         .clamp(8, 16);
     format!(
-        "0x{:0width$x}  +0x{:04x} / +{:03}\n{}\nanchors: {} · references: {}\n{}",
+        "0x{:0width$x}  +0x{:04x} / +{:03}\n{}\nanchors: {}  references: {}\n{}",
         entry.address,
         entry.offset,
         entry.index,
@@ -1536,9 +1536,9 @@ pub(super) fn instruction_flow_description(
         let decision =
             conditional_branch_taken(instruction, registers, architecture).map(|taken| {
                 if taken {
-                    "BRANCH · TAKEN"
+                    "BRANCH  TAKEN"
                 } else {
-                    "BRANCH · NOT TAKEN"
+                    "BRANCH  NOT TAKEN"
                 }
             });
         (decision.unwrap_or("BRANCH"), operands)

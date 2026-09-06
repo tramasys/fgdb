@@ -955,9 +955,7 @@ fn build_tls() -> (
     make_responsive_label(&symbol_count, pango::EllipsizeMode::Middle);
     enable_stable_text_selection(&symbol_count);
 
-    let search = gtk::SearchEntry::builder()
-        .placeholder_text("Filter TLS symbol, module, or path")
-        .build();
+    let search = components::delayed_search_entry("Filter TLS symbol, module, or path");
 
     search.add_css_class("kernel-table-search");
     search.set_max_width_chars(34);
@@ -1091,12 +1089,8 @@ fn build_changes() -> (
     controls.add_css_class("kernel-change-controls");
     let title = section_title("MAPPING DELTAS");
     title.set_valign(gtk::Align::Center);
-    title.set_ellipsize(pango::EllipsizeMode::End);
-    title.set_tooltip_text(Some("MAPPING DELTAS"));
 
-    let search = gtk::SearchEntry::builder()
-        .placeholder_text("Filter mapping changes")
-        .build();
+    let search = components::delayed_search_entry("Filter mapping changes");
 
     search.add_css_class("kernel-table-search");
     search.add_css_class("kernel-change-search");
@@ -1168,7 +1162,9 @@ fn build_changes() -> (
     empty.set_valign(gtk::Align::Center);
     empty.set_justify(gtk::Justification::Center);
     empty.set_margin_start(0);
+    empty.set_margin_end(0);
     empty.set_margin_top(26);
+    empty.set_margin_bottom(0);
 
     let table_scroll = gtk::ScrolledWindow::builder()
         .child(&view)
@@ -1232,7 +1228,7 @@ fn build_threads() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
 
     for (title, width, expand, column) in [
         ("TID", 80, false, ThreadColumn::Tid),
-        ("NAME", 130, false, ThreadColumn::Name),
+        ("NAME", 220, false, ThreadColumn::Name),
         ("STATE", 150, false, ThreadColumn::State),
         ("CPU", 50, false, ThreadColumn::Cpu),
         ("CPU TIME", 110, false, ThreadColumn::Runtime),
@@ -1510,10 +1506,10 @@ fn build_memory() -> (
         let source = memory_unit_label(source, row_class, 13, 0.0);
         source.add_css_class("muted");
         unit_grid.attach(&source, 1, row, 1, 1);
-        let kib = memory_unit_label("—", row_class, 15, 1.0);
-        let mib = memory_unit_label("—", row_class, 14, 1.0);
-        let gib = memory_unit_label("—", row_class, 14, 1.0);
-        let pages = memory_unit_label("—", row_class, 19, 1.0);
+        let kib = memory_unit_label("-", row_class, 15, 1.0);
+        let mib = memory_unit_label("-", row_class, 14, 1.0);
+        let gib = memory_unit_label("-", row_class, 14, 1.0);
+        let pages = memory_unit_label("-", row_class, 19, 1.0);
         pages.set_hexpand(true);
         unit_grid.attach(&kib, 2, row, 1, 1);
         unit_grid.attach(&mib, 3, row, 1, 1);
@@ -1599,12 +1595,12 @@ fn build_memory() -> (
     mapping_header.add_css_class("kernel-memory-subtitle");
     let mapping_title = section_title("PER-MAPPING PRIVATE MEMORY");
     mapping_title.set_hexpand(true);
+    mapping_title.set_halign(gtk::Align::Fill);
     mapping_title.set_ellipsize(pango::EllipsizeMode::End);
     mapping_title.set_tooltip_text(Some("PER-MAPPING PRIVATE MEMORY"));
 
-    let mapping_search = gtk::SearchEntry::builder()
-        .placeholder_text("Filter address, permissions, or backing")
-        .build();
+    let mapping_search =
+        components::delayed_search_entry("Filter address, permissions, or backing");
 
     mapping_search.add_css_class("kernel-table-search");
     mapping_search.set_max_width_chars(34);
@@ -1708,7 +1704,7 @@ fn build_private_summary() -> (gtk::FlowBox, KernelPrivateSummaryView) {
         let title = gtk::Label::new(Some(title));
         title.add_css_class("section-title");
         title.set_halign(gtk::Align::Start);
-        let value = gtk::Label::new(Some("—"));
+        let value = gtk::Label::new(Some("-"));
         value.add_css_class("kernel-private-summary-value");
         value.set_halign(gtk::Align::Start);
         value.set_xalign(0.0);
@@ -1755,10 +1751,8 @@ fn build_mappings() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     let controls = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     controls.add_css_class("kernel-table-controls");
 
-    let search = gtk::SearchEntry::builder()
-        .placeholder_text("Filter address, path, permissions, or flags")
-        .hexpand(true)
-        .build();
+    let search = components::delayed_search_entry("Filter address, path, permissions, or flags");
+    search.set_hexpand(true);
 
     search.add_css_class("kernel-table-search");
     let count = gtk::Label::new(Some("No snapshot"));
@@ -1971,7 +1965,7 @@ fn memory_column(
         label.set_text(&text);
 
         label.set_tooltip_text(Some(&format!(
-            "{} · {} VMAs · VSS {} · RSS {} · private RSS (USS) {} · shared RSS {} · PSS {} · {}",
+            "{}  {} VMAs  VSS {}  RSS {}  private RSS (USS) {}  shared RSS {}  PSS {}  {}",
             category.category,
             category.mappings,
             crate::kernel::format_bytes(category.virtual_bytes),
@@ -2050,7 +2044,7 @@ fn private_mapping_column(
         label.set_text(&text);
 
         label.set_tooltip_text(Some(&format!(
-            "0x{:016x}-0x{:016x} · {} · device {} · inode {} · private RSS (USS) {} · clean {} · dirty {} · RSS {} · VSS {} · PSS {} · anonymous {} · referenced {} · lazy-free {} · huge/PMD {} · {}",
+            "0x{:016x}-0x{:016x}  {}  device {}  inode {}  private RSS (USS) {}  clean {}  dirty {}  RSS {}  VSS {}  PSS {}  anonymous {}  referenced {}  lazy-free {}  huge/PMD {}  {}",
             mapping.start,
             mapping.end,
             mapping.permissions,
@@ -2094,7 +2088,7 @@ fn format_memory_amount(bytes: u64, page_size: u64) -> String {
     };
 
     format!(
-        "{} · {} pages",
+        "{}  {} pages",
         crate::kernel::format_bytes(bytes),
         format_grouped_count(pages)
     )
@@ -2175,7 +2169,7 @@ fn mapping_column(
                 } else if mapping.numa_nodes.is_empty() {
                     mapping.numa_policy.clone()
                 } else {
-                    format!("{} · {}", mapping.numa_policy, mapping.numa_nodes)
+                    format!("{}  {}", mapping.numa_policy, mapping.numa_nodes)
                 }
             }
             MappingColumn::Page => mapping.page_sample.clone(),
@@ -2183,7 +2177,7 @@ fn mapping_column(
                 let mut flags = mapping.vm_flags.clone();
 
                 if mapping.thp_eligible {
-                    flags.push_str(" · THP eligible");
+                    flags.push_str("  THP eligible");
                 }
 
                 flags
@@ -2210,7 +2204,7 @@ fn mapping_column(
         label.set_text(&text);
 
         label.set_tooltip_text(Some(&format!(
-            "0x{:016x}-0x{:016x} · {} · device {} · inode {} · VSS {} · RSS {} · private RSS (USS) {} · shared RSS {} · PSS {} · anonymous {} · referenced {} · lazy-free {} · locked {} · huge/PMD {} · {}",
+            "0x{:016x}-0x{:016x}  {}  device {}  inode {}  VSS {}  RSS {}  private RSS (USS) {}  shared RSS {}  PSS {}  anonymous {}  referenced {}  lazy-free {}  locked {}  huge/PMD {}  {}",
             mapping.start,
             mapping.end,
             mapping.permissions,
@@ -2313,7 +2307,7 @@ fn mapping_change_column(
         label.set_text(&text);
 
         label.set_tooltip_text(Some(&format!(
-            "{} · 0x{:016x}-0x{:016x} · {} · device {} · inode {} · ΔVSS {} · ΔRSS {} · ΔPSS {} · ΔUSS {} · {}",
+            "{}  0x{:016x}-0x{:016x}  {}  device {}  inode {}  ΔVSS {}  ΔRSS {}  ΔPSS {}  ΔUSS {}  {}",
             change.status,
             change.start,
             change.end,
@@ -2350,7 +2344,7 @@ fn format_signed_bytes(delta: i128) -> String {
             "−{}",
             crate::kernel::format_bytes(delta.unsigned_abs().min(u128::from(u64::MAX)) as u64)
         ),
-        std::cmp::Ordering::Equal => String::from("—"),
+        std::cmp::Ordering::Equal => String::from("-"),
     }
 }
 
@@ -2387,7 +2381,7 @@ fn descriptor_column(
         );
 
         label.set_tooltip_text(Some(&format!(
-            "{} · {} · {} · {}",
+            "{}  {}  {}  {}",
             descriptor.target, descriptor.access, descriptor.flags, descriptor.details
         )));
     })
@@ -2427,6 +2421,12 @@ fn thread_column(
         let thread = object.borrow::<KernelThread>();
         reset_kernel_css(label);
 
+        if matches!(column, ThreadColumn::Name) {
+            label.set_ellipsize(pango::EllipsizeMode::None);
+            label.set_wrap(true);
+            label.set_wrap_mode(pango::WrapMode::WordChar);
+        }
+
         let text = match column {
             ThreadColumn::Tid => thread.tid.to_string(),
             ThreadColumn::Name => thread.name.clone(),
@@ -2440,13 +2440,13 @@ fn thread_column(
             ThreadColumn::Switches => thread.switches.clone(),
             ThreadColumn::Runtime => thread
                 .runtime_ns
-                .map_or_else(|| String::from("—"), crate::kernel::format_duration_ns),
+                .map_or_else(|| String::from("-"), crate::kernel::format_duration_ns),
             ThreadColumn::RunqueueWait => thread
                 .runqueue_wait_ns
-                .map_or_else(|| String::from("—"), crate::kernel::format_duration_ns),
+                .map_or_else(|| String::from("-"), crate::kernel::format_duration_ns),
             ThreadColumn::Timeslices => thread
                 .timeslices
-                .map_or_else(|| String::from("—"), |value| value.to_string()),
+                .map_or_else(|| String::from("-"), |value| value.to_string()),
         };
 
         if matches!(column, ThreadColumn::State) {
@@ -2504,7 +2504,7 @@ fn signal_column(
             SignalColumn::ProcessPending => (mark(signal.pending_process), signal.pending_process),
             SignalColumn::ThreadPending => (
                 if signal.pending_threads == 0 {
-                    String::from("—")
+                    String::from("-")
                 } else {
                     format!("{} thread(s)", signal.pending_threads)
                 },
@@ -2512,7 +2512,7 @@ fn signal_column(
             ),
             SignalColumn::Blocked => (
                 if signal.blocked_threads == 0 {
-                    String::from("—")
+                    String::from("-")
                 } else {
                     format!("{} thread(s)", signal.blocked_threads)
                 },
@@ -2632,7 +2632,7 @@ fn tls_module_column(
         label.set_text(&text);
 
         label.set_tooltip_text(Some(&format!(
-            "{} · ELF PT_TLS template vaddr 0x{:x} · {} initialized / {} total · alignment {} · {} symbol(s)\n{}",
+            "{}  ELF PT_TLS template vaddr 0x{:x}  {} initialized / {} total  alignment {}  {} symbol(s)\n{}",
             module.module,
             module.template_address,
             crate::kernel::format_bytes(module.initialized_bytes),
@@ -2671,7 +2671,7 @@ fn tls_symbol_column(
         label.set_text(&text);
 
         label.set_tooltip_text(Some(&format!(
-            "{} · template-relative offset 0x{:x} · {} · {}\n{}",
+            "{}  template-relative offset 0x{:x}  {}  {}\n{}",
             row.symbol.name,
             row.symbol.offset,
             crate::kernel::format_bytes(row.symbol.size),
@@ -2685,7 +2685,7 @@ fn mark(active: bool) -> String {
     if active {
         String::from("●")
     } else {
-        String::from("—")
+        String::from("-")
     }
 }
 
@@ -2715,7 +2715,7 @@ fn table_column(
 
         let label = gtk::Label::new(None);
         label.add_css_class("debug-table-cell");
-        label.set_halign(gtk::Align::Start);
+        label.set_halign(gtk::Align::Fill);
         label.set_ellipsize(pango::EllipsizeMode::Middle);
         enable_stable_text_selection(&label);
         item.set_child(Some(&label));
@@ -2828,7 +2828,7 @@ impl KernelView {
             let summary = if mapping_change_count == 0 {
                 String::from("No changes")
             } else {
-                format!("{mapping_change_count} changed mappings · largest first")
+                format!("{mapping_change_count} changed mappings  largest first")
             };
 
             self.mapping_change_count.set_text(&summary);
@@ -2935,16 +2935,18 @@ impl KernelView {
             std::mem::take(&mut snapshot.process_tree),
         );
 
-        self.thread_count
-            .set_text(&format!("{thread_count} kernel threads"));
+        self.thread_count.set_text(&format!(
+            "{thread_count} kernel thread{}",
+            if thread_count == 1 { "" } else { "s" }
+        ));
 
         self.signal_count.set_text(&format!(
-            "{active_signals} active states · {signal_count} signals decoded",
+            "{active_signals} active states  {signal_count} signals decoded",
         ));
 
         if let Some(accounting) = snapshot.memory_accounting.as_ref() {
             self.mapping_count.set_text(&format!(
-                "{} VMAs · VSS {} · RSS {} · USS {}",
+                "{} VMAs  VSS {}  RSS {}  USS {}",
                 mapping_count,
                 crate::kernel::format_bytes(accounting.virtual_bytes),
                 crate::kernel::format_bytes(accounting.rss),
@@ -2962,7 +2964,7 @@ impl KernelView {
             .set_text(&format!("{limit_count} resource limits"));
 
         self.process_count.set_text(&format!(
-            "{process_count} related processes · ancestors and up to 256 descendants",
+            "{process_count} related processes  ancestors and up to 256 descendants",
         ));
 
         self.threads_empty.set_visible(thread_count == 0);
@@ -3009,7 +3011,8 @@ impl KernelView {
         replace_boxed_store_if_changed(&self.tls_module_store, module_rows);
 
         self.tls_module_count.set_text(&format!(
-            "{module_count} ELF module(s) with static TLS templates",
+            "{module_count} ELF module{} with static TLS templates",
+            if module_count == 1 { "" } else { "s" }
         ));
 
         self.tls_module_count.set_tooltip_text(Some(
@@ -3044,7 +3047,7 @@ impl KernelView {
             let reported_name = thread.name.as_deref().unwrap_or("unnamed");
             let name = tls_thread_display_name(reported_name, executable_name, thread.id == "1");
 
-            format!("GDB #{} · {} · {name}", thread.id, thread.target_id)
+            format!("GDB #{}  {}  {name}", thread.id, thread.target_id)
         });
 
         if self.tls_runtime.borrow().thread == thread {
@@ -3392,7 +3395,7 @@ fn update_memory_summary(
     }
 
     view.meta.set_text(&format!(
-        "{} VMAs  ·  base page {} ({} bytes)",
+        "{} VMAs  base page {} ({} bytes)",
         format_grouped_count(mapping_count as u64),
         crate::kernel::format_bytes(accounting.page_size),
         format_grouped_count(accounting.page_size),
@@ -3420,7 +3423,7 @@ fn update_memory_summary(
     ));
 
     view.private_summary.mappings.set_text(&format!(
-        "{} mappings · {exclusive_categories} types",
+        "{} mappings  {exclusive_categories} types",
         format_grouped_count(private_mapping_count as u64),
     ));
 }
@@ -3428,7 +3431,7 @@ fn update_memory_summary(
 fn set_memory_unit_row(row: &KernelMemoryUnitRow, bytes: Option<u64>, page_size: u64) {
     let Some(bytes) = bytes else {
         for label in [&row.kib, &row.mib, &row.gib, &row.pages] {
-            label.set_text("—");
+            label.set_text("-");
             label.set_tooltip_text(None);
         }
 
@@ -3447,7 +3450,7 @@ fn set_memory_unit_row(row: &KernelMemoryUnitRow, bytes: Option<u64>, page_size:
         .set_text(&format_page_equivalents(bytes, page_size));
 
     let tooltip = format!(
-        "{} bytes · {}",
+        "{} bytes  {}",
         format_grouped_count(bytes),
         crate::kernel::format_bytes(bytes)
     );
@@ -3467,7 +3470,7 @@ fn format_scaled_binary(bytes: u64, unit: u64, decimals: usize) -> String {
 
 fn format_page_equivalents(bytes: u64, page_size: u64) -> String {
     if page_size == 0 {
-        return String::from("—");
+        return String::from("-");
     }
 
     if bytes.is_multiple_of(page_size) {
@@ -3490,7 +3493,7 @@ fn clear_memory_summary(view: &KernelMemorySummaryView) {
         &view.private_summary.dirty,
         &view.private_summary.mappings,
     ] {
-        label.set_text("—");
+        label.set_text("-");
     }
 }
 
@@ -3866,7 +3869,7 @@ mod memory_view_tests {
     fn formats_page_counts_and_safe_memory_ratios() {
         assert_eq!(
             format_memory_amount(1024 * 1024, 4096),
-            "1.00 MiB · 256 pages"
+            "1.00 MiB  256 pages"
         );
 
         assert_eq!(format_scaled_binary(3_076_096, 1024, 2), "3,004");

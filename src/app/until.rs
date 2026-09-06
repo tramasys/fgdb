@@ -1503,20 +1503,20 @@ fn progress_detail(run: &UntilRun, pending_steps: u64) -> String {
     };
 
     let mut detail = format!(
-        "{verb} · {}{unique_suffix} observed PCs",
+        "{verb}  {}{unique_suffix} observed PCs",
         run.observed_addresses.len()
     );
 
     if let Some(address) = run.current_address {
-        detail.push_str(&format!(" · PC 0x{address:x}"));
+        detail.push_str(&format!("  PC 0x{address:x}"));
     }
 
     if run.repeated_steps >= 64 && run.repeated_steps.saturating_mul(4) >= run.steps {
-        detail.push_str(" · repeating control-flow path");
+        detail.push_str("  repeating control-flow path");
     }
 
     detail.push_str(&format!(
-        " · looking for {} · Pause cancels",
+        "  looking for {}  Pause cancels",
         action_description(&run.action)
     ));
 

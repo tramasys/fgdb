@@ -198,7 +198,7 @@ mod tests {
             value_registers: Vec::new(),
             return_frame: None,
             memory_kind: MemoryKind::Stack,
-            region: Some(String::from("rw-p · [stack]")),
+            region: Some(String::from("rw-p  [stack]")),
         };
 
         let word = u64::from_le_bytes(*b"LD_LIBRA");

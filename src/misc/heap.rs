@@ -830,7 +830,7 @@ impl Inspector<'_> {
                 &format!("system {}", crate::kernel::format_bytes(arena.system_mem)),
                 if arena.main { "main" } else { "thread" },
                 &format!(
-                    "heap {}  ·  top {}  ·  next {}  ·  attached {}  ·  max system {}",
+                    "heap {}  top {}  next {}  attached {}  max system {}",
                     arena
                         .heap_base
                         .map_or_else(|| String::from("uninitialized"), format_address),
@@ -852,7 +852,7 @@ impl Inspector<'_> {
             &self.version.to_string(),
             "native",
             &format!(
-                "{}-bit pointers  ·  alignment 0x{:x}  ·  malloc_state 0x{:x} bytes",
+                "{}-bit pointers  alignment 0x{:x}  malloc_state 0x{:x} bytes",
                 self.layout.pointer_size * 8,
                 self.layout.malloc_alignment,
                 self.layout.arena_size
@@ -1124,32 +1124,32 @@ impl Inspector<'_> {
         };
 
         let mut details = format!(
-            "user {}  ·  usable 0x{:x}  ·  prev_size 0x{:x}",
+            "user {}  usable 0x{:x}  prev_size 0x{:x}",
             format_address(chunk.user),
             usable,
             chunk.previous_size
         );
 
         if !flags.is_empty() {
-            details.push_str("  ·  ");
+            details.push_str("  ");
             details.push_str(&flags.join(" | "));
         }
 
         if !tags.is_empty() {
-            details.push_str("  ·  ");
+            details.push_str("  ");
             details.push_str(&tags.join(", "));
         }
 
         if include_links && state == "Freed" {
             if let Ok(forward) = self.reader.word(chunk.user) {
-                details.push_str(&format!("  ·  fd/raw {}", format_address(forward)));
+                details.push_str(&format!("  fd/raw {}", format_address(forward)));
             }
 
             if let Ok(backward) = self
                 .reader
                 .word(chunk.user.saturating_add(self.layout.pointer_size))
             {
-                details.push_str(&format!("  ·  bk/key {}", format_address(backward)));
+                details.push_str(&format!("  bk/key {}", format_address(backward)));
             }
         }
 
@@ -1198,7 +1198,7 @@ impl Inspector<'_> {
 
                 let metric = bin.declared_count.map_or_else(
                     || format!("{} chunk{}", parsed_count, plural(parsed_count)),
-                    |declared| format!("{parsed_count} parsed  ·  {declared} declared"),
+                    |declared| format!("{parsed_count} parsed  {declared} declared"),
                 );
 
                 let details = if bin.chunks.is_empty() {
@@ -1212,7 +1212,7 @@ impl Inspector<'_> {
                         .join(" → ");
 
                     if let Some(warning) = bin.warning.as_ref() {
-                        format!("{addresses}  ·  {warning}")
+                        format!("{addresses}  {warning}")
                     } else {
                         addresses
                     }
@@ -1221,7 +1221,7 @@ impl Inspector<'_> {
                 self.push_inspectable_row(
                     name,
                     &format!("index {}", bin.index),
-                    &format!("{}  ·  {metric}", bin.expected_size),
+                    &format!("{}  {metric}", bin.expected_size),
                     if bin.warning.is_some() {
                         "warning"
                     } else if bin.chunks.is_empty() {
@@ -1772,7 +1772,7 @@ fn native_heap_summary(
             let threads = rows.iter().filter(|row| row.state == "thread").count();
 
             format!(
-                "{arenas} arena{}  ·  {threads} thread arena{}",
+                "{arenas} arena{}  {threads} thread arena{}",
                 plural(arenas),
                 plural(threads)
             )
@@ -1785,7 +1785,7 @@ fn native_heap_summary(
         NativeHeapQuery::Top | NativeHeapQuery::Chunk(_) => {
             rows.iter().find(|row| row.kind == "Chunk").map_or_else(
                 || String::from("no valid chunk"),
-                |row| format!("{}  ·  {}  ·  {}", row.location, row.metric, row.state),
+                |row| format!("{}  {}  {}", row.location, row.metric, row.state),
             )
         }
         NativeHeapQuery::Chunks | NativeHeapQuery::Parsed => {
@@ -1800,7 +1800,7 @@ fn native_heap_summary(
                 .fold(0_u64, u64::saturating_add);
 
             format!(
-                "{chunks} chunk{}  ·  {used} used  ·  {freed} free  ·  {} total",
+                "{chunks} chunk{}  {used} used  {freed} free  {} total",
                 plural(chunks),
                 crate::kernel::format_bytes(bytes)
             )
@@ -1818,7 +1818,7 @@ fn native_heap_summary(
             let warnings = rows.iter().filter(|row| row.state == "warning").count();
 
             format!(
-                "{bins} bin{}  ·  {occupied} occupied  ·  {warnings} warning{}",
+                "{bins} bin{}  {occupied} occupied  {warnings} warning{}",
                 plural(bins),
                 plural(warnings)
             )
@@ -1826,7 +1826,7 @@ fn native_heap_summary(
     };
 
     format!(
-        "glibc {version} ptmalloc  ·  {detail}  ·  {} read",
+        "glibc {version} ptmalloc  {detail}  {} read",
         crate::kernel::format_bytes(u64::try_from(bytes_read).unwrap_or(u64::MAX))
     )
 }

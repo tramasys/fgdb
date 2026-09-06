@@ -692,10 +692,7 @@ impl Ui {
 
         window.add_css_class("debug-data-window");
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        root.set_margin_top(10);
-        root.set_margin_bottom(10);
-        root.set_margin_start(10);
-        root.set_margin_end(10);
+        components::inset(&root, components::DIALOG_INSET);
         let heading = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         heading.add_css_class("debug-data-heading");
         let title = gtk::Label::new(Some("Debug data"));
@@ -749,7 +746,7 @@ impl Ui {
         append_debug_data_page(&notebook, &overview, "Overview");
         append_debug_data_page(&notebook, &modules, "Modules");
         append_debug_data_page(&notebook, &sources, "Sources");
-        append_debug_data_page(&notebook, &printers, "Pretty Printers");
+        append_debug_data_page(&notebook, &printers, "Pretty printers");
         append_debug_data_page(&notebook, &activity, "Activity");
         root.append(&notebook);
         window.set_child(Some(&root));
@@ -898,7 +895,7 @@ impl Ui {
         view.overview.append(&debug_data_fact(
             "Modules",
             &format!(
-                "{loaded} with symbols · {} missing",
+                "{loaded} with symbols  {} missing",
                 modules.saturating_sub(loaded)
             ),
         ));
@@ -1007,7 +1004,7 @@ impl Ui {
                 }));
         } else {
             view.overview
-                .append(&wrapping_value(&capabilities.features.join("  ·  ")));
+                .append(&wrapping_value(&capabilities.features.join("  ")));
         }
 
         if refreshing {
@@ -1120,7 +1117,7 @@ impl Ui {
                 if let Some(debuglink) = details.debuglink.as_deref() {
                     let value = details.debuglink_crc.map_or_else(
                         || debuglink.to_owned(),
-                        |crc| format!("{debuglink} · CRC {crc:08x}"),
+                        |crc| format!("{debuglink}  CRC {crc:08x}"),
                     );
 
                     row.append(&debug_data_fact("Debuglink", &value));
@@ -2432,9 +2429,9 @@ fn debug_data_activity_summary(activity: &[DebugDataActivity]) -> gtk::Box {
 
     let detail = match (activity.len(), issue_count) {
         (0, _) => String::from("No activity has been recorded for this session"),
-        (events, 0) => format!("{events} events · no warnings or errors"),
-        (events, 1) => format!("{events} events · 1 warning or error"),
-        (events, issues) => format!("{events} events · {issues} warnings or errors"),
+        (events, 0) => format!("{events} events  no warnings or errors"),
+        (events, 1) => format!("{events} events  1 warning or error"),
+        (events, issues) => format!("{events} events  {issues} warnings or errors"),
     };
 
     let detail = gtk::Label::new(Some(&detail));
@@ -2508,10 +2505,7 @@ fn debug_data_activity_row(event: &DebugDataActivity) -> gtk::Box {
 
 fn debug_data_page() -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    page.set_margin_top(8);
-    page.set_margin_bottom(8);
-    page.set_margin_start(8);
-    page.set_margin_end(8);
+    components::inset(&page, components::CONTENT_INSET);
 
     page
 }
@@ -2524,24 +2518,8 @@ fn debug_data_page_with_search(search: &gtk::Entry) -> gtk::Box {
 }
 
 fn debug_data_search(placeholder: &str) -> gtk::Entry {
-    let search = gtk::Entry::builder()
-        .placeholder_text(placeholder)
-        .primary_icon_name("system-search-symbolic")
-        .build();
-
+    let search = components::search_entry(placeholder);
     search.add_css_class("debug-data-search");
-
-    search.connect_changed(|search| {
-        search
-            .set_secondary_icon_name((!search.text().is_empty()).then_some("edit-clear-symbolic"));
-    });
-
-    search.connect_icon_release(|search, position| {
-        if position == gtk::EntryIconPosition::Secondary {
-            search.set_text("");
-        }
-    });
-
     search
 }
 
@@ -2562,7 +2540,7 @@ fn append_debug_data_page(notebook: &gtk::Notebook, content: &gtk::Box, title: &
     label.set_xalign(0.5);
     label.set_width_chars(1);
     label.set_max_width_chars(1);
-    label.set_ellipsize(pango::EllipsizeMode::End);
+    label.set_wrap(true);
     notebook.append_page(&page, Some(&label));
     let notebook_page = notebook.page(&page);
     notebook_page.set_tab_expand(true);
@@ -2614,7 +2592,7 @@ fn debug_data_fact(name: &str, value: &str) -> gtk::Box {
 
 fn selectable_value(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
-    label.set_halign(gtk::Align::Start);
+    label.set_halign(gtk::Align::Fill);
     label.set_xalign(0.0);
     enable_stable_text_selection(&label);
     label.set_focusable(false);

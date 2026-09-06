@@ -595,10 +595,7 @@ fn build_variable_editor(
     editor.add_css_class("value-editor");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
     content.set_spacing(6);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
+    components::inset(&content, components::DIALOG_INSET);
     let expression = gtk::Label::new(Some(&variable.name));
     expression.add_css_class("local-name");
     expression.set_halign(gtk::Align::Start);
@@ -703,7 +700,7 @@ fn build_variable_editor(
     }
 
     if address {
-        let hint = gtk::Label::new(Some("ADDRESS · hexadecimal or a GDB address expression"));
+        let hint = gtk::Label::new(Some("ADDRESS  hexadecimal or a GDB address expression"));
         hint.add_css_class("muted");
         hint.set_halign(gtk::Align::Start);
         content.append(&hint);
@@ -719,7 +716,7 @@ fn build_variable_editor(
 
     content.append(&entry);
     content.append(&validation);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let actions = components::control_row();
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
     let apply = gtk::Button::with_label("Set value");
@@ -865,10 +862,7 @@ fn open_float_editor(
 
     editor.add_css_class("value-editor");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
+    components::inset(&content, components::DIALOG_INSET);
     let expression = gtk::Label::new(Some(&variable.name));
     expression.add_css_class("local-name");
     expression.set_halign(gtk::Align::Start);
@@ -902,7 +896,7 @@ fn open_float_editor(
     content.append(&entry);
 
     let detail = gtk::Label::new(Some(&format!(
-        "{}-bit floating point · accepts inf, -inf, and nan · raw mode preserves the exact bit pattern",
+        "{}-bit floating point  accepts inf, -inf, and nan  raw mode preserves the exact bit pattern",
         float.bits
     )));
 
@@ -915,7 +909,7 @@ fn open_float_editor(
     validation.set_halign(gtk::Align::Start);
     validation.set_visible(false);
     content.append(&validation);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let actions = components::control_row();
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
     let apply = gtk::Button::with_label("Set value");
@@ -1074,10 +1068,7 @@ fn open_enum_editor(
 
     editor.add_css_class("value-editor");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
+    components::inset(&content, components::DIALOG_INSET);
     let expression = gtk::Label::new(Some(&variable.name));
     expression.add_css_class("local-name");
     expression.set_halign(gtk::Align::Start);
@@ -1125,7 +1116,7 @@ fn open_enum_editor(
     detail.set_wrap(true);
     update_enum_detail(&detail, metadata, selected);
     content.append(&detail);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let actions = components::control_row();
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
     let apply = gtk::Button::with_label("Set value");
@@ -1198,12 +1189,12 @@ fn enum_value_matches(current: &str, variant: &str) -> bool {
 fn update_enum_detail(detail: &gtk::Label, metadata: &ValueTypeMetadata, selected: u32) {
     if let Some(variant) = metadata.enum_variants.get(selected as usize) {
         detail.set_text(&format!(
-            "Discriminant {} · {}-bit enum",
+            "Discriminant {}  {}-bit enum",
             variant.value,
             metadata.bits.unwrap_or_default()
         ));
     } else {
-        detail.set_text("Raw GDB expression · useful for values absent from the debug information");
+        detail.set_text("Raw GDB expression  useful for values absent from the debug information");
     }
 }
 
@@ -1222,10 +1213,7 @@ fn open_boolean_editor(
 
     editor.add_css_class("value-editor");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
+    components::inset(&content, components::DIALOG_INSET);
     let expression = gtk::Label::new(Some(&variable.name));
     expression.add_css_class("local-name");
     expression.set_halign(gtk::Align::Start);
@@ -1246,13 +1234,13 @@ fn open_boolean_editor(
     content.append(&row);
 
     let detail = gtk::Label::new(Some(
-        "Boolean value · fgdb sends the language-neutral value 0 or 1 to GDB",
+        "Boolean value  fgdb sends the language-neutral value 0 or 1 to GDB",
     ));
 
     detail.add_css_class("muted");
     detail.set_halign(gtk::Align::Start);
     content.append(&detail);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let actions = components::control_row();
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
     let apply = gtk::Button::with_label("Set value");
@@ -1358,10 +1346,7 @@ fn open_string_editor(
 
     editor.add_css_class("value-editor");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
+    components::inset(&content, components::DIALOG_INSET);
     let expression = gtk::Label::new(Some(&variable.name));
     expression.add_css_class("local-name");
     expression.set_halign(gtk::Align::Start);
@@ -1403,7 +1388,7 @@ fn open_string_editor(
     validation.set_halign(gtk::Align::Start);
     validation.set_visible(false);
     content.append(&validation);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let actions = components::control_row();
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
     let apply = gtk::Button::with_label("Set value");
@@ -1536,7 +1521,7 @@ fn update_string_editor(
     address_mode: bool,
 ) {
     if address_mode {
-        detail.set_text("Pointer address · hexadecimal or a GDB address expression");
+        detail.set_text("Pointer address  hexadecimal or a GDB address expression");
         let valid = !entry.text().trim().is_empty();
         validation.set_visible(false);
         apply.set_sensitive(valid);
@@ -1550,11 +1535,11 @@ fn update_string_editor(
     match (parse_string_input(&entry.text()), string.storage) {
         (Ok(bytes), StringStorage::Buffer { capacity, pointer }) if bytes.len() <= capacity => {
             detail.set_text(&format!(
-                "String contents · {} / {} bytes · terminating NUL is written automatically{}",
+                "String contents  {} / {} bytes  terminating NUL is written automatically{}",
                 bytes.len(),
                 capacity,
                 if pointer {
-                    " · growth is limited to the currently known buffer"
+                    "  growth is limited to the currently known buffer"
                 } else {
                     ""
                 }
@@ -1565,7 +1550,7 @@ fn update_string_editor(
         }
         (Ok(bytes), StringStorage::Buffer { capacity, .. }) => {
             detail.set_text(&format!(
-                "String contents · {} / {} bytes",
+                "String contents  {} / {} bytes",
                 bytes.len(),
                 capacity
             ));
@@ -1576,7 +1561,7 @@ fn update_string_editor(
         }
         (Ok(bytes), StringStorage::CppString) => {
             detail.set_text(&format!(
-                "std::string contents · {} bytes · applying calls assign() in the inferior and may allocate",
+                "std::string contents  {} bytes  applying calls assign() in the inferior and may allocate",
                 bytes.len()
             ));
 
@@ -1588,7 +1573,7 @@ fn update_string_editor(
             if bytes.len() == length && std::str::from_utf8(&bytes).is_ok() =>
         {
             detail.set_text(&format!(
-                "Rust String contents · {length} UTF-8 bytes · edited in place without changing its allocation"
+                "Rust String contents  {length} UTF-8 bytes  edited in place without changing its allocation"
             ));
 
             validation.set_visible(false);
@@ -1596,7 +1581,7 @@ fn update_string_editor(
         }
         (Ok(bytes), StringStorage::RustString { length }) => {
             detail.set_text(&format!(
-                "Rust String contents · {} / {length} bytes · in-place edits must keep the same UTF-8 byte length",
+                "Rust String contents  {} / {length} bytes  in-place edits must keep the same UTF-8 byte length",
                 bytes.len()
             ));
 
@@ -1610,14 +1595,14 @@ fn update_string_editor(
             apply.set_sensitive(false);
         }
         (Err(error), StringStorage::Buffer { capacity, .. }) => {
-            detail.set_text(&format!("String contents · up to {} bytes", capacity));
+            detail.set_text(&format!("String contents  up to {} bytes", capacity));
             validation.set_text(error);
             validation.set_visible(true);
             apply.set_sensitive(false);
         }
         (Err(error), StringStorage::CppString) => {
             detail.set_text(
-                "std::string contents · applying calls assign() in the inferior and may allocate",
+                "std::string contents  applying calls assign() in the inferior and may allocate",
             );
 
             validation.set_text(error);
@@ -1626,7 +1611,7 @@ fn update_string_editor(
         }
         (Err(error), StringStorage::RustString { length }) => {
             detail.set_text(&format!(
-                "Rust String contents · exactly {length} UTF-8 bytes"
+                "Rust String contents  exactly {length} UTF-8 bytes"
             ));
 
             validation.set_text(error);
@@ -1649,10 +1634,7 @@ fn open_unavailable_rust_string_editor(
 
     editor.add_css_class("value-editor");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
+    components::inset(&content, components::DIALOG_INSET);
     let expression = gtk::Label::new(Some(&variable.name));
     expression.add_css_class("local-name");
     expression.set_halign(gtk::Align::Start);
@@ -1700,13 +1682,10 @@ pub(super) fn open_vector_editor(
     editor.add_css_class("value-editor");
     editor.add_css_class("vector-editor");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
+    components::inset(&content, components::DIALOG_INSET);
 
     let heading = gtk::Label::new(Some(&format!(
-        "${} · {} bits · edit interpreted lanes",
+        "${}  {} bits  edit interpreted lanes",
         register.name,
         register_bytes * 8
     )));
@@ -1782,7 +1761,7 @@ pub(super) fn open_vector_editor(
     lane_validation.set_halign(gtk::Align::Start);
     lane_validation.set_visible(false);
     content.append(&lane_validation);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let actions = components::control_row();
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
     let apply = gtk::Button::with_label("Apply lanes");
@@ -1975,13 +1954,10 @@ pub(super) fn open_flag_editor(
 
     editor.add_css_class("value-editor");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
+    components::inset(&content, components::DIALOG_INSET);
 
     let heading = gtk::Label::new(Some(&format!(
-        "${} = 0x{original:016x} · toggle individual flags",
+        "${} = 0x{original:016x}  toggle individual flags",
         register.name
     )));
 
@@ -2005,7 +1981,7 @@ pub(super) fn open_flag_editor(
     }
 
     content.append(&flags);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let actions = components::control_row();
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
     let apply = gtk::Button::with_label("Apply flags");
@@ -2071,10 +2047,7 @@ pub(super) fn open_breakpoint_condition_editor(
 
     editor.add_css_class("value-editor");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
+    components::inset(&content, components::DIALOG_INSET);
 
     let breakpoint_name = breakpoint
         .function
@@ -2087,6 +2060,7 @@ pub(super) fn open_breakpoint_condition_editor(
     expression.add_css_class("local-name");
     expression.set_halign(gtk::Align::Start);
     expression.set_ellipsize(pango::EllipsizeMode::End);
+    expression.set_tooltip_text(Some(&expression.text()));
     content.append(&expression);
 
     let hint = gtk::Label::new(Some(
@@ -2102,7 +2076,7 @@ pub(super) fn open_breakpoint_condition_editor(
     entry.set_hexpand(true);
     entry.set_tooltip_text(Some("Examples: count == 4, ptr != 0, $rax == 0x10"));
     content.append(&entry);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let actions = components::control_row();
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
     let clear = gtk::Button::with_label("Clear");
@@ -2197,10 +2171,7 @@ pub(super) fn open_breakpoint_editor(
     editor.add_css_class("value-editor");
     editor.add_css_class("breakpoint-editor");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
+    components::inset(&content, components::DIALOG_INSET);
 
     let grid = gtk::Grid::builder()
         .column_spacing(10)
@@ -2326,7 +2297,7 @@ pub(super) fn open_breakpoint_editor(
     validation.set_halign(gtk::Align::Start);
     validation.set_wrap(true);
     content.append(&validation);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let actions = components::control_row();
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
 
@@ -2469,10 +2440,7 @@ pub(super) fn open_stop_point_metadata_editor(
 
     editor.add_css_class("value-editor");
     let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
-    content.set_margin_top(10);
-    content.set_margin_bottom(10);
-    content.set_margin_start(10);
-    content.set_margin_end(10);
+    components::inset(&content, components::DIALOG_INSET);
     let title = gtk::Label::new(Some("GROUPS / TAGS"));
     title.add_css_class("section-title");
     title.set_halign(gtk::Align::Start);
@@ -2500,7 +2468,7 @@ pub(super) fn open_stop_point_metadata_editor(
     tags.set_text(&metadata.tags.join(", "));
     content.append(&group);
     content.append(&tags);
-    let actions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    let actions = components::control_row();
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
     let apply = gtk::Button::with_label("Apply");
