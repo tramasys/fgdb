@@ -77,7 +77,7 @@ pub(super) fn build_locals_view(
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
     viewer_handler: &Rc<RefCell<Option<VariableViewerHandler>>>,
     viewers: &Rc<VariableViewerRegistry>,
-    target_pointer_bits: &Rc<Cell<u32>>,
+    presentation: &Rc<variable_presentation::VariablePresentation>,
     filter_controls: Option<(&gtk::Entry, &gtk::ToggleButton)>,
 ) -> (gtk::ColumnView, gio::ListStore, gtk::SingleSelection) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -152,7 +152,7 @@ pub(super) fn build_locals_view(
         360,
         true,
         LocalColumn::Value,
-        Rc::clone(target_pointer_bits),
+        Rc::clone(presentation),
         &variable_menu,
     ));
 
@@ -161,7 +161,7 @@ pub(super) fn build_locals_view(
         260,
         false,
         LocalColumn::Type,
-        Rc::clone(target_pointer_bits),
+        Rc::clone(presentation),
         &variable_menu,
     ));
 
@@ -1032,12 +1032,13 @@ fn local_text_column(
     width: i32,
     expand: bool,
     column: LocalColumn,
-    target_pointer_bits: Rc<Cell<u32>>,
+    presentation: Rc<variable_presentation::VariablePresentation>,
     variable_menu: &VariableMenuContext,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
     let active_popover_for_unbind = Rc::clone(&variable_menu.active_popover);
     let variable_menu = variable_menu.clone();
+    let presentation_for_setup = Rc::clone(&presentation);
 
     factory.connect_setup(move |_, object| {
         let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
@@ -1057,6 +1058,10 @@ fn local_text_column(
         enable_recycled_text_selection(&label);
         connect_current_variable_context_menu(&label, item, &variable_menu);
         item.set_child(Some(&label));
+
+        if matches!(column, LocalColumn::Value) {
+            presentation_for_setup.register(item);
+        }
     });
 
     factory.connect_bind(move |_, object| {
@@ -1089,8 +1094,7 @@ fn local_text_column(
                 ));
             }
             LocalColumn::Value => {
-                let display =
-                    variable_display_value(variable, value, details, target_pointer_bits.get());
+                let display = presentation.display(variable, value, details);
 
                 label.set_text(&display);
 
@@ -1141,7 +1145,24 @@ pub(super) fn variable_display_value(
     value: &str,
     details: &str,
     target_pointer_bits: u32,
+    format: crate::config::settings::IntegerDisplay,
 ) -> String {
+    if format != crate::config::settings::IntegerDisplay::Automatic
+        && details.is_empty()
+        && let Some(display) =
+            value::formatted_integer(variable, value, target_pointer_bits, format)
+    {
+        return display;
+    }
+
+    if format != crate::config::settings::IntegerDisplay::Automatic {
+        return if details.is_empty() {
+            compact_pretty_value(variable, value)
+        } else {
+            format!("{value}  {details}")
+        };
+    }
+
     let decimal = integer_decimal_value(variable, value, target_pointer_bits);
 
     match (details.is_empty(), decimal) {
@@ -1300,7 +1321,7 @@ pub(super) fn build_instruction_view() -> (
     gtk::ColumnView,
     gio::ListStore,
     gtk::SingleSelection,
-    gtk::ColumnViewColumn,
+    InstructionColumns,
 ) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
@@ -1347,30 +1368,35 @@ pub(super) fn build_instruction_view() -> (
             &selection,
             |row| Cow::Borrowed(split_instruction(&row.instruction.text).1),
         ),
-        instruction_column(
-            "BYTES",
-            130,
-            false,
-            "instruction-opcodes",
-            &selection,
-            |row| {
-                row.instruction
-                    .opcodes
-                    .as_deref()
-                    .map_or(Cow::Borrowed("unavailable"), Cow::Borrowed)
-            },
-        ),
-        instruction_column(
-            "SYMBOL",
-            140,
-            false,
-            "instruction-symbol",
-            &selection,
-            |row| Cow::Owned(instruction_symbol(&row.instruction)),
-        ),
     ] {
         view.append_column(&column);
     }
+
+    let bytes = instruction_column(
+        "BYTES",
+        130,
+        false,
+        "instruction-opcodes",
+        &selection,
+        |row| {
+            row.instruction
+                .opcodes
+                .as_deref()
+                .map_or(Cow::Borrowed("unavailable"), Cow::Borrowed)
+        },
+    );
+
+    let symbols = instruction_column(
+        "SYMBOL",
+        140,
+        false,
+        "instruction-symbol",
+        &selection,
+        |row| Cow::Owned(instruction_symbol(&row.instruction)),
+    );
+
+    view.append_column(&bytes);
+    view.append_column(&symbols);
 
     let source_column = instruction_column(
         "SOURCE",
@@ -1394,7 +1420,16 @@ pub(super) fn build_instruction_view() -> (
     );
     source_column.set_visible(false);
     view.append_column(&source_column);
-    (view, store, selection, source_column)
+    (
+        view,
+        store,
+        selection,
+        InstructionColumns {
+            bytes,
+            symbols,
+            source: source_column,
+        },
+    )
 }
 
 pub(super) fn build_register_view() -> (gtk::Box, Vec<RegisterGroupView>) {
@@ -1876,16 +1911,16 @@ pub(super) fn build_editor_panel(notebook: &gtk::Notebook) -> SourceEditorPanel 
     let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 1);
     toolbar.add_css_class("source-navigation-toolbar");
     let back = gtk::Button::with_label("‹");
-    back.set_tooltip_text(Some("Back in source navigation history\nAlt+Left"));
+    back.set_tooltip_text(Some("Back in source navigation history"));
     back.set_sensitive(false);
     let forward = gtk::Button::with_label("›");
-    forward.set_tooltip_text(Some("Forward in source navigation history\nAlt+Right"));
+    forward.set_tooltip_text(Some("Forward in source navigation history"));
     forward.set_sensitive(false);
     let quick_open = gtk::Button::with_label("Quick open");
-    quick_open.set_tooltip_text(Some("Find a loaded or project source file\nCtrl+P"));
+    quick_open.set_tooltip_text(Some("Find a loaded or project source file"));
     let open_file = gtk::Button::with_label("Open file…");
     open_file.set_tooltip_text(Some(
-        "Open one or more source files from disk in editor tabs  Ctrl+O",
+        "Open one or more source files from disk in editor tabs",
     ));
     for button in [&back, &forward, &quick_open, &open_file] {
         button.add_css_class("source-navigation-action");
@@ -1896,12 +1931,12 @@ pub(super) fn build_editor_panel(notebook: &gtk::Notebook) -> SourceEditorPanel 
     popover.set_autohide(true);
     let menu = gtk::Box::new(gtk::Orientation::Vertical, 1);
     menu.add_css_class("source-navigation-menu");
-    let find = source_navigation_menu_action("Find in file", "Ctrl+F");
-    let go_to_line = source_navigation_menu_action("Go to line", "Ctrl+G");
-    let symbols = source_navigation_menu_action("Functions and symbols", "Ctrl+Shift+O");
+    let find = source_navigation_menu_action("Find in file", "");
+    let go_to_line = source_navigation_menu_action("Go to line", "");
+    let symbols = source_navigation_menu_action("Functions and symbols", "");
     let loaded_search = source_navigation_menu_action("Search loaded source files", "");
-    let tree_search = source_navigation_menu_action("Search source tree", "Ctrl+Shift+F");
-    let reopen_closed = source_navigation_menu_action("Reopen closed tab", "Ctrl+Shift+T");
+    let tree_search = source_navigation_menu_action("Search source tree", "");
+    let reopen_closed = source_navigation_menu_action("Reopen closed tab", "");
     reopen_closed.set_sensitive(false);
     for button in [
         &find,
@@ -2478,6 +2513,7 @@ pub(super) fn build_source_buffer(
 
 pub(super) fn build_source_view(buffer: &sourceview5::Buffer) -> sourceview5::View {
     sourceview5::View::builder()
+        .css_classes(["source-preferences"])
         .buffer(buffer)
         .editable(false)
         .highlight_current_line(true)

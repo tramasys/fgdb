@@ -31,7 +31,7 @@ impl LogLevel {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) struct LogFilter(u8);
 
 impl LogFilter {

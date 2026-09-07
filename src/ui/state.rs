@@ -34,6 +34,10 @@ impl Ui {
         let remembered_disclosures = layout::remembered_disclosures();
         let target_pointer_bits = Rc::new(Cell::new(usize::BITS));
         let target_pointer_bits_known = Rc::new(Cell::new(false));
+        let variable_presentation = variable_presentation::VariablePresentation::new(
+            config.preferences.integer_display,
+            Rc::clone(&target_pointer_bits),
+        );
 
         let inspector_bindings = InspectorBindings {
             theme,
@@ -41,6 +45,7 @@ impl Ui {
             variable_viewer_handler: &variable_viewer_handler,
             variable_viewers: &variable_viewers,
             target_pointer_bits: &target_pointer_bits,
+            variable_presentation: &variable_presentation,
             kernel: KernelViewBindings {
                 refresh_handler: &kernel_refresh_handler,
                 remembered_disclosures: &remembered_disclosures,
@@ -107,6 +112,7 @@ impl Ui {
             gdb_capabilities_label: topbar.gdb_capabilities_label,
             target_label: topbar.target_label,
             terminal_toggle_button: topbar.terminal_toggle_button,
+            log_toggle_button: log_toggle,
             debug_data_button: topbar.debug_data_button,
             run_button: topbar.run_button,
             pause_button: topbar.pause_button,
@@ -282,7 +288,8 @@ impl Ui {
             source_roots: Rc::new(RefCell::new(source_base_roots.clone())),
             source_base_roots,
             configuration_report: config.configuration_report().clone(),
-            configuration_dialog: Rc::new(RefCell::new(None)),
+            settings: settings::Settings::new(config),
+            variable_presentation,
             debug_data_view: Rc::new(RefCell::new(None)),
             debug_data_state: Rc::new(RefCell::new(
                 debug_data::DebugDataState::from_launch_config(config),
@@ -810,125 +817,6 @@ impl Ui {
     pub fn connect_source_actions(self: &Rc<Self>) {
         self.connect_open_source();
         self.connect_source_navigation();
-    }
-
-    fn connect_keyboard_shortcuts(&self) {
-        let keys = gtk::EventControllerKey::new();
-        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
-        let run = self.run_button.clone();
-        let pause = self.pause_button.clone();
-        let next = self.next_button.clone();
-        let step = self.step_button.clone();
-        let next_instruction = self.next_instruction_button.clone();
-        let step_instruction = self.step_instruction_button.clone();
-        let finish = self.finish_button.clone();
-        let terminal_toggle = self.terminal_toggle_button.clone();
-        let resynchronize = self.resynchronize_button.clone();
-        let source_back = self.source_navigation.back.clone();
-        let source_forward = self.source_navigation.forward.clone();
-        let source_quick_open = self.source_navigation.quick_open.clone();
-        let source_open_file = self.source_navigation.open_file.clone();
-        let source_find = self.source_navigation.find.clone();
-        let source_go_to_line = self.source_navigation.go_to_line.clone();
-        let source_symbols = self.source_navigation.symbols.clone();
-        let source_tree_search = self.source_navigation.tree_search.clone();
-        let source_reopen_closed = self.source_navigation.reopen_closed.clone();
-        let source_find_close = self.source_navigation.find_close.clone();
-        let source_find_bar = self.source_navigation.find_bar.clone();
-        let terminal = self.terminal.clone();
-
-        keys.connect_key_pressed(move |_, key, _, state| {
-            let control = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
-            let shift = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
-            let alt = state.contains(gtk::gdk::ModifierType::ALT_MASK);
-            let blocked = state.contains(gtk::gdk::ModifierType::SUPER_MASK);
-
-            if blocked {
-                return gtk::glib::Propagation::Proceed;
-            }
-
-            let source_action = match (key, control, shift, alt) {
-                (gtk::gdk::Key::Left, false, false, true) => Some(&source_back),
-                (gtk::gdk::Key::Right, false, false, true) => Some(&source_forward),
-                (gtk::gdk::Key::p | gtk::gdk::Key::P, true, false, false) => {
-                    Some(&source_quick_open)
-                }
-                (gtk::gdk::Key::o | gtk::gdk::Key::O, true, false, false) => {
-                    Some(&source_open_file)
-                }
-                (gtk::gdk::Key::f | gtk::gdk::Key::F, true, false, false) => Some(&source_find),
-                (gtk::gdk::Key::g | gtk::gdk::Key::G, true, false, false) => {
-                    Some(&source_go_to_line)
-                }
-                (gtk::gdk::Key::o | gtk::gdk::Key::O, true, true, false) => Some(&source_symbols),
-                (gtk::gdk::Key::f | gtk::gdk::Key::F, true, true, false) => {
-                    Some(&source_tree_search)
-                }
-                (gtk::gdk::Key::t | gtk::gdk::Key::T, true, true, false) => {
-                    Some(&source_reopen_closed)
-                }
-                _ => None,
-            };
-
-            if terminal.has_focus() && source_action.is_some() {
-                return gtk::glib::Propagation::Proceed;
-            }
-
-            if let Some(button) = source_action.filter(|button| button.is_sensitive()) {
-                button.emit_clicked();
-                return gtk::glib::Propagation::Stop;
-            }
-
-            if key == gtk::gdk::Key::Escape
-                && !control
-                && !shift
-                && !alt
-                && source_find_bar.is_visible()
-                && !terminal.has_focus()
-            {
-                source_find_close.emit_clicked();
-                return gtk::glib::Propagation::Stop;
-            }
-
-            if alt {
-                return gtk::glib::Propagation::Proceed;
-            }
-
-            if key == gtk::gdk::Key::grave && control && !shift {
-                terminal_toggle.set_active(!terminal_toggle.is_active());
-                return gtk::glib::Propagation::Stop;
-            }
-
-            if matches!(key, gtk::gdk::Key::r | gtk::gdk::Key::R)
-                && control
-                && shift
-                && resynchronize.is_sensitive()
-            {
-                resynchronize.emit_clicked();
-                return gtk::glib::Propagation::Stop;
-            }
-
-            let button = match (key, control, shift) {
-                (gtk::gdk::Key::F5, false, false) => Some(&run),
-                (gtk::gdk::Key::F6, false, false) => Some(&pause),
-                (gtk::gdk::Key::F10, false, false) => Some(&next),
-                (gtk::gdk::Key::F10, true, false) => Some(&next_instruction),
-                (gtk::gdk::Key::F11, false, false) => Some(&step),
-                (gtk::gdk::Key::F11, true, false) => Some(&step_instruction),
-                (gtk::gdk::Key::F11, false, true) => Some(&finish),
-                _ => None,
-            };
-
-            let Some(button) = button.filter(|button| button.is_sensitive()) else {
-                return gtk::glib::Propagation::Proceed;
-            };
-
-            button.emit_clicked();
-
-            gtk::glib::Propagation::Stop
-        });
-
-        self.window.add_controller(keys);
     }
 
     pub(crate) fn connect_terminal_synchronization(self: &Rc<Self>) {
@@ -1751,7 +1639,11 @@ impl Ui {
     }
 
     pub(crate) fn set_disassembly_handler(&self, handler: impl Fn(DisassemblyRequest) + 'static) {
-        self.disassembly_handler.replace(Some(Rc::new(handler)));
+        let handler: DisassemblyHandler = Rc::new(handler);
+        self.disassembly_handler.replace(Some(Rc::clone(&handler)));
+        handler(DisassemblyRequest::Mixed(
+            self.disassembly_controls.mixed.is_active(),
+        ));
     }
 
     pub(crate) fn request_disassembly_for_stop(&self, pc: String, architecture: Option<String>) {

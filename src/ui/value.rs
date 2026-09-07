@@ -610,7 +610,11 @@ pub(super) fn parse_integer_input(
         )
     };
 
-    let digits = digits.replace(['_', '\''], "");
+    let digits = if digits.contains(['_', '\'']) {
+        std::borrow::Cow::Owned(digits.replace(['_', '\''], ""))
+    } else {
+        std::borrow::Cow::Borrowed(digits)
+    };
 
     if digits.is_empty() {
         return Err("Enter digits after the base prefix");
@@ -1057,6 +1061,34 @@ pub(super) fn integer_decimal_value(
     Some(magnitude.to_string())
 }
 
+pub(super) fn formatted_integer(
+    variable: &Variable,
+    value: &str,
+    target_pointer_bits: u32,
+    display: crate::config::settings::IntegerDisplay,
+) -> Option<String> {
+    use crate::config::settings::IntegerDisplay;
+
+    // A printer's numeric-looking summary is not necessarily its scalar value.
+    // Unknown types retain GDB's representation instead of guessing a width.
+    if variable.dynamic || variable.display_hint.is_some() || variable.can_expand() {
+        return None;
+    }
+
+    let format = variable_integer_format(variable, target_pointer_bits, None)?;
+    let raw = parse_integer_input(value, format, IntegerRadix::Decimal).ok()?;
+
+    match display {
+        IntegerDisplay::Automatic => None,
+        IntegerDisplay::Hexadecimal => Some(format!("0x{raw:x}")),
+        IntegerDisplay::Decimal => Some(format_integer_value(raw, format, IntegerRadix::Decimal)),
+        IntegerDisplay::Both => Some(format!(
+            "0x{raw:x}  ({})",
+            format_integer_value(raw, format, IntegerRadix::Decimal),
+        )),
+    }
+}
+
 fn integer_format(type_name: &str, target_pointer_bits: u32) -> Option<IntegerFormat> {
     let target_pointer_bits = match target_pointer_bits {
         16 | 32 | 64 | 128 => target_pointer_bits,
@@ -1298,6 +1330,124 @@ mod float_tests {
         assert_eq!(
             variable_integer_format(&variable, 64, Some(&metadata)),
             Some(IntegerFormat::signed(32))
+        );
+    }
+
+    #[test]
+    fn integer_presentation_preserves_non_scalars_and_target_widths() {
+        use crate::config::settings::IntegerDisplay;
+
+        let mut variable = Variable {
+            local_index: None,
+            name: String::from("value"),
+            value: String::new(),
+            type_name: None,
+            argument: false,
+            varobj: None,
+            num_children: 0,
+            has_more: false,
+            display_hint: None,
+            dynamic: false,
+        };
+
+        for (ty, input, bits, decimal, hexadecimal) in [
+            ("int", "0xffffffff", 64, "-1", "0xffffffff"),
+            ("i8", "-128", 64, "-128", "0x80"),
+            ("u8", "0xff", 64, "255", "0xff"),
+            ("usize", "0xffffffff", 32, "4294967295", "0xffffffff"),
+            ("isize", "0xffffffff", 32, "-1", "0xffffffff"),
+            (
+                "u64",
+                "18_446_744_073_709_551_615",
+                64,
+                "18446744073709551615",
+                "0xffffffffffffffff",
+            ),
+            (
+                "u128",
+                "0xffffffffffffffffffffffffffffffff",
+                64,
+                "340282366920938463463374607431768211455",
+                "0xffffffffffffffffffffffffffffffff",
+            ),
+            (
+                "i128",
+                "-170141183460469231731687303715884105728",
+                64,
+                "-170141183460469231731687303715884105728",
+                "0x80000000000000000000000000000000",
+            ),
+        ] {
+            variable.type_name = Some(ty.into());
+            assert_eq!(
+                formatted_integer(&variable, input, bits, IntegerDisplay::Decimal).as_deref(),
+                Some(decimal)
+            );
+            assert_eq!(
+                formatted_integer(&variable, input, bits, IntegerDisplay::Hexadecimal).as_deref(),
+                Some(hexadecimal)
+            );
+            assert_eq!(
+                formatted_integer(&variable, input, bits, IntegerDisplay::Both),
+                Some(format!("{hexadecimal}  ({decimal})"))
+            );
+        }
+
+        for (ty, input) in [
+            ("enum Color", "1"),
+            ("bool", "1"),
+            ("int *", "0x1234"),
+            ("int [3]", "3"),
+            ("double", "42"),
+            ("struct int_box", "42"),
+            ("u8", "256"),
+            ("u8", "-1"),
+            ("i8", "128"),
+            ("int", "<optimized out>"),
+            ("time_t", "42"),
+            ("std::string", "42"),
+        ] {
+            variable.type_name = Some(ty.into());
+            assert_eq!(
+                formatted_integer(&variable, input, 64, IntegerDisplay::Decimal),
+                None,
+                "{ty}: {input}"
+            );
+        }
+
+        variable.type_name = Some("int".into());
+        variable.dynamic = true;
+        assert_eq!(
+            formatted_integer(&variable, "42", 64, IntegerDisplay::Both),
+            None
+        );
+        variable.dynamic = false;
+        variable.display_hint = Some("string".into());
+        assert_eq!(
+            formatted_integer(&variable, "42", 64, IntegerDisplay::Both),
+            None
+        );
+
+        variable.display_hint = None;
+        assert_eq!(
+            super::super::views::variable_display_value(
+                &variable,
+                "0x2a",
+                "",
+                64,
+                IntegerDisplay::Automatic
+            ),
+            "0x2a  (42)"
+        );
+        assert_eq!(
+            super::super::views::variable_display_value(
+                &variable,
+                "0x2a",
+                "'x'",
+                64,
+                IntegerDisplay::Decimal
+            ),
+            "0x2a  'x'"
         );
     }
 }

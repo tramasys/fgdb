@@ -10,8 +10,12 @@ use clap::{Parser, error::ErrorKind};
 
 use crate::{cpp_toolchain::GccPrettyPrinter, rust_toolchain::RustToolchain};
 
+pub(crate) mod keybindings;
+pub(crate) mod settings;
+pub(crate) mod settings_io;
+
 const MAX_CONFIG_BYTES: usize = 64 * 1024;
-const DEFAULT_CONFIG: &str = "# fgdb configuration\n# Environment variables override these values for one launch.\ngdb=gdb\ngdb_args=\nsource_path=\n# Pretty-printer scripts execute inside GDB. Use the platform path separator for multiple scripts.\n# pretty_printer_path=/path/to/printer.py\ngef_context=hide\nsafe_mode=false\n# Move source breakpoints to GDB's next executable line in the same file.\n# Set false to require the exact clicked line.\nbreakpoint_auto_relocate=true\n# working_directory=/path/to/project\n\n# Execution history. Recording is started explicitly from the direction menu.\nrr=rr\nrecord_full_limit=200000\nrecord_btrace_buffer_kib=64\n\n# Named profiles can contain these settings and a startup session.\n# [profile example]\n# executable=/path/to/program\n# arguments=--flag 'argument with spaces'\n# working_directory=/path/to/project\n";
+const DEFAULT_CONFIG: &str = "# fgdb configuration\n# Environment variables override these values for one launch.\ngdb=gdb\ngdb_args=\nsource_path=\n# Pretty-printer scripts execute inside GDB. Use the platform path separator for multiple scripts.\n# pretty_printer_path=/path/to/printer.py\ngef_context=hide\nsafe_mode=false\n# Move source breakpoints to GDB's next executable line in the same file.\n# Set false to require the exact clicked line.\nbreakpoint_auto_relocate=true\n# working_directory=/path/to/project\n\n# Execution history. Recording is started explicitly from the direction menu.\nrr=rr\nrecord_full_limit=200000\nrecord_btrace_buffer_kib=64\n\n# Appearance preferences apply live. Fonts use a Pango family, style, and size.\nsource_font=Monospace 9\nsource_tab_width=4\nsource_wrap=false\nsource_highlight_line=true\nterminal_font=Monospace 9.5\nterminal_scrollback=20000\n\n# Named profiles can contain these settings and a startup session.\n# [profile example]\n# executable=/path/to/program\n# arguments=--flag 'argument with spaces'\n# working_directory=/path/to/project\n";
 const DEFAULT_SECTION: &str = "<default>";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,14 +110,6 @@ impl ConfigurationReport {
 
     pub fn effective(&self) -> &[EffectiveConfigurationEntry] {
         &self.effective
-    }
-
-    pub fn menu_detail(&self) -> String {
-        match self.issues.len() {
-            0 => String::from("loaded"),
-            1 => String::from("1 issue"),
-            count => format!("{count} issues"),
-        }
     }
 }
 
@@ -238,6 +234,8 @@ impl DebugSession {
 
 #[derive(Clone, Debug)]
 pub struct LaunchConfig {
+    pub(crate) preferences: settings::Preferences,
+    pub(crate) live_settings: settings::LiveSettings,
     pub replay: ReplayConfig,
     pub gdb_executable: String,
     pub gdb_startup_arguments: Vec<String>,
@@ -522,6 +520,27 @@ struct Cli {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ConfigLayer {
+    keybindings: keybindings::Overrides,
+    source_font: Option<String>,
+    source_tab_width: Option<u32>,
+    source_wrap: Option<bool>,
+    source_highlight_line: Option<bool>,
+    terminal_font: Option<String>,
+    terminal_scrollback: Option<u32>,
+    integer_display: Option<settings::IntegerDisplay>,
+    instruction_bytes: Option<bool>,
+    instruction_symbols: Option<bool>,
+    instruction_source: Option<bool>,
+    assembly_syntax: Option<settings::AssemblySyntax>,
+    terminal_cursor_shape: Option<settings::CursorShape>,
+    terminal_cursor_blink: Option<settings::CursorBlink>,
+    terminal_scroll_output: Option<bool>,
+    terminal_scroll_typing: Option<bool>,
+    log_info: Option<bool>,
+    log_warnings: Option<bool>,
+    log_errors: Option<bool>,
+    log_follow: Option<bool>,
+    log_wrap: Option<bool>,
     rr_executable: Option<String>,
     record_full_limit: Option<u32>,
     record_btrace_buffer_kib: Option<u32>,
@@ -542,6 +561,13 @@ struct ConfigLayer {
 
 impl ConfigLayer {
     fn overlay(&mut self, overlay: &Self) {
+        self.keybindings.extend(
+            overlay
+                .keybindings
+                .iter()
+                .map(|(&action, &shortcut)| (action, shortcut)),
+        );
+
         if overlay.attach.is_some() || overlay.core_dump.is_some() || overlay.remote.is_some() {
             self.attach = None;
             self.core_dump = None;
@@ -557,6 +583,26 @@ impl ConfigLayer {
         }
 
         overlay_fields!(
+            source_font,
+            source_tab_width,
+            source_wrap,
+            source_highlight_line,
+            terminal_font,
+            terminal_scrollback,
+            integer_display,
+            instruction_bytes,
+            instruction_symbols,
+            instruction_source,
+            assembly_syntax,
+            terminal_cursor_shape,
+            terminal_cursor_blink,
+            terminal_scroll_output,
+            terminal_scroll_typing,
+            log_info,
+            log_warnings,
+            log_errors,
+            log_follow,
+            log_wrap,
             rr_executable,
             record_full_limit,
             record_btrace_buffer_kib,
@@ -789,7 +835,31 @@ fn parse_profile_header(line: &str) -> Result<String, String> {
 }
 
 fn canonical_config_key(key: &str) -> Option<&'static str> {
+    if let Some(action) = keybindings::Action::from_config_key(key) {
+        return Some(action.config_key());
+    }
+
     match key {
+        "source_font" => Some("source_font"),
+        "source_tab_width" => Some("source_tab_width"),
+        "source_wrap" => Some("source_wrap"),
+        "source_highlight_line" => Some("source_highlight_line"),
+        "terminal_font" => Some("terminal_font"),
+        "terminal_scrollback" => Some("terminal_scrollback"),
+        "integer_display" => Some("integer_display"),
+        "instruction_bytes" => Some("instruction_bytes"),
+        "instruction_symbols" => Some("instruction_symbols"),
+        "instruction_source" => Some("instruction_source"),
+        "assembly_syntax" => Some("assembly_syntax"),
+        "terminal_cursor_shape" => Some("terminal_cursor_shape"),
+        "terminal_cursor_blink" => Some("terminal_cursor_blink"),
+        "terminal_scroll_output" => Some("terminal_scroll_output"),
+        "terminal_scroll_typing" => Some("terminal_scroll_typing"),
+        "log_info" => Some("log_info"),
+        "log_warnings" => Some("log_warnings"),
+        "log_errors" => Some("log_errors"),
+        "log_follow" => Some("log_follow"),
+        "log_wrap" => Some("log_wrap"),
         "rr" | "rr_executable" => Some("rr"),
         "record_full_limit" => Some("record_full_limit"),
         "record_btrace_buffer_kib" => Some("record_btrace_buffer_kib"),
@@ -813,6 +883,13 @@ fn canonical_config_key(key: &str) -> Option<&'static str> {
 fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> Result<(), String> {
     let unquoted = unquote_config_value(value);
 
+    if let Some(action) = keybindings::Action::from_config_key(key) {
+        layer
+            .keybindings
+            .insert(action, keybindings::Shortcut::parse(unquoted)?);
+        return Ok(());
+    }
+
     let required = || {
         (!unquoted.is_empty())
             .then_some(unquoted)
@@ -820,6 +897,84 @@ fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> 
     };
 
     match key {
+        "source_font" | "terminal_font" => {
+            settings::validate_font(required()?)?;
+
+            if key == "source_font" {
+                layer.source_font = Some(unquoted.to_owned());
+            } else {
+                layer.terminal_font = Some(unquoted.to_owned());
+            }
+        }
+        "source_tab_width" | "terminal_scrollback" => {
+            let number = required()?
+                .parse::<u32>()
+                .map_err(|_| format!("Invalid {key} value '{value}'"))?;
+            let range = if key == "source_tab_width" {
+                1..=32
+            } else {
+                0..=1_000_000
+            };
+
+            if !range.contains(&number) {
+                return Err(format!(
+                    "{key} must be between {} and {}",
+                    range.start(),
+                    range.end()
+                ));
+            }
+
+            if key == "source_tab_width" {
+                layer.source_tab_width = Some(number);
+            } else {
+                layer.terminal_scrollback = Some(number);
+            }
+        }
+        "integer_display" => {
+            layer.integer_display = Some(settings::IntegerDisplay::parse(required()?)?);
+        }
+        "assembly_syntax" => {
+            layer.assembly_syntax = Some(settings::AssemblySyntax::parse(required()?)?);
+        }
+        "terminal_cursor_shape" => {
+            layer.terminal_cursor_shape = Some(settings::CursorShape::parse(required()?)?);
+        }
+        "terminal_cursor_blink" => {
+            layer.terminal_cursor_blink = Some(settings::CursorBlink::parse(required()?)?);
+        }
+        "source_wrap"
+        | "source_highlight_line"
+        | "instruction_bytes"
+        | "instruction_symbols"
+        | "instruction_source"
+        | "terminal_scroll_output"
+        | "terminal_scroll_typing"
+        | "log_info"
+        | "log_warnings"
+        | "log_errors"
+        | "log_follow"
+        | "log_wrap" => {
+            let enabled =
+                parse_boolean(unquoted).ok_or_else(|| format!("Invalid {key} value '{value}'"))?;
+
+            let field = match key {
+                "source_wrap" => &mut layer.source_wrap,
+                "source_highlight_line" => &mut layer.source_highlight_line,
+                "instruction_bytes" => &mut layer.instruction_bytes,
+                "instruction_symbols" => &mut layer.instruction_symbols,
+                "instruction_source" => &mut layer.instruction_source,
+                "terminal_scroll_output" => &mut layer.terminal_scroll_output,
+                "terminal_scroll_typing" => &mut layer.terminal_scroll_typing,
+                "log_info" => &mut layer.log_info,
+                "log_warnings" => &mut layer.log_warnings,
+                "log_errors" => &mut layer.log_errors,
+                "log_follow" => &mut layer.log_follow,
+                "log_wrap" => &mut layer.log_wrap,
+                _ => unreachable!(),
+            };
+
+            *field = Some(enabled);
+        }
         "rr" => {
             let executable = required()?;
 
@@ -988,6 +1143,24 @@ fn collect_layer_validation_issues(
     path: &Path,
     issues: &mut Vec<ConfigurationIssue>,
 ) {
+    if let Some((first, second)) =
+        keybindings::Bindings::from_overrides(&layer.keybindings).conflict()
+    {
+        push_configuration_issue(
+            issues,
+            ConfigurationIssue::file(
+                path,
+                configuration_line(locations, section, second.config_key())
+                    .or_else(|| configuration_line(locations, section, first.config_key())),
+                format!(
+                    "Invalid {context}: '{}' and '{}' use the same shortcut",
+                    first.title(),
+                    second.title()
+                ),
+            ),
+        );
+    }
+
     let modes = [
         ("attach", layer.attach.is_some()),
         ("core", layer.core_dump.is_some()),
@@ -1079,6 +1252,13 @@ fn push_configuration_issue(issues: &mut Vec<ConfigurationIssue>, issue: Configu
 }
 
 fn sanitize_config_layer(layer: &mut ConfigLayer) {
+    if keybindings::Bindings::from_overrides(&layer.keybindings)
+        .conflict()
+        .is_some()
+    {
+        layer.keybindings.clear();
+    }
+
     if layer
         .gdb_startup_arguments
         .as_deref()
@@ -1111,6 +1291,21 @@ fn sanitize_config_layer(layer: &mut ConfigLayer) {
 fn read_environment_overrides() -> (EnvironmentOverrides, Vec<ConfigurationIssue>) {
     let mut overrides = EnvironmentOverrides::default();
     let mut issues = Vec::new();
+
+    for (key, name) in [
+        ("source_font", "FGDB_SOURCE_FONT"),
+        ("source_tab_width", "FGDB_SOURCE_TAB_WIDTH"),
+        ("source_wrap", "FGDB_SOURCE_WRAP"),
+        ("source_highlight_line", "FGDB_SOURCE_HIGHLIGHT_LINE"),
+        ("terminal_font", "FGDB_TERMINAL_FONT"),
+        ("terminal_scrollback", "FGDB_TERMINAL_SCROLLBACK"),
+    ] {
+        if let Some(value) = environment_string(name, &mut issues)
+            && let Err(error) = set_config_value(&mut overrides.layer, key, &value)
+        {
+            issues.push(ConfigurationIssue::external(name, error));
+        }
+    }
 
     overrides.layer.gdb_executable =
         environment_string("FGDB_GDB", &mut issues).and_then(|value| {
@@ -1219,6 +1414,8 @@ fn resolve_launch_config(
 ) -> Result<LaunchConfig, String> {
     let config = &loaded.config;
     let selected_profile = cli.profile.clone().or_else(|| environment.profile.clone());
+    let live_settings =
+        settings::LiveSettings::new(selected_profile.clone(), environment.layer.clone());
     let pretty_printer_paths_from_environment = environment.layer.pretty_printer_paths.is_some();
     let mut settings = config.defaults.clone();
 
@@ -1233,6 +1430,7 @@ fn resolve_launch_config(
 
     settings.overlay(&environment.layer);
     sanitize_config_layer(&mut settings);
+    let preferences = settings::Preferences::from_layer(&settings);
 
     let working_directory = cli
         .working_directory
@@ -1314,22 +1512,29 @@ fn resolve_launch_config(
         created: loaded.created,
         selected_profile: selected_profile.clone(),
         issues: configuration_issues,
-        effective: effective_configuration(
-            selected_profile.as_deref(),
-            &gdb_executable,
-            &gdb_startup_arguments,
-            settings.gef_context_visible.unwrap_or(false),
-            &source_paths,
-            &pretty_printer_paths,
-            &working_directory,
-            safe_mode,
-            breakpoint_auto_relocate,
-            &replay,
-            initial_session.as_ref(),
-        ),
+        effective: {
+            let mut effective = effective_configuration(
+                selected_profile.as_deref(),
+                &gdb_executable,
+                &gdb_startup_arguments,
+                settings.gef_context_visible.unwrap_or(false),
+                &source_paths,
+                &pretty_printer_paths,
+                &working_directory,
+                safe_mode,
+                breakpoint_auto_relocate,
+                &replay,
+                initial_session.as_ref(),
+            );
+
+            effective.extend(preferences.entries());
+            effective
+        },
     });
 
     Ok(LaunchConfig {
+        preferences,
+        live_settings,
         replay,
         gdb_executable,
         gdb_startup_arguments,
@@ -1809,6 +2014,8 @@ mod tests {
     #[test]
     fn assembles_special_gef_startup_before_launch_target() {
         let mut configuration = LaunchConfig {
+            preferences: super::settings::Preferences::from_layer(&super::ConfigLayer::default()),
+            live_settings: super::settings::LiveSettings::new(None, super::ConfigLayer::default()),
             replay: super::ReplayConfig::default(),
             gdb_executable: String::from("/usr/bin/gdb"),
             gdb_startup_arguments: vec![String::from("-ex"), String::from("init-gef-special")],

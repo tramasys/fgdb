@@ -28,6 +28,17 @@ pub(super) fn control_row() -> gtk::Box {
     gtk::Box::new(gtk::Orientation::Horizontal, CONTROL_GAP)
 }
 
+pub(super) fn icon_label(icon: &str, label: &str) -> gtk::Box {
+    let row = control_row();
+    row.set_halign(gtk::Align::Center);
+    let image = gtk::Image::from_icon_name(icon);
+    image.set_pixel_size(14);
+    row.append(&image);
+    row.append(&gtk::Label::new(Some(label)));
+
+    row
+}
+
 /// Keep an outer popover dismissible after a nested dropdown releases its grab.
 /// GTK can leave the outer surface visible while routing input to the window.
 pub(super) fn keep_popover_dismissible(window: &gtk::ApplicationWindow, popover: &gtk::Popover) {
@@ -165,12 +176,13 @@ pub(super) fn menu_action(text: &str, detail: Option<&str>) -> gtk::Button {
     label.set_hexpand(true);
     label.add_css_class("menu-action-label");
 
-    let child: gtk::Widget = if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
+    let child: gtk::Widget = if let Some(detail) = detail {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
         row.append(&label);
         let hint = gtk::Label::new(Some(detail));
         hint.set_xalign(1.0);
         hint.add_css_class("menu-action-detail");
+        hint.set_visible(!detail.is_empty());
         row.append(&hint);
         row.upcast()
     } else {
@@ -182,4 +194,16 @@ pub(super) fn menu_action(text: &str, detail: Option<&str>) -> gtk::Button {
         .hexpand(true)
         .css_classes(["menu-action"])
         .build()
+}
+
+pub(super) fn set_menu_action_detail(button: &gtk::Button, detail: &str) {
+    if let Some(hint) = button
+        .child()
+        .and_then(|child| child.last_child())
+        .and_downcast::<gtk::Label>()
+        && hint.has_css_class("menu-action-detail")
+    {
+        hint.set_text(detail);
+        hint.set_visible(!detail.is_empty());
+    }
 }

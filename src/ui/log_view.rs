@@ -17,10 +17,13 @@ struct LogState {
     end_mark: gtk::TextMark,
     count: gtk::Label,
     follow: gtk::ToggleButton,
+    filters: [(LogLevel, gtk::ToggleButton); LogLevel::ALL.len()],
+    scroll: gtk::ScrolledWindow,
     clear: gtk::Button,
     adjustment: gtk::Adjustment,
     history: RefCell<LogHistory>,
     filter: Cell<LogFilter>,
+    applying_filters: Cell<bool>,
     projection: RefCell<LogProjection>,
     dirty: Cell<bool>,
     refilter_pending: Cell<bool>,
@@ -140,10 +143,13 @@ impl ApplicationLog {
             level_tags,
             count,
             follow,
+            filters,
+            scroll: scroll.clone(),
             clear,
             adjustment: scroll.vadjustment(),
             history: RefCell::new(LogHistory::default()),
             filter: Cell::new(LogFilter::ALL),
+            applying_filters: Cell::new(false),
             projection: RefCell::new(LogProjection::default()),
             dirty: Cell::new(false),
             refilter_pending: Cell::new(false),
@@ -153,15 +159,19 @@ impl ApplicationLog {
             layout_subscription: RefCell::new(None),
         });
 
-        for (level, button) in filters {
+        for (level, button) in &state.filters {
             let weak = Rc::downgrade(&state);
+            let level = *level;
+
             button.connect_toggled(move |button| {
                 if let Some(state) = weak.upgrade() {
                     state
                         .filter
                         .set(state.filter.get().with(level, button.is_active()));
 
-                    state.refilter();
+                    if !state.applying_filters.get() {
+                        state.refilter();
+                    }
                 }
             });
         }
@@ -256,6 +266,56 @@ impl ApplicationLog {
 
     pub(super) fn view(&self) -> &gtk::TextView {
         &self.0.view
+    }
+
+    pub(super) fn apply_preferences(
+        &self,
+        previous: &crate::config::settings::Preferences,
+        preferences: &crate::config::settings::Preferences,
+        initial: bool,
+    ) {
+        let previous_filter = self.0.filter.get();
+        self.0.applying_filters.set(true);
+
+        for (level, button) in &self.0.filters {
+            let (before, after) = match level {
+                LogLevel::Info => (previous.log_info, preferences.log_info),
+                LogLevel::Warning => (previous.log_warnings, preferences.log_warnings),
+                LogLevel::Error => (previous.log_errors, preferences.log_errors),
+            };
+
+            if initial || before != after {
+                button.set_active(after);
+            }
+        }
+
+        self.0.applying_filters.set(false);
+
+        if self.0.filter.get() != previous_filter {
+            self.0.refilter();
+        }
+
+        if initial || previous.log_follow != preferences.log_follow {
+            self.0.follow.set_active(preferences.log_follow);
+        }
+
+        if initial || previous.log_wrap != preferences.log_wrap {
+            self.0.view.set_wrap_mode(if preferences.log_wrap {
+                gtk::WrapMode::WordChar
+            } else {
+                gtk::WrapMode::None
+            });
+
+            self.0
+                .scroll
+                .set_hscrollbar_policy(if preferences.log_wrap {
+                    gtk::PolicyType::Never
+                } else {
+                    gtk::PolicyType::Automatic
+                });
+
+            self.0.follow_latest();
+        }
     }
 
     pub(super) fn record(&self, level: LogLevel, title: &str, detail: &str) {

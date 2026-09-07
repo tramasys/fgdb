@@ -1498,7 +1498,7 @@ impl Ui {
             }
         }
 
-        self.disassembly_controls.source_column.set_visible(mixed);
+        self.disassembly_controls.columns.source.set_visible(mixed);
 
         let syntax_applicable = matches!(
             self.target_architecture(),

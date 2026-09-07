@@ -51,20 +51,21 @@ pub(super) fn build_topbar(
     let kill_session_button = session_menu_action("Kill inferior", "terminate");
     kill_session_button.add_css_class("danger-action");
     let detach_session_button = session_menu_action("Detach safely", "keep running");
-    let resynchronize_button = session_menu_action("Refresh debugger state", "Ctrl+Shift+R");
+    let resynchronize_button = session_menu_action("Refresh debugger state", "");
     resynchronize_button.add_css_class("session-utility-action");
 
     resynchronize_button.set_tooltip_text(Some(
         "Re-read state after terminal commands or external debugger changes",
     ));
 
-    let configuration_detail = config.configuration_report().menu_detail();
-    let configuration_button = session_menu_action("Configuration", &configuration_detail);
-    configuration_button.add_css_class("session-utility-action");
+    let configuration_button = gtk::Button::new();
+    configuration_button.set_child(Some(&components::icon_label(
+        "preferences-system-symbolic",
+        "Settings",
+    )));
+    configuration_button.add_css_class("toolbar-action");
 
-    configuration_button.set_tooltip_text(Some(
-        "Show loaded files, configuration issues, and effective settings",
-    ));
+    configuration_button.set_tooltip_text(Some("Change preferences and inspect configuration"));
 
     if !config.configuration_report().issues().is_empty() {
         configuration_button.add_css_class("configuration-warning");
@@ -84,11 +85,14 @@ pub(super) fn build_topbar(
     session_menu.append(&detach_session_button);
     session_menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     session_menu.append(&resynchronize_button);
-    session_menu.append(&configuration_button);
     session_menu.append(&restart_gdb_button);
     session_menu.append(&gdb_capabilities_label);
     session_popover.set_child(Some(&session_menu));
     let session_button = header_popup_button("Session", &session_popover);
+    session_button.set_child(Some(&components::icon_label(
+        "folder-open-symbolic",
+        "Session",
+    )));
     session_button.add_css_class("toolbar-action");
 
     session_button.set_tooltip_text(Some(
@@ -96,7 +100,12 @@ pub(super) fn build_topbar(
     ));
 
     leading.append(&session_button);
-    let debug_data = gtk::Button::with_label("Debug data");
+    leading.append(&configuration_button);
+    let debug_data = gtk::Button::new();
+    debug_data.set_child(Some(&components::icon_label(
+        "dialog-information-symbolic",
+        "Debug data",
+    )));
     debug_data.add_css_class("toolbar-action");
 
     debug_data.set_tooltip_text(Some(
@@ -104,10 +113,8 @@ pub(super) fn build_topbar(
     ));
 
     leading.append(&debug_data);
-    let terminal_toggle = components::workspace_toggle(
-        "Terminal",
-        "Show or hide the interactive GDB terminal\nCtrl+`",
-    );
+    let terminal_toggle =
+        components::workspace_toggle("Terminal", "Show or hide the interactive GDB terminal");
     terminal_toggle.set_active(true);
     let gef_tools = build_gef_tools_menu(terminal, &terminal_toggle);
     topbar.pack_start(&leading);
@@ -115,34 +122,34 @@ pub(super) fn build_topbar(
     controls.add_css_class("execution-controls");
     let replay_controls = replay::ReplayControls::new(&config.replay);
     controls.append(&replay_controls.button);
-    let run = control_button("Run", "Start or continue the inferior\nF5", true);
-    let pause = control_button("Pause", "Interrupt the inferior\nF6", false);
+    let run = control_button("Run", "Start or continue the inferior", true);
+    let pause = control_button("Pause", "Interrupt the inferior", false);
     let next = control_button(
         "Next",
-        "Step over a source line in the selected direction\nF10",
+        "Step over a source line in the selected direction",
         false,
     );
     let step = control_button(
         "Step",
-        "Step into a source line in the selected direction\nF11",
+        "Step into a source line in the selected direction",
         false,
     );
 
     let next_instruction = control_button(
         "Nexti",
-        "Step one instruction in the selected direction, stepping over calls\nCtrl+F10",
+        "Step one instruction in the selected direction, stepping over calls",
         false,
     );
 
     let step_instruction = control_button(
         "Stepi",
-        "Step one instruction in the selected direction, stepping into calls\nCtrl+F11",
+        "Step one instruction in the selected direction, stepping into calls",
         false,
     );
 
     let finish = control_button(
         "Finish",
-        "Finish the current function, or reverse to its entry\nShift+F11",
+        "Finish the current function, or reverse to its entry",
         false,
     );
 
@@ -158,7 +165,7 @@ pub(super) fn build_topbar(
     let until_kind = gtk::Label::new(Some("Next matching event"));
     until_kind.add_css_class("session-kind");
     until_kind.set_halign(gtk::Align::Start);
-    let until_detail = gtk::Label::new(Some("Live execution path  Pause cancels"));
+    let until_detail = gtk::Label::new(Some("Live execution path / Pause cancels"));
     until_detail.add_css_class("session-target");
     until_detail.set_halign(gtk::Align::Start);
     until_summary.append(&until_caption);
@@ -909,7 +916,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         bindings.variable_children_handler,
         bindings.variable_viewer_handler,
         bindings.variable_viewers,
-        bindings.target_pointer_bits,
+        bindings.variable_presentation,
         Some((&locals_filter, &locals_changed)),
     );
 
@@ -918,7 +925,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
             bindings.variable_children_handler,
             bindings.variable_viewer_handler,
             bindings.variable_viewers,
-            bindings.target_pointer_bits,
+            bindings.variable_presentation,
             None,
         );
 
@@ -930,7 +937,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
 
-    let (instructions_view, instructions_store, instructions_selection, source_column) =
+    let (instructions_view, instructions_store, instructions_selection, instruction_columns) =
         build_instruction_view();
 
     let instructions_empty = empty_label("Paused target required");
@@ -1125,7 +1132,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         follow: disassembly_follow,
         open_memory: disassembly_memory,
         range: disassembly_range,
-        source_column,
+        columns: instruction_columns,
         scrolled: instructions_scrolled.clone(),
         scroll_generation: Rc::new(Cell::new(0)),
         loading: Rc::new(Cell::new(false)),

@@ -38,7 +38,26 @@ mod imp {
     impl WidgetImpl for BreakpointGutterRenderer {
         fn measure(&self, orientation: gtk::Orientation, for_size: i32) -> (i32, i32, i32, i32) {
             if orientation == gtk::Orientation::Horizontal {
-                (GUTTER_WIDTH, GUTTER_WIDTH, -1, -1)
+                let renderer = self.obj();
+                let lines = renderer
+                    .buffer()
+                    .map_or(1, |buffer| buffer.line_count().max(1));
+                let digits = (lines.ilog10() + 1).max(3) as i32;
+                let layout = renderer.create_pango_layout(Some("›"));
+                let marker_width = layout.pixel_size().0;
+
+                let digit_width = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+                    .into_iter()
+                    .map(|digit| {
+                        layout.set_text(digit);
+                        layout.pixel_size().0
+                    })
+                    .max()
+                    .unwrap_or_default();
+
+                let width = GUTTER_WIDTH.max(marker_width + digits * digit_width + 8);
+
+                (width, width, -1, -1)
             } else {
                 self.parent_measure(orientation, for_size)
             }
@@ -87,8 +106,10 @@ mod imp {
 
             let layout = renderer.create_pango_layout(Some(&style.text));
             let (text_width, text_height) = layout.pixel_size();
+            let (text_y, text_line_height) =
+                lines.line_extent(line, GutterRendererAlignmentMode::First);
             let x = (width - text_width as f32 - 4.0).max(0.0);
-            let y = line_y as f32 + ((line_height as f32 - text_height as f32) / 2.0).max(0.0);
+            let y = text_y as f32 + ((text_line_height as f32 - text_height as f32) / 2.0).max(0.0);
             snapshot.save();
             snapshot.translate(&graphene::Point::new(x, y));
             snapshot.append_layout(&layout, &style.foreground);
@@ -121,7 +142,7 @@ impl BreakpointGutterRenderer {
             .activate_handler
             .replace(Some(Rc::new(activate_handler)));
 
-        renderer.set_alignment_mode(GutterRendererAlignmentMode::Cell);
+        renderer.set_alignment_mode(GutterRendererAlignmentMode::First);
         renderer.add_css_class("breakpoint-gutter");
 
         renderer

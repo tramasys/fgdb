@@ -204,6 +204,8 @@ impl Ui {
                     };
 
                     let document = open_source_document(&path, &snapshot.contents, context);
+                    ui.settings.apply_source(&document.view);
+
                     if let Some(ready) = ready.take() {
                         ready(&ui, Some(document));
                     }
@@ -237,7 +239,7 @@ impl Ui {
         &self,
         instruction: &Instruction,
     ) -> Option<source::SourceLine> {
-        if !self.disassembly_controls.source_column.is_visible() {
+        if !self.disassembly_controls.columns.source.is_visible() {
             return None;
         }
 

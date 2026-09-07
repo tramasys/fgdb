@@ -11,8 +11,6 @@
 .debug-data-control-card,
 .debug-data-printer-loaders,
 .variable-viewer-identity,
-.configuration-files,
-.configuration-issues,
 .configuration-grid {
     padding: 8px;
     background: @app_card;
@@ -1068,59 +1066,22 @@ columnview.memory-map-table row {
     color: @app_danger;
 }
 
-.session-menu > button.session-action.configuration-warning .menu-action-label,
-.session-menu > button.session-action.configuration-warning .menu-action-detail {
+button.toolbar-action.configuration-warning {
     color: @app_danger;
-}
-
-.configuration-dialog {
-    color: @app_fg;
-    background: @app_bg;
-}
-
-.configuration-ok {
-    color: @app_success;
 }
 
 .configuration-error {
     color: @app_danger;
 }
 
-.configuration-fact {
-    min-height: 24px;
-    padding: 1px 5px;
-}
-
-.configuration-fact-name {
-    min-width: 120px;
-    color: @app_muted;
-}
-
-.configuration-fact-value,
 .configuration-value {
     color: @app_fg;
-    font-family: monospace;
-}
-
-.configuration-issue {
-    padding: 6px 8px;
-    background: alpha(@app_danger, 0.06);
-    border-left: 2px solid @app_danger;
-}
-
-.configuration-issue-location {
-    color: @app_danger;
     font-family: monospace;
 }
 
 .configuration-grid > label {
     min-height: 23px;
     padding: 3px 6px;
-}
-
-.configuration-grid-heading {
-    color: @app_muted;
-    background: @app_raised;
 }
 
 .configuration-setting {
@@ -1753,6 +1714,96 @@ listview.source-tree-view row:selected {
 
 .source-tree-loaded {
     color: @app_success;
+}
+
+.settings-dialog,
+window.fontchooser {
+    background: @app_surface;
+    color: @app_fg;
+}
+
+window.fontchooser listview {
+    background: @app_bg;
+    color: @app_fg;
+}
+
+window.fontchooser listview > row {
+    padding: 6px 8px;
+    color: @app_fg;
+    background: transparent;
+}
+
+window.fontchooser listview > row:hover {
+    background: @app_hover;
+}
+
+window.fontchooser listview > row:selected {
+    background: @app_selected;
+}
+
+window.fontchooser scale trough {
+    background: @app_raised;
+    border: 1px solid @app_border;
+}
+
+window.fontchooser scrolledwindow {
+    border: 1px solid @app_border;
+}
+
+window.fontchooser scale slider {
+    background: @app_muted;
+    border: 1px solid @app_border;
+}
+
+window.fontchooser scale highlight {
+    background: @app_accent;
+}
+
+.settings-dialog scrollbar,
+window.fontchooser scrollbar {
+    border-color: @app_border;
+}
+
+.settings-sidebar {
+    min-width: 136px;
+    border: 1px solid @app_border;
+    background: @app_bg;
+}
+
+.settings-sidebar row {
+    padding: 10px 12px;
+    border: 0;
+    color: @app_fg;
+    background: transparent;
+}
+
+.settings-sidebar row:hover {
+    color: @app_fg;
+    background: @app_hover;
+}
+
+.settings-sidebar row:selected {
+    color: @app_accent_hover;
+    background: @app_selected;
+}
+
+.settings-sidebar row:selected:hover {
+    color: @app_accent_hover;
+    background: @app_selected_hover;
+}
+
+.settings-heading,
+.settings-row {
+    padding: 10px 12px;
+    border-bottom: 1px solid @app_border;
+}
+
+.settings-row {
+    background: @app_card;
+}
+
+.settings-name {
+    font-weight: 700;
 }
 
 .source-tab {

@@ -21,6 +21,9 @@ mod components;
 use components::section_title;
 mod configuration;
 mod debug_data;
+mod keybindings;
+mod settings;
+mod variable_presentation;
 pub(crate) use debug_data::DebugDataAction;
 mod domain;
 use domain::{
@@ -294,6 +297,7 @@ struct InspectorBindings<'a> {
     variable_viewer_handler: &'a Rc<RefCell<Option<VariableViewerHandler>>>,
     variable_viewers: &'a Rc<VariableViewerRegistry>,
     target_pointer_bits: &'a Rc<Cell<u32>>,
+    variable_presentation: &'a Rc<variable_presentation::VariablePresentation>,
     kernel: KernelViewBindings<'a>,
     misc: MiscViewBindings<'a>,
 }
@@ -535,12 +539,19 @@ struct DisassemblyControls {
     follow: gtk::Button,
     open_memory: gtk::Button,
     range: gtk::Label,
-    source_column: gtk::ColumnViewColumn,
+    columns: InstructionColumns,
     scrolled: gtk::ScrolledWindow,
     scroll_generation: Rc<Cell<u64>>,
     loading: Rc<Cell<bool>>,
     syntax_applicable: Rc<Cell<bool>>,
     setting_syntax: Rc<Cell<bool>>,
+}
+
+#[derive(Clone)]
+struct InstructionColumns {
+    bytes: gtk::ColumnViewColumn,
+    symbols: gtk::ColumnViewColumn,
+    source: gtk::ColumnViewColumn,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -1365,16 +1376,8 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 // Source opens automatically at the first source-backed stop.
 // Use “Open file…” in the source toolbar to keep several files in tabs.
 //
-// F5        run / continue       F6        pause
-// F10       step over            F11       step into
-// Ctrl+F10  next instruction     Ctrl+F11  step instruction
-// Shift+F11 finish function
-//
-// Ctrl+P    quick open source    Ctrl+O     open files from disk
-// Ctrl+F    find in source       Ctrl+G     go to source line
-// Ctrl+Shift+O search symbols
-// Ctrl+Shift+F search source tree
-// Alt+Left / Alt+Right navigate source history
+// Open Settings > Keybindings to inspect or change shortcuts.
+// Menus and tooltips show the active bindings.
 //
 // Ctrl+hover underlines navigable symbols. Ctrl+click opens definitions.
 // Double-click an instruction to toggle an address breakpoint.
@@ -1405,6 +1408,7 @@ pub struct Ui {
     gdb_capabilities_label: gtk::Label,
     target_label: gtk::Label,
     terminal_toggle_button: gtk::ToggleButton,
+    log_toggle_button: gtk::ToggleButton,
     debug_data_button: gtk::Button,
     pub run_button: gtk::Button,
     pub pause_button: gtk::Button,
@@ -1574,7 +1578,8 @@ pub struct Ui {
     source_roots: Rc<RefCell<Vec<PathBuf>>>,
     source_base_roots: Vec<PathBuf>,
     configuration_report: ConfigurationReport,
-    configuration_dialog: Rc<RefCell<Option<gtk::Window>>>,
+    settings: Rc<settings::Settings>,
+    variable_presentation: Rc<variable_presentation::VariablePresentation>,
     debug_data_view: Rc<RefCell<Option<debug_data::DebugDataView>>>,
     debug_data_state: Rc<RefCell<debug_data::DebugDataState>>,
     performance_notice_times: Rc<RefCell<HashMap<String, Instant>>>,

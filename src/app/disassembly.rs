@@ -14,10 +14,11 @@ struct DisassemblyState {
     pc: String,
     architecture: Option<String>,
     mixed: bool,
+    mixed_refresh_pending: bool,
     range_start: Option<u64>,
     range_end: Option<u64>,
     function: Option<String>,
-    syntax_queried: bool,
+    syntax_epoch: Option<u64>,
 }
 
 #[derive(Clone, Copy)]
@@ -34,6 +35,7 @@ pub(super) struct DisassemblyController {
     client: Rc<MiClient>,
     state: RefCell<DisassemblyState>,
     generation: std::cell::Cell<u64>,
+    syntax_revision: Cell<u64>,
 }
 
 impl DisassemblyController {
@@ -48,6 +50,7 @@ impl DisassemblyController {
             client,
             state: RefCell::new(DisassemblyState::default()),
             generation: std::cell::Cell::new(0),
+            syntax_revision: Cell::new(0),
         })
     }
 
@@ -66,15 +69,15 @@ impl DisassemblyController {
             DisassemblyRequest::Clear => {
                 self.generation.set(self.generation.get().wrapping_add(1));
 
-                let (mixed, syntax_queried) = {
+                let (mixed, syntax_epoch) = {
                     let state = self.state.borrow();
 
-                    (state.mixed, state.syntax_queried)
+                    (state.mixed, state.syntax_epoch)
                 };
 
                 *self.state.borrow_mut() = DisassemblyState {
                     mixed,
-                    syntax_queried,
+                    syntax_epoch,
                     ..DisassemblyState::default()
                 };
 
@@ -84,13 +87,24 @@ impl DisassemblyController {
                 }
             }
             DisassemblyRequest::Mixed(mixed) => {
-                self.state.borrow_mut().mixed = mixed;
+                {
+                    let mut state = self.state.borrow_mut();
+
+                    if state.mixed == mixed {
+                        return;
+                    }
+
+                    state.mixed = mixed;
+                    state.mixed_refresh_pending = true;
+                }
+
+                let current = self.state.borrow().current.clone();
 
                 if self
                     .ui
                     .upgrade()
                     .is_some_and(|ui| ui.disassembly_commands_available())
-                    && let Some(current) = self.state.borrow().current.clone()
+                    && let Some(current) = current
                 {
                     self.resolve_and_show(current, HistoryUpdate::Keep);
                 }
@@ -113,28 +127,79 @@ impl DisassemblyController {
     }
 
     fn query_syntax_once(self: &Rc<Self>) {
+        use crate::config::settings::AssemblySyntax;
+
+        let epoch = self.client.transport_epoch();
+
         {
             let mut state = self.state.borrow_mut();
 
-            if state.syntax_queried {
+            if state.syntax_epoch == Some(epoch) {
                 return;
             }
 
-            state.syntax_queried = true;
+            state.syntax_epoch = Some(epoch);
         }
 
+        let preferred = self.ui.upgrade().and_then(|ui| {
+            let architecture = self
+                .state
+                .borrow()
+                .architecture
+                .as_deref()
+                .map(TargetArchitecture::from_gdb_description)
+                .unwrap_or_else(|| ui.target_architecture());
+
+            if !matches!(
+                architecture,
+                TargetArchitecture::X86 | TargetArchitecture::X86_64
+            ) {
+                return None;
+            }
+
+            match ui.preferred_assembly_syntax() {
+                AssemblySyntax::Gdb => None,
+                AssemblySyntax::Intel => Some(DisassemblySyntax::Intel),
+                AssemblySyntax::Att => Some(DisassemblySyntax::Att),
+            }
+        });
+
+        let command = match preferred {
+            Some(DisassemblySyntax::Intel) => "-gdb-set disassembly-flavor intel",
+            Some(DisassemblySyntax::Att) => "-gdb-set disassembly-flavor att",
+            None => "-gdb-show disassembly-flavor",
+        };
+
         let controller = Rc::clone(self);
+        let revision = self.syntax_revision.get().wrapping_add(1);
+        self.syntax_revision.set(revision);
 
         if self
             .client
-            .request("-gdb-show disassembly-flavor", move |_, record| {
-                if !record.is_done() {
+            .request(command, move |_, record| {
+                if controller.client.transport_epoch() != epoch
+                    || controller.syntax_revision.get() != revision
+                {
                     return;
                 }
 
-                let syntax = crate::debugger::evaluated_value(&record)
-                    .filter(|value| value.eq_ignore_ascii_case("att"))
-                    .map_or(DisassemblySyntax::Intel, |_| DisassemblySyntax::Att);
+                if !record.is_done() {
+                    if preferred.is_some()
+                        && let Some(ui) = controller.ui.upgrade()
+                    {
+                        ui.show_disassembly_error(record.error_message().unwrap_or(
+                            "GDB rejected the preferred assembly syntax. Use the syntax controls to retry",
+                        ));
+                    }
+
+                    return;
+                }
+
+                let syntax = preferred.unwrap_or_else(|| {
+                    crate::debugger::evaluated_value(&record)
+                        .filter(|value| value.eq_ignore_ascii_case("att"))
+                        .map_or(DisassemblySyntax::Intel, |_| DisassemblySyntax::Att)
+                });
 
                 if let Some(ui) = controller.ui.upgrade() {
                     ui.set_disassembly_syntax(syntax);
@@ -142,7 +207,7 @@ impl DisassemblyController {
             })
             .is_err()
         {
-            self.state.borrow_mut().syntax_queried = false;
+            self.state.borrow_mut().syntax_epoch = None;
         }
     }
 
@@ -154,10 +219,19 @@ impl DisassemblyController {
 
         let controller = Rc::clone(self);
         let command = format!("-gdb-set disassembly-flavor {flavor}");
+        let epoch = self.client.transport_epoch();
+        let revision = self.syntax_revision.get().wrapping_add(1);
+        self.syntax_revision.set(revision);
 
         if self
             .client
             .request(&command, move |_, record| {
+                if controller.client.transport_epoch() != epoch
+                    || controller.syntax_revision.get() != revision
+                {
+                    return;
+                }
+
                 let Some(ui) = controller.ui.upgrade() else {
                     return;
                 };
@@ -174,7 +248,9 @@ impl DisassemblyController {
 
                 ui.set_disassembly_syntax(syntax);
 
-                if let Some(current) = controller.state.borrow().current.clone() {
+                let current = controller.state.borrow().current.clone();
+
+                if let Some(current) = current {
                     controller.resolve_and_show(current, HistoryUpdate::Keep);
                 }
             })
@@ -402,7 +478,12 @@ impl DisassemblyController {
         requests: StopRequests,
         history: HistoryUpdate,
     ) {
-        let mixed = self.state.borrow().mixed;
+        let mixed = {
+            let mut state = self.state.borrow_mut();
+            state.mixed_refresh_pending = false;
+            state.mixed
+        };
+
         let start = address.saturating_sub(FUNCTION_DISASSEMBLY_BEFORE_BYTES);
         let end = address.saturating_add(FUNCTION_DISASSEMBLY_AFTER_BYTES);
 
@@ -539,7 +620,7 @@ impl DisassemblyController {
     }
 
     fn present(
-        &self,
+        self: &Rc<Self>,
         address: u64,
         history: HistoryUpdate,
         instructions: Vec<crate::debugger::Instruction>,
@@ -554,6 +635,13 @@ impl DisassemblyController {
         }
 
         let focus = format!("0x{address:x}");
+
+        if self.state.borrow().mixed_refresh_pending {
+            // A preference changed during this read. Coalesce it into one new
+            // request instead of displaying an obsolete column layout first.
+            self.resolve_and_show(focus, history);
+            return;
+        }
 
         let (pc, architecture) = {
             let state = self.state.borrow();
