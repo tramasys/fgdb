@@ -313,10 +313,12 @@ mod tests {
     fn configured_intent_survives_exit_and_backend_replacement() {
         let model = stopped_model();
         assert!(model.movement_commands_available());
+        assert!(model.session_restart_available());
         model.apply_debugger_state_delta(DebuggerStateDelta::clear_inferior());
         model.set_debug_state_stale(false);
         assert!(!model.inferior_has_started());
         assert!(model.configured_session_can_start());
+        assert!(model.session_restart_available());
         assert!(model.inferiors().is_empty());
         assert!(model.threads().is_empty());
         assert!(!model.movement_commands_available());
@@ -324,6 +326,7 @@ mod tests {
 
         model.set_controls_ready(false);
         assert!(!model.configured_session_can_start());
+        assert!(!model.session_restart_available());
         assert_eq!(model.current_session(), Some(launch_session()));
         model.set_controls_ready(true);
         model.apply_debugger_state_delta(DebuggerStateDelta::replace_target_without_inferior(
@@ -331,7 +334,75 @@ mod tests {
         ));
         model.set_debug_state_stale(false);
         assert!(model.configured_session_can_start());
+        assert!(model.session_restart_available());
         assert!(model.stop_point_commands_available());
+    }
+
+    #[test]
+    fn restart_requires_a_supported_session_and_matching_target() {
+        for (session, expected_connection) in [
+            (None, None),
+            (Some(launch_session()), Some(TargetConnection::Local)),
+            (
+                Some(DebugSession::Attach {
+                    pid: 101,
+                    executable: None,
+                }),
+                None,
+            ),
+            (
+                Some(DebugSession::CoreDump {
+                    executable: "fixture".into(),
+                    core_dump: "core".into(),
+                }),
+                None,
+            ),
+            (
+                Some(DebugSession::RrReplay {
+                    trace_directory: "trace".into(),
+                }),
+                Some(TargetConnection::Remote),
+            ),
+        ]
+        .into_iter()
+        .chain([false, true].into_iter().flat_map(|extended| {
+            [None, Some("fixture".into())]
+                .into_iter()
+                .map(move |executable| {
+                    let supported = extended && executable.is_some();
+
+                    (
+                        Some(DebugSession::Remote {
+                            endpoint: "localhost:1234".into(),
+                            executable: None,
+                            extended,
+                            remote_executable: executable,
+                        }),
+                        supported.then_some(TargetConnection::Remote),
+                    )
+                })
+        })) {
+            let model = DebuggerModel::new(session.clone());
+            model.set_controls_ready(true);
+
+            for connection in [
+                TargetConnection::None,
+                TargetConnection::Local,
+                TargetConnection::Remote,
+                TargetConnection::Core,
+            ] {
+                model.apply_debugger_state_delta(DebuggerStateDelta::establish_stopped_target(
+                    connection,
+                ));
+
+                model.set_debug_state_stale(false);
+                assert_eq!(
+                    model.session_restart_available(),
+                    expected_connection == Some(connection),
+                    "{session:?} with {connection:?}",
+                );
+            }
+        }
     }
 
     #[test]
@@ -340,6 +411,7 @@ mod tests {
         model.set_active_thread_execution(Some("2".into()));
         let first = model.begin_execution_transition();
         assert!(!model.movement_commands_available());
+        assert!(!model.session_restart_available());
         assert!(!model.stopped_inspection_available());
         assert!(!model.execution_transition_matches_thread(Some("1"), false));
         assert!(model.execution_transition_matches_thread(Some("2"), false));
@@ -372,6 +444,7 @@ mod tests {
         assert_eq!(painted[0].state, "stopped");
         assert_eq!(model.threads()[0].state, "running");
         assert!(!model.movement_commands_available());
+        assert!(!model.session_restart_available());
         assert!(!model.stopped_inspection_available());
         assert!(!model.thread_action_can_dispatch(&ThreadAction::RunOnly("1".into())));
         assert!(!model.thread_action_can_dispatch(&ThreadAction::RunOnly("2".into())));

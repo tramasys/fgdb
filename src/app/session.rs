@@ -185,6 +185,10 @@ impl SessionController {
             return;
         };
 
+        if action == SessionAction::Restart && !self.model.session_restart_available() {
+            return;
+        }
+
         if self.busy.replace(true) {
             return;
         }

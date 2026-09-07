@@ -115,6 +115,7 @@ impl Ui {
             log_toggle_button: log_toggle,
             debug_data_button: topbar.debug_data_button,
             run_button: topbar.run_button,
+            restart_button: topbar.restart_button,
             pause_button: topbar.pause_button,
             next_button: topbar.next_button,
             step_button: topbar.step_button,
@@ -1291,11 +1292,7 @@ impl Ui {
             add_memory: can_inspect && !self.memory_address_entry.text().trim().is_empty(),
             session: (ready || self.model.gdb_recovery_required()) && !pending,
             new_session: ready && !pending && !running && can_replace_session,
-            restart_session: ready
-                && (started || rr_replay)
-                && !running
-                && !pending
-                && session.as_ref().is_some_and(DebugSession::supports_restart),
+            restart_session: self.model.session_restart_available(),
             kill_session: ready
                 && started
                 && !running
@@ -1426,11 +1423,9 @@ impl Ui {
         set_transient_execution_sensitive(&self.session_button, state.session, state.busy);
         set_execution_sensitive(&self.new_session_button, state.new_session, state.busy);
 
-        set_execution_sensitive(
-            &self.restart_session_button,
-            state.restart_session,
-            state.busy,
-        );
+        for button in [&self.restart_button, &self.restart_session_button] {
+            set_execution_sensitive(button, state.restart_session, state.busy);
+        }
 
         set_execution_sensitive(&self.kill_session_button, state.kill_session, state.busy);
 

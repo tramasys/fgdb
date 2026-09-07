@@ -123,6 +123,16 @@ pub(super) fn build_topbar(
     let replay_controls = replay::ReplayControls::new(&config.replay);
     controls.append(&replay_controls.button);
     let run = control_button("Run", "Start or continue the inferior", true);
+    let restart = control_button(
+        "",
+        "Restart the program from the beginning, keeping breakpoints and session settings",
+        false,
+    );
+
+    let restart_icon = gtk::Image::from_icon_name("view-refresh-symbolic");
+    restart_icon.set_pixel_size(14);
+    restart.set_child(Some(&restart_icon));
+    restart.update_property(&[gtk::accessible::Property::Label("Restart program")]);
     let pause = control_button("Pause", "Interrupt the inferior", false);
     let next = control_button(
         "Next",
@@ -234,6 +244,7 @@ pub(super) fn build_topbar(
     until.set_tooltip_text(Some("Run until a selected control-flow or memory event"));
     until.set_sensitive(false);
     controls.append(&run);
+    controls.append(&restart);
     controls.append(&pause);
     controls.append(&next);
     controls.append(&step);
@@ -291,6 +302,7 @@ pub(super) fn build_topbar(
         debug_data_button: debug_data,
         terminal_toggle_button: terminal_toggle,
         run_button: run,
+        restart_button: restart,
         pause_button: pause,
         next_button: next,
         step_button: step,

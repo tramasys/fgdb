@@ -44,6 +44,25 @@ impl DebuggerModel {
         )
     }
 
+    pub(crate) fn session_restart_available(&self) -> bool {
+        let state = self.execution.debugger_state.get();
+
+        if !self.debugger_synchronization_available() || state.stopped_context_is_stale() {
+            return false;
+        }
+
+        self.execution
+            .current_session
+            .borrow()
+            .as_ref()
+            .is_some_and(|session| {
+                session.supports_restart()
+                    && (configured_target_can_start(Some(session), state.target_connection())
+                        || (matches!(session, DebugSession::RrReplay { .. })
+                            && state.target_connection() == TargetConnection::Remote))
+            })
+    }
+
     pub(crate) fn movement_commands_available(&self) -> bool {
         self.execution.debugger_ready.get()
             && self.inferior_has_started()

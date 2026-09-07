@@ -72,6 +72,7 @@ impl Ui {
         });
 
         for (button, action) in [
+            (&self.restart_button, SessionAction::Restart),
             (&self.restart_session_button, SessionAction::Restart),
             (&self.kill_session_button, SessionAction::Kill),
             (&self.detach_session_button, SessionAction::Detach),
