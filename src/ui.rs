@@ -1,3 +1,35 @@
+mod actions;
+mod build;
+mod cfg_view;
+mod components;
+mod configuration;
+pub(crate) mod controls;
+mod debug_data;
+mod debug_state;
+mod dialogs;
+mod domain;
+mod editor;
+pub(crate) mod formatting;
+mod inferiors;
+mod kernel_view;
+mod keybindings;
+mod layout;
+mod lifecycle;
+mod log_view;
+mod memory_view;
+mod misc_view;
+mod replay;
+mod session;
+mod settings;
+mod state;
+mod syscall_view;
+mod threads;
+mod value;
+mod variable_presentation;
+mod variable_viewers;
+mod views;
+mod watches;
+
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
@@ -16,31 +48,18 @@ use gtk::{gio, glib, pango, prelude::*};
 use sourceview5::prelude::*;
 use vte4::prelude::*;
 
-mod actions;
-mod components;
-use components::section_title;
-mod configuration;
-mod debug_data;
-mod keybindings;
-mod settings;
-mod variable_presentation;
+use components::{
+    clear_box, dynamic_list, empty_label, replace_boxed_store, replace_boxed_store_if_changed,
+    section_title,
+};
 pub(crate) use debug_data::DebugDataAction;
-mod domain;
+use debug_state::update_selected_frame_buttons;
 use domain::{
     LocalVariableCatalog, MemoryRefreshBatch, TerminalSynchronization, VariableNodeIndex,
     local_refresh_indices,
 };
-mod layout;
-mod lifecycle;
-mod log_view;
-mod replay;
 use log_view::{ApplicationLog, LogLevel};
-mod source_breakpoints;
-mod source_loading;
-mod source_navigation;
-mod syscall_view;
 pub(crate) use syscall_view::SyscallAction;
-mod value;
 
 use crate::model::DebuggerStateDelta;
 #[cfg(test)]
@@ -61,7 +80,6 @@ use value::{
 };
 
 use crate::{
-    breakpoint_gutter::{BreakpointGutterRenderer, LineStyle},
     config::{ConfigurationReport, DebugSession, LaunchConfig},
     debug_info::ModuleDebugMetadata,
     debugger::{
@@ -85,6 +103,24 @@ use crate::{
     source,
     theme::Theme,
 };
+
+pub(crate) use variable_viewers::{
+    VariableViewerPlan, VariableViewerRegistry, VariableViewerRequest, VariableViewerRow,
+    VariableViewerSession,
+};
+pub(crate) use views::compact_variable_type;
+
+use build::*;
+use cfg_view::*;
+use controls::*;
+use dialogs::*;
+use editor::*;
+use formatting::*;
+use kernel_view::*;
+use memory_view::*;
+use misc_view::*;
+use threads::*;
+use views::*;
 
 const EXECUTION_CATEGORY: &str = "execution";
 const MAX_EXPRESSION_WATCHES: usize = 256;
@@ -1449,7 +1485,7 @@ pub struct Ui {
     source_tree_search: Rc<RefCell<Option<Arc<source::SourceSearchIndex>>>>,
     source_index: Rc<RefCell<Option<Arc<source::SourceIndex>>>>,
     source_breakpoint_index: Rc<RefCell<source::SourceBreakpointIndex>>,
-    source_breakpoint_refresh: Rc<RefCell<source_breakpoints::SourceBreakpointRefresh>>,
+    source_breakpoint_refresh: Rc<RefCell<editor::SourceBreakpointRefresh>>,
     source_tree_indexing: Rc<Cell<bool>>,
     source_tree_generation: Arc<AtomicU64>,
     source_tree_render_generation: Arc<AtomicU64>,
@@ -1805,43 +1841,6 @@ struct LeftSidebar {
     source_tree: SourceTreeControls,
     inferior_controls: InferiorControls,
 }
-
-mod build;
-mod cfg_view;
-pub(crate) mod controls;
-mod debug_state;
-mod dialogs;
-pub(crate) mod formatting;
-mod inferiors;
-mod kernel_view;
-mod memory_view;
-mod misc_view;
-mod session;
-mod source_actions;
-mod source_view;
-mod state;
-mod threads;
-mod variable_viewers;
-mod views;
-mod watches;
-
-pub(crate) use variable_viewers::{
-    VariableViewerPlan, VariableViewerRegistry, VariableViewerRequest, VariableViewerRow,
-    VariableViewerSession,
-};
-pub(crate) use views::compact_variable_type;
-
-use build::*;
-use cfg_view::*;
-use controls::*;
-use dialogs::*;
-use formatting::*;
-use kernel_view::*;
-use memory_view::*;
-use misc_view::*;
-use source_view::*;
-use threads::*;
-use views::*;
 
 #[cfg(test)]
 mod tests {

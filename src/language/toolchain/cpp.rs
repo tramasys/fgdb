@@ -77,7 +77,7 @@ fn compiler_output(
     timeout: Duration,
 ) -> Option<Vec<u8>> {
     let (executable, prefix_arguments) = compiler.split_first()?;
-    crate::compiler_probe::output(
+    super::probe::output(
         Command::new(executable)
             .args(prefix_arguments)
             .arg(argument)

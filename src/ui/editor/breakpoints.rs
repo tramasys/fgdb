@@ -11,7 +11,7 @@ struct PendingIndex {
 }
 
 #[derive(Default)]
-pub(super) struct SourceBreakpointRefresh {
+pub(in crate::ui) struct SourceBreakpointRefresh {
     revision: Arc<AtomicU64>,
     pending: Option<PendingIndex>,
     published_sources: Option<Arc<source::SourceIndex>>,
@@ -44,7 +44,7 @@ fn same_locations(left: &[Breakpoint], right: &[Breakpoint]) -> bool {
 }
 
 impl Ui {
-    pub(super) fn latest_source_breakpoints(&self) -> Vec<Breakpoint> {
+    pub(in crate::ui) fn latest_source_breakpoints(&self) -> Vec<Breakpoint> {
         self.source_breakpoint_refresh
             .borrow()
             .pending
@@ -55,11 +55,15 @@ impl Ui {
             )
     }
 
-    pub(super) fn refresh_source_breakpoint_index(&self) {
+    pub(in crate::ui) fn refresh_source_breakpoint_index(&self) {
         self.prepare_source_breakpoints(self.latest_source_breakpoints(), true);
     }
 
-    pub(super) fn prepare_source_breakpoints(&self, breakpoints: Vec<Breakpoint>, force: bool) {
+    pub(in crate::ui) fn prepare_source_breakpoints(
+        &self,
+        breakpoints: Vec<Breakpoint>,
+        force: bool,
+    ) {
         let sources = self.source_index_snapshot();
         let mut state = self.source_breakpoint_refresh.borrow_mut();
 

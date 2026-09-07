@@ -10,7 +10,7 @@ const MAX_SOURCE_TREE_FILES: usize = 20_000;
 const MAX_SOURCE_RESULTS: usize = 200;
 
 impl Ui {
-    pub(super) fn connect_source_navigation(self: &Rc<Self>) {
+    pub(in crate::ui) fn connect_source_navigation(self: &Rc<Self>) {
         let weak_ui = Rc::downgrade(self);
 
         self.source_navigation.back.connect_clicked(move |_| {
@@ -222,7 +222,7 @@ impl Ui {
         });
     }
 
-    pub(super) fn present_source_find(&self) {
+    pub(in crate::ui) fn present_source_find(&self) {
         let Some(document) = self.current_source_document() else {
             self.set_status(
                 "Find unavailable",
@@ -500,11 +500,11 @@ impl Ui {
         })
     }
 
-    pub(super) fn navigate_to_source(&self, path: &Path, line: u32, record: bool) -> bool {
+    pub(in crate::ui) fn navigate_to_source(&self, path: &Path, line: u32, record: bool) -> bool {
         self.navigate_to_source_then(path, line, record, |_, _| {})
     }
 
-    pub(super) fn navigate_to_source_then(
+    pub(in crate::ui) fn navigate_to_source_then(
         &self,
         path: &Path,
         line: u32,
@@ -1643,7 +1643,7 @@ impl Ui {
         }
     }
 
-    pub(super) fn close_source_palette(&self) {
+    pub(in crate::ui) fn close_source_palette(&self) {
         let window = self
             .source_palette
             .borrow()

@@ -1,3 +1,28 @@
+mod assignments;
+mod backend;
+mod breakpoints;
+mod build;
+mod debug_data;
+mod disassembly;
+mod inferiors;
+mod kernel;
+mod lifecycle;
+mod lifecycle_reducer;
+mod misc;
+mod refresh;
+mod replay;
+mod rr;
+mod session;
+mod source_control;
+mod stop_requests;
+mod symbols;
+mod syscalls;
+mod threads;
+mod type_metadata;
+mod until;
+mod variable_viewers;
+mod watches;
+
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
@@ -37,108 +62,8 @@ use crate::{
     },
 };
 
-const MAX_POINTER_CHAIN_DEPTH: usize = 3;
-const AUTOMATIC_PRINT_ELEMENTS: usize = 128;
-const VARIABLE_CHILD_PAGE_SIZE: usize = 128;
-const MAX_VARIABLE_CHILDREN: usize = 4096;
-const STACK_WORD_COUNT: usize = 32;
-const POINTER_STRING_PREVIEW_ELEMENTS: usize = 256;
-const POINTER_ENRICHMENT_CONCURRENCY: usize = 4;
-// Keep stop refresh responsive even in generated or macro-heavy frames.
-// Remaining aggregate roots stay visible and create their varobj lazily when
-// the user expands them.
-const MAX_AUTOMATIC_VARIABLE_OBJECTS: usize = 32;
-static NEXT_VARIABLE_OBJECT_ID: AtomicU64 = AtomicU64::new(1);
-
-fn next_variable_object_name() -> String {
-    let id = NEXT_VARIABLE_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
-
-    format!("fgdb_var_{}_{id}", std::process::id())
-}
-
-struct RegisterRefresh {
-    ui: Weak<Ui>,
-    requests: StopRequests,
-    registers: Vec<Register>,
-    pending: VecDeque<usize>,
-    active: usize,
-    architecture: TargetArchitecture,
-    endian: TargetEndian,
-    pointer_bits: u32,
-}
-
-struct StackRefresh {
-    ui: Weak<Ui>,
-    requests: StopRequests,
-    entries: Vec<StackEntry>,
-    stack_register: &'static str,
-    pending: VecDeque<usize>,
-    active: usize,
-    word_size: usize,
-    endian: TargetEndian,
-}
-
-struct StackInputs {
-    ui: Weak<Ui>,
-    requests: StopRequests,
-    frames: Option<Vec<StackFrame>>,
-    registers: Option<Vec<Register>>,
-}
-
-struct VariableRefresh {
-    ui: Weak<Ui>,
-    requests: StopRequests,
-    target: VariableRefreshTarget,
-    variables: Vec<Variable>,
-    fallbacks: Vec<Variable>,
-    needs_update: Vec<bool>,
-    next_index: usize,
-    created: usize,
-    automatic_creation_indices: HashSet<usize>,
-    created_varobjs: HashSet<String>,
-    update_batch: Option<Rc<VariableUpdateBatch>>,
-    bulk_completed: bool,
-}
-
-#[derive(Clone)]
-enum VariableRefreshTarget {
-    Locals,
-    ExpressionWatches(Vec<String>),
-}
-
-struct VariableUpdateBatch {
-    requests: StopRequests,
-    remaining_preparations: Cell<usize>,
-    states: RefCell<Vec<Rc<RefCell<VariableRefresh>>>>,
-    requested: Cell<bool>,
-}
-
-mod assignments;
-mod backend;
-mod breakpoints;
-mod build;
-mod debug_data;
-mod disassembly;
 use debug_data::handle_debug_data_action;
-mod inferiors;
-mod kernel;
-mod lifecycle;
-mod lifecycle_reducer;
-mod misc;
-mod refresh;
-mod replay;
-mod rr;
-mod session;
-mod source_control;
-mod stop_requests;
 use stop_requests::{edit_requests, stop_requests};
-mod symbols;
-mod syscalls;
-mod threads;
-mod type_metadata;
-mod until;
-mod variable_viewers;
-mod watches;
 
 pub use build::build;
 
@@ -162,6 +87,15 @@ use type_metadata::*;
 use until::*;
 use variable_viewers::*;
 use watches::*;
+
+const AUTOMATIC_PRINT_ELEMENTS: usize = 128;
+static NEXT_VARIABLE_OBJECT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_variable_object_name() -> String {
+    let id = NEXT_VARIABLE_OBJECT_ID.fetch_add(1, Ordering::Relaxed);
+
+    format!("fgdb_var_{}_{id}", std::process::id())
+}
 
 #[cfg(test)]
 mod tests {

@@ -1,5 +1,15 @@
 use super::*;
 
+pub(super) fn update_selected_frame_buttons(buttons: &[(u32, gtk::Button)], selected: u32) {
+    for (level, button) in buttons {
+        if *level == selected {
+            button.add_css_class("current-debug-item");
+        } else {
+            button.remove_css_class("current-debug-item");
+        }
+    }
+}
+
 fn local_snapshot_is_inspectable(
     model: &crate::model::DebuggerModel,
     generation: Option<u64>,

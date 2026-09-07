@@ -7,186 +7,6 @@ struct SourceGutterMenuHandlers {
     delete: Rc<RefCell<Option<StringSelectionHandler>>>,
 }
 
-pub(super) fn dynamic_list(empty_text: &str) -> gtk::Box {
-    let list = gtk::Box::new(gtk::Orientation::Vertical, 1);
-    list.append(&empty_label(empty_text));
-
-    list
-}
-
-pub(super) fn build_signal_grid(
-    signals: &'static [(&'static str, &'static str)],
-) -> (gtk::Grid, Vec<(gtk::Button, &'static str, &'static str)>) {
-    let grid = gtk::Grid::builder()
-        .column_homogeneous(true)
-        .column_spacing(2)
-        .row_spacing(2)
-        .hexpand(true)
-        .build();
-
-    let buttons = signals
-        .iter()
-        .enumerate()
-        .map(|(index, &(signal, description))| {
-            let label = if signal == "all" {
-                "ALL SIGNALS"
-            } else {
-                signal
-            };
-
-            let button = gtk::Button::with_label(label);
-            button.add_css_class("signal-action");
-            button.add_css_class("catchpoint-action");
-            button.set_halign(gtk::Align::Fill);
-            button.set_hexpand(true);
-
-            button.set_tooltip_text(Some(&format!(
-                "{description}\nClick to add a GDB signal catchpoint"
-            )));
-
-            grid.attach(&button, (index % 3) as i32, (index / 3) as i32, 1, 1);
-
-            (button, signal, description)
-        })
-        .collect();
-
-    (grid, buttons)
-}
-
-pub(super) fn empty_label(text: &str) -> gtk::Label {
-    let label = gtk::Label::new(Some(text));
-    label.add_css_class("muted");
-    label.set_halign(gtk::Align::Fill);
-    label.set_xalign(0.0);
-    label.set_wrap(true);
-    label.set_margin_start(4);
-    label.set_margin_end(4);
-    label.set_margin_top(3);
-    label.set_margin_bottom(3);
-
-    label
-}
-
-pub(super) fn clear_box(container: &gtk::Box) {
-    while let Some(child) = container.first_child() {
-        container.remove(&child);
-    }
-}
-
-pub(super) fn replace_boxed_store<T: 'static>(
-    store: &gio::ListStore,
-    values: impl IntoIterator<Item = T>,
-) {
-    let values = values
-        .into_iter()
-        .map(glib::BoxedAnyObject::new)
-        .collect::<Vec<_>>();
-
-    store.splice(0, store.n_items(), &values);
-}
-
-pub(super) fn replace_boxed_store_if_changed<T: PartialEq + 'static>(
-    store: &gio::ListStore,
-    values: impl IntoIterator<Item = T>,
-) -> bool {
-    let values = values.into_iter().collect::<Vec<_>>();
-    let old_len = usize::try_from(store.n_items()).unwrap_or(usize::MAX);
-
-    if old_len == values.len() {
-        let mut changed = false;
-        let mut run_start = None;
-        let mut replacements = Vec::new();
-
-        for (index, value) in values.into_iter().enumerate() {
-            if boxed_store_item_equals(store, index, &value) {
-                if let Some(start) = run_start.take() {
-                    store.splice(
-                        u32::try_from(start).unwrap_or(u32::MAX),
-                        u32::try_from(replacements.len()).unwrap_or(u32::MAX),
-                        &replacements,
-                    );
-
-                    replacements.clear();
-                }
-            } else {
-                changed = true;
-                run_start.get_or_insert(index);
-                replacements.push(glib::BoxedAnyObject::new(value));
-            }
-        }
-
-        if let Some(start) = run_start {
-            store.splice(
-                u32::try_from(start).unwrap_or(u32::MAX),
-                u32::try_from(replacements.len()).unwrap_or(u32::MAX),
-                &replacements,
-            );
-        }
-
-        return changed;
-    }
-
-    let common_len = old_len.min(values.len());
-
-    let prefix = values
-        .iter()
-        .take(common_len)
-        .enumerate()
-        .take_while(|(index, value)| boxed_store_item_equals(store, *index, *value))
-        .count();
-
-    let suffix = values
-        .iter()
-        .enumerate()
-        .rev()
-        .take(common_len.saturating_sub(prefix))
-        .take_while(|(index, value)| {
-            let old_index = old_len - (values.len() - *index);
-
-            boxed_store_item_equals(store, old_index, *value)
-        })
-        .count();
-
-    let new_middle_len = values.len().saturating_sub(prefix + suffix);
-    let old_middle_len = old_len.saturating_sub(prefix + suffix);
-
-    let replacements = values
-        .into_iter()
-        .skip(prefix)
-        .take(new_middle_len)
-        .map(glib::BoxedAnyObject::new)
-        .collect::<Vec<_>>();
-
-    store.splice(
-        u32::try_from(prefix).unwrap_or(u32::MAX),
-        u32::try_from(old_middle_len).unwrap_or(u32::MAX),
-        &replacements,
-    );
-
-    true
-}
-
-fn boxed_store_item_equals<T: PartialEq + 'static>(
-    store: &gio::ListStore,
-    index: usize,
-    value: &T,
-) -> bool {
-    store
-        .item(u32::try_from(index).unwrap_or(u32::MAX))
-        .and_downcast::<glib::BoxedAnyObject>()
-        .is_some_and(|item| *item.borrow::<T>() == *value)
-}
-
-pub(super) fn update_selected_frame_buttons(buttons: &[(u32, gtk::Button)], selected: u32) {
-    for (level, button) in buttons {
-        if *level == selected {
-            button.add_css_class("current-debug-item");
-        } else {
-            button.remove_css_class("current-debug-item");
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 enum SourceTabCloseScope {
     This,
@@ -447,7 +267,7 @@ fn connect_source_tab_context_menu(
     document.tab.add_controller(gesture);
 }
 
-pub(super) fn open_source_document(
+pub(in crate::ui) fn open_source_document(
     path: &Path,
     contents: &str,
     context: SourceOpenContext<'_>,
@@ -554,7 +374,7 @@ pub(super) fn open_source_document(
     document
 }
 
-pub(super) fn build_breakpoint_gutter(
+pub(in crate::ui) fn build_breakpoint_gutter(
     path: &Path,
     context: SourceOpenContext<'_>,
 ) -> BreakpointGutterRenderer {
@@ -688,7 +508,7 @@ pub(super) fn build_breakpoint_gutter(
     renderer
 }
 
-pub(super) fn connect_breakpoint_gutter_context_click(
+pub(in crate::ui) fn connect_breakpoint_gutter_context_click(
     page: &gtk::ScrolledWindow,
     view: &sourceview5::View,
     renderer: &BreakpointGutterRenderer,
@@ -829,7 +649,7 @@ fn open_source_gutter_menu(
     popover.popup();
 }
 
-pub(super) fn connect_source_symbol_navigation(
+pub(in crate::ui) fn connect_source_symbol_navigation(
     document: &SourceDocument,
     symbol_handler: &Rc<RefCell<Option<StringSelectionHandler>>>,
 ) {
@@ -971,14 +791,14 @@ pub(super) fn connect_source_symbol_navigation(
     document.view.add_controller(gesture);
 }
 
-pub(super) fn source_symbol_at_iter(
+pub(in crate::ui) fn source_symbol_at_iter(
     buffer: &sourceview5::Buffer,
     iter: &gtk::TextIter,
 ) -> Option<String> {
     source_symbol_span_at_iter(buffer, iter).map(|(symbol, _, _)| symbol)
 }
 
-pub(super) fn source_symbol_span_at_iter(
+pub(in crate::ui) fn source_symbol_span_at_iter(
     buffer: &sourceview5::Buffer,
     iter: &gtk::TextIter,
 ) -> Option<(String, usize, usize)> {
@@ -998,11 +818,11 @@ pub(super) fn source_symbol_span_at_iter(
 }
 
 #[cfg(test)]
-pub(super) fn source_symbol_at_offset(line: &str, offset: usize) -> Option<String> {
+pub(in crate::ui) fn source_symbol_at_offset(line: &str, offset: usize) -> Option<String> {
     source_symbol_span_at_offset(line, offset).map(|(symbol, _, _)| symbol)
 }
 
-pub(super) fn source_symbol_span_at_offset(
+pub(in crate::ui) fn source_symbol_span_at_offset(
     line: &str,
     offset: usize,
 ) -> Option<(String, usize, usize)> {
@@ -1073,7 +893,7 @@ pub(super) fn source_symbol_span_at_offset(
     Some((symbol.to_owned(), left, right))
 }
 
-pub(super) fn is_callable_source_symbol(symbol: &str, line: &str, cursor: usize) -> bool {
+pub(in crate::ui) fn is_callable_source_symbol(symbol: &str, line: &str, cursor: usize) -> bool {
     const NON_CALL_KEYWORDS: &[&str] = &[
         "if", "for", "while", "switch", "catch", "match", "loop", "sizeof", "alignof", "_Alignof",
         "typeof", "decltype", "typeid", "return",
@@ -1121,7 +941,7 @@ pub(super) fn is_callable_source_symbol(symbol: &str, line: &str, cursor: usize)
     characters.next() == Some('(')
 }
 
-pub(super) fn update_source_link_highlight(
+pub(in crate::ui) fn update_source_link_highlight(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
     tag: &gtk::TextTag,
@@ -1182,7 +1002,7 @@ pub(super) fn update_source_link_highlight(
     view.set_cursor_from_name(Some("pointer"));
 }
 
-pub(super) fn clear_source_link_highlight(
+pub(in crate::ui) fn clear_source_link_highlight(
     view: &sourceview5::View,
     buffer: &sourceview5::Buffer,
     tag: &gtk::TextTag,
@@ -1199,7 +1019,7 @@ pub(super) fn clear_source_link_highlight(
     view.set_cursor_from_name(None);
 }
 
-pub(super) fn source_location_score(symbol: &str, location: &SourceLocation) -> u16 {
+pub(in crate::ui) fn source_location_score(symbol: &str, location: &SourceLocation) -> u16 {
     let symbol = without_generic_arguments(symbol);
     let function = without_generic_arguments(&location.function);
 
@@ -1241,7 +1061,7 @@ pub(super) fn source_location_score(symbol: &str, location: &SourceLocation) -> 
     score
 }
 
-pub(super) fn without_generic_arguments(symbol: &str) -> String {
+pub(in crate::ui) fn without_generic_arguments(symbol: &str) -> String {
     let mut depth = 0_u32;
 
     symbol
@@ -1262,7 +1082,7 @@ pub(super) fn without_generic_arguments(symbol: &str) -> String {
         .collect()
 }
 
-pub(super) fn compact_function_name(symbol: &str) -> String {
+pub(in crate::ui) fn compact_function_name(symbol: &str) -> String {
     if symbol.chars().count() <= 56 || !symbol.contains(['<', '>']) {
         return symbol.to_owned();
     }
@@ -1299,7 +1119,7 @@ pub(super) fn compact_function_name(symbol: &str) -> String {
     }
 }
 
-pub(super) fn scroll_source_document(document: &SourceDocument, line: u32) {
+pub(in crate::ui) fn scroll_source_document(document: &SourceDocument, line: u32) {
     let Ok(line) = i32::try_from(line.saturating_sub(1)) else {
         return;
     };
@@ -1316,43 +1136,9 @@ pub(super) fn scroll_source_document(document: &SourceDocument, line: u32) {
     });
 }
 
-pub(super) fn source_tab_title(path: &Path) -> String {
+pub(in crate::ui) fn source_tab_title(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("source")
         .to_owned()
-}
-
-#[cfg(test)]
-mod model_update_tests {
-    use super::*;
-
-    fn values(store: &gio::ListStore) -> Vec<u32> {
-        (0..store.n_items())
-            .map(|index| {
-                *store
-                    .item(index)
-                    .and_downcast::<glib::BoxedAnyObject>()
-                    .unwrap()
-                    .borrow::<u32>()
-            })
-            .collect()
-    }
-
-    #[test]
-    fn changed_store_updates_preserve_equal_objects() {
-        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-        assert!(replace_boxed_store_if_changed(&store, [1_u32, 2, 3]));
-        let first = store.item(0).unwrap();
-        let last = store.item(2).unwrap();
-        assert!(replace_boxed_store_if_changed(&store, [1_u32, 20, 3]));
-        assert_eq!(values(&store), [1, 20, 3]);
-        assert_eq!(store.item(0).as_ref(), Some(&first));
-        assert_eq!(store.item(2).as_ref(), Some(&last));
-        assert!(!replace_boxed_store_if_changed(&store, [1_u32, 20, 3]));
-        assert!(replace_boxed_store_if_changed(&store, [1_u32, 3]));
-        assert_eq!(values(&store), [1, 3]);
-        assert_eq!(store.item(0).as_ref(), Some(&first));
-        assert_eq!(store.item(1).as_ref(), Some(&last));
-    }
 }

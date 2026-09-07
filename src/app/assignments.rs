@@ -354,7 +354,8 @@ mod tests {
 
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
         let toolchain =
-            crate::rust_toolchain::RustToolchain::discover(root, Duration::from_secs(2)).unwrap();
+            crate::language::toolchain::RustToolchain::discover(root, Duration::from_secs(2))
+                .unwrap();
         let fixture = root.join("target/debug-fixtures/rust-variable-viewer-target");
         assert!(
             fixture.is_file(),
@@ -440,8 +441,9 @@ assert bytes(gdb.selected_inferior().read_memory(local._data_ptr,local._length))
 assert bytes(gdb.selected_inferior().read_memory(argument._data_ptr,argument._length)) == bytes.fromhex("{}")
 assert "fgdb_rs_string" not in gdb.execute("show convenience",to_string=True)
 gdb.write("FGDB_EDIT_ROUNDTRIP_OK\n")"#, type_metadata::hex(&local_bytes), type_metadata::hex(&argument_bytes))));
-        let output = crate::compiler_probe::output(&mut command, Duration::from_secs(15))
-            .expect("live GDB smoke test failed or timed out");
+        let output =
+            crate::language::toolchain::probe::output(&mut command, Duration::from_secs(15))
+                .expect("live GDB smoke test failed or timed out");
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("FGDB_EDIT_ROUNDTRIP_OK"), "{output}");
         assert!(!output.contains("^error"), "{output}");

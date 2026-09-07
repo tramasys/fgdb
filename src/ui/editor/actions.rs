@@ -5,7 +5,7 @@ impl Ui {
         self.source_index.borrow().as_ref().cloned()
     }
 
-    pub(super) fn resolve_source_path(&self, reported_path: &str) -> Option<PathBuf> {
+    pub(in crate::ui) fn resolve_source_path(&self, reported_path: &str) -> Option<PathBuf> {
         if let Some(path) = self
             .resolved_source_paths
             .borrow_mut()
@@ -393,7 +393,7 @@ impl Ui {
             .extend(variable_objects);
     }
 
-    pub(super) fn connect_open_source(self: &Rc<Self>) {
+    pub(in crate::ui) fn connect_open_source(self: &Rc<Self>) {
         let weak_ui = Rc::downgrade(self);
 
         self.source_navigation.open_file.connect_clicked(move |_| {

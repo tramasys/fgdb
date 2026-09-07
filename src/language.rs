@@ -7,6 +7,7 @@ use std::path::Path;
 
 pub(crate) mod python;
 pub(crate) mod scripts;
+pub(crate) mod toolchain;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum Language {

@@ -1916,3 +1916,42 @@ fn disassembly_control_group(label: &str, widgets: &[gtk::Widget]) -> gtk::Box {
 
     group
 }
+
+pub(super) fn build_signal_grid(
+    signals: &'static [(&'static str, &'static str)],
+) -> (gtk::Grid, Vec<(gtk::Button, &'static str, &'static str)>) {
+    let grid = gtk::Grid::builder()
+        .column_homogeneous(true)
+        .column_spacing(2)
+        .row_spacing(2)
+        .hexpand(true)
+        .build();
+
+    let buttons = signals
+        .iter()
+        .enumerate()
+        .map(|(index, &(signal, description))| {
+            let label = if signal == "all" {
+                "ALL SIGNALS"
+            } else {
+                signal
+            };
+
+            let button = gtk::Button::with_label(label);
+            button.add_css_class("signal-action");
+            button.add_css_class("catchpoint-action");
+            button.set_halign(gtk::Align::Fill);
+            button.set_hexpand(true);
+
+            button.set_tooltip_text(Some(&format!(
+                "{description}\nClick to add a GDB signal catchpoint"
+            )));
+
+            grid.attach(&button, (index % 3) as i32, (index / 3) as i32, 1, 1);
+
+            (button, signal, description)
+        })
+        .collect();
+
+    (grid, buttons)
+}

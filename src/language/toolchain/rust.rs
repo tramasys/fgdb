@@ -111,7 +111,7 @@ fn rustc_output(
     arguments: &[&str],
     timeout: Duration,
 ) -> Option<Vec<u8>> {
-    crate::compiler_probe::output(
+    super::probe::output(
         Command::new("rustc")
             .args(arguments)
             .current_dir(working_directory),

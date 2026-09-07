@@ -8,7 +8,7 @@ use std::{
 
 use clap::{Parser, error::ErrorKind};
 
-use crate::{cpp_toolchain::GccPrettyPrinter, rust_toolchain::RustToolchain};
+use crate::language::toolchain::{GccPrettyPrinter, RustToolchain};
 
 pub(crate) mod keybindings;
 pub(crate) mod settings;

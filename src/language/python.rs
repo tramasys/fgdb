@@ -3,18 +3,18 @@
 
 const PACKAGE: &str = "_fgdb_languages_v1";
 const MODULES: &[(&str, &str)] = &[
-    ("common", include_str!("common.py")),
-    ("fortran", include_str!("fortran.py")),
-    ("zig", include_str!("zig.py")),
-    ("odin", include_str!("odin.py")),
-    ("array", include_str!("array.py")),
-    ("printers", include_str!("printers.py")),
+    ("common", include_str!("printers/common.py")),
+    ("fortran", include_str!("printers/fortran.py")),
+    ("zig", include_str!("printers/zig.py")),
+    ("odin", include_str!("printers/odin.py")),
+    ("array", include_str!("printers/array.py")),
+    ("printers", include_str!("printers/printers.py")),
 ];
 
 pub(crate) fn install_command() -> String {
     let mut command = format!(
         "python exec({}, {{'_sources': [",
-        crate::debugger::quote(include_str!("runtime.py")),
+        crate::debugger::quote(include_str!("printers/runtime.py")),
     );
 
     for (name, source) in MODULES {

@@ -4,9 +4,39 @@
 use super::*;
 use gtk::gdk;
 
+mod models;
+pub(super) use models::{replace_boxed_store, replace_boxed_store_if_changed};
+
 pub(super) const CONTROL_GAP: i32 = 6;
 pub(super) const CONTENT_INSET: i32 = 8;
 pub(super) const DIALOG_INSET: i32 = 12;
+
+pub(super) fn dynamic_list(empty_text: &str) -> gtk::Box {
+    let list = gtk::Box::new(gtk::Orientation::Vertical, 1);
+    list.append(&empty_label(empty_text));
+
+    list
+}
+
+pub(super) fn empty_label(text: &str) -> gtk::Label {
+    let label = gtk::Label::new(Some(text));
+    label.add_css_class("muted");
+    label.set_halign(gtk::Align::Fill);
+    label.set_xalign(0.0);
+    label.set_wrap(true);
+    label.set_margin_start(4);
+    label.set_margin_end(4);
+    label.set_margin_top(3);
+    label.set_margin_bottom(3);
+
+    label
+}
+
+pub(super) fn clear_box(container: &gtk::Box) {
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+}
 
 pub(super) fn inset(widget: &impl IsA<gtk::Widget>, margin: i32) {
     widget.set_margin_top(margin);

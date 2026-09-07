@@ -40,7 +40,7 @@ fn load_source(
 }
 
 impl Ui {
-    pub(super) fn open_source_batch(
+    pub(in crate::ui) fn open_source_batch(
         &self,
         paths: Rc<RefCell<std::collections::VecDeque<PathBuf>>>,
         outcome: Rc<RefCell<(usize, Vec<String>)>>,
@@ -104,14 +104,14 @@ impl Ui {
         });
     }
 
-    pub(super) fn invalidate_source_io(&self) {
+    pub(in crate::ui) fn invalidate_source_io(&self) {
         self.source_io_epoch.fetch_add(1, Ordering::Relaxed);
         self.source_open_generation.fetch_add(1, Ordering::Relaxed);
         self.disassembly_source_cache.borrow_mut().clear();
         self.disassembly_source_pending.borrow_mut().clear();
     }
 
-    pub(super) fn open_source_when_ready(
+    pub(in crate::ui) fn open_source_when_ready(
         &self,
         reported: &Path,
         ready: impl FnOnce(&Ui, Option<SourceDocument>) + 'static,
@@ -235,7 +235,7 @@ impl Ui {
         true
     }
 
-    pub(super) fn disassembly_source_text(
+    pub(in crate::ui) fn disassembly_source_text(
         &self,
         instruction: &Instruction,
     ) -> Option<source::SourceLine> {
