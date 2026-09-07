@@ -423,6 +423,10 @@ pub(super) fn variable_boolean_value(
         .join(" ");
 
     if !matches!(unqualified.as_str(), "bool" | "_bool" | "c_bool")
+        && !((unqualified == "logical"
+            || unqualified.starts_with("logical(")
+            || unqualified.starts_with("logical*"))
+            && !crate::language::is_fortran_array(&unqualified))
         && !metadata.is_some_and(|metadata| metadata.kind == ValueTypeKind::Boolean)
     {
         return None;
@@ -435,8 +439,8 @@ pub(super) fn variable_boolean_value(
         .to_ascii_lowercase();
 
     match value.as_str() {
-        "false" => Some(false),
-        "true" => Some(true),
+        "false" | ".false." => Some(false),
+        "true" | ".true." => Some(true),
         _ => parse_boolean_integer(&value).map(|value| value != 0),
     }
 }
@@ -460,7 +464,7 @@ fn parse_boolean_integer(value: &str) -> Option<u128> {
 pub(super) fn variable_character_format(
     variable: &Variable,
     target_pointer_bits: u32,
-    rust_source: bool,
+    source_language: crate::language::Language,
     metadata: Option<&ValueTypeMetadata>,
 ) -> Option<IntegerFormat> {
     let type_name = variable.type_name.as_deref()?.trim().to_ascii_lowercase();
@@ -477,10 +481,12 @@ pub(super) fn variable_character_format(
         .collect::<Vec<_>>()
         .join(" ");
 
-    let rust_language = rust_source
-        || metadata.is_some_and(|metadata| metadata.language.as_deref() == Some("rust"));
+    let value_language = metadata
+        .and_then(|metadata| metadata.language.as_deref())
+        .map(crate::language::Language::from_gdb)
+        .unwrap_or(source_language);
 
-    if rust_language && unqualified == "char" {
+    if value_language == crate::language::Language::Rust && unqualified == "char" {
         target_integer_format(metadata).or(Some(IntegerFormat::unsigned(32)))
     } else if matches!(
         unqualified.as_str(),

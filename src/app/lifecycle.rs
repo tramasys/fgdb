@@ -972,16 +972,114 @@ fn gef_context_configuration_command(
 }
 
 pub(super) fn request_initial_source(ui: &Weak<Ui>, client: &MiClient) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+
+    let Some(generation) = current_ui.initial_source_generation() else {
+        return;
+    };
+
+    let session = current_ui.model.current_session();
+    let epoch = client.transport_epoch();
     let weak_ui = ui.clone();
 
-    let _ = client.request("-file-list-exec-source-file", move |_, record| {
-        if record.is_done()
-            && let (Some(ui), Some(source_file)) =
-                (weak_ui.upgrade(), crate::debugger::current_source(&record))
-        {
-            ui.show_initial_source(&source_file);
-        }
+    let current = Rc::new(move || {
+        weak_ui.upgrade().filter(|ui| {
+            ui.initial_source_generation() == Some(generation)
+                && ui.model.session().as_ref() == session.as_ref()
+                && ui.model.execution().ready
+                && !ui.model.execution().session_pending
+                && !ui.model.inferior_is_running()
+        })
     });
+
+    let guard = Rc::clone(&current);
+
+    let _ = client.request_when(
+        "-file-list-exec-source-file",
+        move || guard().is_some(),
+        move |client, record| {
+            if !record.is_done() || client.transport_epoch() != epoch {
+                return;
+            }
+
+            let (Some(ui), Some(source_file)) =
+                (current(), crate::debugger::current_source(&record))
+            else {
+                return;
+            };
+
+            let language =
+                crate::language::Language::from_path(Path::new(source_file.source_path()));
+
+            let Some(pattern) = language
+                .entrypoint_pattern()
+                .filter(|_| !ui.model.inferior_has_started())
+            else {
+                ui.show_initial_source(&source_file);
+                return;
+            };
+
+            // Query only the qualified entry symbol, not the loaded-source list.
+            // Two matches are enough to reject an ambiguous entry point.
+            let command = format!(
+                "-symbol-info-functions --name {} --max-results 2",
+                crate::debugger::quote(pattern)
+            );
+
+            let guard = Rc::clone(&current);
+            let fallback = source_file.clone();
+
+            if client
+                .request_when(
+                    &command,
+                    move || guard().is_some_and(|ui| !ui.model.inferior_has_started()),
+                    move |client, record| {
+                        if client.transport_epoch() != epoch || record.class == "superseded" {
+                            return;
+                        }
+
+                        let Some(ui) = current().filter(|ui| !ui.model.inferior_has_started())
+                        else {
+                            return;
+                        };
+
+                        let source = entrypoint_source(&record, language).unwrap_or(fallback);
+                        ui.show_initial_source(&source);
+                    },
+                )
+                .is_err()
+            {
+                ui.show_initial_source(&source_file);
+            }
+        },
+    );
+}
+
+fn entrypoint_source(
+    record: &MiRecord,
+    language: crate::language::Language,
+) -> Option<crate::debugger::SourceFile> {
+    if !record.is_done() {
+        return None;
+    }
+
+    let mut locations = crate::debugger::source_locations(record).into_iter();
+    let location = locations.next()?;
+
+    if locations.next().is_some()
+        || location.line == 0
+        || crate::language::Language::from_path(Path::new(location.source_path())) != language
+    {
+        return None;
+    }
+
+    Some(crate::debugger::SourceFile {
+        file: location.file,
+        fullname: location.fullname,
+        line: location.line,
+    })
 }
 
 pub(super) fn resynchronize_debugger_state(ui: &Weak<Ui>, client: &MiClient) {
@@ -1022,9 +1120,47 @@ pub(super) fn resynchronize_debugger_state(ui: &Weak<Ui>, client: &MiClient) {
 #[cfg(test)]
 mod tests {
     use super::{
-        GefContextControl, gef_context_configuration_command, parse_pointer_size,
-        selected_thread_execution_may_be_orphaned,
+        GefContextControl, entrypoint_source, gef_context_configuration_command,
+        parse_pointer_size, selected_thread_execution_may_be_orphaned,
     };
+
+    #[test]
+    fn initial_entrypoint_requires_one_source_in_the_expected_language() {
+        use crate::{debugger::parse_record, language::Language};
+
+        for (language, file, name) in [
+            (Language::Zig, "fixture.zig", "fixture.main"),
+            (Language::Odin, "fixture.odin", "fixture::main"),
+        ] {
+            let symbol = format!(r#"{{line="6",name="{name}"}}"#);
+
+            let record = parse_record(&format!(
+                r#"1^done,symbols={{debug=[{{filename="{file}",fullname="/src/{file}",symbols=[{symbol}]}}]}}"#
+            ))
+            .unwrap();
+
+            let source = entrypoint_source(&record, language).unwrap();
+            assert_eq!(source.source_path(), format!("/src/{file}"));
+            assert_eq!(source.line, 6);
+            assert!(entrypoint_source(&record, Language::C).is_none());
+
+            let ambiguous = parse_record(&format!(
+                r#"1^done,symbols={{debug=[{{filename="{file}",symbols=[{symbol},{symbol}]}}]}}"#
+            ))
+            .unwrap();
+
+            assert!(entrypoint_source(&ambiguous, language).is_none());
+        }
+
+        for reply in [
+            "1^done,symbols={}",
+            r#"1^error,msg="Undefined MI command""#,
+            r#"1^done,symbols={debug=[{filename="x.zig",symbols=[{line="0",name="x.main"}]}]}"#,
+        ] {
+            let record = parse_record(reply).unwrap();
+            assert!(entrypoint_source(&record, Language::Zig).is_none());
+        }
+    }
 
     #[test]
     fn accepts_decimal_and_gdb_hex_pointer_sizes() {

@@ -329,6 +329,8 @@ impl SessionController {
                             "The executable, arguments, environment, and working directory are configured.",
                             Some("status-ready"),
                         );
+
+                        request_initial_source(&self.ui, &self.client);
                     }
 
                     DebugSession::Attach { .. }

@@ -194,7 +194,7 @@ impl Ui {
         let children_handler = Rc::clone(&self.variable_children_handler);
         let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
         let target_architecture = Rc::clone(&self.target_architecture);
-        let current_source_is_rust = Rc::clone(&self.current_source_is_rust);
+        let current_source_language = Rc::clone(&self.current_source_language);
         let model = Rc::clone(&self.model);
 
         self.expression_watches_view
@@ -239,7 +239,7 @@ impl Ui {
                                 variable,
                                 target_pointer_bits.get(),
                                 target_architecture.get(),
-                                current_source_is_rust.get(),
+                                current_source_language.get(),
                                 None,
                                 ValueEditorHandlers {
                                     model: Rc::clone(&model),

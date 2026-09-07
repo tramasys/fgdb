@@ -578,7 +578,7 @@ fn finish_linked_node(
             .join("  ");
 
         let row = VariableViewerRow {
-            ordinal: traversal.shown,
+            ordinal: traversal.shown.to_string(),
             name: traversal
                 .current_address
                 .map(|address| format!("0x{address:x}"))

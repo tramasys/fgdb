@@ -8,6 +8,7 @@ mod cpp_toolchain;
 mod debug_info;
 mod debugger;
 mod kernel;
+mod language;
 mod misc;
 mod model;
 mod performance;

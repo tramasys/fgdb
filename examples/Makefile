@@ -2,6 +2,9 @@ CC ?= cc
 CXX ?= g++
 RUSTC ?= rustc
 GDB ?= gdb
+FORTRAN ?= gfortran
+ZIG ?= zig
+ODIN ?= odin
 
 CFLAGS ?= -std=c17 -g3 -O0 -fno-omit-frame-pointer -fno-inline -Wall -Wextra -Wpedantic
 CXXFLAGS ?= -std=c++20 -g3 -O0 -fno-omit-frame-pointer -fno-inline -Wall -Wextra -Wpedantic
@@ -33,11 +36,26 @@ OPTIMIZED_TARGETS := \
 	$(TARGET_DIR)/cpp-debug-target-o2 \
 	$(TARGET_DIR)/rust-debug-target-o2
 TARGETS := $(C_TARGETS) $(CXX_TARGETS) $(RUST_TARGETS) $(OPTIMIZED_TARGETS)
+LANGUAGE_TARGETS := \
+	$(TARGET_DIR)/fortran-variable-viewer-target \
+	$(TARGET_DIR)/zig-variable-viewer-target \
+	$(TARGET_DIR)/odin-variable-viewer-target
 CORE_DUMP := $(TARGET_DIR)/c-misc-core-target.core
 
-.PHONY: all clean core
+.PHONY: all clean core languages
 
 all: $(TARGETS)
+
+languages: $(LANGUAGE_TARGETS)
+
+$(TARGET_DIR)/fortran-variable-viewer-target: fortran_variable_viewer_target.f90 | $(TARGET_DIR)
+	$(FORTRAN) -g3 -O0 -fcheck=all $< -o $@
+
+$(TARGET_DIR)/zig-variable-viewer-target: zig_variable_viewer_target.zig | $(TARGET_DIR)
+	$(ZIG) build-exe $< -O Debug -fllvm -femit-bin=$@
+
+$(TARGET_DIR)/odin-variable-viewer-target: odin_variable_viewer_target.odin | $(TARGET_DIR)
+	$(ODIN) build $< -file -debug -o:none -out:$@
 
 $(TARGET_DIR):
 	mkdir -p $@
@@ -105,4 +123,4 @@ $(CORE_DUMP): $(TARGET_DIR)/c-misc-core-target
 		-ex "generate-core-file $(abspath $@)"
 
 clean:
-	$(RM) $(TARGETS) $(CORE_DUMP)
+	$(RM) $(TARGETS) $(LANGUAGE_TARGETS) $(CORE_DUMP)

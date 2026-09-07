@@ -1961,7 +1961,7 @@ impl MiClient {
                 client.capabilities.borrow_mut().pretty_printing = enabled;
 
                 if enabled {
-                    client.probe_rust_pretty_printing(true);
+                    client.configure_language_printers();
                 } else {
                     client.finish_initialization();
                 }
@@ -1976,6 +1976,28 @@ impl MiClient {
     pub fn refresh_pretty_printer_capabilities(&self) {
         if self.is_ready() && self.capabilities.borrow().pretty_printing {
             self.probe_rust_pretty_printing(false);
+        }
+    }
+
+    fn configure_language_printers(&self) {
+        let epoch = self.transport_epoch.get();
+
+        if self
+            .request(
+                &crate::language::python::install_command(),
+                move |client, record| {
+                    if client.transport_epoch.get() != epoch || record.class == "superseded" {
+                        return;
+                    }
+
+                    client.capabilities.borrow_mut().language_printers = record.is_success();
+                    client.probe_rust_pretty_printing(true);
+                },
+            )
+            .is_err()
+            && self.transport_epoch.get() == epoch
+        {
+            self.probe_rust_pretty_printing(true);
         }
     }
 
@@ -2564,6 +2586,7 @@ mod tests {
             mi_async: true,
             pretty_printing: true,
             rust_pretty_printing: true,
+            language_printers: true,
         };
 
         assert!(capabilities.supports("thread-info"));
@@ -2765,6 +2788,7 @@ mod tests {
                 client.process_line("4^done");
                 client.process_line("5^done");
                 client.process_line("6^done");
+                client.process_line("7^done");
                 let events = events.borrow();
 
                 let [super::MiEvent::Ready(capabilities)] = events.as_slice() else {
@@ -2804,6 +2828,7 @@ mod tests {
                 client.process_line("4^done");
                 client.process_line("5^done");
                 client.process_line(r#"6^error,msg="Python is unavailable""#);
+                client.process_line(r#"7^error,msg="Python is unavailable""#);
                 let events = events.borrow();
 
                 let [super::MiEvent::Ready(capabilities)] = events.as_slice() else {

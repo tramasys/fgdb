@@ -38,12 +38,14 @@ pub(super) fn viewer_value_is_null(value: &str) -> bool {
     )
 }
 
-pub(super) fn indexed_child_ordinal(name: &str) -> Option<usize> {
-    name.trim()
-        .strip_prefix('[')?
-        .strip_suffix(']')?
-        .parse()
-        .ok()
+pub(super) fn indexed_child_ordinal(name: &str) -> Option<i64> {
+    let name = name.trim();
+    let index = name
+        .strip_prefix('[')
+        .and_then(|name| name.strip_suffix(']'))
+        .unwrap_or(name);
+
+    index.parse().ok()
 }
 
 pub(super) fn transparent_index_wrapper(children: &[Variable]) -> Option<Variable> {

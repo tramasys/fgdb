@@ -88,8 +88,6 @@ pub(super) struct DebugDataState {
     pretty_printer_error: Option<String>,
     gcc_pretty_printer_directory: Option<PathBuf>,
     configured_pretty_printer_paths: Vec<PathBuf>,
-    runtime_pretty_printer_paths: Vec<PathBuf>,
-    pretty_printer_script_loading: bool,
     safe_mode: bool,
     activity: Vec<DebugDataActivity>,
 }
@@ -112,9 +110,11 @@ pub(super) struct DebugDataView {
     pub(super) window: gtk::Window,
     pub(super) refresh: gtk::Button,
     pub(super) overview: gtk::Box,
+    language_support: gtk::Box,
     pub(super) modules: gtk::Box,
     pub(super) sources: gtk::Box,
     pub(super) printers: gtk::Box,
+    printer_loader: PrettyPrinterLoader,
     pub(super) activity: gtk::Box,
     pub(super) module_search: gtk::Entry,
     pub(super) source_search: gtk::Entry,
@@ -341,56 +341,50 @@ impl Ui {
             || state.pretty_printer_error.is_some()
     }
 
-    pub(crate) fn begin_pretty_printer_script_load(&self, path: &Path) -> Result<(), String> {
-        let mut state = self.debug_data_state.borrow_mut();
-
-        if state.pretty_printer_script_loading {
-            return Err(String::from(
-                "Another pretty-printer script is still loading",
-            ));
-        }
-
-        if state
-            .runtime_pretty_printer_paths
-            .iter()
-            .any(|loaded| loaded == path)
-        {
-            return Err(String::from(
-                "This pretty-printer script is already loaded for the current GDB session",
-            ));
-        }
-
-        state.pretty_printer_script_loading = true;
-        drop(state);
+    pub(crate) fn begin_pretty_printer_script_load(
+        &self,
+    ) -> Result<crate::model::printers::PrinterLoadId, String> {
+        let request = self
+            .model
+            .printer_scripts
+            .borrow_mut()
+            .begin()
+            .map_err(str::to_owned)?;
         self.render_debug_data_printers();
 
-        Ok(())
+        Ok(request)
     }
 
-    pub(crate) fn finish_pretty_printer_script_load(&self, path: PathBuf, loaded: bool) {
-        let mut state = self.debug_data_state.borrow_mut();
-        state.pretty_printer_script_loading = false;
+    pub(crate) fn finish_pretty_printer_script_load(
+        &self,
+        request: crate::model::printers::PrinterLoadId,
+        path: Option<PathBuf>,
+    ) -> bool {
+        let loaded = path.is_some();
 
-        if loaded && !state.runtime_pretty_printer_paths.contains(&path) {
-            state.runtime_pretty_printer_paths.push(path);
+        if !self
+            .model
+            .printer_scripts
+            .borrow_mut()
+            .finish(request, path)
+        {
+            return false;
         }
-
-        drop(state);
 
         if loaded && let Some(view) = self.debug_data_view.borrow().as_ref() {
             view.printer_path.set_text("");
         }
 
         self.render_debug_data_printers();
+        true
     }
 
     pub(crate) fn reset_runtime_pretty_printer_scripts(&self) {
+        self.model.printer_scripts.borrow_mut().reset();
         let mut state = self.debug_data_state.borrow_mut();
         let reload_registry = state.pretty_printers_ready
             || state.pretty_printers_loading
             || state.pretty_printer_error.is_some();
-        state.runtime_pretty_printer_paths.clear();
-        state.pretty_printer_script_loading = false;
         state.pretty_printers = Rc::new(Vec::new());
         state.pretty_printers_ready = false;
         state.pretty_printers_loading = false;
@@ -741,6 +735,10 @@ impl Ui {
         let printer_browse = gtk::Button::with_label("Browse…");
         printer_browse.add_css_class("inline-action");
         let printer_load = gtk::Button::with_label("Load");
+        printer_load.set_tooltip_text(Some(
+            "Source a trusted GDB script. Python scripts should register standard GDB pretty printers, preferably scoped to their library's objfile.",
+        ));
+
         printer_load.add_css_class("inline-action");
         printer_load.set_sensitive(false);
         let load_for_entry = printer_load.clone();
@@ -749,6 +747,11 @@ impl Ui {
             load_for_entry.set_sensitive(entry.is_sensitive() && !entry.text().trim().is_empty());
         });
 
+        let printer_loader =
+            PrettyPrinterLoader::new(&printer_path, &printer_browse, &printer_load);
+        printers.append(&printer_loader.root);
+        let printer_registry = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        printers.append(&printer_registry);
         let activity = debug_data_page();
         append_debug_data_page(&notebook, &overview, "Overview");
         append_debug_data_page(&notebook, &modules, "Modules");
@@ -762,9 +765,11 @@ impl Ui {
             window: window.clone(),
             refresh,
             overview,
+            language_support: language_support_section(),
             modules,
             sources,
-            printers,
+            printers: printer_registry,
+            printer_loader,
             activity,
             module_search: module_search.clone(),
             source_search: source_search.clone(),
@@ -897,6 +902,22 @@ impl Ui {
         view.overview.append(&debug_data_fact(
             "Capabilities",
             &capabilities.compatibility_summary(),
+        ));
+
+        // Reuse the static section so refreshes preserve its disclosure state.
+        view.overview.append(&view.language_support);
+
+        view.overview.append(&debug_data_fact(
+            "Built-in language printers",
+            if capabilities.language_printers {
+                if capabilities.pretty_printing {
+                    "Loaded"
+                } else {
+                    "Loaded, pretty printing disabled"
+                }
+            } else {
+                "Unavailable - raw GDB values remain available"
+            },
         ));
 
         view.overview.append(&debug_data_fact(
@@ -1488,7 +1509,7 @@ impl Ui {
         };
 
         let render_started = Instant::now();
-        clear_page_after_search(&view.printers);
+        clear_debug_data_box(&view.printers);
 
         let (
             scopes,
@@ -1503,6 +1524,7 @@ impl Ui {
             safe_mode,
         ) = {
             let state = self.debug_data_state.borrow();
+            let scripts = self.model.printer_scripts.borrow();
 
             (
                 Rc::clone(&state.pretty_printers),
@@ -1512,8 +1534,8 @@ impl Ui {
                 state.pretty_printer_error.clone(),
                 state.gcc_pretty_printer_directory.clone(),
                 state.configured_pretty_printer_paths.clone(),
-                state.runtime_pretty_printer_paths.clone(),
-                state.pretty_printer_script_loading,
+                scripts.loaded().to_vec(),
+                scripts.is_loading(),
                 state.safe_mode,
             )
         };
@@ -1531,7 +1553,7 @@ impl Ui {
                 && !view.printer_path.text().trim().is_empty(),
         );
 
-        view.printers.append(&pretty_printer_loader_panel(
+        render_pretty_printer_loader(
             &view,
             &scopes,
             gcc_directory.as_deref(),
@@ -1540,7 +1562,7 @@ impl Ui {
             script_loading,
             safe_mode,
             printer_supported,
-        ));
+        );
 
         if loading {
             view.printers.append(&muted_label(if scopes.is_empty() {
@@ -2123,8 +2145,43 @@ fn filter_pretty_printer_scope(
     )
 }
 
+#[derive(Clone)]
+struct PrettyPrinterLoader {
+    root: gtk::Box,
+    entries: gtk::Box,
+    note: gtk::Label,
+}
+
+impl PrettyPrinterLoader {
+    fn new(path: &gtk::Entry, browse: &gtk::Button, load: &gtk::Button) -> Self {
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        root.add_css_class("debug-data-printer-loaders");
+        let heading = gtk::Label::new(Some("PRINTER LOADERS"));
+        heading.add_css_class("debug-data-printer-loader-heading");
+        heading.set_halign(gtk::Align::Start);
+        root.append(&heading);
+        let entries = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        root.append(&entries);
+        let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        controls.add_css_class("debug-data-printer-loader-controls");
+        controls.append(path);
+        controls.append(browse);
+        controls.append(load);
+        root.append(&controls);
+        let note = wrapping_value("");
+        note.add_css_class("debug-data-printer-loader-note");
+        root.append(&note);
+
+        Self {
+            root,
+            entries,
+            note,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-fn pretty_printer_loader_panel(
+fn render_pretty_printer_loader(
     view: &DebugDataView,
     scopes: &[PrettyPrinterScope],
     gcc_directory: Option<&Path>,
@@ -2133,13 +2190,10 @@ fn pretty_printer_loader_panel(
     loading: bool,
     safe_mode: bool,
     printer_supported: bool,
-) -> gtk::Box {
-    let panel = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    panel.add_css_class("debug-data-printer-loaders");
-    let heading = gtk::Label::new(Some("PRINTER LOADERS"));
-    heading.add_css_class("debug-data-printer-loader-heading");
-    heading.set_halign(gtk::Align::Start);
-    panel.append(&heading);
+) {
+    // The entry and buttons retain one parent for the dialog's entire lifetime.
+    let panel = &view.printer_loader.entries;
+    clear_debug_data_box(panel);
 
     let gcc_registered = pretty_printer_registry_contains(scopes, "libstdc++");
     let (gcc_path, gcc_status, gcc_status_class) = if safe_mode {
@@ -2199,24 +2253,13 @@ fn pretty_printer_loader_panel(
         ));
     }
 
-    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    controls.add_css_class("debug-data-printer-loader-controls");
-    controls.append(&view.printer_path);
-    controls.append(&view.printer_browse);
-    controls.append(&view.printer_load);
-    panel.append(&controls);
-    let note = wrapping_value(if !printer_supported {
+    view.printer_loader.note.set_text(if !printer_supported {
         "This GDB does not expose dynamic pretty printing"
     } else if loading {
-        "Loading the selected script inside GDB…"
+        "Validating and loading the selected script…"
     } else {
-        "Scripts execute inside GDB for this session. Add pretty_printer_path to the fgdb configuration to load a script at startup"
+        "Only load trusted scripts. They execute with GDB's permissions for this session. Use pretty_printer_path in the fgdb configuration for startup loading"
     });
-
-    note.add_css_class("debug-data-printer-loader-note");
-    panel.append(&note);
-
-    panel
 }
 
 fn pretty_printer_loader_row(name: &str, path: &str, status: &str, status_class: &str) -> gtk::Box {
@@ -2583,18 +2626,43 @@ fn debug_data_section(text: &str) -> gtk::Label {
 }
 
 fn debug_data_fact(name: &str, value: &str) -> gtk::Box {
+    debug_data_labeled_value(name, selectable_value(value))
+}
+
+fn debug_data_labeled_value(name: &str, value: gtk::Label) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 9);
     row.add_css_class("debug-data-fact");
     let name = gtk::Label::new(Some(name));
     name.add_css_class("debug-data-fact-name");
     name.set_halign(gtk::Align::Start);
     name.set_xalign(0.0);
-    let value = selectable_value(value);
     value.set_hexpand(true);
     row.append(&name);
     row.append(&value);
 
     row
+}
+
+fn language_support_section() -> gtk::Box {
+    let rows = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
+    components::inset(&rows, components::CONTENT_INSET);
+
+    for support in crate::language::PRIMARY_LANGUAGES {
+        let row = debug_data_labeled_value(support.name, wrapping_value(support.inspection));
+        row.set_tooltip_text(Some(support.expressions));
+        rows.append(&row);
+    }
+
+    rows.append(&muted_label(
+        "Values depend on compiler debug information and GDB support. Hover a language for expression syntax. Raw fields remain available when no printer applies.",
+    ));
+
+    build_disclosure(
+        "Language support",
+        &rows,
+        false,
+        "debug-data-language-support",
+    )
 }
 
 fn selectable_value(text: &str) -> gtk::Label {

@@ -2445,7 +2445,23 @@ pub(super) fn build_source_buffer(
 
     let language = path.map_or_else(
         || manager.language("c"),
-        |path| manager.guess_language(Some(path), None),
+        |path| {
+            let language = crate::language::Language::from_path(path);
+            let configured = || {
+                language
+                    .support()
+                    .and_then(|support| manager.language(support.syntax))
+            };
+
+            if matches!(
+                language,
+                crate::language::Language::Zig | crate::language::Language::Odin
+            ) {
+                configured().or_else(|| manager.guess_language(Some(path), None))
+            } else {
+                manager.guess_language(Some(path), None).or_else(configured)
+            }
+        },
     );
 
     let buffer = sourceview5::Buffer::builder()

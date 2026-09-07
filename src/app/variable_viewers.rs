@@ -4,6 +4,7 @@ mod heuristics;
 mod indexed;
 mod lifecycle;
 mod linked;
+mod native_array;
 
 use heuristics::{
     compact_variable_type_name, compact_viewer_text, indexed_child_ordinal, is_cpp_access_group,
@@ -153,7 +154,26 @@ fn start_variable_viewer_plan(
     request: VariableViewerRequest,
     owned_root: Option<String>,
 ) {
+    if matches!(
+        request.descriptor.plan,
+        VariableViewerPlan::NativeArray { .. }
+    ) && !request.variable.is_available()
+    {
+        session.finish(&request.variable.value);
+        cleanup_viewer_variable_objects(&ui, &client, owned_root);
+        return;
+    }
+
     match request.descriptor.plan.clone() {
+        VariableViewerPlan::NativeArray { limit } => native_array::request_array(
+            ui,
+            client,
+            requests,
+            session,
+            request.variable,
+            limit.min(MAX_VIEWER_ITEMS),
+            owned_root,
+        ),
         VariableViewerPlan::IndexedChildren { limit } => request_indexed_children(
             ui,
             client,

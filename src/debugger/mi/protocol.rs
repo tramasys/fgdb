@@ -67,6 +67,7 @@ pub struct GdbCapabilities {
     pub mi_async: bool,
     pub pretty_printing: bool,
     pub rust_pretty_printing: bool,
+    pub language_printers: bool,
 }
 
 impl GdbCapabilities {

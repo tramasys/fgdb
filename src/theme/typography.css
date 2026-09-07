@@ -136,6 +136,10 @@ button.breakpoint-badge,
     font-weight: 700;
 }
 
+.debug-data-language-support .section-title {
+    font-size: inherit;
+}
+
 .thread-workspace-summary,
 .inferior-stop-owner,
 .debug-data-section,

@@ -184,7 +184,7 @@ fn request_indexed_level(
                 .into_iter()
                 .take(limit)
                 .map(|(index, child)| VariableViewerRow {
-                    ordinal: index,
+                    ordinal: index.to_string(),
                     name: child.name.clone(),
                     value: compact_viewer_text(&child.value, 320),
                     type_name: compact_variable_type_name(child.type_name.as_deref()),

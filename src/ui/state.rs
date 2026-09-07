@@ -200,7 +200,7 @@ impl Ui {
             target_pointer_bits_known,
             target_architecture: Rc::new(Cell::new(TargetArchitecture::Unknown)),
             target_endian: Rc::new(Cell::new(None)),
-            current_source_is_rust: Rc::new(Cell::new(false)),
+            current_source_language: Rc::new(Cell::new(crate::language::Language::Unknown)),
             instructions_title: workspace.instructions_title,
             instructions_store: workspace.instructions_store,
             instructions_selection: workspace.instructions_selection,

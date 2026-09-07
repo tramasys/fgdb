@@ -79,6 +79,15 @@ pub struct ValueTypeMetadata {
     pub enum_variants: Vec<EnumVariant>,
 }
 
+impl VariableUpdate {
+    /// GDB only includes a dynamic parent's value when its summary changes.
+    /// Bundled variants use that summary as a discriminant, but GDB can retain
+    /// the old child types. Retire the owning varobj before accepting children.
+    pub fn invalidates_variant_children(&self) -> bool {
+        self.display_hint.as_deref() == Some("fgdb-variant") && self.value.is_some()
+    }
+}
+
 impl Variable {
     pub fn is_available(&self) -> bool {
         let value = self.value.trim();
@@ -87,6 +96,8 @@ impl Variable {
             "<optimized out",
             "<out of scope",
             "<not available",
+            "<not allocated",
+            "<not associated",
             "<type changed",
             "<error:",
         ]
@@ -98,7 +109,12 @@ impl Variable {
         self.type_name.as_deref().is_some_and(|type_name| {
             let type_name = type_name.trim();
 
-            type_name.contains('*') || type_name.starts_with('&') || type_name.ends_with('&')
+            (type_name.contains('*')
+                || type_name.starts_with(['&', '^'])
+                || type_name.starts_with("[^]")
+                || type_name.ends_with('&'))
+                && !crate::language::is_fortran_array(type_name)
+                && !crate::language::uses_fortran_kind_star(type_name)
         })
     }
 
@@ -1577,6 +1593,7 @@ mod tests {
         assert_eq!(updates[0].has_more, Some(true));
         assert_eq!(updates[0].display_hint.as_deref(), Some("array"));
         assert_eq!(updates[0].dynamic, Some(true));
+        assert!(!updates[0].invalidates_variant_children());
         assert_eq!(updates[1].in_scope, Some(false));
         assert!(updates[1].type_changed);
         assert_eq!(updates[1].new_type.as_deref(), Some("long"));
@@ -1585,6 +1602,15 @@ mod tests {
         assert_eq!(selected.in_scope, Some(false));
         assert!(selected.type_changed);
         assert!(super::variable_update_named(&record, "missing").is_none());
+
+        let record = parse_record(
+            r#"15^done,changelist=[{name="var1.choice",value="point",in_scope="true",type_changed="false",displayhint="fgdb-variant",dynamic="1"},{name="var1.choice.count",value="{id = 3}",in_scope="true",type_changed="false"}]"#,
+        )
+        .unwrap();
+
+        let updates = variable_updates(&record);
+        assert!(updates[0].invalidates_variant_children());
+        assert!(!updates[1].invalidates_variant_children());
     }
 
     #[test]

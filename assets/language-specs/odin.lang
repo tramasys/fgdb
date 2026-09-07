@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<language id="fgdb-odin" _name="Odin" version="2.0" _section="Source">
+  <metadata>
+    <property name="globs">*.odin</property>
+    <property name="line-comment-start">//</property>
+    <property name="block-comment-start">/*</property>
+    <property name="block-comment-end">*/</property>
+  </metadata>
+  <styles>
+    <style id="keyword" name="Keyword" map-to="def:keyword"/>
+    <style id="type" name="Type" map-to="def:type"/>
+    <style id="directive" name="Directive" map-to="def:preprocessor"/>
+    <style id="string" name="String" map-to="def:string"/>
+    <style id="comment" name="Comment" map-to="def:comment"/>
+  </styles>
+  <definitions>
+    <context id="line-comment" style-ref="comment" end-at-line-end="true">
+      <start>//</start>
+      <include><context ref="def:in-comment"/></include>
+    </context>
+    <context id="raw-string" style-ref="string"><start>`</start><end>`</end></context>
+    <context id="block-comment" style-ref="comment">
+      <start>/\*</start><end>\*/</end>
+      <include><context ref="block-comment"/></include>
+    </context>
+    <context id="fgdb-odin">
+      <include>
+        <context ref="line-comment"/>
+        <context ref="block-comment"/>
+        <context ref="raw-string"/>
+        <context ref="def:string"/>
+        <context ref="def:single-quoted-string"/>
+        <context ref="def:hexadecimal"/>
+        <context ref="def:decimal"/>
+        <context style-ref="directive"><match>\#[a-zA-Z_][a-zA-Z_0-9]*</match></context>
+        <context style-ref="type">
+          <match>\b([iu](8|16|32|64|128)|f(16|32|64)|b(8|16|32|64)|int|uint|uintptr|bool|byte|rune|string|cstring|rawptr|typeid|any|complex(32|64|128)|quaternion(64|128|256))\b</match>
+        </context>
+        <context style-ref="keyword">
+          <match>\b(auto_cast|bit_field|bit_set|break|case|cast|context|continue|defer|distinct|do|dynamic|else|enum|fallthrough|for|foreign|if|import|in|map|matrix|not_in|or_break|or_continue|or_else|or_return|package|proc|return|struct|switch|transmute|union|using|when|where|true|false|nil)\b</match>
+        </context>
+      </include>
+    </context>
+  </definitions>
+</language>

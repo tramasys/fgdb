@@ -855,11 +855,21 @@ fn apply_bulk_variable_updates(
         })
         .collect::<HashSet<_>>();
 
+    // Dynamic pretty printers reuse child slots in GDB, even when a variant
+    // changes their types. Recreate the owning root before publishing any of
+    // its descendants, including changes in nested variants.
+    let changed_variants = updates
+        .iter()
+        .filter(|update| update.invalidates_variant_children())
+        .filter_map(|update| variable_object_owned_root(&roots, &update.varobj).cloned())
+        .collect::<HashSet<_>>();
+
     let descendants = updates
         .iter()
         .filter(|update| {
             !roots.contains(&update.varobj)
                 && variable_object_has_owned_ancestor(&roots, &update.varobj)
+                && variable_object_owned_root(&changed_variants, &update.varobj).is_none()
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -898,6 +908,7 @@ fn apply_bulk_variable_updates(
                 let update = updates.get(varobj.as_str()).copied();
 
                 let invalid = (!succeeded && reused)
+                    || changed_variants.contains(&varobj)
                     || update.is_some_and(|update| {
                         update.in_scope == Some(false) || update.type_changed
                     });
@@ -943,17 +954,22 @@ fn variable_object_owns_update(root: &str, candidate: &str) -> bool {
 }
 
 fn variable_object_has_owned_ancestor(roots: &HashSet<String>, candidate: &str) -> bool {
-    let mut current = candidate;
+    candidate
+        .rsplit_once('.')
+        .is_some_and(|(parent, _)| variable_object_owned_root(roots, parent).is_some())
+}
 
-    while let Some((parent, _)) = current.rsplit_once('.') {
-        if roots.contains(parent) {
-            return true;
+fn variable_object_owned_root<'a>(
+    roots: &'a HashSet<String>,
+    mut candidate: &str,
+) -> Option<&'a String> {
+    loop {
+        if let Some(root) = roots.get(candidate) {
+            return Some(root);
         }
 
-        current = parent;
+        candidate = candidate.rsplit_once('.')?.0;
     }
-
-    false
 }
 
 fn apply_variable_update(variable: &mut Variable, update: &crate::debugger::VariableUpdate) {
@@ -2606,7 +2622,8 @@ mod tests {
     use super::{
         LazyStopNeeds, Variable, VariableRefreshTarget, apply_variable_update,
         has_persistent_variable_objects, reuse_variable_objects, take_owned_variable_objects,
-        variable_child_page_end, variable_object_has_owned_ancestor, variable_object_owns_update,
+        variable_child_page_end, variable_object_has_owned_ancestor, variable_object_owned_root,
+        variable_object_owns_update,
     };
 
     fn variable(
@@ -2731,6 +2748,16 @@ mod tests {
 
         assert!(!variable_object_owns_update("fgdb_var_1", "temporary"));
         let roots = HashSet::from([String::from("fgdb_var_1"), String::from("fgdb_var_20")]);
+
+        assert_eq!(
+            variable_object_owned_root(&roots, "fgdb_var_1.choice.value").map(String::as_str),
+            Some("fgdb_var_1"),
+        );
+
+        assert_eq!(
+            variable_object_owned_root(&roots, "fgdb_var_20").map(String::as_str),
+            Some("fgdb_var_20"),
+        );
 
         assert!(variable_object_has_owned_ancestor(
             &roots,

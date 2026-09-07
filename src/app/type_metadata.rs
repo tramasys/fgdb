@@ -21,14 +21,14 @@ pub(super) fn request_value_type_metadata(ui: Weak<Ui>, client: Rc<MiClient>, va
     };
 
     let Some(varobj) = variable.varobj.as_deref() else {
-        request_resolved_metadata(ui, requests, request, variable.name.clone(), variable);
+        request_resolved_metadata(ui, requests, request, variable.name.clone(), None, variable);
         return;
     };
 
-    let command = format!(
-        "-var-info-path-expression {}",
-        crate::debugger::quote(varobj)
-    );
+    let (root, members) = variable_path_root(&variable, varobj);
+    let members = members.map(str::to_owned);
+
+    let command = format!("-var-info-path-expression {}", crate::debugger::quote(root));
 
     let ui_for_response = ui.clone();
     let ui_for_guard = ui.clone();
@@ -48,14 +48,17 @@ pub(super) fn request_value_type_metadata(ui: Weak<Ui>, client: Rc<MiClient>, va
                 return;
             }
 
-            let expression = crate::debugger::variable_path_expression(&record)
-                .unwrap_or_else(|| variable_for_response.name.clone());
+            let Some(expression) = crate::debugger::variable_path_expression(&record) else {
+                present_editor(&ui_for_response, request, variable_for_response, None);
+                return;
+            };
 
             request_resolved_metadata(
                 ui_for_response,
                 requests_for_response,
                 request,
                 expression,
+                members,
                 variable_for_response,
             );
         })
@@ -93,15 +96,22 @@ pub(super) fn assign_float_bytes(
     };
 
     let Some(varobj) = variable.varobj.as_deref() else {
-        assign_resolved_float(ui, requests, variable.name.clone(), variable, raw_bytes);
+        assign_resolved_float(
+            ui,
+            requests,
+            variable.name.clone(),
+            None,
+            variable,
+            raw_bytes,
+        );
 
         return;
     };
 
-    let command = format!(
-        "-var-info-path-expression {}",
-        crate::debugger::quote(varobj)
-    );
+    let (root, members) = variable_path_root(&variable, varobj);
+    let members = members.map(str::to_owned);
+
+    let command = format!("-var-info-path-expression {}", crate::debugger::quote(root));
 
     let ui_for_response = ui.clone();
 
@@ -131,6 +141,7 @@ pub(super) fn assign_float_bytes(
                 ui_for_response,
                 requests_for_response,
                 expression,
+                members,
                 variable_for_response,
                 raw_for_response,
             );
@@ -145,18 +156,19 @@ fn assign_resolved_float(
     ui: Weak<Ui>,
     requests: StopRequests,
     expression: String,
+    members: Option<String>,
     variable: Variable,
     raw_bytes: Vec<u8>,
 ) {
     let python = format!(
         r#"import gdb
-v=gdb.parse_and_eval(bytes.fromhex("{}").decode())
+v={}
 b=bytes.fromhex("{}")
 assert int(v.type.sizeof) == len(b), "floating-point storage width changed"
 assert v.address is not None, "value has no writable memory address"
 little="little endian" in gdb.execute("show endian",to_string=True).lower()
 gdb.selected_inferior().write_memory(v.address,b[::-1] if little else b)"#,
-        hex(expression.as_bytes()),
+        value_python(&expression, members.as_deref()),
         hex(&raw_bytes),
     );
 
@@ -205,13 +217,14 @@ fn request_resolved_metadata(
     requests: StopRequests,
     request: VariableEditorRequest,
     expression: String,
+    members: Option<String>,
     variable: Variable,
 ) {
     if !editor_request_is_current(&ui, request) {
         return;
     }
 
-    let python = metadata_python(&expression);
+    let python = metadata_python(&expression, members.as_deref());
 
     let command = crate::debugger::console_command(&format!(
         "python exec(bytes.fromhex(\"{}\").decode(), {{}})",
@@ -259,11 +272,36 @@ fn present_editor(
     }
 }
 
-pub(super) fn metadata_python(expression: &str) -> String {
+fn variable_path_root<'a>(variable: &Variable, varobj: &'a str) -> (&'a str, Option<&'a str>) {
+    if variable
+        .type_name
+        .as_deref()
+        .is_some_and(crate::language::is_fortran_type)
+    {
+        let (root, members) = varobj.split_once('.').unwrap_or((varobj, ""));
+
+        (root, Some(members))
+    } else {
+        (varobj, None)
+    }
+}
+
+fn value_python(expression: &str, members: Option<&str>) -> String {
+    if let Some(members) = members {
+        crate::language::python::fortran_value_expression(expression, members)
+    } else {
+        let expression = hex(expression.as_bytes());
+
+        format!("gdb.parse_and_eval(bytes.fromhex(\"{expression}\").decode())")
+    }
+}
+
+pub(super) fn metadata_python(expression: &str, members: Option<&str>) -> String {
+    let value = value_python(expression, members);
+
     format!(
         r#"import gdb
-e=bytes.fromhex("{}").decode()
-v=gdb.parse_and_eval(e)
+v={value}
 t=v.type.strip_typedefs()
 kind="other"
 if t.code == gdb.TYPE_CODE_ENUM: kind="enum"
@@ -297,7 +335,6 @@ if kind == "enum":
 meta=";".join(["1",kind,bits,signed,raw,language]+variants)
 assert len(meta) <= {MAX_METADATA_BYTES}, "type metadata exceeds the editor budget"
 gdb.write("{METADATA_PREFIX}"+meta+"\n")"#,
-        hex(expression.as_bytes()),
     )
 }
 
@@ -401,7 +438,7 @@ pub(super) fn hex(bytes: &[u8]) -> String {
     )
 }
 
-fn decode_hex(value: &str) -> Option<Vec<u8>> {
+pub(super) fn decode_hex(value: &str) -> Option<Vec<u8>> {
     if !value.len().is_multiple_of(2) {
         return None;
     }

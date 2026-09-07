@@ -18,6 +18,7 @@ use std::{
 };
 pub(crate) mod actions;
 mod execution;
+pub(crate) mod printers;
 pub(crate) mod processes;
 pub(crate) mod replay;
 mod state;
@@ -27,6 +28,7 @@ pub(crate) use execution::execution_event_matches_thread;
 pub(crate) use state::{DebuggerState, DebuggerStateDelta, TargetConnection};
 
 pub(crate) struct DebuggerModel {
+    pub(crate) printer_scripts: RefCell<printers::PrinterScripts>,
     pub(crate) replay: RefCell<replay::ReplayState>,
     execution: ExecutionState,
     processes: ProcessState,
@@ -36,6 +38,7 @@ pub(crate) struct DebuggerModel {
 impl DebuggerModel {
     pub(crate) fn new(initial_session: Option<DebugSession>) -> Self {
         Self {
+            printer_scripts: RefCell::new(printers::PrinterScripts::default()),
             replay: RefCell::new(replay::ReplayState::default()),
             execution: ExecutionState::new(initial_session),
             processes: ProcessState::new(),

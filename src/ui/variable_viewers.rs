@@ -12,6 +12,9 @@ const MAX_OPEN_VARIABLE_VIEWERS: usize = 16;
 /// produce the same plans.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum VariableViewerPlan {
+    NativeArray {
+        limit: usize,
+    },
     IndexedChildren {
         limit: usize,
     },
@@ -54,8 +57,9 @@ impl VariableViewerRegistry {
     pub(crate) fn with_builtins() -> Self {
         let mut registry = Self::default();
         let array_registered = registry.register(ArrayViewerProvider);
+        let native_array_registered = registry.register(FortranArrayProvider);
         let list_registered = registry.register(LinkedListViewerProvider);
-        debug_assert!(array_registered && list_registered);
+        debug_assert!(array_registered && native_array_registered && list_registered);
 
         registry
     }
@@ -88,6 +92,29 @@ impl VariableViewerRegistry {
 }
 
 struct ArrayViewerProvider;
+
+struct FortranArrayProvider;
+
+impl VariableViewerProvider for FortranArrayProvider {
+    fn descriptor(&self) -> VariableViewerDescriptor {
+        VariableViewerDescriptor {
+            id: String::from("native-array"),
+            title: String::from("Array / sequence"),
+            detail: String::from("Browse array coordinates with native bounds and storage order"),
+            plan: VariableViewerPlan::NativeArray {
+                limit: ARRAY_VIEWER_LIMIT,
+            },
+        }
+    }
+
+    fn supports(&self, variable: &Variable) -> bool {
+        viewer_can_inspect(variable)
+            && variable
+                .type_name
+                .as_deref()
+                .is_some_and(crate::language::is_fortran_array)
+    }
+}
 
 impl VariableViewerProvider for ArrayViewerProvider {
     fn descriptor(&self) -> VariableViewerDescriptor {
@@ -277,7 +304,7 @@ fn is_linked_name(name: &str) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct VariableViewerRow {
-    pub(crate) ordinal: usize,
+    pub(crate) ordinal: String,
     pub(crate) name: String,
     pub(crate) value: String,
     pub(crate) type_name: String,
@@ -387,20 +414,27 @@ impl Ui {
                 return true;
             }
 
-            let searchable = format!(
-                "{} {} {} {}",
-                row.name, row.value, row.type_name, row.details
-            )
-            .to_ascii_lowercase();
-
-            query
-                .split_whitespace()
-                .all(|term| searchable.contains(term))
+            query.split_whitespace().all(|term| {
+                [
+                    &row.ordinal,
+                    &row.name,
+                    &row.value,
+                    &row.type_name,
+                    &row.details,
+                ]
+                .iter()
+                .any(|field| {
+                    field
+                        .as_bytes()
+                        .windows(term.len())
+                        .any(|window| window.eq_ignore_ascii_case(term.as_bytes()))
+                })
+            })
         });
 
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
-        let search = source_search_entry("Filter name, value, type, or field");
+        let search = source_search_entry("Filter index, name, value, type, or field");
         let query_for_search = Rc::clone(&query);
 
         search.connect_changed(move |search| {
@@ -415,12 +449,21 @@ impl Ui {
         view.add_css_class("variable-viewer-table");
         view.set_vexpand(true);
 
+        let native_array = matches!(
+            request.descriptor.plan,
+            VariableViewerPlan::NativeArray { .. }
+        );
+
         for (title, width, expand, field) in [
-            ("INDEX", 75, false, 0_u8),
+            ("INDEX", if native_array { 160 } else { 75 }, false, 0_u8),
             ("NAME / ADDRESS", 180, false, 1),
             ("VALUE / FIELDS", 360, true, 2),
             ("TYPE", 240, false, 3),
         ] {
+            if native_array && field == 1 {
+                continue;
+            }
+
             view.append_column(&variable_viewer_column(title, width, expand, field));
         }
 
@@ -519,18 +562,24 @@ fn variable_viewer_column(
         clear_label_selection(&label);
 
         let text = match field {
-            0 => row.ordinal.to_string(),
-            1 => row.name.clone(),
-            2 if !row.details.is_empty() => row.details.clone(),
-            2 => row.value.clone(),
-            _ => row.type_name.clone(),
+            0 => &row.ordinal,
+            1 => &row.name,
+            2 if !row.details.is_empty() => &row.details,
+            2 => &row.value,
+            _ => &row.type_name,
         };
 
-        label.set_text(&text);
+        label.set_text(text);
+
+        let identity = if row.name.is_empty() {
+            &row.ordinal
+        } else {
+            &row.name
+        };
 
         label.set_tooltip_text(Some(&format!(
-            "{}\n{}\n{}",
-            row.name, row.value, row.type_name
+            "{identity}\n{}\n{}",
+            row.value, row.type_name
         )));
     });
 

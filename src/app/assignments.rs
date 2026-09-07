@@ -431,6 +431,7 @@ else: raise AssertionError("invalid Rust string edit was accepted")"#,
             .arg("-ex")
             .arg(scoped_python(type_metadata::metadata_python(
                 "local_primitives.float32",
+                None,
             )));
         command.arg("-ex").arg(scoped_python(format!(r#"import gdb
 local=gdb.default_visualizer(gdb.parse_and_eval("local_string"))

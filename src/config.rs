@@ -361,10 +361,8 @@ impl LaunchConfig {
             }
 
             for path in &self.pretty_printer_paths {
-                if let Some(path) = path.to_str()
-                    && let Ok(path) = crate::debugger::gdb_cli_string(path)
-                {
-                    arguments.extend([String::from("-iex"), format!("source {path}")]);
+                if let Ok(command) = crate::language::scripts::source_command(path) {
+                    arguments.extend([String::from("-iex"), command]);
                 }
             }
 
@@ -1402,37 +1400,13 @@ fn resolve_pretty_printer_paths(
             working_directory.join(&path)
         };
 
-        let canonical = match candidate.canonicalize() {
-            Ok(canonical) => canonical,
+        let canonical = match crate::language::scripts::PrinterScript::resolve(&candidate) {
+            Ok(script) => script.into_path(),
             Err(error) => {
-                errors.push((path, error.to_string()));
-
+                errors.push((path, error));
                 continue;
             }
         };
-
-        match canonical.metadata() {
-            Ok(metadata) if metadata.is_file() => {}
-            Ok(_) => {
-                errors.push((path, String::from("the path is not a regular file")));
-
-                continue;
-            }
-            Err(error) => {
-                errors.push((path, error.to_string()));
-
-                continue;
-            }
-        }
-
-        if canonical.to_str().is_none() {
-            errors.push((
-                path,
-                String::from("the path is not valid UTF-8 for this GDB session"),
-            ));
-
-            continue;
-        }
 
         if seen.insert(canonical.clone()) {
             resolved.push(canonical);
@@ -2249,10 +2223,26 @@ mod tests {
 
         assert!(errors.is_empty());
         assert_eq!(paths, [script.canonicalize().unwrap()]);
+        let validated = crate::language::scripts::PrinterScript::resolve(&script).unwrap();
+
+        assert_eq!(
+            validated.command(),
+            format!("source {}", paths[0].display())
+        );
+        assert_eq!(validated.path(), paths[0]);
 
         let (_, errors) = resolve_pretty_printer_paths(vec![PathBuf::from("missing.py")], &root);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].0, PathBuf::from("missing.py"));
+
+        let invalid = root.join("line\nbreak.py");
+        std::fs::write(&invalid, "# test printer\n").unwrap();
+
+        let (paths, errors) = resolve_pretty_printer_paths(vec![root.clone(), invalid], &root);
+        assert!(paths.is_empty());
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].1.contains("regular file"));
+        assert!(errors[1].1.contains("unsupported characters"));
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -2273,21 +2263,17 @@ mod tests {
     }
 
     #[test]
-    fn configured_pretty_printer_scripts_are_quoted_as_startup_commands() {
+    fn configured_pretty_printer_scripts_use_literal_source_paths() {
         let root = std::env::temp_dir().join(format!(
             "fgdb-config-printer-command-{}",
             std::process::id()
         ));
-        let script = root.join("user printer.py");
+        let script = root.join("user's \"printer\".py");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&script, "# test printer\n").unwrap();
         let contents = format!("gdb=gdb\npretty_printer_path={}\n", script.display());
         let configuration = resolve(&["fgdb"], &contents);
-        let expected = format!(
-            "source {}",
-            crate::debugger::gdb_cli_string(script.canonicalize().unwrap().to_str().unwrap())
-                .unwrap()
-        );
+        let expected = format!("source {}", script.canonicalize().unwrap().display());
 
         assert!(
             configuration

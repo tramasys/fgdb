@@ -135,6 +135,13 @@ impl Ui {
         });
     }
 
+    pub(crate) fn initial_source_generation(&self) -> Option<u64> {
+        self.source_documents
+            .borrow()
+            .is_empty()
+            .then(|| self.source_open_generation.load(Ordering::Relaxed))
+    }
+
     pub fn show_initial_source(&self, source_file: &SourceFile) {
         if !self.source_documents.borrow().is_empty() {
             return;
@@ -160,11 +167,12 @@ impl Ui {
     pub fn show_execution_location(&self, frame: &StackFrame) {
         self.model.select_frame(frame.level);
 
-        self.current_source_is_rust.set(
+        self.current_source_language.set(
             frame
                 .source_path()
-                .and_then(|path| Path::new(path).extension())
-                .is_some_and(|extension| extension.eq_ignore_ascii_case("rs")),
+                .map_or(crate::language::Language::Unknown, |path| {
+                    crate::language::Language::from_path(Path::new(path))
+                }),
         );
 
         if let Some(description) = frame.architecture.as_deref() {
@@ -259,7 +267,9 @@ impl Ui {
     pub fn clear_execution_location(&self) {
         self.source_open_generation.fetch_add(1, Ordering::Relaxed);
         self.model.select_frame(u32::MAX);
-        self.current_source_is_rust.set(false);
+        self.current_source_language
+            .set(crate::language::Language::Unknown);
+
         update_selected_frame_buttons(&self.frame_buttons.borrow(), u32::MAX);
         self.clear_execution_mark();
     }
@@ -270,7 +280,9 @@ impl Ui {
         // The stopped-state refresh updates it when GDB reports the next frame.
         // Removing and immediately restoring this class made the blue row flash
         // on every step even though the sidebar contents stayed visible.
-        self.current_source_is_rust.set(false);
+        self.current_source_language
+            .set(crate::language::Language::Unknown);
+
         self.execution_source_line.set(None);
         let path = self.execution_source_path.borrow();
 
@@ -393,11 +405,9 @@ impl Ui {
             let source_filter = gtk::FileFilter::new();
             source_filter.set_name(Some("Source files"));
 
-            for pattern in [
-                "*.c", "*.h", "*.cc", "*.cpp", "*.cxx", "*.hpp", "*.hh", "*.rs", "*.s", "*.S",
-                "*.asm", "*.inc", "*.inl", "*.m", "*.mm", "*.go", "*.zig",
-            ] {
-                source_filter.add_pattern(pattern);
+            for extension in crate::language::source_extensions() {
+                source_filter.add_pattern(&format!("*.{extension}"));
+                source_filter.add_pattern(&format!("*.{}", extension.to_ascii_uppercase()));
             }
 
             let all_filter = gtk::FileFilter::new();

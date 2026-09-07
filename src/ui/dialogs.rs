@@ -36,7 +36,7 @@ impl Ui {
             variable,
             self.target_pointer_bits.get(),
             self.target_architecture(),
-            self.current_source_is_rust.get(),
+            self.current_source_language.get(),
             metadata.as_ref(),
             ValueEditorHandlers {
                 model: Rc::clone(&self.model),
@@ -463,7 +463,7 @@ pub(super) fn open_variable_editor(
     variable: Variable,
     target_pointer_bits: u32,
     target_architecture: TargetArchitecture,
-    rust_source: bool,
+    source_language: crate::language::Language,
     metadata: Option<&ValueTypeMetadata>,
     handlers: ValueEditorHandlers,
 ) {
@@ -502,7 +502,7 @@ pub(super) fn open_variable_editor(
         variable,
         target_pointer_bits,
         target_architecture,
-        rust_source,
+        source_language,
         metadata,
         handlers,
     );
@@ -547,7 +547,7 @@ fn build_variable_editor(
     variable: Variable,
     target_pointer_bits: u32,
     target_architecture: TargetArchitecture,
-    rust_source: bool,
+    source_language: crate::language::Language,
     metadata: Option<&ValueTypeMetadata>,
     handlers: ValueEditorHandlers,
 ) -> gtk::Window {
@@ -582,7 +582,18 @@ fn build_variable_editor(
     }
 
     if let Some(value) = variable_boolean_value(&variable, metadata) {
-        return open_boolean_editor(parent, variable, value, Rc::clone(&handlers.assignment));
+        let dialect = metadata
+            .and_then(|metadata| metadata.language.as_deref())
+            .map(crate::language::Language::from_gdb)
+            .unwrap_or(source_language);
+
+        return open_boolean_editor(
+            parent,
+            variable,
+            value,
+            dialect,
+            Rc::clone(&handlers.assignment),
+        );
     }
 
     let editor = gtk::Window::builder()
@@ -610,7 +621,7 @@ fn build_variable_editor(
     content.append(&type_name);
 
     let character_format =
-        variable_character_format(&variable, target_pointer_bits, rust_source, metadata);
+        variable_character_format(&variable, target_pointer_bits, source_language, metadata);
 
     let integer_format = character_format
         .or_else(|| variable_integer_format(&variable, target_pointer_bits, metadata))
@@ -1202,6 +1213,7 @@ fn open_boolean_editor(
     parent: &gtk::ApplicationWindow,
     variable: Variable,
     original: bool,
+    dialect: crate::language::Language,
     handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
 ) -> gtk::Window {
     let editor = gtk::Window::builder()
@@ -1234,7 +1246,7 @@ fn open_boolean_editor(
     content.append(&row);
 
     let detail = gtk::Label::new(Some(
-        "Boolean value  fgdb sends the language-neutral value 0 or 1 to GDB",
+        "Boolean value  assignment uses the current GDB expression dialect",
     ));
 
     detail.add_css_class("muted");
@@ -1261,7 +1273,7 @@ fn open_boolean_editor(
             if let Some(handler) = handler {
                 handler(
                     variable.clone(),
-                    if selected { "1" } else { "0" }.to_owned(),
+                    dialect.boolean_literal(selected).to_owned(),
                 );
             }
         }

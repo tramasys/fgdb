@@ -1496,7 +1496,7 @@ pub struct Ui {
     target_pointer_bits_known: Rc<Cell<bool>>,
     target_architecture: Rc<Cell<TargetArchitecture>>,
     target_endian: Rc<Cell<Option<TargetEndian>>>,
-    current_source_is_rust: Rc<Cell<bool>>,
+    current_source_language: Rc<Cell<crate::language::Language>>,
     instructions_title: gtk::Label,
     instructions_store: gio::ListStore,
     instructions_selection: gtk::SingleSelection,
@@ -2318,6 +2318,18 @@ mod tests {
             dynamic: false,
         };
 
+        assert!(!variable("message", "character*24", "'Fortran'").is_pointer());
+        assert!(variable("pointer", "real *", "0x1000").is_pointer());
+        assert!(variable("function", "integer (*)(int)", "0x1000").is_pointer());
+        assert_eq!(
+            variable_boolean_value(&variable("enabled", "logical(kind=4)", ".TRUE."), None),
+            Some(true)
+        );
+        assert_eq!(
+            variable_boolean_value(&variable("enabled", "logical*8", ".FALSE."), None),
+            Some(false)
+        );
+
         assert_eq!(
             variable_integer_format(&variable("count", "std::uint32_t", "0x2a"), 64, None),
             Some(IntegerFormat::unsigned(32))
@@ -2327,14 +2339,19 @@ mod tests {
             variable_character_format(
                 &variable("separator", "char16_t", "65 'A'"),
                 64,
-                false,
+                crate::language::Language::Cpp,
                 None,
             ),
             Some(IntegerFormat::unsigned(16))
         );
 
         assert_eq!(
-            variable_character_format(&variable("letter", "char", "'🦀'"), 64, true, None),
+            variable_character_format(
+                &variable("letter", "char", "'🦀'"),
+                64,
+                crate::language::Language::Rust,
+                None
+            ),
             Some(IntegerFormat::unsigned(32))
         );
 
