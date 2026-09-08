@@ -78,7 +78,67 @@ struct HeapInspectorWidgets {
     command: gtk::Label,
     store: gio::ListStore,
     empty: gtk::Label,
-    in_flight: Rc<Cell<bool>>,
+    in_flight: Rc<Cell<Option<HeapInspectionId>>>,
+    selection: Rc<AllocatorSelection>,
+    backend_selector: gtk::DropDown,
+}
+
+#[derive(Default)]
+pub(super) struct AllocatorSelection {
+    selected: Cell<Option<crate::misc::HeapBackend>>,
+    available: RefCell<Vec<crate::misc::HeapBackend>>,
+    manual: Cell<bool>,
+    updating: Cell<bool>,
+}
+
+impl AllocatorSelection {
+    fn update(&self, selector: &gtk::DropDown, snapshot: &AllocatorSnapshot) {
+        let manual = self
+            .selected
+            .get()
+            .filter(|backend| self.manual.get() && snapshot.available_backends.contains(backend));
+
+        self.manual.set(manual.is_some());
+
+        let selected = manual
+            .or(snapshot.selected_backend)
+            .or_else(|| snapshot.available_backends.first().copied());
+
+        self.updating.set(true);
+
+        if *self.available.borrow() != snapshot.available_backends {
+            let names = snapshot
+                .available_backends
+                .iter()
+                .map(|backend| backend.name())
+                .collect::<Vec<_>>();
+
+            let model = gtk::StringList::new(&names);
+            self.available.replace(snapshot.available_backends.clone());
+            selector.set_model(Some(&model));
+            selector.set_sensitive(!names.is_empty());
+        }
+
+        let index = selected.and_then(|backend| {
+            snapshot
+                .available_backends
+                .iter()
+                .position(|candidate| *candidate == backend)
+        });
+
+        selector.set_selected(index.map_or(gtk::INVALID_LIST_POSITION, |index| index as u32));
+        self.updating.set(false);
+    }
+
+    fn clear(&self, selector: &gtk::DropDown) {
+        self.updating.set(true);
+        self.manual.set(false);
+        self.selected.set(None);
+        self.available.borrow_mut().clear();
+        selector.set_selected(gtk::INVALID_LIST_POSITION);
+        selector.set_sensitive(false);
+        self.updating.set(false);
+    }
 }
 
 struct HeapTableWidgets {
@@ -202,6 +262,10 @@ pub(super) fn build_misc_view(theme: &Theme) -> MiscView {
         heap_inspector_store: allocator.inspector.store,
         heap_inspector_empty: allocator.inspector.empty,
         heap_inspector_in_flight: allocator.inspector.in_flight,
+        heap_inspector_serial: Cell::new(0),
+        heap_inspector_snapshot_stop: Cell::new(None),
+        heap_selection: allocator.inspector.selection,
+        heap_backend_selector: allocator.inspector.backend_selector,
         lock_summary: locks.summary,
         lock_note: locks.note,
         lock_store: locks.store,
@@ -403,9 +467,9 @@ fn build_allocator_page() -> AllocatorWidgets {
     root.append(&switcher);
     let summary = gtk::Box::new(gtk::Orientation::Vertical, 0);
     summary.set_vexpand(true);
-    let detection = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    let detection = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
     detection.add_css_class("allocator-detection-card");
-    let caption = gtk::Label::new(Some("DETECTED ALLOCATOR"));
+    let caption = gtk::Label::new(Some("C ALLOCATOR BINDING"));
     caption.add_css_class("allocator-detection-caption");
     caption.set_halign(gtk::Align::Start);
     let implementation = allocator_value_label("allocator-detection-identity");
@@ -413,24 +477,38 @@ fn build_allocator_page() -> AllocatorWidgets {
     detection.append(&caption);
     detection.append(&implementation);
     detection.append(&basis);
-    let bindings = append_allocator_detail(&detection, "DEFAULT C BINDINGS", None);
-    let runtimes = append_allocator_detail(&detection, "DETECTED RUNTIMES", None);
+    let runtimes = append_allocator_detail(&detection, "Loaded runtimes", None);
 
     let frontends = append_allocator_detail(
         &detection,
-        "LANGUAGE / RUNTIME ALLOCATORS",
+        "Allocation frontends",
         Some("allocator-frontend-value"),
     );
 
-    let evidence = append_allocator_detail(
-        &detection,
-        "SUPPORTING EVIDENCE",
-        Some("allocator-evidence-value"),
-    );
+    let details = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
+    let bindings = append_allocator_detail(&details, "C bindings", None);
 
+    let evidence = append_allocator_detail(&details, "Evidence", Some("allocator-evidence-value"));
+
+    detection.append(&build_disclosure(
+        "Detection evidence",
+        &details,
+        false,
+        "allocator-evidence",
+    ));
     let safety = allocator_value_label("allocator-detection-safety");
     detection.append(&safety);
-    summary.append(&detection);
+
+    let detection_scroll = gtk::ScrolledWindow::builder()
+        .child(&detection)
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .propagate_natural_height(true)
+        .min_content_height(100)
+        .overlay_scrolling(false)
+        .build();
+
+    configure_misc_scroller(&detection_scroll);
+    summary.append(&detection_scroll);
 
     let metrics = gtk::FlowBox::builder()
         .selection_mode(gtk::SelectionMode::None)
@@ -454,26 +532,26 @@ fn build_allocator_page() -> AllocatorWidgets {
 
     view.append_column(&misc_column::<AllocatorRegion>(
         "ADDRESS RANGE",
-        330,
+        270,
         false,
-        |row| format!("0x{:016x}-0x{:016x}", row.start, row.end),
+        |row| format!("0x{:x}-0x{:x}", row.start, row.end),
     ));
 
-    view.append_column(&misc_column::<AllocatorRegion>("SIZE", 120, false, |row| {
+    view.append_column(&misc_column::<AllocatorRegion>("SIZE", 95, false, |row| {
         crate::kernel::format_bytes(row.size())
     }));
 
-    view.append_column(&misc_column::<AllocatorRegion>("PERM", 78, false, |row| {
+    view.append_column(&misc_column::<AllocatorRegion>("PERM", 65, false, |row| {
         row.permissions.clone()
     }));
 
-    view.append_column(&misc_column::<AllocatorRegion>("ROLE", 260, false, |row| {
+    view.append_column(&misc_column::<AllocatorRegion>("ROLE", 150, false, |row| {
         row.role.clone()
     }));
 
     view.append_column(&misc_column::<AllocatorRegion>(
         "BACKING",
-        420,
+        180,
         true,
         |row| row.path.clone(),
     ));
@@ -505,11 +583,31 @@ fn build_allocator_page() -> AllocatorWidgets {
 fn build_heap_inspector() -> HeapInspectorWidgets {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_vexpand(true);
-    let controls = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let controls = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
     controls.add_css_class("heap-inspector-controls");
+    let actions = RefCell::new(Vec::new());
+    let selection = Rc::new(AllocatorSelection::default());
+    let backend_selector = gtk::DropDown::from_strings(&["Awaiting allocator detection"]);
+    backend_selector.set_hexpand(true);
+    backend_selector.set_sensitive(false);
+    backend_selector.set_tooltip_text(Some(
+        "Choose a detected runtime. A Rust global allocator may differ from the C malloc binding",
+    ));
+
+    let backend_row = gtk::Box::new(gtk::Orientation::Horizontal, components::CONTROL_GAP);
+    let backend_label = gtk::Label::new(Some("Runtime"));
+    backend_label.add_css_class("heap-inspector-group-title");
+    backend_row.append(&backend_label);
+    backend_row.append(&backend_selector);
+    let inspect = heap_action_button("Read state", HeapInspectionAction::Backend, &actions);
+    inspect.set_tooltip_text(Some(
+        "Read a bounded snapshot without executing allocator code",
+    ));
+    backend_row.append(&inspect);
+    controls.append(&backend_row);
 
     let note = gtk::Label::new(Some(
-        "Read-only heap structure views for the detected allocator.",
+        "Pause the target to detect allocator runtimes. No allocator functions are called.",
     ));
 
     note.add_css_class("heap-inspector-note");
@@ -517,7 +615,7 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
     note.set_xalign(0.0);
     note.set_wrap(true);
     controls.append(&note);
-    let actions = RefCell::new(Vec::new());
+    let glibc_controls = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
 
     let structures = heap_action_group(
         "GLIBC STRUCTURES",
@@ -531,7 +629,7 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
         &actions,
     );
 
-    controls.append(&structures);
+    glibc_controls.append(&structures);
 
     let bins = heap_action_group(
         "FREE LISTS / BINS",
@@ -547,8 +645,8 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
         &actions,
     );
 
-    controls.append(&bins);
-    let expression_group = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    glibc_controls.append(&bins);
+    let expression_group = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
     let expression_title = gtk::Label::new(Some("TARGETED INSPECTION"));
     expression_title.add_css_class("heap-inspector-group-title");
     expression_title.set_halign(gtk::Align::Start);
@@ -565,29 +663,45 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
         "Inspect the allocation containing this user pointer or chunk address",
     ));
 
-    expression_group.append(&expression);
+    let targeted_actions = gtk::Box::new(gtk::Orientation::Horizontal, components::CONTROL_GAP);
 
-    let targeted_actions = gtk::FlowBox::builder()
-        .selection_mode(gtk::SelectionMode::None)
-        .homogeneous(false)
-        .min_children_per_line(1)
-        .max_children_per_line(2)
-        .column_spacing(3)
-        .row_spacing(3)
-        .build();
-
-    targeted_actions.add_css_class("heap-inspector-actions");
     let chunk = heap_action_button("Inspect chunk", HeapInspectionAction::Chunk, &actions);
-    targeted_actions.insert(&chunk, -1);
-    let backend = heap_action_button("Detected backend", HeapInspectionAction::Backend, &actions);
-
-    backend.set_tooltip_text(Some(
-        "Inspect the detected backend when fgdb has a verified native decoder",
-    ));
-
-    targeted_actions.insert(&backend, -1);
+    chunk.set_hexpand(false);
+    targeted_actions.append(&expression);
+    targeted_actions.append(&chunk);
     expression_group.append(&targeted_actions);
-    controls.append(&expression_group);
+    glibc_controls.append(&expression_group);
+    glibc_controls.set_visible(false);
+    controls.append(&glibc_controls);
+
+    let selected_backend = Rc::clone(&selection);
+    let action_buttons = actions.borrow().clone();
+
+    backend_selector.connect_selected_item_notify(move |selector| {
+        let selected = selected_backend
+            .available
+            .borrow()
+            .get(selector.selected() as usize)
+            .copied();
+        selected_backend.selected.set(selected);
+
+        if !selected_backend.updating.get() {
+            selected_backend.manual.set(true);
+        }
+
+        let is_glibc = selected == Some(crate::misc::HeapBackend::Glibc);
+        glibc_controls.set_visible(is_glibc);
+
+        for (button, action) in &action_buttons {
+            button.set_visible(*action == HeapInspectionAction::Backend || is_glibc);
+        }
+
+        note.set_text(
+            selected.map_or("No supported allocator runtime was detected", |backend| {
+                backend.scope()
+            }),
+        );
+    });
     root.append(&controls);
     let result_header = gtk::Box::new(gtk::Orientation::Vertical, 1);
     result_header.add_css_class("heap-inspector-result-header");
@@ -608,7 +722,7 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
 
     table.view.append_column(&heap_inspection_column(
         "STRUCTURE",
-        125,
+        100,
         false,
         HeapCellKind::Structure,
         |row| &row.kind,
@@ -616,7 +730,7 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
 
     table.view.append_column(&heap_inspection_column(
         "ADDRESS / INDEX",
-        190,
+        160,
         false,
         HeapCellKind::Location,
         |row| &row.location,
@@ -624,15 +738,15 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
 
     table.view.append_column(&heap_inspection_column(
         "SIZE / COUNT",
-        180,
+        135,
         false,
         HeapCellKind::Metric,
         |row| &row.metric,
     ));
 
     table.view.append_column(&heap_inspection_column(
-        "STATE",
-        110,
+        "STATE / MEANING",
+        150,
         false,
         HeapCellKind::State,
         |row| &row.state,
@@ -640,7 +754,7 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
 
     table.view.append_column(&heap_inspection_column(
         "DETAILS / LINKS",
-        500,
+        180,
         true,
         HeapCellKind::Details,
         |row| &row.details,
@@ -657,7 +771,9 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
         command,
         store: table.store,
         empty: table.empty,
-        in_flight: Rc::new(Cell::new(false)),
+        in_flight: Rc::new(Cell::new(None)),
+        selection,
+        backend_selector,
     }
 }
 
@@ -800,6 +916,7 @@ fn update_heap_row_actions(
 
     inspect.set_sensitive(
         targeted_inspect.is_sensitive()
+            && targeted_inspect.is_visible()
             && selected
                 .is_some_and(|row| row.borrow::<HeapInspectionRow>().inspect_address.is_some()),
     );
@@ -814,7 +931,7 @@ fn activate_selected_heap_chunk(
         return;
     };
 
-    if targeted_inspect.is_sensitive() {
+    if targeted_inspect.is_sensitive() && targeted_inspect.is_visible() {
         expression.set_text(&format_address(Some(address)));
         targeted_inspect.emit_clicked();
     }
@@ -840,6 +957,16 @@ fn connect_heap_table_interactions(
     let targeted = targeted_inspect.clone();
 
     targeted_inspect.connect_sensitive_notify(move |_| {
+        update_heap_row_actions(&selection, &copy, &inspect, &targeted);
+    });
+
+    let selection = table.selection.clone();
+    let copy = table.copy_selected.clone();
+    let inspect = table.inspect_selected.clone();
+    let targeted = targeted_inspect.clone();
+
+    targeted_inspect.connect_visible_notify(move |_| {
+        inspect.set_visible(targeted.is_visible());
         update_heap_row_actions(&selection, &copy, &inspect, &targeted);
     });
 
@@ -921,8 +1048,18 @@ fn heap_inspection_column(
             HeapCellKind::Details => "heap-inspector-details-cell",
         });
 
-        label.set_halign(gtk::Align::Start);
-        label.set_ellipsize(pango::EllipsizeMode::Middle);
+        label.set_halign(gtk::Align::Fill);
+        label.set_xalign(0.0);
+
+        if matches!(cell_kind, HeapCellKind::State | HeapCellKind::Details) {
+            label.set_wrap(true);
+            label.set_wrap_mode(pango::WrapMode::WordChar);
+            label.set_lines(3);
+            label.set_ellipsize(pango::EllipsizeMode::End);
+        } else {
+            label.set_ellipsize(pango::EllipsizeMode::Middle);
+        }
+
         enable_stable_text_selection(&label);
         item.set_child(Some(&label));
     });
@@ -1051,12 +1188,16 @@ fn append_allocator_detail(
     title: &str,
     value_class: Option<&str>,
 ) -> gtk::Label {
-    let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, components::CONTENT_INSET);
     row.add_css_class("allocator-detail");
     let key = gtk::Label::new(Some(title));
     key.add_css_class("allocator-detail-key");
     key.set_halign(gtk::Align::Start);
+    key.set_valign(gtk::Align::Start);
+    key.set_width_chars(20);
+    key.set_xalign(0.0);
     let value = allocator_value_label("allocator-detail-value");
+    value.set_hexpand(true);
 
     if let Some(value_class) = value_class {
         value.add_css_class(value_class);
@@ -1909,7 +2050,7 @@ pub(super) fn connect_misc_tab_visibility(
 
 impl MiscView {
     pub(super) fn set_heap_inspector_sensitive(&self, sensitive: bool, busy: bool) {
-        let inspection_in_flight = self.heap_inspector_in_flight.get();
+        let inspection_in_flight = self.heap_inspector_in_flight.get().is_some();
         let sensitive = sensitive && !inspection_in_flight;
 
         for (button, _) in &self.heap_inspector_actions {
@@ -1986,6 +2127,9 @@ impl MiscView {
     fn show_allocator(&self, allocator: AllocatorSnapshot) {
         let region_count = allocator.regions.len();
 
+        self.heap_selection
+            .update(&self.heap_backend_selector, &allocator);
+
         let basis_class = match allocator.implementation.as_str() {
             "split allocator bindings" => Some("allocator-detection-error"),
             "allocator binding unresolved"
@@ -2008,10 +2152,7 @@ impl MiscView {
 
         set_allocator_value(&self.allocator_implementation, &allocator.implementation);
 
-        set_allocator_value(
-            &self.allocator_basis,
-            &allocator.detection_basis.to_ascii_uppercase(),
-        );
+        set_allocator_value(&self.allocator_basis, &allocator.detection_basis);
 
         let bindings = if allocator.default_bindings.is_empty() {
             if allocator.probe_complete {
@@ -2060,7 +2201,7 @@ impl MiscView {
         let evidence = if allocator.evidence.is_empty() {
             String::from("No additional allocator-specific symbols or modules")
         } else {
-            allocator.evidence.join("  ")
+            allocator.evidence.join("\n")
         };
 
         set_allocator_value(&self.allocator_evidence, &evidence);
@@ -2068,11 +2209,11 @@ impl MiscView {
         set_allocator_value(
             &self.allocator_safety,
             if allocator.probe_dispatch_failures > 0 {
-                "PARTIAL READ-ONLY PROBE  some optional GDB queries were not queued"
+                "Partial read-only detection. Some optional GDB probes were skipped"
             } else if allocator.probe_complete {
-                "READ ONLY  resolved for this stop without executing allocator code"
+                "Read-only detection cached until the session or loaded modules change. C bindings do not prove a language's global allocator"
             } else {
-                "MAPPING FALLBACK  allocator code was not executed"
+                "Mapping evidence only. No allocator code was executed"
             },
         );
 
@@ -2311,13 +2452,15 @@ impl MiscView {
 
         self.allocator_store.remove_all();
         self.allocator_empty.set_visible(true);
-        self.heap_inspector_in_flight.set(false);
+        self.heap_selection.clear(&self.heap_backend_selector);
+        self.heap_inspector_in_flight.set(None);
+        self.heap_inspector_snapshot_stop.set(None);
 
         self.heap_inspector_command
             .set_text("No heap structure query has run");
 
         self.heap_inspector_status
-            .set_text("Choose a discovered command above while the target is paused");
+            .set_text("Choose a detected runtime while the target is paused");
 
         self.heap_inspector_status
             .remove_css_class("heap-inspector-error");
@@ -2356,11 +2499,25 @@ impl Ui {
         handler: impl Fn(HeapInspectionRequest) + 'static,
     ) {
         self.heap_inspection_handler.replace(Some(Rc::new(handler)));
+        let weak_ui = Rc::clone(&self.self_weak);
+
+        self.misc_view
+            .heap_backend_selector
+            .connect_selected_item_notify(move |_| {
+                if let Some(ui) = weak_ui.borrow().upgrade() {
+                    if let Some(request) = ui.misc_view.heap_inspector_in_flight.get() {
+                        ui.finish_heap_inspection(request);
+                    }
+
+                    ui.update_control_sensitivity();
+                }
+            });
 
         for (button, action) in &self.misc_view.heap_inspector_actions {
             let action = *action;
             let expression = self.misc_view.heap_inspector_expression.clone();
             let callback = Rc::clone(&self.heap_inspection_handler);
+            let selection = Rc::clone(&self.misc_view.heap_selection);
 
             button.connect_clicked(move |_| {
                 let Some(callback) = callback.borrow().clone() else {
@@ -2370,6 +2527,7 @@ impl Ui {
                 callback(HeapInspectionRequest {
                     action,
                     expression: expression.text().trim().to_owned(),
+                    backend: selection.selected.get(),
                 });
             });
         }
@@ -2390,24 +2548,33 @@ impl Ui {
             });
     }
 
-    pub(crate) fn begin_heap_inspection(&self, command: &str) -> Option<u64> {
-        if !self.misc_refresh_allowed() || self.misc_view.heap_inspector_in_flight.replace(true) {
+    pub(crate) fn begin_heap_inspection(&self, command: &str) -> Option<HeapInspectionId> {
+        if !self.misc_refresh_allowed() || self.misc_view.heap_inspector_in_flight.get().is_some() {
             return None;
         }
 
-        let generation = self.model.current_stop_refresh_generation();
+        let serial = self.misc_view.heap_inspector_serial.get().wrapping_add(1);
+        self.misc_view.heap_inspector_serial.set(serial);
 
+        let generation =
+            HeapInspectionId::new(self.model.current_stop_refresh_generation(), serial);
         self.misc_view
-            .heap_inspector_command
-            .set_text(&format!("FGDB  {command}"));
+            .heap_inspector_in_flight
+            .set(Some(generation));
 
-        self.misc_view
-            .heap_inspector_command
-            .set_tooltip_text(Some(command));
+        if self.misc_view.heap_inspector_store.n_items() == 0 {
+            self.misc_view
+                .heap_inspector_command
+                .set_text(&format!("FGDB  {command}"));
+
+            self.misc_view
+                .heap_inspector_command
+                .set_tooltip_text(Some(command));
+        }
 
         self.misc_view
             .heap_inspector_status
-            .set_text("Reading heap structures…");
+            .set_text(&format!("Reading {command}…"));
 
         self.misc_view
             .heap_inspector_status
@@ -2417,61 +2584,97 @@ impl Ui {
             .heap_inspector_status
             .remove_css_class("heap-inspector-warning");
 
-        self.misc_view.heap_inspector_store.remove_all();
         self.misc_view.heap_inspector_empty.set_visible(false);
         self.update_control_sensitivity();
 
         Some(generation)
     }
 
-    pub(crate) fn heap_inspection_is_current(&self, generation: u64) -> bool {
-        self.model.is_stop_refresh_current(generation)
-            && self.misc_view.heap_inspector_in_flight.get()
+    pub(crate) fn heap_inspection_is_current(&self, generation: HeapInspectionId) -> bool {
+        self.model
+            .is_stop_refresh_current(generation.stop_generation)
+            && self.misc_view.heap_inspector_in_flight.get() == Some(generation)
             && !self.model.inferior_is_running()
     }
 
-    pub(crate) fn allocator_identity(&self) -> String {
-        self.misc_view.allocator_implementation.text().to_string()
-    }
-
-    pub(crate) fn show_heap_inspection(&self, generation: u64, snapshot: HeapInspectionSnapshot) {
-        if !self.model.is_stop_refresh_current(generation) {
-            self.finish_heap_inspection();
+    pub(crate) fn show_heap_inspection(
+        &self,
+        generation: HeapInspectionId,
+        snapshot: HeapInspectionSnapshot,
+    ) {
+        if !self.heap_inspection_is_current(generation) {
+            self.finish_heap_inspection(generation);
             return;
         }
 
-        self.misc_view.heap_inspector_in_flight.set(false);
+        if snapshot.rows.is_empty()
+            && let Some(diagnostic) = snapshot.diagnostic.as_deref()
+        {
+            self.show_heap_inspection_error(generation, &snapshot.command, diagnostic);
+            return;
+        }
+
+        self.misc_view.heap_inspector_in_flight.set(None);
+        self.misc_view
+            .heap_inspector_snapshot_stop
+            .set(Some(generation.stop_generation));
         self.misc_view.show_heap_inspection(snapshot);
         self.update_control_sensitivity();
     }
 
-    pub(crate) fn show_heap_inspection_error(&self, generation: u64, command: &str, error: &str) {
-        if !self.model.is_stop_refresh_current(generation) {
-            self.finish_heap_inspection();
+    pub(crate) fn show_heap_inspection_error(
+        &self,
+        generation: HeapInspectionId,
+        command: &str,
+        error: &str,
+    ) {
+        if !self.heap_inspection_is_current(generation) {
+            self.finish_heap_inspection(generation);
             return;
         }
 
-        self.misc_view.heap_inspector_in_flight.set(false);
+        self.misc_view.heap_inspector_in_flight.set(None);
 
-        self.misc_view
-            .heap_inspector_command
-            .set_text(&format!("FGDB  {command}"));
+        let has_previous = self.misc_view.heap_inspector_store.n_items() > 0;
+
+        if !has_previous {
+            self.misc_view
+                .heap_inspector_command
+                .set_text(&format!("FGDB  {command}"));
+
+            self.misc_view
+                .heap_inspector_command
+                .set_tooltip_text(Some(command));
+        }
 
         self.misc_view
             .heap_inspector_status
             .add_css_class("heap-inspector-error");
 
-        self.misc_view.heap_inspector_status.set_text(error);
+        self.misc_view
+            .heap_inspector_status
+            .set_text(&if has_previous {
+                format!("{command} failed. Previous snapshot retained. {error}")
+            } else {
+                error.to_owned()
+            });
+
         self.application_log
             .record(LogLevel::Error, "Heap inspection failed", error);
-        self.misc_view.heap_inspector_store.remove_all();
-        self.misc_view.heap_inspector_empty.set_visible(true);
+        self.misc_view
+            .heap_inspector_empty
+            .set_visible(!has_previous);
         self.update_control_sensitivity();
     }
 
-    fn finish_heap_inspection(&self) {
-        self.misc_view.heap_inspector_in_flight.set(false);
-        self.update_control_sensitivity();
+    pub(crate) fn finish_heap_inspection(&self, generation: HeapInspectionId) {
+        if self.misc_view.heap_inspector_in_flight.get() == Some(generation) {
+            self.misc_view.heap_inspector_in_flight.set(None);
+            self.misc_view.heap_inspector_status.set_text(
+                "Inspection cancelled after the stop context changed. Read state to refresh",
+            );
+            self.update_control_sensitivity();
+        }
     }
 
     pub fn set_misc_refresh_handler(&self, handler: impl Fn() + 'static) {

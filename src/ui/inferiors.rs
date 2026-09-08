@@ -875,9 +875,13 @@ impl Ui {
         self.reset_target_abi();
         self.invalidate_allocator_probe_cache();
         self.latest_modules.borrow_mut().clear();
-        clear_box(&self.modules_list);
-        self.modules_list
+        self.module_controls.dismiss_menu();
+        self.module_controls.symbol_labels.borrow_mut().clear();
+        clear_box(&self.module_controls.list);
+        self.module_controls
+            .list
             .append(&empty_label("Modules refresh after selecting an inferior"));
+        self.update_module_control_sensitivity();
     }
 
     fn render_selected_inferior_state(&self) {

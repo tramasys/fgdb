@@ -9,10 +9,11 @@ pub(crate) struct Choice {
 }
 
 macro_rules! choices {
-    ($name:ident { $($variant:ident => ($value:literal, $label:literal)),+ $(,)? }) => {
+    ($(#[$attribute:meta])* $name:ident { $($(#[$variant_attribute:meta])* $variant:ident => ($value:literal, $label:literal)),+ $(,)? }) => {
+        $(#[$attribute])*
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub(crate) enum $name {
-            $($variant),+
+            $($(#[$variant_attribute])* $variant),+
         }
 
         impl $name {
@@ -67,8 +68,18 @@ choices!(CursorBlink {
     Off => ("off", "Off"),
 });
 
+choices!(#[derive(Default)] SymbolDownloads {
+    #[default]
+    Gdb => ("gdb", "Follow GDB setting"),
+    Ask => ("ask", "Ask before downloading"),
+    On => ("on", "Allow on explicit symbol requests"),
+    Off => ("off", "Local files only"),
+});
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Preferences {
+    pub symbol_downloads: SymbolDownloads,
+    pub debug_file_directories: String,
     pub keybindings: keybindings::Bindings,
     pub source_font: String,
     pub source_tab_width: u32,
@@ -102,6 +113,11 @@ impl Preferences {
 
     fn values(&self) -> Values {
         let mut entries: Values = [
+            ("symbol_downloads", self.symbol_downloads.as_str().into()),
+            (
+                "debug_file_directories",
+                self.debug_file_directories.clone(),
+            ),
             ("source_font", self.source_font.clone()),
             ("source_tab_width", self.source_tab_width.to_string()),
             ("source_wrap", self.source_wrap.to_string()),
@@ -152,6 +168,8 @@ impl Preferences {
 
     pub(super) fn from_layer(layer: &ConfigLayer) -> Self {
         Self {
+            symbol_downloads: layer.symbol_downloads.unwrap_or_default(),
+            debug_file_directories: layer.debug_file_directories.clone().unwrap_or_default(),
             keybindings: keybindings::Bindings::from_overrides(&layer.keybindings),
             source_font: layer
                 .source_font
@@ -381,6 +399,20 @@ pub(crate) const SETTINGS: &[Setting] = &[
         help: "Set source breakpoints at the next executable line when the clicked line has no code",
         page: "Debugging",
         control: Control::Toggle,
+    },
+    Setting {
+        key: "symbol_downloads",
+        title: "Debug information downloads",
+        help: "Used only when explicitly resolving module symbols. Local loading never needs network consent",
+        page: "Debugging",
+        control: Control::Choice(SymbolDownloads::CHOICES),
+    },
+    Setting {
+        key: "debug_file_directories",
+        title: "Additional debug directories",
+        help: "Absolute directories separated by ':', searched in addition to GDB's configured directories. Applies to the next symbol request",
+        page: "Debugging",
+        control: Control::Text,
     },
     Setting {
         key: "gdb",

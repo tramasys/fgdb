@@ -738,7 +738,7 @@ pub(super) fn build_workspace(
         call_stack_list: left_sidebar.call_stack_list,
         threads_list: left_sidebar.threads_list,
         thread_controls: left_sidebar.thread_controls,
-        modules_list: left_sidebar.modules_list,
+        module_controls: left_sidebar.module_controls,
         inferior_controls: left_sidebar.inferior_controls,
         locals_store: inspector.locals_store,
         locals_selection: inspector.locals_selection,
@@ -856,13 +856,7 @@ pub(super) fn build_left_sidebar() -> LeftSidebar {
 
     let thread_controls = build_thread_controls();
     let threads_list = thread_controls.list.clone();
-    let modules_list = dynamic_list("Modules appear after the inferior starts");
-
-    let modules_scrolled = gtk::ScrolledWindow::builder()
-        .child(&modules_list)
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .build();
+    let module_controls = modules::build_module_controls();
 
     let source_tree = build_source_tree_view();
     let inferior_controls = build_inferior_controls();
@@ -883,7 +877,10 @@ pub(super) fn build_left_sidebar() -> LeftSidebar {
         Some(&gtk::Label::new(Some("Threads"))),
     );
 
-    navigation.append_page(&modules_scrolled, Some(&gtk::Label::new(Some("Modules"))));
+    navigation.append_page(
+        &module_controls.root,
+        Some(&gtk::Label::new(Some("Modules"))),
+    );
     navigation.append_page(&source_tree.root, Some(&gtk::Label::new(Some("Sources"))));
     navigation.connect_switch_page(move |_, page, _| {
         clear_label_selections_after_switch(page);
@@ -898,7 +895,7 @@ pub(super) fn build_left_sidebar() -> LeftSidebar {
         call_stack_list,
         threads_list,
         thread_controls,
-        modules_list,
+        module_controls,
         source_tree,
         inferior_controls,
     }

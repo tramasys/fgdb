@@ -10,6 +10,7 @@ mod misc;
 mod model;
 mod performance;
 mod source;
+mod symbols;
 mod syscalls;
 mod theme;
 mod ui;

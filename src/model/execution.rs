@@ -197,6 +197,7 @@ impl DebuggerModel {
         let changed = self.execution.debugger_ready.replace(ready) != ready;
 
         if !ready {
+            self.symbols.reset();
             self.invalidate_stop_context();
             self.execution
                 .debugger_state
@@ -335,6 +336,7 @@ impl DebuggerModel {
     }
 
     pub(crate) fn set_current_session(&self, session: DebugSession) {
+        self.symbols.reset();
         self.reset_replay();
         self.execution.current_session.replace(Some(session));
     }
@@ -397,6 +399,10 @@ impl DebuggerModel {
     }
 
     pub(crate) fn set_session_pending(&self, value: bool) -> bool {
+        if value && !self.execution.session_pending.get() {
+            self.symbols.reset();
+        }
+
         self.execution.session_pending.replace(value) != value
     }
 

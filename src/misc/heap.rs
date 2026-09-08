@@ -4,6 +4,11 @@ use std::{
     io::Read,
     os::unix::fs::FileExt,
     path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use super::*;
@@ -71,6 +76,36 @@ pub(crate) struct NativeHeapReadRequest {
     pub pointer_bits: u32,
     pub query: NativeHeapQuery,
     pub discovery: HeapDiscovery,
+    pub budget: HeapReadBudget,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct HeapReadBudget {
+    cancelled: Arc<AtomicBool>,
+    deadline: Instant,
+}
+
+impl HeapReadBudget {
+    pub(crate) fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+            deadline: Instant::now() + Duration::from_secs(8),
+        }
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.cancelled.load(Ordering::Relaxed) || Instant::now() >= self.deadline {
+            Err(String::from(
+                "Heap inspection was cancelled or exceeded its time budget",
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -338,6 +373,7 @@ struct MemoryReader<'a> {
     endian: TargetEndian,
     pointer_size: usize,
     bytes_read: usize,
+    budget: HeapReadBudget,
 }
 
 impl<'a> MemoryReader<'a> {
@@ -346,6 +382,7 @@ impl<'a> MemoryReader<'a> {
         mappings: &'a [ProcessMapping],
         endian: TargetEndian,
         pointer_bits: u32,
+        budget: HeapReadBudget,
     ) -> Result<Self, String> {
         let pointer_size = usize::try_from(pointer_bits / 8)
             .unwrap_or_default()
@@ -360,6 +397,7 @@ impl<'a> MemoryReader<'a> {
             endian,
             pointer_size,
             bytes_read: 0,
+            budget,
         })
     }
 
@@ -388,6 +426,8 @@ impl<'a> MemoryReader<'a> {
     }
 
     fn read(&mut self, address: u64, bytes: &mut [u8]) -> Result<(), String> {
+        self.budget.check()?;
+
         if !self.readable(address, bytes.len()) {
             return Err(format!(
                 "Address range 0x{address:x}+0x{:x} is not readable",
@@ -473,8 +513,54 @@ pub(crate) fn inspect_native_heap(
     request: NativeHeapReadRequest,
 ) -> Result<HeapInspectionSnapshot, String> {
     crate::kernel::read_verified_local_proc(request.pid, request.debugger_pid, |target| {
-        inspect_native_heap_at(request, target.root())
+        request.budget.check()?;
+        ensure_heap_threads_stopped(target.root(), &request.budget)?;
+        let budget = request.budget.clone();
+        let snapshot = inspect_native_heap_at(request, target.root())?;
+        budget.check()?;
+        ensure_heap_threads_stopped(target.root(), &budget)?;
+        Ok(snapshot)
     })
+}
+
+fn ensure_heap_threads_stopped(root: &Path, budget: &HeapReadBudget) -> Result<(), String> {
+    let tasks = std::fs::read_dir(root.join("task"))
+        .map_err(|error| format!("Cannot verify stopped heap threads: {error}"))?;
+
+    let mut found_thread = false;
+
+    for (index, task) in tasks.enumerate() {
+        budget.check()?;
+
+        if index >= 4096 {
+            return Err(String::from(
+                "The heap reader cannot verify more than 4096 stopped threads",
+            ));
+        }
+
+        let task = task.map_err(|error| format!("Cannot verify a heap thread: {error}"))?;
+        let stat = crate::bounded::read_prefix(&task.path().join("stat"), 4096)
+            .map_err(|error| format!("Cannot read a heap thread state: {error}"))?;
+
+        let state = stat
+            .iter()
+            .rposition(|byte| *byte == b')')
+            .and_then(|end| stat.get(end + 2));
+
+        if !matches!(state, Some(b't' | b'T')) {
+            return Err(String::from(
+                "Pause every thread in the selected inferior before inspecting allocator metadata",
+            ));
+        }
+
+        found_thread = true;
+    }
+
+    if found_thread {
+        Ok(())
+    } else {
+        Err(String::from("The inferior no longer has live threads"))
+    }
 }
 
 fn inspect_native_heap_at(
@@ -501,7 +587,13 @@ fn inspect_native_heap_at(
     }
 
     let layout = GlibcLayout::new(version, request.architecture, request.pointer_bits)?;
-    let reader = MemoryReader::new(root, &mappings, request.endian, request.pointer_bits)?;
+    let reader = MemoryReader::new(
+        root,
+        &mappings,
+        request.endian,
+        request.pointer_bits,
+        request.budget,
+    )?;
 
     let main_heap = mappings
         .iter()
@@ -2180,6 +2272,7 @@ mod tests {
             endian: TargetEndian::Little,
             pointer_bits: 64,
             query,
+            budget: HeapReadBudget::new(),
             discovery: HeapDiscovery {
                 tls_bases: vec![tls],
                 ..HeapDiscovery::default()

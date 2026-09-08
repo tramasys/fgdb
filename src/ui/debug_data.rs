@@ -1,5 +1,7 @@
 use super::*;
 
+mod modules;
+
 use std::{
     rc::Weak,
     sync::mpsc::{self, TryRecvError},
@@ -62,9 +64,17 @@ pub(crate) enum DebugDataAction {
     LoadPrettyPrinterScript(PathBuf),
     AddSourceDirectory(PathBuf),
     RemoveSourceDirectory(String),
-    AddSubstitution { from: String, to: String },
+    AddSubstitution {
+        from: String,
+        to: String,
+    },
     RemoveSubstitution(String),
-    RetrySymbols(Option<String>),
+    ResolveSymbols {
+        module: crate::symbols::ModuleKey,
+        mode: crate::symbols::ResolveMode,
+    },
+    RetryAllSymbols,
+    CancelSymbols(crate::symbols::ModuleKey),
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -108,10 +118,12 @@ impl DebugDataState {
 #[derive(Clone)]
 pub(super) struct DebugDataView {
     pub(super) window: gtk::Window,
+    notebook: gtk::Notebook,
     pub(super) refresh: gtk::Button,
     pub(super) overview: gtk::Box,
     language_support: gtk::Box,
     pub(super) modules: gtk::Box,
+    module_list: modules::ModuleList,
     pub(super) sources: gtk::Box,
     pub(super) printers: gtk::Box,
     printer_loader: PrettyPrinterLoader,
@@ -192,6 +204,7 @@ impl Ui {
     }
 
     pub(crate) fn connect_debug_data_actions(self: &Rc<Self>) {
+        self.connect_module_controls();
         let weak_ui = Rc::downgrade(self);
 
         self.debug_data_button.connect_clicked(move |_| {
@@ -209,6 +222,41 @@ impl Ui {
 
     fn dispatch_debug_data_action(&self, action: DebugDataAction) {
         defer_debug_data_action(&self.debug_data_action_handler, action);
+    }
+
+    /// Capture the target before yielding out of GTK event dispatch. A session
+    /// switch must not turn an old module click into work on the new target.
+    pub(super) fn dispatch_symbol_action(&self, action: DebugDataAction) {
+        let lifetime = self.model.symbols.lifetime();
+        let inferior = self.model.selected_inferior_id();
+        let weak = self.self_weak.borrow().clone();
+
+        glib::idle_add_local_once(move || {
+            let Some(ui) = weak.upgrade() else {
+                return;
+            };
+
+            if ui.model.symbols.lifetime() != lifetime
+                || ui.model.selected_inferior_id() != inferior
+            {
+                return;
+            }
+
+            match &action {
+                DebugDataAction::ResolveSymbols { module, .. }
+                | DebugDataAction::CancelSymbols(module)
+                    if inferior.as_deref() == Some(&module.inferior)
+                        && ui.model.symbols.snapshot(module).is_some() => {}
+                DebugDataAction::RetryAllSymbols if inferior.is_some() => {}
+                _ => return,
+            }
+
+            let handler = ui.debug_data_action_handler.borrow().clone();
+
+            if let Some(handler) = handler {
+                handler(action);
+            }
+        });
     }
 
     pub(crate) fn begin_debug_data_refresh(self: &Rc<Self>) -> u64 {
@@ -552,8 +600,26 @@ impl Ui {
         self.debug_data_state.borrow().source_directories.clone()
     }
 
-    pub(crate) fn debuginfod_status_for_debug_data(&self) -> String {
-        self.debug_data_state.borrow().debuginfod_status.clone()
+    pub(crate) fn symbol_module_keys(&self) -> Vec<crate::symbols::ModuleKey> {
+        self.model
+            .selected_inferior_id()
+            .map_or_else(Vec::new, |inferior| {
+                self.latest_modules
+                    .borrow()
+                    .iter()
+                    .map(|module| crate::symbols::ModuleKey::new(&inferior, module))
+                    .collect()
+            })
+    }
+
+    pub(crate) fn render_symbol_resolution(&self) {
+        self.update_module_control_sensitivity();
+        self.refresh_module_symbol_labels();
+        self.render_debug_data_modules();
+    }
+
+    pub(crate) fn render_symbol_configuration(&self) {
+        self.render_debug_data_overview();
     }
 
     pub(crate) fn add_runtime_source_directory(&self, path: PathBuf) {
@@ -676,6 +742,21 @@ impl Ui {
         needs_load
     }
 
+    pub(super) fn present_debug_data_module(self: &Rc<Self>, target: &str) {
+        self.present_debug_data();
+        let view = self.debug_data_view.borrow().as_ref().cloned();
+
+        if let Some(view) = view {
+            view.module_search.set_text(target);
+            view.notebook.set_current_page(Some(1));
+            self.render_debug_data_modules();
+        }
+
+        if !self.debug_data_state.borrow().refreshing {
+            self.dispatch_debug_data_action(DebugDataAction::Refresh);
+        }
+    }
+
     fn present_debug_data(self: &Rc<Self>) {
         if let Some(view) = self.debug_data_view.borrow().as_ref() {
             view.window.present();
@@ -721,6 +802,18 @@ impl Ui {
         let overview = debug_data_page();
         let module_search = debug_data_search("Filter module, path, build ID, or symbol state");
         let modules = debug_data_page_with_search(&module_search);
+        let module_list = modules::ModuleList::new(&modules, Rc::downgrade(self));
+        let weak = Rc::downgrade(self);
+
+        modules.connect_map(move |_| {
+            let weak = weak.clone();
+
+            glib::idle_add_local_once(move || {
+                if let Some(ui) = weak.upgrade() {
+                    ui.render_debug_data_modules();
+                }
+            });
+        });
         let source_search = debug_data_search("Filter loaded source files");
         let sources = debug_data_page_with_search(&source_search);
         let printer_search = debug_data_search("Filter scope, provider, or printer name");
@@ -753,6 +846,24 @@ impl Ui {
         let printer_registry = gtk::Box::new(gtk::Orientation::Vertical, 6);
         printers.append(&printer_registry);
         let activity = debug_data_page();
+
+        for (page, render) in [
+            (&overview, Ui::render_debug_data_overview as fn(&Ui)),
+            (&activity, Ui::render_debug_data_activity as fn(&Ui)),
+        ] {
+            let weak = Rc::downgrade(self);
+
+            page.connect_map(move |_| {
+                let weak = weak.clone();
+
+                glib::idle_add_local_once(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        render(&ui);
+                    }
+                });
+            });
+        }
+
         append_debug_data_page(&notebook, &overview, "Overview");
         append_debug_data_page(&notebook, &modules, "Modules");
         append_debug_data_page(&notebook, &sources, "Sources");
@@ -763,10 +874,12 @@ impl Ui {
 
         self.debug_data_view.replace(Some(DebugDataView {
             window: window.clone(),
+            notebook: notebook.clone(),
             refresh,
             overview,
             language_support: language_support_section(),
             modules,
+            module_list,
             sources,
             printers: printer_registry,
             printer_loader,
@@ -862,6 +975,10 @@ impl Ui {
             return;
         };
 
+        if !view.overview.is_mapped() {
+            return;
+        }
+
         clear_debug_data_box(&view.overview);
 
         let (refreshing, debuginfod_status, debuginfod_urls, sources_ready, sources_loading) = {
@@ -947,9 +1064,39 @@ impl Ui {
 
         view.overview.append(&debug_data_fact("Debuginfod", status));
 
+        if let Some(configuration) = self.model.symbols.configuration.borrow().as_ref() {
+            view.overview.append(&debug_data_fact(
+                "Automatic library symbols",
+                if configuration.auto_solib {
+                    "On (GDB setting)"
+                } else {
+                    "Off (GDB setting)"
+                },
+            ));
+
+            view.overview.append(&debug_data_fact(
+                "Debug-file directories",
+                &configuration
+                    .search
+                    .directories
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
+        }
+
+        view.overview.append(&debug_data_fact(
+            "Download policy",
+            crate::config::settings::SymbolDownloads::CHOICES
+                .iter()
+                .find(|choice| choice.value == self.model.symbols.policy.get().as_str())
+                .map_or("Unknown", |choice| choice.label),
+        ));
+
         if debuginfod_status == "ask" {
             view.overview.append(&muted_label(
-                "Choose Enable or Disable before retrying symbols so GDB cannot block on a hidden confirmation prompt.",
+                "Local symbol loading remains available. Fetch debug info asks for a download for the selected module. Persistent policy is in Settings under Debugging.",
             ));
         }
 
@@ -1042,183 +1189,18 @@ impl Ui {
     }
 
     pub(super) fn render_debug_data_modules(&self) {
-        let Some(view) = self.debug_data_view.borrow().as_ref().cloned() else {
-            return;
-        };
-
-        let render_started = Instant::now();
-        clear_page_after_search(&view.modules);
-        let query = view.module_search.text().trim().to_ascii_lowercase();
-        let terms = query.split_whitespace().collect::<Vec<_>>();
-        let metadata = self.module_debug_metadata.borrow();
-        let modules = self.latest_modules.borrow();
-
-        let (can_retry_symbols, render_limit) = {
-            let debug_data = self.debug_data_state.borrow();
-
-            (
-                debug_data.debuginfod_status != "ask",
-                debug_data.module_limit.max(DEBUG_DATA_RESULT_PAGE_SIZE),
-            )
-        };
-
-        let mut shown = 0_usize;
-        let mut matching = 0_usize;
-
-        for module in modules.iter() {
-            let path_text = module.host_name.as_deref().unwrap_or(&module.target_name);
-            let path = Path::new(path_text);
-            let details = metadata.get(path);
-
-            let build_id = details
-                .and_then(|details| details.build_id.as_deref())
-                .unwrap_or("");
-
-            let status = if module.symbols_loaded {
-                "symbols loaded"
-            } else {
-                "missing symbols"
-            };
-
-            if !terms.iter().all(|term| {
-                text_matches(&module.target_name, term)
-                    || text_matches(path_text, term)
-                    || text_matches(build_id, term)
-                    || text_matches(status, term)
-            }) {
-                continue;
-            }
-
-            matching += 1;
-
-            if shown >= render_limit {
-                continue;
-            }
-
-            shown += 1;
-            let row = gtk::Box::new(gtk::Orientation::Vertical, 3);
-            row.add_css_class("debug-data-row");
-            let heading = gtk::Box::new(gtk::Orientation::Horizontal, 7);
-            let name = gtk::Label::new(path.file_name().and_then(|name| name.to_str()));
-            name.add_css_class("module-name");
-            name.set_halign(gtk::Align::Start);
-            name.set_hexpand(true);
-            heading.append(&name);
-
-            let state = gtk::Label::new(Some(if module.symbols_loaded {
-                "SYMBOLS"
-            } else {
-                "NO SYMBOLS"
-            }));
-
-            state.add_css_class(if module.symbols_loaded {
-                "module-symbols-loaded"
-            } else {
-                "module-symbols-missing"
-            });
-
-            heading.append(&state);
-            let retry = gtk::Button::with_label("Retry");
-            retry.add_css_class("inline-action");
-            retry.set_sensitive(can_retry_symbols);
-            let handler = Rc::clone(&self.debug_data_action_handler);
-            let target = module.target_name.clone();
-
-            retry.connect_clicked(move |button| {
-                button.set_sensitive(false);
-
-                defer_debug_data_action(
-                    &handler,
-                    DebugDataAction::RetrySymbols(Some(target.clone())),
-                );
-            });
-
-            heading.append(&retry);
-            row.append(&heading);
-            row.append(&selectable_value(&path.display().to_string()));
-
-            if let Some(details) = details {
-                if let Some(build_id) = details.build_id.as_deref() {
-                    row.append(&debug_data_fact("Build ID", build_id));
-                }
-
-                if let Some(debuglink) = details.debuglink.as_deref() {
-                    let value = details.debuglink_crc.map_or_else(
-                        || debuglink.to_owned(),
-                        |crc| format!("{debuglink}  CRC {crc:08x}"),
-                    );
-
-                    row.append(&debug_data_fact("Debuglink", &value));
-                }
-
-                let debug_file = details.separate_debug_file.as_ref().map_or_else(
-                    || {
-                        if details.embedded_debug_info {
-                            String::from("Embedded in module")
-                        } else {
-                            String::from("Not found")
-                        }
-                    },
-                    |path| path.display().to_string(),
-                );
-
-                row.append(&debug_data_fact("Debug file", &debug_file));
-
-                if let Some(message) = details.error.as_deref().or(details.suggestion.as_deref()) {
-                    row.append(&muted_label(message));
-                }
-            } else {
-                row.append(&muted_label("Inspecting ELF metadata…"));
-            }
-
-            view.modules.append(&row);
+        if let Some(view) = self.debug_data_view.borrow().as_ref().cloned() {
+            view.module_list.render(self, &view);
         }
+    }
 
-        if matching == 0 {
-            view.modules.append(&muted_label(if modules.is_empty() {
-                "Modules appear after an executable or core is loaded"
-            } else {
-                "No modules match the filter"
-            }));
+    pub(crate) fn update_symbol_rows(&self, keys: &HashSet<crate::symbols::ModuleKey>) {
+        self.update_module_control_sensitivity();
+        self.refresh_module_symbol_labels();
+
+        if let Some(view) = self.debug_data_view.borrow().as_ref().cloned() {
+            view.module_list.update(self, &view, keys);
         }
-
-        if shown < matching {
-            let remaining = matching - shown;
-
-            let show_more = gtk::Button::with_label(&format!(
-                "Show {} more module{}",
-                remaining.min(DEBUG_DATA_RESULT_PAGE_SIZE),
-                if remaining == 1 { "" } else { "s" }
-            ));
-
-            show_more.add_css_class("inline-action");
-            show_more.set_halign(gtk::Align::Center);
-            let handler = Rc::clone(&self.debug_data_action_handler);
-
-            show_more.connect_clicked(move |button| {
-                button.set_sensitive(false);
-                defer_debug_data_action(&handler, DebugDataAction::ShowMoreModules);
-            });
-
-            view.modules.append(&show_more);
-        }
-
-        if !modules.is_empty() {
-            let retry_all = gtk::Button::with_label("Retry all missing symbols");
-            retry_all.add_css_class("inline-action");
-            retry_all.set_halign(gtk::Align::Start);
-            retry_all.set_sensitive(can_retry_symbols);
-            let handler = Rc::clone(&self.debug_data_action_handler);
-
-            retry_all.connect_clicked(move |button| {
-                button.set_sensitive(false);
-                defer_debug_data_action(&handler, DebugDataAction::RetrySymbols(None));
-            });
-
-            view.modules.append(&retry_all);
-        }
-
-        self.record_ui_render_duration("Debug Data modules", render_started);
     }
 
     fn render_debug_data_sources(&self) {
@@ -1706,6 +1688,10 @@ impl Ui {
             return;
         };
 
+        if !view.activity.is_mapped() {
+            return;
+        }
+
         clear_debug_data_box(&view.activity);
         let activity = self.debug_data_state.borrow().activity.clone();
 
@@ -1809,6 +1795,14 @@ impl Ui {
 
         let (sender, receiver) = mpsc::channel();
         let queued_generation = Arc::clone(&current_generation);
+        let search = self
+            .model
+            .symbols
+            .configuration
+            .borrow()
+            .as_ref()
+            .map(|configuration| configuration.search.clone())
+            .unwrap_or_default();
 
         if let Err(error) = crate::background::submit_cancellable_with_priority(
             crate::background::Priority::Background,
@@ -1845,16 +1839,25 @@ impl Ui {
 
                     let details = match unchanged {
                         Some(cached) if force && cached.error.is_some() => {
-                            crate::debug_info::inspect_module_while(&path, &is_current)
+                            crate::debug_info::inspect_module_with_search(
+                                &path,
+                                &search,
+                                &is_current,
+                            )
                         }
                         Some(cached) if force => {
-                            crate::debug_info::refresh_module_debug_file_while(
+                            crate::debug_info::refresh_module_debug_file_with_search(
                                 cached.clone(),
+                                &search,
                                 &is_current,
                             )
                         }
                         Some(cached) => cached.clone(),
-                        None => crate::debug_info::inspect_module_while(&path, &is_current),
+                        None => crate::debug_info::inspect_module_with_search(
+                            &path,
+                            &search,
+                            &is_current,
+                        ),
                     };
 
                     metadata.insert(path, details);

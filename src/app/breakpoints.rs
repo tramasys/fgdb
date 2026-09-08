@@ -1100,8 +1100,14 @@ pub(super) fn refresh_modules(ui: &Weak<Ui>, client: &MiClient) {
                 if record.is_done() && ui.model.selected_inferior_id() == inferior_id {
                     let modules = crate::debugger::shared_libraries(&record);
 
+                    let symbols_changed = inferior_id
+                        .as_deref()
+                        .is_some_and(|inferior| ui.model.symbols.observe(inferior, &modules));
+
                     if ui.show_modules(&modules) {
                         ui.refresh_module_debug_metadata(false);
+                    } else if symbols_changed {
+                        ui.render_symbol_resolution();
                     }
                 }
 

@@ -15,6 +15,7 @@ mod rr;
 mod session;
 mod source_control;
 mod stop_requests;
+mod symbol_resolution;
 mod symbols;
 mod syscalls;
 mod threads;

@@ -13,10 +13,20 @@ impl Ui {
         root_variables(&self.expression_watches_store)
     }
 
+    pub(crate) fn expression_watch_variable_objects_for_refresh(&self) -> Vec<Variable> {
+        self.variable_objects_for_symbols(
+            self.expression_watch_variable_objects(),
+            self.watch_symbol_revision.get(),
+        )
+    }
+
     pub fn show_expression_watches_for_refresh(&self, generation: u64, variables: &[Variable]) {
         if !self.model.is_stop_refresh_current(generation) {
             return;
         }
+
+        self.watch_symbol_revision
+            .set(self.model.symbols.revision());
 
         let selected = root_variable_at(
             &self.expression_watches_selection,

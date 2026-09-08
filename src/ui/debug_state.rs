@@ -393,6 +393,9 @@ impl Ui {
     }
 
     pub fn show_locals(&self, variables: &[Variable]) {
+        self.local_symbol_revision
+            .set(self.model.symbols.revision());
+
         self.locals_generation.set(None);
         self.locals_view.set_tooltip_text(None);
         self.locals_summary.set_tooltip_text(None);
@@ -500,6 +503,9 @@ impl Ui {
 
     pub fn show_locals_for_refresh(&self, generation: u64, variables: &[Variable]) {
         if self.model.is_stop_refresh_current(generation) {
+            self.local_symbol_revision
+                .set(self.model.symbols.revision());
+
             if self.locals_generation.replace(Some(generation)) != Some(generation) {
                 self.locals_render_limit.set(self.adaptive_render_limit(
                     "locals pane",
@@ -848,6 +854,31 @@ impl Ui {
 
     pub fn local_variable_objects(&self) -> Vec<Variable> {
         self.local_variables.borrow().to_vec()
+    }
+
+    pub(crate) fn local_variable_objects_for_refresh(&self) -> Vec<Variable> {
+        self.variable_objects_for_symbols(
+            self.local_variable_objects(),
+            self.local_symbol_revision.get(),
+        )
+    }
+
+    pub(super) fn variable_objects_for_symbols(
+        &self,
+        variables: Vec<Variable>,
+        revision: u64,
+    ) -> Vec<Variable> {
+        if revision == self.model.symbols.revision() {
+            return variables;
+        }
+
+        // Keep the old display, but never reuse its objects after symbols
+        // change. Only publishing a refreshed snapshot advances its revision.
+        self.defer_variable_object_deletions(
+            variables.into_iter().filter_map(|variable| variable.varobj),
+        );
+
+        Vec::new()
     }
 
     pub(crate) fn local_variable_refresh_indices(&self, variables: &[Variable]) -> HashSet<usize> {
@@ -1362,118 +1393,6 @@ impl Ui {
 
         self.update_thread_control_sensitivity();
         self.record_ui_render_duration("thread pane", render_started);
-    }
-
-    pub fn show_modules(&self, modules: &[SharedLibrary]) -> bool {
-        if self.latest_modules.borrow().as_slice() == modules {
-            return false;
-        }
-
-        let render_started = Instant::now();
-        self.latest_modules.replace(modules.to_vec());
-        self.reset_debug_data_module_paging();
-
-        if modules.is_empty() {
-            self.module_debug_metadata.borrow_mut().clear();
-        }
-
-        self.render_debug_data_overview();
-        self.render_debug_data_modules();
-        clear_box(&self.modules_list);
-
-        if modules.is_empty() {
-            self.modules_list
-                .append(&empty_label("No shared libraries loaded"));
-
-            self.record_ui_render_duration("module pane", render_started);
-            return true;
-        }
-
-        let module_limit =
-            self.adaptive_render_limit("module pane", crate::performance::MODULE_WIDGET_BUDGET, 32);
-
-        for module in modules.iter().take(module_limit) {
-            let row = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            row.add_css_class("module-row");
-            let heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-
-            let name = Path::new(&module.target_name)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(&module.target_name);
-
-            let name = gtk::Label::new(Some(name));
-            name.add_css_class("module-name");
-            name.set_halign(gtk::Align::Start);
-            name.set_hexpand(true);
-            name.set_ellipsize(pango::EllipsizeMode::End);
-
-            let symbol_state = gtk::Label::new(Some(if module.symbols_loaded {
-                "SYMBOLS"
-            } else {
-                "NO SYMBOLS"
-            }));
-
-            symbol_state.add_css_class("module-symbol-state");
-
-            symbol_state.add_css_class(if module.symbols_loaded {
-                "module-symbols-loaded"
-            } else {
-                "module-symbols-missing"
-            });
-
-            heading.append(&name);
-            heading.append(&symbol_state);
-
-            let range = match (&module.from, &module.to) {
-                (Some(from), Some(to)) => format!("{from}-{to}"),
-                _ => String::from("address range unavailable"),
-            };
-
-            let range = gtk::Label::new(Some(&range));
-            range.add_css_class("module-range");
-            range.set_halign(gtk::Align::Start);
-            enable_stable_text_selection(&range);
-            let path = module.host_name.as_deref().unwrap_or(&module.target_name);
-            let path_label = gtk::Label::new(Some(path));
-            path_label.add_css_class("module-path");
-            path_label.set_halign(gtk::Align::Start);
-            path_label.set_ellipsize(pango::EllipsizeMode::Middle);
-            enable_stable_text_selection(&path_label);
-
-            path_label.set_tooltip_text(Some(&format!(
-                "Target: {}\nHost: {}",
-                module.target_name, path
-            )));
-
-            row.append(&heading);
-            row.append(&range);
-            row.append(&path_label);
-            self.modules_list.append(&row);
-        }
-
-        if modules.len() > module_limit {
-            let shown = module_limit;
-            let omitted = modules.len() - shown;
-
-            let notice = performance_partial_label(&format!(
-                "{omitted} additional module{} available in Debug Data",
-                if omitted == 1 { " is" } else { "s are" }
-            ));
-
-            self.modules_list.append(&notice);
-
-            self.record_performance_notice(crate::performance::PerformanceNotice::count(
-                crate::performance::BudgetOutcome::Partial,
-                "module pane",
-                shown,
-                modules.len(),
-            ));
-        }
-
-        self.record_ui_render_duration("module pane", render_started);
-
-        true
     }
 
     pub fn show_threads_for_refresh(&self, generation: u64, threads: &[ThreadInfo]) {
@@ -3597,7 +3516,7 @@ fn sync_thread_partial_notice(container: &gtk::Box, omitted: usize) {
     }
 }
 
-fn performance_partial_label(text: &str) -> gtk::Label {
+pub(super) fn performance_partial_label(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.add_css_class("performance-partial");
     label.set_halign(gtk::Align::Fill);

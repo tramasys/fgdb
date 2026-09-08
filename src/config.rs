@@ -541,6 +541,8 @@ struct ConfigLayer {
     log_errors: Option<bool>,
     log_follow: Option<bool>,
     log_wrap: Option<bool>,
+    symbol_downloads: Option<settings::SymbolDownloads>,
+    debug_file_directories: Option<String>,
     rr_executable: Option<String>,
     record_full_limit: Option<u32>,
     record_btrace_buffer_kib: Option<u32>,
@@ -603,6 +605,8 @@ impl ConfigLayer {
             log_errors,
             log_follow,
             log_wrap,
+            symbol_downloads,
+            debug_file_directories,
             rr_executable,
             record_full_limit,
             record_btrace_buffer_kib,
@@ -860,6 +864,8 @@ fn canonical_config_key(key: &str) -> Option<&'static str> {
         "log_errors" => Some("log_errors"),
         "log_follow" => Some("log_follow"),
         "log_wrap" => Some("log_wrap"),
+        "symbol_downloads" => Some("symbol_downloads"),
+        "debug_file_directories" => Some("debug_file_directories"),
         "rr" | "rr_executable" => Some("rr"),
         "record_full_limit" => Some("record_full_limit"),
         "record_btrace_buffer_kib" => Some("record_btrace_buffer_kib"),
@@ -897,6 +903,22 @@ fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> 
     };
 
     match key {
+        "symbol_downloads" => {
+            layer.symbol_downloads = Some(settings::SymbolDownloads::parse(required()?)?);
+        }
+        "debug_file_directories" => {
+            if unquoted.contains(['\0', '\n', '\r'])
+                || (!unquoted.is_empty()
+                    && env::split_paths(unquoted).any(|path| !path.is_absolute()))
+                || env::split_paths(unquoted).count() > 32
+            {
+                return Err(String::from(
+                    "Use at most 32 absolute debug directories without line breaks",
+                ));
+            }
+
+            layer.debug_file_directories = Some(unquoted.to_owned());
+        }
         "source_font" | "terminal_font" => {
             settings::validate_font(required()?)?;
 

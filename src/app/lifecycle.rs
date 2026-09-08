@@ -101,6 +101,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             refresh_inferiors(weak_ui, client);
         }
         MiEvent::InferiorStarted { id, pid } => {
+            ui.model.symbols.forget_inferior(&id);
             // A terminal user can load and run a different executable in the
             // same GDB process. Register-number caches are target-specific and
             // must not leak across that boundary. The stopped-state refresh
@@ -112,6 +113,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
             refresh_thread_policy(weak_ui, client);
         }
         MiEvent::InferiorExited { id, exit_code: _ } => {
+            ui.model.symbols.forget_inferior(&id);
             let selected_exited = ui.model.inferior_exit_owns_selected_context(&id);
             let pending_exited =
                 ui.model.pending_execution_inferior().as_deref() == Some(id.as_str());

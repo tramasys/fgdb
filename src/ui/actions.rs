@@ -64,6 +64,22 @@ pub(crate) enum HeapInspectionAction {
 pub(crate) struct HeapInspectionRequest {
     pub action: HeapInspectionAction,
     pub expression: String,
+    pub backend: Option<crate::misc::HeapBackend>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HeapInspectionId {
+    pub stop_generation: u64,
+    serial: u64,
+}
+
+impl HeapInspectionId {
+    pub(super) fn new(stop_generation: u64, serial: u64) -> Self {
+        Self {
+            stop_generation,
+            serial,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

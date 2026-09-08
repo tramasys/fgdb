@@ -2056,7 +2056,7 @@ scrolledwindow.cfg-scroll > viewport,
 }
 
 .allocator-detection-card {
-    padding: 6px 8px;
+    padding: 8px;
     background: @app_raised;
     border-bottom: 1px solid @app_border;
 }
@@ -2072,8 +2072,7 @@ scrolledwindow.cfg-scroll > viewport,
 }
 
 .allocator-detection-basis {
-    margin-top: 1px;
-    padding: 2px 5px;
+    padding: 4px 8px;
     color: @app_accent;
     background: alpha(@app_accent, 0.10);
     border-left: 2px solid @app_accent;
@@ -2092,9 +2091,7 @@ scrolledwindow.cfg-scroll > viewport,
 }
 
 .allocator-detail {
-    margin-top: 3px;
-    padding-top: 3px;
-    border-top: 1px solid alpha(@app_border, 0.72);
+    padding: 4px 0;
 }
 
 .allocator-detail-value {
@@ -2110,11 +2107,10 @@ scrolledwindow.cfg-scroll > viewport,
 }
 
 .allocator-detection-safety {
-    margin-top: 4px;
-    padding: 3px 5px;
-    color: @app_success;
-    background: alpha(@app_success, 0.07);
-    border-left: 2px solid alpha(@app_success, 0.72);
+    padding: 4px 8px;
+    color: @app_muted;
+    background: @app_surface;
+    border-left: 2px solid @app_border;
 }
 
 .allocator-detection-safety.allocator-safety-warning {
@@ -2134,8 +2130,7 @@ flowbox.allocator-metrics > flowboxchild {
 }
 
 .allocator-metric-cell {
-    min-height: 35px;
-    padding: 3px 7px;
+    padding: 8px;
     background: @app_surface;
 }
 
@@ -2144,13 +2139,12 @@ flowbox.allocator-metrics > flowboxchild {
 }
 
 .heap-inspector-controls {
-    padding: 6px 7px;
+    padding: 8px;
     background: @app_surface;
     border-bottom: 1px solid @app_border;
 }
 
 .heap-inspector-note {
-    padding-bottom: 2px;
     color: @app_muted;
 }
 
@@ -2170,8 +2164,7 @@ flowbox.heap-inspector-actions > flowboxchild {
 }
 
 .heap-inspector-result-header {
-    min-height: 38px;
-    padding: 4px 7px;
+    padding: 8px;
     background: @app_raised;
     border-bottom: 1px solid @app_border;
 }
@@ -2204,7 +2197,6 @@ flowbox.heap-inspector-actions > flowboxchild {
     color: @app_accent_hover;
 }
 
-.heap-inspector-metric-cell,
 .heap-inspector-details-cell {
     color: @app_muted;
 }
@@ -2213,8 +2205,7 @@ flowbox.heap-inspector-actions > flowboxchild {
     margin: 3px 4px;
     min-height: 18px;
     padding: 0 5px;
-    color: @app_muted;
-    background: alpha(@app_fg, 0.045);
+    color: @app_fg;
 }
 
 .heap-inspector-state-cell.heap-state-active {

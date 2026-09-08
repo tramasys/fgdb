@@ -314,6 +314,16 @@ impl Settings {
         let previous = self.preferences.borrow();
         let font_changed = initial || previous.source_font != preferences.source_font;
 
+        ui.model.symbols.policy.set(preferences.symbol_downloads);
+
+        if initial || previous.debug_file_directories != preferences.debug_file_directories {
+            ui.model.symbols.extra_directories.replace(
+                std::env::split_paths(&preferences.debug_file_directories)
+                    .filter(|path| !path.as_os_str().is_empty())
+                    .collect(),
+            );
+        }
+
         ui.variable_presentation
             .set_format(preferences.integer_display);
         ui.application_log

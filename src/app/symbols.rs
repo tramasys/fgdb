@@ -135,112 +135,173 @@ fn finish_source_symbol_request(search: &SourceSymbolSearch) {
     }
 }
 
-pub(super) fn request_source_symbol(
-    ui: Weak<Ui>,
-    client: Rc<MiClient>,
-    symbol: String,
-    load_libraries_on_miss: bool,
+pub(super) fn connect_source_symbol_navigation(
+    ui: &Rc<Ui>,
+    client: &Rc<MiClient>,
+    resolver: &Rc<crate::symbols::SymbolResolver>,
 ) {
-    let pattern = source_symbol_pattern(&symbol);
+    let navigation = Rc::new(SourceSymbolNavigation {
+        ui: Rc::downgrade(ui),
+        client: Rc::downgrade(client),
+        resolver: Rc::downgrade(resolver),
+        generation: Cell::new(0),
+    });
 
-    let command = format!(
-        "-symbol-info-functions --name {} --max-results 256",
-        crate::debugger::quote(&pattern)
-    );
+    ui.set_source_symbol_handler(move |symbol| {
+        let (Some(ui), Some(client)) = (navigation.ui.upgrade(), navigation.client.upgrade())
+        else {
+            return;
+        };
 
-    if let Some(ui) = ui.upgrade() {
+        let generation = navigation.generation.get().wrapping_add(1);
+        navigation.generation.set(generation);
+
+        let lookup = Rc::new(SourceSymbolLookup {
+            navigation: Rc::clone(&navigation),
+            generation,
+            lifetime: ui.model.symbols.lifetime(),
+            epoch: client.transport_epoch(),
+            inferior: ui.model.selected_inferior_id(),
+            symbol,
+        });
+
         ui.set_status(
             "Resolving source",
-            &format!("Looking up {symbol} through GDB…"),
+            &format!("Looking up {} through GDB…", lookup.symbol),
             None,
         );
+        lookup.request(true);
+    });
+}
+
+struct SourceSymbolNavigation {
+    ui: Weak<Ui>,
+    client: Weak<MiClient>,
+    resolver: Weak<crate::symbols::SymbolResolver>,
+    generation: Cell<u64>,
+}
+
+/// A source lookup and its optional symbol-loading retry share one identity.
+/// Neither a newer lookup nor a different session may inherit the old action.
+struct SourceSymbolLookup {
+    navigation: Rc<SourceSymbolNavigation>,
+    generation: u64,
+    lifetime: u64,
+    epoch: u64,
+    inferior: Option<String>,
+    symbol: String,
+}
+
+impl SourceSymbolLookup {
+    fn current(&self) -> bool {
+        self.navigation.generation.get() == self.generation
+            && self
+                .navigation
+                .client
+                .upgrade()
+                .is_some_and(|client| client.is_ready() && client.transport_epoch() == self.epoch)
+            && self.navigation.ui.upgrade().is_some_and(|ui| {
+                ui.model.symbols.lifetime() == self.lifetime
+                    && ui.model.selected_inferior_id() == self.inferior
+            })
     }
 
-    let ui_for_response = ui.clone();
-    let client_for_response = Rc::clone(&client);
-    let symbol_for_response = symbol;
+    fn fail(&self, message: &str) {
+        if self.current()
+            && let Some(ui) = self.navigation.ui.upgrade()
+        {
+            ui.set_status("Symbol lookup failed", message, Some("status-error"));
+        }
+    }
 
-    if let Err(error) = client.request(&command, move |_, record| {
-        let locations = record
-            .is_done()
-            .then(|| crate::debugger::source_locations(&record));
+    fn request(self: &Rc<Self>, load_on_miss: bool) {
+        if !self.current() {
+            return;
+        }
 
-        match locations {
-            Some(locations) if !locations.is_empty() => {
-                if let Some(ui) = ui_for_response.upgrade() {
-                    ui.show_source_locations(&symbol_for_response, &locations);
+        let Some(client) = self.navigation.client.upgrade() else {
+            return;
+        };
+
+        let command = format!(
+            "-symbol-info-functions --name {} --max-results 256",
+            crate::debugger::quote(&source_symbol_pattern(&self.symbol)),
+        );
+
+        let lookup = Rc::clone(self);
+        let guard = Rc::clone(self);
+
+        if let Err(error) = client.request_when(
+            &command,
+            move || guard.current(),
+            move |_, record| {
+                if !lookup.current() {
+                    return;
                 }
-            }
-            Some(_) if load_libraries_on_miss => load_library_symbols_for_source(
-                ui_for_response.clone(),
-                Rc::clone(&client_for_response),
-                symbol_for_response.clone(),
-            ),
-            Some(_) => {
-                if let Some(ui) = ui_for_response.upgrade() {
-                    ui.show_source_locations(&symbol_for_response, &[]);
-                }
-            }
-            None => {
-                if let Some(ui) = ui_for_response.upgrade() {
-                    ui.set_status(
-                        "Symbol lookup failed",
+
+                if !record.is_done() {
+                    lookup.fail(
                         record
                             .error_message()
                             .unwrap_or("GDB could not resolve that source symbol"),
-                        Some("status-error"),
                     );
+                    return;
+                }
+
+                let locations = crate::debugger::source_locations(&record);
+
+                if locations.is_empty() && load_on_miss {
+                    lookup.load_symbols();
+                } else if let Some(ui) = lookup.navigation.ui.upgrade() {
+                    ui.show_source_locations(&lookup.symbol, &locations);
+                }
+            },
+        ) {
+            self.fail(&error.to_string());
+        }
+    }
+
+    fn load_symbols(self: &Rc<Self>) {
+        let (Some(ui), Some(resolver)) = (
+            self.navigation.ui.upgrade(),
+            self.navigation.resolver.upgrade(),
+        ) else {
+            return;
+        };
+
+        if !self.current() {
+            return;
+        }
+
+        let keys = ui.symbol_module_keys();
+
+        if keys.is_empty() {
+            ui.show_source_locations(&self.symbol, &[]);
+            return;
+        }
+
+        let lookup = Rc::clone(self);
+
+        if let Err(error) = resolver.resolve_all_then(keys, move |summary| {
+            if lookup.current() {
+                if summary.cancelled == 0 {
+                    lookup.request(false);
+                } else {
+                    lookup.fail("Library symbol loading was cancelled");
                 }
             }
-        }
-    }) && let Some(ui) = ui.upgrade()
-    {
-        ui.set_status(
-            "Symbol lookup failed",
-            &error.to_string(),
-            Some("status-error"),
-        );
-    }
-}
-
-pub(super) fn load_library_symbols_for_source(ui: Weak<Ui>, client: Rc<MiClient>, symbol: String) {
-    if let Some(ui) = ui.upgrade() {
-        ui.set_status(
-            "Loading library symbols",
-            &format!("No definition for {symbol} was loaded. Asking GDB to load shared libraries…"),
-            None,
-        );
-    }
-
-    let command = crate::debugger::console_command("sharedlibrary");
-    let ui_for_response = ui.clone();
-    let client_for_response = Rc::clone(&client);
-    let symbol_for_response = symbol;
-
-    if let Err(error) = client.request(&command, move |_, record| {
-        if record.is_done() {
-            request_source_symbol(
-                ui_for_response.clone(),
-                Rc::clone(&client_for_response),
-                symbol_for_response.clone(),
-                false,
-            );
-        } else if let Some(ui) = ui_for_response.upgrade() {
+        }) {
+            self.fail(&error);
+        } else {
             ui.set_status(
-                "Library symbols unavailable",
-                record.error_message().unwrap_or(
-                    "GDB could not load shared-library symbols. Pause the target and try again",
+                "Loading library symbols",
+                &format!(
+                    "Resolving libraries for {} using the configured symbol policy…",
+                    self.symbol
                 ),
-                Some("status-error"),
+                None,
             );
         }
-    }) && let Some(ui) = ui.upgrade()
-    {
-        ui.set_status(
-            "Library symbols unavailable",
-            &error.to_string(),
-            Some("status-error"),
-        );
     }
 }
 

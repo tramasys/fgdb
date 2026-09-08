@@ -28,6 +28,7 @@ pub(crate) use execution::execution_event_matches_thread;
 pub(crate) use state::{DebuggerState, DebuggerStateDelta, TargetConnection};
 
 pub(crate) struct DebuggerModel {
+    pub(crate) symbols: Rc<crate::symbols::SymbolState>,
     pub(crate) printer_scripts: RefCell<printers::PrinterScripts>,
     pub(crate) replay: RefCell<replay::ReplayState>,
     execution: ExecutionState,
@@ -38,6 +39,7 @@ pub(crate) struct DebuggerModel {
 impl DebuggerModel {
     pub(crate) fn new(initial_session: Option<DebugSession>) -> Self {
         Self {
+            symbols: Rc::new(crate::symbols::SymbolState::default()),
             printer_scripts: RefCell::new(printers::PrinterScripts::default()),
             replay: RefCell::new(replay::ReplayState::default()),
             execution: ExecutionState::new(initial_session),

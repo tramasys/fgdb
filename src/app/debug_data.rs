@@ -21,10 +21,14 @@ struct DebugDataQuery {
 pub(super) fn handle_debug_data_action(
     ui: Weak<Ui>,
     client: Rc<MiClient>,
+    resolver: &Rc<crate::symbols::SymbolResolver>,
     action: DebugDataAction,
 ) {
     match action {
-        DebugDataAction::Refresh => refresh_debug_data(ui, client),
+        DebugDataAction::Refresh => {
+            resolver.refresh_configuration();
+            refresh_debug_data(ui, client);
+        }
         DebugDataAction::SetDebuginfodEnabled(enabled) => {
             let value = if enabled { "on" } else { "off" };
 
@@ -34,13 +38,19 @@ pub(super) fn handle_debug_data_action(
                 format!("set debuginfod enabled {value}"),
                 format!("Debuginfod {value}"),
             );
+
+            resolver.refresh_configuration();
         }
-        DebugDataAction::SetDebuginfodUrls(urls) => run_console_setting(
-            ui,
-            client,
-            format!("set debuginfod urls {urls}"),
-            String::from("Updated debuginfod URLs"),
-        ),
+        DebugDataAction::SetDebuginfodUrls(urls) => {
+            run_console_setting(
+                ui,
+                client,
+                format!("set debuginfod urls {urls}"),
+                String::from("Updated debuginfod URLs"),
+            );
+
+            resolver.refresh_configuration();
+        }
         DebugDataAction::SetPrettyPrinting(enabled) => {
             set_pretty_printing(ui, client, enabled);
         }
@@ -85,7 +95,28 @@ pub(super) fn handle_debug_data_action(
             set_substitution(ui, client, from, to);
         }
         DebugDataAction::RemoveSubstitution(from) => remove_substitution(ui, client, from),
-        DebugDataAction::RetrySymbols(module) => retry_symbols(ui, client, module),
+        DebugDataAction::ResolveSymbols { module, mode } => {
+            if let Err(error) = resolver.resolve(module, mode)
+                && let Some(ui) = ui.upgrade()
+            {
+                ui.add_debug_data_warning(error);
+                ui.render_symbol_resolution();
+            }
+        }
+        DebugDataAction::RetryAllSymbols => {
+            if let Some(ui) = ui.upgrade()
+                && let Err(error) = resolver.resolve_all(ui.symbol_module_keys())
+            {
+                ui.add_debug_data_warning(error);
+                ui.render_symbol_resolution();
+            }
+        }
+        DebugDataAction::CancelSymbols(module) => {
+            if let Some(ui) = ui.upgrade() {
+                ui.model.symbols.cancel(&module);
+                ui.render_symbol_resolution();
+            }
+        }
     }
 }
 
@@ -540,68 +571,6 @@ fn remove_substitution(ui: Weak<Ui>, client: Rc<MiClient>, from: String) {
     );
 }
 
-fn retry_symbols(ui: Weak<Ui>, client: Rc<MiClient>, module: Option<String>) {
-    if let Some(current_ui) = ui.upgrade()
-        && current_ui.debuginfod_status_for_debug_data() == "ask"
-    {
-        current_ui.add_debug_data_warning(
-            "Symbol retry was not started: choose whether to enable or disable debuginfod first",
-        );
-
-        return;
-    }
-
-    let command = module.as_deref().map_or_else(
-        || String::from("sharedlibrary"),
-        |module| {
-            let pattern = exact_gdb_regex(module);
-
-            crate::debugger::gdb_cli_string(&pattern).map_or_else(
-                |_| String::from("sharedlibrary"),
-                |pattern| format!("sharedlibrary {pattern}"),
-            )
-        },
-    );
-
-    if let Some(ui) = ui.upgrade() {
-        ui.add_debug_data_progress(module.as_deref().map_or_else(
-            || String::from("Retrying symbols for all shared libraries…"),
-            |module| format!("Retrying symbols for {module}…"),
-        ));
-    }
-
-    let ui_for_response = ui.clone();
-    let client_for_refresh = Rc::clone(&client);
-
-    if let Err(error) = client.request_console(&command, move |_, record, output| {
-        if let Some(ui) = ui_for_response.upgrade() {
-            note_console_truncation(&ui, &record, "Symbol loading output");
-            let detail = output.trim();
-
-            if record.is_done() {
-                if detail.is_empty() {
-                    ui.add_debug_data_success("Symbol loading completed");
-                } else if detail.contains("No loaded shared libraries match") {
-                    ui.add_debug_data_warning(detail);
-                } else {
-                    ui.add_debug_data_success(detail);
-                }
-            } else {
-                ui.add_debug_data_error(format!(
-                    "Symbol loading failed: {}",
-                    console_error(&record, &output)
-                ));
-            }
-        }
-
-        refresh_debug_data(ui_for_response, client_for_refresh);
-    }) && let Some(ui) = ui.upgrade()
-    {
-        ui.add_debug_data_error(format!("Could not queue symbol loading: {error}"));
-        refresh_debug_data(Rc::downgrade(&ui), client);
-    }
-}
-
 fn note_query_truncation(query: &mut DebugDataQuery, record: &MiRecord, operation: &str) {
     if record.output_was_truncated() {
         query.notices.push(format!(
@@ -687,26 +656,6 @@ fn console_error<'a>(record: &'a crate::debugger::MiRecord, output: &'a str) -> 
         .unwrap_or("GDB rejected the command")
 }
 
-fn exact_gdb_regex(value: &str) -> String {
-    let mut regex = String::with_capacity(value.len().saturating_add(2));
-    regex.push('^');
-
-    for character in value.chars() {
-        if matches!(
-            character,
-            '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\'
-        ) {
-            regex.push('\\');
-        }
-
-        regex.push(character);
-    }
-
-    regex.push('$');
-
-    regex
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,14 +675,6 @@ mod tests {
         assert_eq!(
             parse_substitutions("List:\n  `/rustc/hash' -> `/local/rust'.\n"),
             [(String::from("/rustc/hash"), String::from("/local/rust"))]
-        );
-    }
-
-    #[test]
-    fn quotes_module_names_as_exact_gdb_regexes() {
-        assert_eq!(
-            exact_gdb_regex("/usr/lib/libc.so.6"),
-            r"^/usr/lib/libc\.so\.6$"
         );
     }
 

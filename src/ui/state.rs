@@ -172,7 +172,7 @@ impl Ui {
             thread_controls: workspace.thread_controls,
             thread_buttons: Rc::new(RefCell::new(Vec::new())),
             latest_threads: Rc::new(RefCell::new(None)),
-            modules_list: workspace.modules_list,
+            module_controls: workspace.module_controls,
             latest_modules: Rc::new(RefCell::new(Vec::new())),
             module_debug_metadata: Rc::new(RefCell::new(HashMap::new())),
             module_debug_generation: Arc::new(AtomicU64::new(0)),
@@ -199,6 +199,8 @@ impl Ui {
             expression_watches_empty: workspace.expression_watches_empty,
             expression_watches: Rc::new(RefCell::new(Vec::new())),
             deferred_variable_object_deletions: Rc::new(RefCell::new(HashSet::new())),
+            local_symbol_revision: Cell::new(0),
+            watch_symbol_revision: Cell::new(0),
             pending_local_variable_objects: Rc::new(RefCell::new(HashSet::new())),
             expression_watch_entry: workspace.expression_watch_entry,
             expression_watch_add_button: workspace.expression_watch_add_button,
@@ -1191,6 +1193,7 @@ impl Ui {
     }
 
     pub(super) fn update_control_sensitivity(&self) {
+        self.update_module_control_sensitivity();
         let ready = self.model.execution().ready;
         let debugger_state = self.model.execution().state;
         let started = debugger_state.inferior_started();
@@ -1262,7 +1265,7 @@ impl Ui {
             inspect: can_inspect,
             syntax: self.disassembly_controls.syntax_applicable.get(),
             gef_tools: self.gef_available.get() && ready && !running && !pending,
-            heap_inspector_in_flight: self.misc_view.heap_inspector_in_flight.get(),
+            heap_inspector_in_flight: self.misc_view.heap_inspector_in_flight.get().is_some(),
             heap_action_visibility: self
                 .misc_view
                 .heap_inspector_actions
@@ -1366,6 +1369,29 @@ impl Ui {
 
         self.misc_view
             .set_heap_inspector_sensitive(state.inspect, state.busy);
+
+        if !state.busy
+            && self.misc_view.heap_inspector_in_flight.get().is_none()
+            && !self
+                .misc_view
+                .heap_inspector_status
+                .has_css_class("heap-inspector-error")
+            && self
+                .misc_view
+                .heap_inspector_snapshot_stop
+                .get()
+                .is_some_and(|generation| !self.model.is_stop_refresh_current(generation))
+        {
+            self.misc_view.heap_inspector_snapshot_stop.set(None);
+
+            self.misc_view
+                .heap_inspector_status
+                .remove_css_class("heap-inspector-warning");
+
+            self.misc_view
+                .heap_inspector_status
+                .set_text("Snapshot from an earlier stop. Read state to refresh");
+        }
 
         self.memory_watch_container
             .commands_available

@@ -18,6 +18,7 @@ mod lifecycle;
 mod log_view;
 mod memory_view;
 mod misc_view;
+mod modules;
 mod replay;
 mod session;
 mod settings;
@@ -119,6 +120,7 @@ use formatting::*;
 use kernel_view::*;
 use memory_view::*;
 use misc_view::*;
+use modules::ModuleControls;
 use threads::*;
 use views::*;
 
@@ -1152,7 +1154,11 @@ struct MiscView {
     heap_inspector_command: gtk::Label,
     heap_inspector_store: gio::ListStore,
     heap_inspector_empty: gtk::Label,
-    heap_inspector_in_flight: Rc<Cell<bool>>,
+    heap_inspector_in_flight: Rc<Cell<Option<HeapInspectionId>>>,
+    heap_inspector_serial: Cell<u64>,
+    heap_inspector_snapshot_stop: Cell<Option<u64>>,
+    heap_selection: Rc<misc_view::AllocatorSelection>,
+    heap_backend_selector: gtk::DropDown,
     lock_summary: gtk::Label,
     lock_note: gtk::Label,
     lock_store: gio::ListStore,
@@ -1502,7 +1508,7 @@ pub struct Ui {
     thread_controls: ThreadControls,
     thread_buttons: Rc<RefCell<Vec<(String, gtk::Button)>>>,
     latest_threads: Rc<RefCell<Option<ThreadRenderState>>>,
-    modules_list: gtk::Box,
+    module_controls: ModuleControls,
     latest_modules: Rc<RefCell<Vec<SharedLibrary>>>,
     module_debug_metadata: Rc<RefCell<HashMap<PathBuf, ModuleDebugMetadata>>>,
     module_debug_generation: Arc<AtomicU64>,
@@ -1529,6 +1535,8 @@ pub struct Ui {
     expression_watches_empty: gtk::Label,
     expression_watches: Rc<RefCell<Vec<String>>>,
     deferred_variable_object_deletions: Rc<RefCell<HashSet<String>>>,
+    local_symbol_revision: Cell<u64>,
+    watch_symbol_revision: Cell<u64>,
     pending_local_variable_objects: Rc<RefCell<HashSet<(u64, usize)>>>,
     expression_watch_entry: gtk::Entry,
     expression_watch_add_button: gtk::Button,
@@ -1708,7 +1716,7 @@ struct Workspace {
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
     thread_controls: ThreadControls,
-    modules_list: gtk::Box,
+    module_controls: ModuleControls,
     inferior_controls: InferiorControls,
     locals_store: gio::ListStore,
     locals_selection: gtk::SingleSelection,
@@ -1837,7 +1845,7 @@ struct LeftSidebar {
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
     thread_controls: ThreadControls,
-    modules_list: gtk::Box,
+    module_controls: ModuleControls,
     source_tree: SourceTreeControls,
     inferior_controls: InferiorControls,
 }

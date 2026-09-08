@@ -8,14 +8,15 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
 use goblin::{
     container::Ctx,
     elf::{
         Elf,
         note::NT_GNU_BUILD_ID,
-        section_header::{SHN_XINDEX, SectionHeader},
+        program_header::{PT_NOTE, ProgramHeader},
+        section_header::{SHF_COMPRESSED, SHN_XINDEX, SHT_NOBITS, SHT_NOTE, SectionHeader},
     },
 };
 
@@ -23,9 +24,60 @@ const MAX_ELF_SECTIONS: usize = 100_000;
 const MAX_SECTION_HEADER_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SECTION_NAME_BYTES: usize = 16 * 1024 * 1024;
 const MAX_METADATA_SECTION_BYTES: usize = 1024 * 1024;
+const MAX_NOTE_SCAN_BYTES: usize = 4 * 1024 * 1024;
 const DEBUGLINK_CRC_BUFFER_BYTES: usize = 64 * 1024;
 const MAX_DEBUGLINK_CRC_CACHE_ENTRIES: usize = 32;
 const GNU_DEBUGLINK_CRC_TABLE: [u32; 256] = gnu_debuglink_crc_table();
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DebugFileSearch {
+    pub directories: Vec<PathBuf>,
+    pub caches: Vec<PathBuf>,
+}
+
+impl Default for DebugFileSearch {
+    fn default() -> Self {
+        let caches = if let Some(path) = std::env::var_os("DEBUGINFOD_CACHE_PATH") {
+            vec![PathBuf::from(path)]
+        } else {
+            let mut paths = Vec::new();
+
+            if let Some(path) = std::env::var_os("XDG_CACHE_HOME") {
+                paths.push(PathBuf::from(path).join("debuginfod_client"));
+            }
+
+            if let Some(path) = std::env::var_os("HOME") {
+                paths.push(PathBuf::from(&path).join(".cache/debuginfod_client"));
+                paths.push(PathBuf::from(path).join(".debuginfod_client_cache"));
+            }
+
+            paths
+        };
+
+        Self {
+            directories: vec![PathBuf::from("/usr/lib/debug")],
+            caches,
+        }
+    }
+}
+
+fn open_regular_file(path: &Path) -> io::Result<(File, std::fs::Metadata)> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
+        .open(path)?;
+
+    let metadata = file.metadata()?;
+
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "The path is not a regular file",
+        ));
+    }
+
+    Ok((file, metadata))
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModuleDebugMetadata {
@@ -34,6 +86,7 @@ pub(crate) struct ModuleDebugMetadata {
     pub(crate) debuglink: Option<String>,
     pub(crate) debuglink_crc: Option<u32>,
     pub(crate) separate_debug_file: Option<PathBuf>,
+    pub(crate) rejected_debug_files: Vec<String>,
     pub(crate) embedded_debug_info: bool,
     pub(crate) suggestion: Option<String>,
     pub(crate) error: Option<String>,
@@ -49,6 +102,7 @@ impl ModuleDebugMetadata {
             debuglink: None,
             debuglink_crc: None,
             separate_debug_file: None,
+            rejected_debug_files: Vec::new(),
             embedded_debug_info: false,
             suggestion: None,
             error: Some(error.into()),
@@ -72,64 +126,82 @@ impl ModuleDebugMetadata {
 
 #[cfg(test)]
 fn inspect_module(path: &Path) -> ModuleDebugMetadata {
-    inspect_module_while(path, &|| true)
+    inspect_module_with_search(path, &DebugFileSearch::default(), &|| true)
 }
 
-pub(crate) fn inspect_module_while(
+pub(crate) fn inspect_module_with_search(
     path: &Path,
+    search: &DebugFileSearch,
     is_current: &impl Fn() -> bool,
 ) -> ModuleDebugMetadata {
-    let mut file = match File::open(path) {
-        Ok(file) => file,
-        Err(error) => {
-            let message = format!("Cannot read host module: {error}");
+    inspect_module_for_build_id(path, search, None, is_current)
+}
 
-            return match std::fs::metadata(path) {
-                Ok(metadata) => ModuleDebugMetadata::unavailable_for_file(path, message, &metadata),
-                Err(_) => ModuleDebugMetadata::unavailable(path, message),
-            };
-        }
-    };
+/// GDB's build ID remains useful when a remote or deleted module cannot be
+/// opened on the host. Local lookup must not require a network request.
+pub(crate) fn inspect_module_for_build_id(
+    path: &Path,
+    search: &DebugFileSearch,
+    expected_build_id: Option<&str>,
+    is_current: &impl Fn() -> bool,
+) -> ModuleDebugMetadata {
+    let mut metadata = read_module_metadata(path, is_current);
 
-    let metadata = match file.metadata() {
-        Ok(metadata) if metadata.is_file() => metadata,
-        Ok(metadata) => {
-            return ModuleDebugMetadata::unavailable_for_file(
-                path,
-                "The host path is not a regular file",
-                &metadata,
-            );
+    if metadata.build_id.is_none() {
+        metadata.build_id = expected_build_id.map(str::to_owned);
+
+        if expected_build_id.is_some() {
+            // Only the ID from GDB is trusted here. A different file may now
+            // occupy the host path, so do not use its DWARF or debuglink CRC.
+            metadata.embedded_debug_info = false;
+            metadata.debuglink = None;
+            metadata.debuglink_crc = None;
         }
+    }
+
+    if expected_build_id.is_some_and(|expected| metadata.build_id.as_deref() != Some(expected)) {
+        metadata.error = Some(String::from(
+            "The host module does not match GDB's build ID",
+        ));
+        return metadata;
+    }
+
+    refresh_module_debug_file_with_search(metadata, search, is_current)
+}
+
+fn read_module_metadata(path: &Path, is_current: &impl Fn() -> bool) -> ModuleDebugMetadata {
+    if !is_current() {
+        return ModuleDebugMetadata::unavailable(path, "Symbol request cancelled");
+    }
+
+    let (mut file, metadata) = match open_regular_file(path) {
+        Ok(opened) => opened,
         Err(error) => {
             return ModuleDebugMetadata::unavailable(
                 path,
-                format!("Cannot inspect host module: {error}"),
+                format!("Cannot read host module: {error}"),
             );
         }
     };
 
-    let elf = match inspect_elf_metadata(&mut file, metadata.len()) {
+    let elf = match inspect_elf_metadata(&mut file, metadata.len(), is_current) {
         Ok(elf) => elf,
-        Err(error) => {
-            return ModuleDebugMetadata::unavailable_for_file(path, error, &metadata);
-        }
+        Err(error) => return ModuleDebugMetadata::unavailable_for_file(path, error, &metadata),
     };
 
-    refresh_module_debug_file_while(
-        ModuleDebugMetadata {
-            path: path.to_path_buf(),
-            build_id: elf.build_id,
-            debuglink: elf.debuglink,
-            debuglink_crc: elf.debuglink_crc,
-            separate_debug_file: None,
-            embedded_debug_info: elf.embedded_debug_info,
-            suggestion: None,
-            error: None,
-            file_size: Some(metadata.len()),
-            modified: metadata.modified().ok(),
-        },
-        is_current,
-    )
+    ModuleDebugMetadata {
+        path: path.to_path_buf(),
+        build_id: elf.build_id,
+        debuglink: elf.debuglink,
+        debuglink_crc: elf.debuglink_crc,
+        separate_debug_file: None,
+        rejected_debug_files: Vec::new(),
+        embedded_debug_info: elf.embedded_debug_info,
+        suggestion: None,
+        error: None,
+        file_size: Some(metadata.len()),
+        modified: metadata.modified().ok(),
+    }
 }
 
 struct ElfDebugMetadata {
@@ -139,154 +211,313 @@ struct ElfDebugMetadata {
     embedded_debug_info: bool,
 }
 
-fn inspect_elf_metadata(file: &mut File, file_size: u64) -> Result<ElfDebugMetadata, String> {
-    let header_bytes = read_file_range(file, 0, 64_u64.min(file_size), file_size, 64)
-        .map_err(|error| format!("Cannot read ELF header: {error}"))?;
-
+fn inspect_elf_metadata(
+    file: &mut File,
+    file_size: u64,
+    is_current: &impl Fn() -> bool,
+) -> Result<ElfDebugMetadata, String> {
+    check_current(is_current)?;
+    let header_bytes = read_file_range(file, 0, 64_u64.min(file_size), file_size, 64)?;
     let header = Elf::parse_header(&header_bytes)
         .map_err(|error| format!("Cannot parse ELF header: {error}"))?;
 
-    if header.e_shoff == 0 {
-        return Ok(ElfDebugMetadata {
-            build_id: None,
-            debuglink: None,
-            debuglink_crc: None,
-            embedded_debug_info: false,
-        });
-    }
-
     let context = Ctx::new(
-        header
-            .container()
-            .map_err(|error| format!("Cannot parse ELF class: {error}"))?,
-        header
-            .endianness()
-            .map_err(|error| format!("Cannot parse ELF byte order: {error}"))?,
+        header.container().map_err(|error| error.to_string())?,
+        header.endianness().map_err(|error| error.to_string())?,
     );
 
-    let section_size = SectionHeader::size(context);
-    let section_entry_size = usize::from(header.e_shentsize);
-
-    if section_entry_size < section_size {
-        return Err(format!(
-            "Unsupported ELF section-header size {} (expected {section_size})",
-            header.e_shentsize
-        ));
-    }
-
-    let first_section = read_section_headers(
-        file,
-        file_size,
-        header.e_shoff,
-        1,
-        section_entry_size,
-        context,
-    )?;
-
-    let Some(null_section) = first_section.first() else {
-        return Err(String::from("ELF section table is empty"));
+    let mut result = ElfDebugMetadata {
+        build_id: None,
+        debuglink: None,
+        debuglink_crc: None,
+        embedded_debug_info: false,
     };
 
-    let section_count = if header.e_shnum == 0 {
-        usize::try_from(null_section.sh_size)
-            .map_err(|_| String::from("ELF section count does not fit in memory"))?
+    let sections = if header.e_shoff == 0 {
+        Vec::new()
     } else {
-        usize::from(header.e_shnum)
+        let entry_size = usize::from(header.e_shentsize);
+
+        if entry_size < SectionHeader::size(context) {
+            return Err(String::from("Invalid ELF section-header size"));
+        }
+
+        let first = read_section_headers(file, file_size, header.e_shoff, 1, entry_size, context)?;
+        let count = if header.e_shnum == 0 {
+            usize::try_from(first[0].sh_size).map_err(|_| "ELF section count overflow")?
+        } else {
+            usize::from(header.e_shnum)
+        };
+
+        if count > MAX_ELF_SECTIONS {
+            return Err(String::from("ELF section count exceeds its safety limit"));
+        }
+
+        check_current(is_current)?;
+        read_section_headers(file, file_size, header.e_shoff, count, entry_size, context)?
     };
 
-    if section_count == 0 {
-        return Ok(ElfDebugMetadata {
-            build_id: None,
-            debuglink: None,
-            debuglink_crc: None,
-            embedded_debug_info: false,
-        });
-    }
-
-    if section_count > MAX_ELF_SECTIONS {
-        return Err(format!(
-            "ELF section count {section_count} exceeds the safety limit of {MAX_ELF_SECTIONS}"
-        ));
-    }
-
-    let sections = read_section_headers(
-        file,
-        file_size,
-        header.e_shoff,
-        section_count,
-        section_entry_size,
-        context,
-    )?;
-
-    if header.e_shstrndx == 0 {
-        return Ok(ElfDebugMetadata {
-            build_id: None,
-            debuglink: None,
-            debuglink_crc: None,
-            embedded_debug_info: false,
-        });
-    }
-
-    let string_index = if u32::from(header.e_shstrndx) == SHN_XINDEX {
-        usize::try_from(null_section.sh_link)
-            .map_err(|_| String::from("ELF section-name table index does not fit in memory"))?
+    let names = if header.e_shstrndx == 0 {
+        Vec::new()
     } else {
-        usize::from(header.e_shstrndx)
+        let index = if u32::from(header.e_shstrndx) == SHN_XINDEX {
+            sections
+                .first()
+                .ok_or("Missing extended ELF section index")?
+                .sh_link as usize
+        } else {
+            usize::from(header.e_shstrndx)
+        };
+
+        let section = sections
+            .get(index)
+            .ok_or("ELF section-name table index is out of range")?;
+        check_current(is_current)?;
+        read_file_range(
+            file,
+            section.sh_offset,
+            section.sh_size,
+            file_size,
+            MAX_SECTION_NAME_BYTES,
+        )?
     };
 
-    let string_section = sections
-        .get(string_index)
-        .ok_or_else(|| String::from("ELF section-name table index is out of range"))?;
-
-    let section_names = read_file_range(
-        file,
-        string_section.sh_offset,
-        string_section.sh_size,
-        file_size,
-        MAX_SECTION_NAME_BYTES,
-    )
-    .map_err(|error| format!("Cannot read ELF section names: {error}"))?;
-    let mut embedded_debug_info = false;
-    let mut build_id_section = None;
-    let mut debuglink_section = None;
+    let mut note_budget = MAX_NOTE_SCAN_BYTES;
+    let mut has_abbreviations = false;
 
     for section in &sections {
-        match section_name(&section_names, section.sh_name) {
-            Some(".debug_info" | ".zdebug_info") => embedded_debug_info = true,
-            Some(".note.gnu.build-id") => build_id_section = Some(section),
-            Some(".gnu_debuglink") => debuglink_section = Some(section),
-            _ => {}
+        check_current(is_current)?;
+
+        if section.sh_type == SHT_NOTE && result.build_id.is_none() {
+            result.build_id = read_build_id_note(
+                file,
+                file_size,
+                section.sh_offset,
+                section.sh_size,
+                section.sh_addralign,
+                context.is_little_endian(),
+                &mut note_budget,
+            )?;
+        }
+
+        if section_named(&names, section.sh_name, b".debug_info")
+            || section_named(&names, section.sh_name, b".zdebug_info")
+        {
+            result.embedded_debug_info |= dwarf_section_present(
+                file,
+                file_size,
+                section,
+                context,
+                section_named(&names, section.sh_name, b".zdebug_info"),
+            )?;
+        } else if section_named(&names, section.sh_name, b".debug_abbrev")
+            || section_named(&names, section.sh_name, b".zdebug_abbrev")
+        {
+            has_abbreviations |= section.sh_type != SHT_NOBITS
+                && section.sh_size > 0
+                && section
+                    .sh_offset
+                    .checked_add(section.sh_size)
+                    .is_some_and(|end| end <= file_size);
+        } else if section_named(&names, section.sh_name, b".gnu_debuglink") {
+            note_budget = note_budget
+                .checked_sub(
+                    usize::try_from(section.sh_size).map_err(|_| "ELF debuglink size overflow")?,
+                )
+                .ok_or("ELF metadata exceeds its scan budget")?;
+            let bytes = read_metadata_section(file, file_size, section)?;
+            (result.debuglink, result.debuglink_crc) =
+                gnu_debuglink(&bytes, context.is_little_endian()).unwrap_or_default();
         }
     }
 
-    let build_id = if let Some(section) = build_id_section {
-        let bytes = read_metadata_section(file, file_size, section)
-            .map_err(|error| format!("Cannot read ELF build ID: {error}"))?;
+    result.embedded_debug_info &= has_abbreviations;
 
-        gnu_build_id(
-            &bytes,
-            context.is_little_endian(),
-            usize::try_from(section.sh_addralign).unwrap_or(4),
-        )
-    } else {
-        None
-    };
+    // Section headers are optional in a stripped ELF. Build IDs are note
+    // contents, not section names, and can also be found through PT_NOTE.
+    if result.build_id.is_none() && header.e_phoff != 0 {
+        let count = if header.e_phnum == u16::MAX {
+            sections
+                .first()
+                .ok_or("Missing extended ELF program count")?
+                .sh_info as usize
+        } else {
+            usize::from(header.e_phnum)
+        };
 
-    let (debuglink, debuglink_crc) = if let Some(section) = debuglink_section {
-        let bytes = read_metadata_section(file, file_size, section)
-            .map_err(|error| format!("Cannot read ELF debuglink: {error}"))?;
+        let size = usize::from(header.e_phentsize);
 
-        gnu_debuglink(&bytes, context.is_little_endian()).unwrap_or_default()
-    } else {
-        (None, None)
-    };
+        if size < ProgramHeader::size(context) || count > MAX_ELF_SECTIONS {
+            return Err(String::from("Invalid ELF program-header table"));
+        }
 
-    Ok(ElfDebugMetadata {
-        build_id,
-        debuglink,
-        debuglink_crc,
-        embedded_debug_info,
+        let bytes = read_file_range(
+            file,
+            header.e_phoff,
+            size.checked_mul(count)
+                .ok_or("ELF program table overflow")? as u64,
+            file_size,
+            MAX_SECTION_HEADER_BYTES,
+        )?;
+
+        for entry in bytes.chunks_exact(size) {
+            check_current(is_current)?;
+            let segment = ProgramHeader::parse(entry, 0, 1, context)
+                .map_err(|error| error.to_string())?
+                .remove(0);
+
+            if segment.p_type == PT_NOTE {
+                result.build_id = read_build_id_note(
+                    file,
+                    file_size,
+                    segment.p_offset,
+                    segment.p_filesz,
+                    segment.p_align,
+                    context.is_little_endian(),
+                    &mut note_budget,
+                )?;
+
+                if result.build_id.is_some() {
+                    break;
+                }
+            }
+        }
+    }
+
+    check_current(is_current)?;
+    Ok(result)
+}
+
+fn check_current(is_current: &impl Fn() -> bool) -> Result<(), String> {
+    is_current()
+        .then_some(())
+        .ok_or_else(|| String::from("Symbol request cancelled"))
+}
+
+/// Only a few fixed names are needed. Comparing their terminating NUL bounds
+/// work per section even when many offsets share an unterminated string.
+fn section_named(names: &[u8], offset: usize, expected: &[u8]) -> bool {
+    names.get(offset..).is_some_and(|name| {
+        name.get(..expected.len()) == Some(expected) && name.get(expected.len()) == Some(&0)
     })
+}
+
+fn read_build_id_note(
+    file: &mut File,
+    file_size: u64,
+    offset: u64,
+    size: u64,
+    alignment: u64,
+    little_endian: bool,
+    budget: &mut usize,
+) -> Result<Option<String>, String> {
+    let count = usize::try_from(size).map_err(|_| "ELF note size overflow")?;
+    *budget = budget
+        .checked_sub(count)
+        .ok_or("ELF notes exceed their scan budget")?;
+    let bytes = read_file_range(file, offset, size, file_size, MAX_METADATA_SECTION_BYTES)?;
+    Ok(gnu_build_id(
+        &bytes,
+        little_endian,
+        usize::try_from(alignment).unwrap_or(4),
+    ))
+}
+
+/// Establish the presence of DWARF, not complete type usability. GDB owns
+/// decompression, DIE decoding and resolution of split-DWARF dependencies.
+fn dwarf_section_present(
+    file: &mut File,
+    file_size: u64,
+    section: &SectionHeader,
+    context: Ctx,
+    legacy_compressed: bool,
+) -> Result<bool, String> {
+    if section.sh_type == SHT_NOBITS
+        || section.sh_size == 0
+        || section
+            .sh_offset
+            .checked_add(section.sh_size)
+            .is_none_or(|end| end > file_size)
+    {
+        return Ok(false);
+    }
+
+    let bytes = read_file_range(
+        file,
+        section.sh_offset,
+        section.sh_size.min(32),
+        file_size,
+        32,
+    )?;
+
+    if legacy_compressed {
+        return Ok(bytes.starts_with(b"ZLIB")
+            && bytes.len() > 12
+            && u64::from_be_bytes(bytes[4..12].try_into().unwrap()) > 0);
+    }
+
+    if section.sh_flags & u64::from(SHF_COMPRESSED) != 0 {
+        let size = if context.is_big() { 24 } else { 12 };
+
+        if bytes.len() <= size {
+            return Ok(false);
+        }
+
+        let uncompressed = if context.is_big() {
+            let length = bytes[8..16].try_into().unwrap();
+
+            if context.is_little_endian() {
+                u64::from_le_bytes(length)
+            } else {
+                u64::from_be_bytes(length)
+            }
+        } else {
+            u64::from(read_elf_u32(&bytes[4..8], context.is_little_endian()).unwrap())
+        };
+
+        return Ok(uncompressed > 0
+            && read_elf_u32(&bytes[..4], context.is_little_endian())
+                .is_some_and(|kind| matches!(kind, 1 | 2)));
+    }
+
+    let Some(initial) = bytes
+        .get(..4)
+        .and_then(|bytes| read_elf_u32(bytes, context.is_little_endian()))
+    else {
+        return Ok(false);
+    };
+
+    let (length, start, offset_size) = if initial == u32::MAX {
+        let Some(length) = bytes.get(4..12) else {
+            return Ok(false);
+        };
+        let length = if context.is_little_endian() {
+            u64::from_le_bytes(length.try_into().unwrap())
+        } else {
+            u64::from_be_bytes(length.try_into().unwrap())
+        };
+        (length, 12, 8)
+    } else if initial >= 0xfffffff0 {
+        return Ok(false);
+    } else {
+        (u64::from(initial), 4, 4)
+    };
+
+    let Some(version) = bytes.get(start..start + 2) else {
+        return Ok(false);
+    };
+    let version = if context.is_little_endian() {
+        u16::from_le_bytes(version.try_into().unwrap())
+    } else {
+        u16::from_be_bytes(version.try_into().unwrap())
+    };
+
+    let minimum = offset_size + if version == 5 { 5 } else { 4 };
+    Ok((2..=5).contains(&version)
+        && length >= minimum
+        && length
+            .checked_add(start as u64)
+            .is_some_and(|end| end <= section.sh_size))
 }
 
 fn read_section_headers(
@@ -375,27 +606,20 @@ fn read_file_range(
     Ok(bytes)
 }
 
-fn section_name(names: &[u8], offset: usize) -> Option<&str> {
-    let name = names.get(offset..)?;
-    let end = name.iter().position(|byte| *byte == 0)?;
-
-    std::str::from_utf8(&name[..end]).ok()
-}
-
-pub(crate) fn refresh_module_debug_file_while(
+pub(crate) fn refresh_module_debug_file_with_search(
     mut metadata: ModuleDebugMetadata,
+    search: &DebugFileSearch,
     is_current: &impl Fn() -> bool,
 ) -> ModuleDebugMetadata {
-    if metadata.error.is_some() {
-        return metadata;
-    }
-
+    metadata.rejected_debug_files.clear();
     metadata.separate_debug_file = find_separate_debug_file(
         &metadata.path,
         metadata.debuglink.as_deref(),
         metadata.debuglink_crc,
         metadata.build_id.as_deref(),
+        search,
         is_current,
+        &mut metadata.rejected_debug_files,
     );
 
     metadata.suggestion = (!metadata.embedded_debug_info && metadata.separate_debug_file.is_none())
@@ -428,7 +652,8 @@ fn gnu_build_id(data: &[u8], little_endian: bool, alignment: usize) -> Option<St
         let name = name.strip_suffix(&[0]).unwrap_or(name);
         let description = data.get(description_start..description_end)?;
 
-        if note_type == NT_GNU_BUILD_ID && name == b"GNU" {
+        if note_type == NT_GNU_BUILD_ID && name == b"GNU" && (2..=128).contains(&description.len())
+        {
             return Some(hexadecimal(description));
         }
 
@@ -472,7 +697,9 @@ fn find_separate_debug_file(
     debuglink: Option<&str>,
     debuglink_crc: Option<u32>,
     build_id: Option<&str>,
+    search: &DebugFileSearch,
     is_current: &impl Fn() -> bool,
+    rejected: &mut Vec<String>,
 ) -> Option<PathBuf> {
     let mut debuglink_candidates = Vec::new();
 
@@ -484,33 +711,38 @@ fn find_separate_debug_file(
         if module.is_absolute() {
             let relative_parent = parent.strip_prefix("/").unwrap_or(parent);
 
-            debuglink_candidates.push(
-                Path::new("/usr/lib/debug")
-                    .join(relative_parent)
-                    .join(debuglink),
+            debuglink_candidates.extend(
+                search
+                    .directories
+                    .iter()
+                    .take(64)
+                    .map(|directory| directory.join(relative_parent).join(debuglink)),
             );
         }
     }
 
     let mut build_id_candidates = Vec::new();
 
-    if let Some(build_id) = build_id.filter(|build_id| build_id.len() > 2) {
+    if let Some(build_id) = build_id.filter(|id| {
+        (4..=256).contains(&id.len())
+            && id.len().is_multiple_of(2)
+            && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    }) {
         let (prefix, suffix) = build_id.split_at(2);
 
-        build_id_candidates.push(
-            Path::new("/usr/lib/debug/.build-id")
+        build_id_candidates.extend(search.directories.iter().take(64).map(|directory| {
+            directory
+                .join(".build-id")
                 .join(prefix)
-                .join(format!("{suffix}.debug")),
+                .join(format!("{suffix}.debug"))
+        }));
+        build_id_candidates.extend(
+            search
+                .caches
+                .iter()
+                .take(4)
+                .map(|cache| cache.join(build_id).join("debuginfo")),
         );
-
-        if let Some(cache) = std::env::var_os("HOME") {
-            build_id_candidates.push(
-                PathBuf::from(cache)
-                    .join(".cache/debuginfod_client")
-                    .join(build_id)
-                    .join("debuginfo"),
-            );
-        }
     }
 
     select_separate_debug_file_while(
@@ -519,6 +751,7 @@ fn find_separate_debug_file(
         build_id_candidates,
         build_id,
         is_current,
+        rejected,
     )
 }
 
@@ -535,6 +768,7 @@ fn select_separate_debug_file(
         build_id_candidates,
         expected_build_id,
         &|| true,
+        &mut Vec::new(),
     )
 }
 
@@ -544,42 +778,87 @@ fn select_separate_debug_file_while(
     build_id_candidates: impl IntoIterator<Item = PathBuf>,
     expected_build_id: Option<&str>,
     is_current: &impl Fn() -> bool,
+    rejected: &mut Vec<String>,
 ) -> Option<PathBuf> {
-    if let Some(expected_crc) = debuglink_crc {
-        for candidate in debuglink_candidates {
-            if !is_current() {
-                return None;
-            }
+    let candidates = build_id_candidates
+        .into_iter()
+        .filter(|_| expected_build_id.is_some())
+        .map(|path| (path, None))
+        .chain(
+            debuglink_candidates
+                .into_iter()
+                .filter(|_| debuglink_crc.is_some())
+                .map(|path| (path, debuglink_crc)),
+        );
 
-            if candidate.is_file()
-                && cached_gnu_debuglink_crc_while(&candidate, is_current)
-                    .is_ok_and(|crc| crc == expected_crc)
-            {
-                return Some(candidate);
+    for (candidate, crc) in candidates {
+        if !is_current() {
+            break;
+        }
+
+        // Missing paths are normal during a search. Preserve a bounded set of
+        // rejection reasons for files that actually exist, then try the next.
+        if !candidate.try_exists().unwrap_or(false) {
+            continue;
+        }
+
+        match validate_debug_file(&candidate, expected_build_id, crc, is_current) {
+            Ok(()) => return Some(candidate),
+            Err(error) if rejected.len() < 4 => {
+                rejected.push(format!("{}: {error}", candidate.display()))
             }
+            Err(_) => {}
         }
     }
 
-    let expected_build_id = expected_build_id?;
-
-    build_id_candidates
-        .into_iter()
-        .take_while(|_| is_current())
-        .find(|candidate| {
-            candidate_build_id(candidate)
-                .is_ok_and(|build_id| build_id.as_deref() == Some(expected_build_id))
-        })
+    None
 }
 
+#[cfg(test)]
 fn candidate_build_id(path: &Path) -> Result<Option<String>, String> {
-    let mut file = File::open(path).map_err(|error| error.to_string())?;
-    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    let is_current = &|| true;
+    let (mut file, metadata) = open_regular_file(path).map_err(|error| error.to_string())?;
 
-    if !metadata.is_file() {
-        return Err(String::from("Build-ID candidate is not a regular file"));
+    inspect_elf_metadata(&mut file, metadata.len(), is_current).map(|metadata| metadata.build_id)
+}
+
+/// Validate before handing a separate file to GDB. A filename match is not
+/// sufficient, and a matching stripped binary is not a usable debug file.
+pub(crate) fn validate_debug_file(
+    path: &Path,
+    expected_build_id: Option<&str>,
+    expected_crc: Option<u32>,
+    is_current: &impl Fn() -> bool,
+) -> Result<(), String> {
+    if !is_current() {
+        return Err(String::from("Symbol request cancelled"));
     }
 
-    inspect_elf_metadata(&mut file, metadata.len()).map(|metadata| metadata.build_id)
+    let (mut file, metadata) = open_regular_file(path).map_err(|error| error.to_string())?;
+
+    let elf = inspect_elf_metadata(&mut file, metadata.len(), is_current)?;
+
+    if !elf.embedded_debug_info {
+        return Err(String::from(
+            "The matching file does not contain supported DWARF debug information",
+        ));
+    }
+
+    match (expected_build_id, elf.build_id.as_deref(), expected_crc) {
+        (Some(expected), Some(actual), _) if expected == actual => Ok(()),
+        (Some(_), Some(_), _) => Err(String::from(
+            "Debug-file build ID does not match the loaded module",
+        )),
+        (_, _, Some(expected))
+            if cached_gnu_debuglink_crc_while(path, is_current)
+                .is_ok_and(|actual| actual == expected) =>
+        {
+            Ok(())
+        }
+        _ => Err(String::from(
+            "Could not verify the debug file against the loaded module",
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -590,7 +869,7 @@ fn gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
 fn gnu_debuglink_crc_while(path: &Path, is_current: &impl Fn() -> bool) -> io::Result<u32> {
     #[cfg(test)]
     record_debuglink_crc_calculation(path);
-    let mut file = File::open(path)?;
+    let (mut file, _) = open_regular_file(path)?;
     let mut buffer = [0_u8; DEBUGLINK_CRC_BUFFER_BYTES];
     let mut crc = u32::MAX;
 
@@ -884,6 +1163,126 @@ mod tests {
         !crc
     }
 
+    fn metadata_elf(with_debug: bool) -> Vec<u8> {
+        let names = b"\0.shstrtab\0.note.custom\0.debug_info\0.debug_abbrev\0";
+        let mut note = Vec::new();
+        note.extend_from_slice(&4_u32.to_le_bytes());
+        note.extend_from_slice(&4_u32.to_le_bytes());
+        note.extend_from_slice(&NT_GNU_BUILD_ID.to_le_bytes());
+        note.extend_from_slice(b"GNU\0\xde\xad\xbe\xef");
+        let info = if with_debug {
+            &b"\x09\0\0\0\x05\0\x01\x08\0\0\0\0\x01"[..]
+        } else {
+            &[]
+        };
+        let mut bytes = vec![0_u8; 64 + 5 * 64];
+        bytes[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        bytes[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        bytes[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[40..48].copy_from_slice(&64_u64.to_le_bytes());
+        bytes[52..54].copy_from_slice(&64_u16.to_le_bytes());
+        bytes[58..60].copy_from_slice(&64_u16.to_le_bytes());
+        bytes[60..62].copy_from_slice(&5_u16.to_le_bytes());
+        bytes[62..64].copy_from_slice(&1_u16.to_le_bytes());
+
+        for (index, (name, kind, data)) in [
+            (1_u32, 3_u32, &names[..]),
+            (11, SHT_NOTE, &note[..]),
+            (24, 1, info),
+            (36, 1, &b"\x01\x11\0\0\0\0"[..]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let offset = bytes.len() as u64;
+            let start = 64 + (index + 1) * 64;
+            bytes[start..start + 4].copy_from_slice(&name.to_le_bytes());
+            bytes[start + 4..start + 8].copy_from_slice(&kind.to_le_bytes());
+            bytes[start + 24..start + 32].copy_from_slice(&offset.to_le_bytes());
+            bytes[start + 32..start + 40].copy_from_slice(&(data.len() as u64).to_le_bytes());
+            bytes[start + 48..start + 56].copy_from_slice(&4_u64.to_le_bytes());
+            bytes.extend_from_slice(data);
+        }
+
+        bytes
+    }
+
+    #[test]
+    fn metadata_checks_presence_cancellation_and_notes_without_section_names() {
+        let directory = TestDirectory::new("metadata-contract");
+        let path = directory.path().join("module");
+        std::fs::write(&path, metadata_elf(true)).unwrap();
+        let metadata = inspect_module(&path);
+        assert!(metadata.embedded_debug_info, "{metadata:?}");
+        assert_eq!(metadata.build_id.as_deref(), Some("deadbeef"));
+        assert!(
+            inspect_module_with_search(&path, &DebugFileSearch::default(), &|| false)
+                .error
+                .is_some()
+        );
+        assert!(!section_named(&vec![b'x'; 1024 * 1024], 0, b".debug_info"));
+        std::fs::write(&path, metadata_elf(false)).unwrap();
+        assert!(!inspect_module(&path).embedded_debug_info);
+
+        let mut bytes = metadata_elf(true);
+        let note = bytes[64 + 2 * 64 + 24..64 + 2 * 64 + 32]
+            .try_into()
+            .unwrap();
+        let offset = u64::from_le_bytes(note);
+        bytes[32..40].copy_from_slice(&64_u64.to_le_bytes());
+        bytes[40..48].fill(0);
+        bytes[54..56].copy_from_slice(&56_u16.to_le_bytes());
+        bytes[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[60..64].fill(0);
+        bytes[64..120].fill(0);
+        bytes[64..68].copy_from_slice(&PT_NOTE.to_le_bytes());
+        bytes[72..80].copy_from_slice(&offset.to_le_bytes());
+        bytes[96..104].copy_from_slice(&20_u64.to_le_bytes());
+        bytes[112..120].copy_from_slice(&4_u64.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(inspect_module(&path).build_id.as_deref(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn rejects_unusable_candidates_and_searches_without_the_host_module() {
+        let directory = TestDirectory::new("debug-candidate-fallback");
+        let invalid = directory.path().join("invalid.debug");
+        let valid = directory.path().join("valid.debug");
+        std::fs::write(&invalid, metadata_elf(false)).unwrap();
+        std::fs::write(&valid, metadata_elf(true)).unwrap();
+        let mut rejected = Vec::new();
+
+        assert_eq!(
+            select_separate_debug_file_while(
+                [valid.clone()],
+                Some(gnu_debuglink_crc(&valid).unwrap()),
+                [invalid],
+                Some("deadbeef"),
+                &|| true,
+                &mut rejected,
+            ),
+            Some(valid.clone())
+        );
+        assert_eq!(rejected.len(), 1);
+        let cache = directory.path().join("deadbeef");
+        std::fs::create_dir(&cache).unwrap();
+        std::fs::copy(&valid, cache.join("debuginfo")).unwrap();
+
+        let search = DebugFileSearch {
+            directories: Vec::new(),
+            caches: vec![directory.path().to_owned()],
+        };
+        let metadata = inspect_module_for_build_id(
+            &directory.path().join("missing-module"),
+            &search,
+            Some("deadbeef"),
+            &|| true,
+        );
+
+        assert_eq!(metadata.separate_debug_file, Some(cache.join("debuginfo")));
+    }
+
     #[test]
     fn reads_build_id_and_debug_sections_from_the_current_executable() {
         let executable = std::env::current_exe().expect("test executable path");
@@ -961,7 +1360,7 @@ mod tests {
     fn accepts_only_debuglink_candidates_with_matching_contents() {
         let directory = TestDirectory::new("debuglink-match");
         let candidate = directory.path().join("sample.debug");
-        std::fs::write(&candidate, b"matching debug information").unwrap();
+        std::fs::write(&candidate, metadata_elf(true)).unwrap();
         let expected = gnu_debuglink_crc(&candidate).unwrap();
 
         assert_eq!(
@@ -980,7 +1379,7 @@ mod tests {
         let first = directory.path().join("first.debug");
         let second = directory.path().join("second.debug");
         std::fs::write(&first, b"stale debug information").unwrap();
-        std::fs::write(&second, b"matching debug information").unwrap();
+        std::fs::write(&second, metadata_elf(true)).unwrap();
         let expected = gnu_debuglink_crc(&second).unwrap();
 
         assert_eq!(

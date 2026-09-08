@@ -12,6 +12,7 @@ pub(in crate::app) struct VariableRefresh {
     ui: Weak<Ui>,
     requests: StopRequests,
     target: VariableRefreshTarget,
+    symbol_revision: u64,
     variables: Vec<Variable>,
     fallbacks: Vec<Variable>,
     needs_update: Vec<bool>,
@@ -57,7 +58,7 @@ pub(in crate::app) fn refresh_variable_objects(
 ) {
     let existing = ui
         .upgrade()
-        .map(|ui| ui.local_variable_objects())
+        .map(|ui| ui.local_variable_objects_for_refresh())
         .unwrap_or_default();
 
     refresh_persistent_variable_objects(
@@ -80,7 +81,7 @@ pub(in crate::app) fn refresh_expression_variable_objects(
 ) {
     let existing = ui
         .upgrade()
-        .map(|ui| ui.expression_watch_variable_objects())
+        .map(|ui| ui.expression_watch_variable_objects_for_refresh())
         .unwrap_or_default();
 
     let fallbacks = expressions
@@ -152,10 +153,13 @@ fn refresh_persistent_variable_objects(
         VariableRefreshTarget::ExpressionWatches(_) => (0..variables.len()).collect(),
     };
 
+    let symbol_revision = ui.upgrade().map_or(0, |ui| ui.model.symbols.revision());
+
     let state = Rc::new(RefCell::new(VariableRefresh {
         ui,
         requests: update_batch.requests.clone(),
         target,
+        symbol_revision,
         variables,
         fallbacks,
         needs_update,
@@ -185,11 +189,14 @@ fn refresh_persistent_variable_objects(
 
 fn variable_refresh_is_current(state: &VariableRefresh) -> bool {
     state.requests.is_current()
-        && state.ui.upgrade().is_some_and(|ui| match &state.target {
-            VariableRefreshTarget::Locals => true,
-            VariableRefreshTarget::ExpressionWatches(expressions) => {
-                ui.expression_watches_match(expressions)
-            }
+        && state.ui.upgrade().is_some_and(|ui| {
+            ui.model.symbols.revision() == state.symbol_revision
+                && match &state.target {
+                    VariableRefreshTarget::Locals => true,
+                    VariableRefreshTarget::ExpressionWatches(expressions) => {
+                        ui.expression_watches_match(expressions)
+                    }
+                }
         })
 }
 
@@ -321,7 +328,7 @@ pub(in crate::app) fn request_next_variable_object(
 
     let Some((index, display_name)) = next else {
         if state.borrow().bulk_completed {
-            finish_variable_refresh(state);
+            finish_variable_refresh(client, state);
         } else {
             ready_variable_refresh_state(client, state);
         }
@@ -415,7 +422,7 @@ fn ready_variable_refresh_state(client: &MiClient, state: Rc<RefCell<VariableRef
     let batch = state.borrow_mut().update_batch.take();
 
     let Some(batch) = batch else {
-        finish_variable_refresh(state);
+        finish_variable_refresh(client, state);
         return;
     };
 
@@ -462,7 +469,7 @@ pub(super) fn variable_update_batch_ready(
         .any(|state| has_persistent_variable_objects(&state.borrow().variables))
     {
         for state in states {
-            finish_variable_refresh(state);
+            finish_variable_refresh(client, state);
         }
 
         return;
@@ -487,7 +494,7 @@ pub(super) fn variable_update_batch_ready(
         .is_err()
     {
         for state in states {
-            finish_variable_refresh(state);
+            finish_variable_refresh(client, state);
         }
     }
 }
@@ -615,7 +622,7 @@ fn apply_bulk_variable_updates(
             drop(refresh);
             request_next_variable_object(client, state);
         } else {
-            finish_variable_refresh(state);
+            finish_variable_refresh(client, state);
         }
     }
 }
@@ -673,7 +680,12 @@ fn apply_variable_update(variable: &mut Variable, update: &crate::debugger::Vari
     }
 }
 
-fn finish_variable_refresh(state: Rc<RefCell<VariableRefresh>>) {
+fn finish_variable_refresh(client: &MiClient, state: Rc<RefCell<VariableRefresh>>) {
+    if !variable_refresh_is_current(&state.borrow()) {
+        discard_variable_refresh(client, &state);
+        return;
+    }
+
     let (ui, generation, target, variables) = {
         let mut state = state.borrow_mut();
 

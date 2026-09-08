@@ -5,12 +5,22 @@ GDB ?= gdb
 FORTRAN ?= gfortran
 ZIG ?= zig
 ODIN ?= odin
+MUSL_CC ?= musl-gcc
 
 CFLAGS ?= -std=c17 -g3 -O0 -fno-omit-frame-pointer -fno-inline -Wall -Wextra -Wpedantic
 CXXFLAGS ?= -std=c++20 -g3 -O0 -fno-omit-frame-pointer -fno-inline -Wall -Wextra -Wpedantic
 RUSTFLAGS ?= --edition=2024 -C debuginfo=2 -C opt-level=0 -C force-frame-pointers=yes
 CPPFLAGS ?=
 LDFLAGS ?=
+
+# Optional allocator fixtures can use custom debug builds without LD_PRELOAD.
+# Put header flags in *_CFLAGS and library paths / runtime paths in *_LIBS.
+JEMALLOC_CFLAGS ?=
+JEMALLOC_LIBS ?= -ljemalloc
+TCMALLOC_CFLAGS ?=
+TCMALLOC_LIBS ?= -ltcmalloc
+MIMALLOC_CFLAGS ?=
+MIMALLOC_LIBS ?= -lmimalloc
 
 TARGET_DIR := ../target/debug-fixtures
 C_TARGETS := \
@@ -40,13 +50,44 @@ LANGUAGE_TARGETS := \
 	$(TARGET_DIR)/fortran-variable-viewer-target \
 	$(TARGET_DIR)/zig-variable-viewer-target \
 	$(TARGET_DIR)/odin-variable-viewer-target
+ALLOCATOR_TARGETS := \
+	$(TARGET_DIR)/c-glibc-allocator-target \
+	$(TARGET_DIR)/c-musl-allocator-target \
+	$(TARGET_DIR)/c-jemalloc-allocator-target \
+	$(TARGET_DIR)/c-tcmalloc-allocator-target \
+	$(TARGET_DIR)/c-mimalloc-allocator-target
 CORE_DUMP := $(TARGET_DIR)/c-misc-core-target.core
 
-.PHONY: all clean core languages
+.PHONY: all clean core languages allocators \
+	allocator-glibc allocator-musl allocator-jemalloc allocator-tcmalloc allocator-mimalloc
 
 all: $(TARGETS)
 
 languages: $(LANGUAGE_TARGETS)
+
+allocators: $(ALLOCATOR_TARGETS)
+
+allocator-glibc: $(TARGET_DIR)/c-glibc-allocator-target
+allocator-musl: $(TARGET_DIR)/c-musl-allocator-target
+allocator-jemalloc: $(TARGET_DIR)/c-jemalloc-allocator-target
+allocator-tcmalloc: $(TARGET_DIR)/c-tcmalloc-allocator-target
+allocator-mimalloc: $(TARGET_DIR)/c-mimalloc-allocator-target
+
+$(TARGET_DIR)/c-glibc-allocator-target: c_allocator_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DFGDB_ALLOCATOR_GLIBC $< $(LDFLAGS) -o $@
+
+# Static linking makes this fixture independent of the host's musl loader path.
+$(TARGET_DIR)/c-musl-allocator-target: c_allocator_target.c | $(TARGET_DIR)
+	$(MUSL_CC) $(CPPFLAGS) $(CFLAGS) -DFGDB_ALLOCATOR_MUSL $< $(LDFLAGS) -static -o $@
+
+$(TARGET_DIR)/c-jemalloc-allocator-target: c_allocator_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(JEMALLOC_CFLAGS) -DFGDB_ALLOCATOR_JEMALLOC $< $(LDFLAGS) $(JEMALLOC_LIBS) -o $@
+
+$(TARGET_DIR)/c-tcmalloc-allocator-target: c_allocator_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(TCMALLOC_CFLAGS) -DFGDB_ALLOCATOR_TCMALLOC $< $(LDFLAGS) $(TCMALLOC_LIBS) -o $@
+
+$(TARGET_DIR)/c-mimalloc-allocator-target: c_allocator_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(MIMALLOC_CFLAGS) -DFGDB_ALLOCATOR_MIMALLOC $< $(LDFLAGS) $(MIMALLOC_LIBS) -o $@
 
 $(TARGET_DIR)/fortran-variable-viewer-target: fortran_variable_viewer_target.f90 | $(TARGET_DIR)
 	$(FORTRAN) -g3 -O0 -fcheck=all $< -o $@
@@ -123,4 +164,4 @@ $(CORE_DUMP): $(TARGET_DIR)/c-misc-core-target
 		-ex "generate-core-file $(abspath $@)"
 
 clean:
-	$(RM) $(TARGETS) $(LANGUAGE_TARGETS) $(CORE_DUMP)
+	$(RM) $(TARGETS) $(LANGUAGE_TARGETS) $(ALLOCATOR_TARGETS) $(CORE_DUMP)

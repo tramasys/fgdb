@@ -80,8 +80,16 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let weak_ui = Rc::downgrade(&ui);
     let client = Rc::clone(&mi_client);
 
+    let symbol_resolver = symbol_resolution::connect(&ui, &mi_client, &model);
+    connect_source_symbol_navigation(&ui, &mi_client, &symbol_resolver);
+
     ui.set_debug_data_action_handler(move |action| {
-        handle_debug_data_action(weak_ui.clone(), Rc::clone(&client), action);
+        handle_debug_data_action(
+            weak_ui.clone(),
+            Rc::clone(&client),
+            &symbol_resolver,
+            action,
+        );
     });
 
     let disassembly_controller =
@@ -687,17 +695,6 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
 
         let detail = format!("Added filtered {} catchpoint", request.kind.label());
         mutate_breakpoint(weak_ui.clone(), &client, command, detail);
-    });
-
-    let weak_ui = Rc::downgrade(&ui);
-    let weak_client = Rc::downgrade(&mi_client);
-
-    ui.set_source_symbol_handler(move |symbol| {
-        let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
-            return;
-        };
-
-        request_source_symbol(weak_ui, client, symbol, true);
     });
 
     let weak_ui = Rc::downgrade(&ui);
