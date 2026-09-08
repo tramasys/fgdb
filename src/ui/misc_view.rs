@@ -168,9 +168,9 @@ pub(super) fn build_misc_view(theme: &Theme) -> MiscView {
     let allocator_requested = Rc::new(Cell::new(false));
     let allocator_probe_fresh = Rc::new(Cell::new(false));
     let locks_requested = Rc::new(Cell::new(false));
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let root = workspace::ResponsiveBox::new();
     root.set_size_request(0, 0);
-    root.add_css_class("sidebar");
+    root.add_css_class("panel");
     root.add_css_class("kernel-page");
     root.add_css_class("misc-page");
     let pages = gtk::Stack::new();
@@ -195,6 +195,7 @@ pub(super) fn build_misc_view(theme: &Theme) -> MiscView {
 
     root.append(&navigation.root);
     root.append(&navigation.compact_root);
+    root.bind_navigation(&navigation.root, &navigation.compact_root);
     let startup = build_startup_page();
     pages.add_titled(&startup.root, Some("startup-vectors"), "Args / Env");
     let auxv = build_auxv_page();
@@ -215,8 +216,6 @@ pub(super) fn build_misc_view(theme: &Theme) -> MiscView {
 
     MiscView {
         root,
-        wide_subtabs: navigation.root,
-        compact_subtabs: navigation.compact_root,
         active,
         in_flight,
         needs_refresh,
@@ -1755,6 +1754,7 @@ fn build_arguments_section(
         .child(&view)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .overlay_scrolling(false)
         .build();
 
     configure_misc_scroller(&scrolled);
@@ -1823,6 +1823,7 @@ fn build_environment_section(
         .child(&view)
         .vexpand(true)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .overlay_scrolling(false)
         .build();
 
     configure_misc_scroller(&scrolled);
@@ -1984,8 +1985,6 @@ fn linux_signal_name(signal: i32) -> &'static str {
 }
 
 pub(super) fn connect_misc_tab_visibility(
-    notebook: &gtk::Notebook,
-    misc_page: u32,
     view: &MiscView,
     refresh_handler: &Rc<RefCell<Option<MiscRefreshHandler>>>,
 ) {
@@ -1995,8 +1994,7 @@ pub(super) fn connect_misc_tab_visibility(
     let pages = view.pages.clone();
     let handler = Rc::clone(refresh_handler);
 
-    notebook.connect_switch_page(move |_, _, page| {
-        let now_active = page == misc_page;
+    workspace::connect_presentation(&view.root, move |now_active| {
         active.set(now_active);
 
         if now_active

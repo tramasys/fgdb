@@ -67,6 +67,35 @@ impl DebuggerModel {
                 != Some(generation)
     }
 
+    pub(crate) fn register_details_pending(&self, generation: u64) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self.stopped.register_details_generation.get() != Some(generation)
+    }
+
+    pub(crate) fn stack_details_pending(&self, generation: u64) -> bool {
+        if !self.is_stop_refresh_current(generation) {
+            return false;
+        }
+
+        if self.stopped.latest_stack_generation.get() == Some(generation)
+            && !self.stopped.latest_stack.borrow().is_empty()
+        {
+            self.stopped.stack_details_generation.get() != Some(generation)
+        } else {
+            self.stopped.stack_memory_refresh_generation.get() != Some(generation)
+        }
+    }
+
+    pub(crate) fn memory_watches_refresh_pending(&self, generation: u64) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self.stopped.memory_watches_refresh_generation.get() != Some(generation)
+    }
+
+    pub(crate) fn tls_runtime_refresh_pending(&self, generation: u64) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self.stopped.tls_runtime_refresh_generation.get() != Some(generation)
+    }
+
     pub(crate) fn stack_for_details(&self, generation: u64) -> Option<Vec<StackEntry>> {
         (self.is_stop_refresh_current(generation)
             && self.stopped.latest_stack_generation.get() == Some(generation))

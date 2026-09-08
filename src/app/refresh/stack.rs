@@ -139,7 +139,7 @@ pub(in crate::app) fn enrich_stack(
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
-    if !current_ui.stack_details_visible() {
+    if !current_ui.stack_details_visible() || !current_ui.model.stack_details_pending(generation) {
         return;
     }
 

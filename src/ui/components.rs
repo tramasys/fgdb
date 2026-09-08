@@ -11,6 +11,15 @@ pub(super) const CONTROL_GAP: i32 = 6;
 pub(super) const CONTENT_INSET: i32 = 8;
 pub(super) const DIALOG_INSET: i32 = 12;
 
+/// Pane chrome and tables meet at their edges. Content owns its own inset.
+pub(super) fn panel() -> gtk::Box {
+    gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(0)
+        .css_classes(["panel"])
+        .build()
+}
+
 pub(super) fn dynamic_list(empty_text: &str) -> gtk::Box {
     let list = gtk::Box::new(gtk::Orientation::Vertical, 1);
     list.append(&empty_label(empty_text));
@@ -21,13 +30,10 @@ pub(super) fn dynamic_list(empty_text: &str) -> gtk::Box {
 pub(super) fn empty_label(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.add_css_class("muted");
+    label.add_css_class("pane-note");
     label.set_halign(gtk::Align::Fill);
     label.set_xalign(0.0);
     label.set_wrap(true);
-    label.set_margin_start(4);
-    label.set_margin_end(4);
-    label.set_margin_top(3);
-    label.set_margin_bottom(3);
 
     label
 }
@@ -67,6 +73,60 @@ pub(super) fn icon_label(icon: &str, label: &str) -> gtk::Box {
     row.append(&gtk::Label::new(Some(label)));
 
     row
+}
+
+/// Shared title-bar controls that do not depend on the desktop's icon theme.
+pub(super) fn window_controls(window: &impl IsA<gtk::Window>) -> gtk::Box {
+    let window = window.as_ref();
+    let controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    controls.add_css_class("window-controls");
+    let minimize = window_control_button("−", "Minimize", "minimize");
+    let maximize = window_control_button("□", "Maximize or restore", "maximize");
+    let close = window_control_button("×", "Close", "close");
+    let weak = window.downgrade();
+
+    minimize.connect_clicked(move |_| {
+        if let Some(window) = weak.upgrade() {
+            window.minimize();
+        }
+    });
+
+    let weak = window.downgrade();
+
+    maximize.connect_clicked(move |_| {
+        if let Some(window) = weak.upgrade() {
+            if window.is_maximized() {
+                window.unmaximize();
+            } else {
+                window.maximize();
+            }
+        }
+    });
+
+    let weak = window.downgrade();
+
+    close.connect_clicked(move |_| {
+        if let Some(window) = weak.upgrade() {
+            window.close();
+        }
+    });
+
+    controls.append(&minimize);
+    controls.append(&maximize);
+    controls.append(&close);
+
+    controls
+}
+
+fn window_control_button(label: &str, tooltip: &str, class: &str) -> gtk::Button {
+    let button = gtk::Button::with_label(label);
+    button.add_css_class("window-control");
+    button.add_css_class(class);
+    button.set_focus_on_click(false);
+    button.set_tooltip_text(Some(tooltip));
+    button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
+
+    button
 }
 
 /// Keep an outer popover dismissible after a nested dropdown releases its grab.

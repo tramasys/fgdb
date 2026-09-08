@@ -20,6 +20,7 @@
 .locals-toolbar,
 .source-find-bar,
 .source-tree-toolbar,
+.module-toolbar,
 .memory-watch-command,
 .memory-watch-toolbar,
 .misc-startup-controls,
@@ -46,10 +47,7 @@ headerbar.topbar {
     background: @app_bg;
     background-image: none;
     box-shadow: none;
-    border-top: 0;
-    border-left: 0;
-    border-right: 0;
-    border-bottom: 1px solid @app_border;
+    border: 0;
 }
 
 headerbar.topbar .titlebar-identity {
@@ -126,9 +124,13 @@ headerbar.topbar button.window-control.close:active {
     letter-spacing: 0.6px;
 }
 
-.sidebar {
+.panel-content {
     padding: 4px;
     background: @app_surface;
+}
+
+.pane-note {
+    padding: 4px 6px;
 }
 
 .stack-row {
@@ -343,7 +345,7 @@ button.thread-backtrace-frame:hover {
 }
 
 .lock-graph {
-    padding: 5px 0 0;
+    padding: 4px 6px;
     background: @app_surface;
     border-top: 1px solid @app_border;
 }
@@ -983,7 +985,7 @@ list.simd-register-list {
 }
 
 .memory-inspector-split > separator {
-    min-height: 3px;
+    min-height: 1px;
     background: @app_border;
     border: 0;
 }
@@ -1438,25 +1440,6 @@ button.toolbar-action.configuration-warning {
     margin: 0;
 }
 
-.gef-tools-tabs > header {
-    min-height: 20px;
-    background: @app_bg;
-    border-bottom: 1px solid @app_border;
-}
-
-.gef-tools-tabs > header > tabs > tab {
-    min-height: 19px;
-    padding: 0 5px;
-    border: 0;
-    border-bottom: 1px solid transparent;
-}
-
-.gef-tools-tabs > header > tabs > tab:checked {
-    color: @app_fg;
-    background: @app_raised;
-    border-bottom-color: @app_accent;
-}
-
 popover.debugger-context-menu > contents {
     min-width: 168px;
 }
@@ -1473,7 +1456,7 @@ popover.debugger-context-menu > contents {
 }
 
 .until-condition {
-    padding: 2px 0 0;
+    padding: 4px 8px;
 }
 
 .stack-row:hover {
@@ -1598,6 +1581,21 @@ button.workspace-pane-toggle {
     border-right: 1px solid @app_border;
 }
 
+menubutton.workspace-panel-menu > button {
+    min-height: 21px;
+    padding: 0 10px;
+    color: @app_muted;
+    background: @app_surface;
+    border: 0;
+    border-left: 1px solid @app_border;
+}
+
+menubutton.workspace-panel-menu > button:hover,
+menubutton.workspace-panel-menu > button:checked {
+    color: @app_fg;
+    background: @app_hover;
+}
+
 button.workspace-pane-toggle:hover {
     color: @app_fg;
     background: @app_hover;
@@ -1619,31 +1617,6 @@ button.workspace-pane-toggle:checked {
 
 .status-error {
     color: @app_danger;
-}
-
-.source-navigation-toolbar {
-    min-height: 25px;
-    padding: 0;
-    background: @app_surface;
-    border-bottom: 1px solid @app_border;
-}
-
-button.source-navigation-action,
-menubutton.source-navigation-menu-button > button {
-    min-height: 24px;
-    padding: 0 8px;
-    color: @app_muted;
-    background: transparent;
-    border: 0;
-    border-right: 1px solid alpha(@app_border, 0.75);
-}
-
-button.source-navigation-action:hover,
-button.source-navigation-action:focus-visible,
-menubutton.source-navigation-menu-button > button:hover,
-menubutton.source-navigation-menu-button > button:focus-visible {
-    color: @app_accent_hover;
-    background: @app_hover;
 }
 
 button.source-navigation-action:disabled {
@@ -1806,7 +1779,7 @@ window.fontchooser scrollbar {
 }
 
 .settings-sidebar row {
-    padding: 10px 12px;
+    padding: 6px 12px;
     border: 0;
     color: @app_fg;
     background: transparent;
@@ -1837,12 +1810,25 @@ window.fontchooser scrollbar {
     background: @app_card;
 }
 
+.settings-row.workspace-panel-row {
+    padding: 4px 12px;
+}
+
 .settings-name {
     font-weight: 700;
 }
 
+/* The source toolbar already supplies the gap above the file tabs. */
+notebook.source-notebook > header > tabs {
+    padding-top: 0;
+}
+
+notebook.source-notebook > header > tabs > tab {
+    padding: 2px 2px 2px 10px;
+}
+
 .source-tab {
-    padding: 0 2px;
+    padding: 0;
     color: @app_fg;
 }
 
@@ -1873,6 +1859,26 @@ stackswitcher.kernel-tabs {
     background: @app_surface;
 }
 
+.kernel-compact-tab-navigation {
+    padding: 2px;
+}
+
+.kernel-tab-navigation:not(.kernel-compact-tab-navigation) > button.kernel-tab-nav-button {
+    margin: 2px 0;
+}
+
+dropdown.kernel-compact-tab-selector > button {
+    min-height: 24px;
+    padding: 2px 6px;
+    border: 0;
+    background: transparent;
+}
+
+dropdown.kernel-compact-tab-selector > button:hover,
+dropdown.kernel-compact-tab-selector > button:checked {
+    background: @app_selected;
+}
+
 scrolledwindow.kernel-tabs-scroll,
 scrolledwindow.kernel-tabs-scroll > viewport {
     min-width: 0;
@@ -1890,11 +1896,6 @@ scrolledwindow.inspector-page-viewport > viewport {
     border: 0;
     outline: 0;
     box-shadow: none;
-}
-
-.kernel-page.inspector-compact .subpanel-header {
-    padding-left: 2px;
-    padding-right: 2px;
 }
 
 .misc-startup-summary-cell {
@@ -2424,17 +2425,28 @@ paned.misc-data-split > separator:hover {
 }
 
 .kernel-fact-row {
-    min-height: 23px;
-    padding: 1px 4px;
+    min-height: 22px;
+    padding: 2px 6px;
 }
 
-.kernel-fact-row:nth-child(odd) {
-    background: alpha(@app_fg, 0.035);
+.kernel-fact-row.kernel-section-heading {
+    min-height: 24px;
+}
+
+listview.kernel-overview-list {
+    color: @app_fg;
+    background: @app_surface;
 }
 
 listview.kernel-overview-list > row {
+    margin: 0;
+    padding: 0;
     color: @app_fg;
     background: transparent;
+}
+
+listview.kernel-overview-list > row:nth-child(odd) {
+    background: @app_row_alt;
 }
 
 listview.kernel-overview-list > row:hover {
@@ -2504,7 +2516,7 @@ listview.kernel-overview-list > row:hover .kernel-section-heading {
 }
 
 .context-legend grid {
-    padding: 2px 4px 4px;
+    padding: 4px 6px;
 }
 
 .disclosure-arrow {
@@ -2514,7 +2526,11 @@ listview.kernel-overview-list > row:hover .kernel-section-heading {
 paned > separator {
     min-width: 1px;
     min-height: 1px;
+    margin: 0;
+    padding: 0;
+    border: 0;
     background: alpha(@app_fg, 0.10);
+    background-image: none;
 }
 
 paned.workspace-columns > separator:hover {
@@ -2535,18 +2551,28 @@ paned.workspace-inspector-split > separator:hover {
 }
 
 paned.context-split > separator {
-    min-height: 3px;
-    background: alpha(@app_fg, 0.06);
-    border-top: 1px solid alpha(@app_fg, 0.10);
+    min-height: 1px;
+    background: alpha(@app_fg, 0.10);
 }
 
 paned.context-split > separator:hover {
     background: alpha(@app_accent, 0.20);
-    border-top-color: @app_accent;
 }
 
 scrollbar {
     background: @app_surface;
+    background-image: none;
+    border: 0;
+}
+
+scrollbar trough {
+    background: transparent;
+    border: 0;
+}
+
+scrolledwindow > junction {
+    background: @app_surface;
+    border: 0;
 }
 
 scrollbar slider {

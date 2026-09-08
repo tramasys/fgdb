@@ -358,19 +358,23 @@ impl Ui {
     pub(crate) fn begin_variable_viewer(
         &self,
         request: &VariableViewerRequest,
-    ) -> Rc<VariableViewerSession> {
+        origin: &gtk::Widget,
+    ) -> Option<Rc<VariableViewerSession>> {
+        let panel = self.panels.containing(origin)?;
+        let parent = self.panels.window(panel)?;
         let window = gtk::Window::builder()
             .title(format!(
                 "{} - {}",
                 request.descriptor.title, request.variable.name
             ))
-            .transient_for(&self.window)
+            .transient_for(&parent)
             .destroy_with_parent(true)
             .default_width(900)
             .default_height(620)
             .build();
 
         window.add_css_class("variable-viewer-window");
+        self.panels.track_dialog(panel, &window);
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
         components::inset(&root, components::DIALOG_INSET);
         let identity = gtk::Box::new(gtk::Orientation::Vertical, 3);
@@ -514,12 +518,12 @@ impl Ui {
 
         window.present();
 
-        Rc::new(VariableViewerSession {
+        Some(Rc::new(VariableViewerSession {
             window,
             store,
             status,
             shown: Cell::new(0),
-        })
+        }))
     }
 }
 

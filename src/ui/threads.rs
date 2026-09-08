@@ -765,12 +765,13 @@ impl Ui {
 
         let window = gtk::Window::builder()
             .title(title)
-            .transient_for(&self.window)
+            .transient_for(&self.panel_window(PanelId::Threads))
             .default_width(980)
             .default_height(680)
             .build();
 
         window.add_css_class("thread-analysis-window");
+        self.panels.track_dialog(PanelId::Threads, &window);
         let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
         root.set_margin_top(12);
         root.set_margin_bottom(12);

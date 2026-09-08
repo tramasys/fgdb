@@ -195,7 +195,6 @@ impl Ui {
                 }
             });
 
-        let window = self.window.clone();
         let selection = self.expression_watches_selection.clone();
         let handler = Rc::clone(&self.variable_assignment_handler);
         let float_handler = Rc::clone(&self.float_assignment_handler);
@@ -207,8 +206,10 @@ impl Ui {
         let current_source_language = Rc::clone(&self.current_source_language);
         let model = Rc::clone(&self.model);
 
+        let panels = Rc::clone(&self.panels);
+
         self.expression_watches_view
-            .connect_activate(move |_, position| {
+            .connect_activate(move |view, position| {
                 if !model.execution().ready
                     || !model.execution().state.inferior_started()
                     || model.execution().state.inferior_running()
@@ -242,9 +243,9 @@ impl Ui {
                         let editor_handler = editor_handler.borrow().clone();
 
                         if let Some(editor_handler) = editor_handler {
-                            editor_handler(variable);
-                        } else {
-                            open_variable_editor(
+                            editor_handler(variable, PanelId::Watches);
+                        } else if let Some(window) = workspace::host_window(view) {
+                            let editor = open_variable_editor(
                                 &window,
                                 variable,
                                 target_pointer_bits.get(),
@@ -258,6 +259,8 @@ impl Ui {
                                     string: Rc::clone(&string_handler),
                                 },
                             );
+
+                            panels.track_dialog(PanelId::Watches, &editor);
                         }
                     }
                 }

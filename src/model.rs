@@ -481,8 +481,19 @@ mod tests {
         assert_eq!(context.generation(), generation);
         assert!(model.publish_frames(Some(generation), &[frame(0), frame(1)]));
         let painted = model.frames();
+        assert!(model.register_details_pending(generation));
         assert!(model.claim_register_details(generation));
+        assert!(!model.register_details_pending(generation));
         assert!(!model.claim_register_details(generation));
+        assert!(model.stack_details_pending(generation));
+        assert!(model.claim_stack_memory_refresh(generation));
+        assert!(!model.stack_details_pending(generation));
+        assert!(model.memory_watches_refresh_pending(generation));
+        assert!(model.claim_memory_watches_refresh(generation));
+        assert!(!model.memory_watches_refresh_pending(generation));
+        assert!(model.tls_runtime_refresh_pending(generation));
+        assert!(model.claim_tls_runtime_refresh(generation));
+        assert!(!model.tls_runtime_refresh_pending(generation));
 
         model.select_frame(1);
         model.select_frame(0);

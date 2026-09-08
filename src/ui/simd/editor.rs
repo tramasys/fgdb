@@ -242,23 +242,25 @@ impl VectorEditor {
 }
 
 pub(in crate::ui) fn open_vector_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     register: Register,
     display: VectorDisplay,
     model: Rc<crate::model::DebuggerModel>,
     context: crate::debugger::StopContext,
     handler: Rc<RefCell<Option<VectorAssignmentHandler>>>,
-) {
+) -> Option<gtk::Window> {
     if !model.is_stop_context_current(&context) {
-        return;
+        return None;
     }
 
     let (window, _) = build_vector_editor(parent, register, display, model, context, handler);
     window.present();
+
+    Some(window)
 }
 
 fn build_vector_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     register: Register,
     display: VectorDisplay,
     model: Rc<crate::model::DebuggerModel>,

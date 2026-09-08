@@ -759,13 +759,14 @@ impl Ui {
 
     fn present_debug_data(self: &Rc<Self>) {
         if let Some(view) = self.debug_data_view.borrow().as_ref() {
+            view.window.set_transient_for(Some(&self.action_window()));
             view.window.present();
             return;
         }
 
         let window = gtk::Window::builder()
             .title("fgdb debug data")
-            .transient_for(&self.window)
+            .transient_for(&self.action_window())
             .modal(false)
             .hide_on_close(true)
             .default_width(980)

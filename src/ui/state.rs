@@ -72,15 +72,25 @@ impl Ui {
         workspace_footer.append(&log_toggle);
         workspace.status_detail.set_hexpand(true);
         workspace_footer.append(&workspace.status_detail);
+        let panels = workspace.panels.finish();
+        let panel_hosts = workspace::Hosts::new(&window, Rc::clone(&panels));
+        panel_hosts.set_restore_on_startup(config.preferences.restore_panel_windows);
+        workspace_footer.append(&panel_hosts.menu_button());
         root.append(&workspace_footer);
         let layout = layout::Persistence::install(&window, workspace.layout_panes.clone());
-        layout.bind_notebook("left_sidebar", &workspace.left_navigation);
-        layout.bind_console(
+        layout.bind_notebook("left_sidebar", &workspace.left_navigation, &panels);
+        layout.bind_notebook("inspector", &workspace.inspector_navigation, &panels);
+        layout.bind_stack("kernel", &workspace.kernel_view.pages);
+        layout.bind_stack("misc", &workspace.misc_view.pages);
+
+        workspace::console::install(
             &workspace.console,
             &topbar.terminal_toggle_button,
             &log_toggle,
             terminal.upcast_ref(),
             workspace.application_log.view().upcast_ref(),
+            layout.console_view(),
+            layout.console_handler(),
         );
 
         window.set_child(Some(&root));
@@ -132,7 +142,8 @@ impl Ui {
             status_detail: workspace.status_detail,
             status_visual_generation: Rc::new(Cell::new(0)),
             pause_visual_generation: Rc::new(Cell::new(0)),
-            inspector_notebook: workspace.inspector_notebook,
+            panels,
+            panel_hosts,
             source_notebook,
             source_documents,
             source_navigation: workspace.source_navigation,
@@ -347,7 +358,7 @@ impl Ui {
         ui.connect_breakpoint_bulk_controls();
         ui.connect_event_catchpoint_controls();
         ui.connect_filtered_catchpoint_controls();
-        ui.connect_keyboard_shortcuts();
+        ui.connect_keyboard_shortcuts(&ui.window);
         ui.update_session_display();
 
         ui
@@ -510,15 +521,15 @@ impl Ui {
     }
 
     pub fn register_details_visible(&self) -> bool {
-        self.inspector_notebook.current_page() == Some(2)
+        self.panels.presented(PanelId::Registers)
     }
 
     pub fn stack_details_visible(&self) -> bool {
-        self.inspector_notebook.current_page() == Some(3)
+        self.panels.presented(PanelId::Stack)
     }
 
     pub fn memory_details_visible(&self) -> bool {
-        self.inspector_notebook.current_page() == Some(4)
+        self.panels.presented(PanelId::Memory)
     }
 
     pub fn tls_details_visible(&self) -> bool {
@@ -527,62 +538,48 @@ impl Ui {
     }
 
     pub fn connect_debug_controls(self: &Rc<Self>, client: &Rc<MiClient>) {
+        let pending = Rc::new(Cell::new(false));
         let weak_ui = Rc::downgrade(self);
-        let client_for_inspector = Rc::clone(client);
+        let client_for_details = Rc::clone(client);
 
-        self.inspector_notebook
-            .connect_switch_page(move |_, _, page| {
-                if !matches!(page, 2 | 3 | 4 | 7) {
-                    return;
+        let refresh = Rc::new(move || {
+            if pending.replace(true) {
+                return;
+            }
+
+            let pending = Rc::clone(&pending);
+            let weak_ui = weak_ui.clone();
+            let client = Rc::clone(&client_for_details);
+
+            glib::idle_add_local_once(move || {
+                pending.set(false);
+
+                if let Some(ui) = weak_ui.upgrade()
+                    && ui.model.stopped_inspection_available()
+                {
+                    crate::app::refresh_cached_inspector_details(&Rc::downgrade(&ui), &client);
                 }
+            });
+        });
 
-                // GTK can emit `switch-page` before `current_page()` exposes
-                // the new page. Enrichment checks visibility to avoid doing
-                // expensive pointer walks for hidden tabs, so defer it by one
-                // main-loop turn and verify that this page is still active.
-                let weak_ui = weak_ui.clone();
-                let client = Rc::clone(&client_for_inspector);
+        for panel in PanelId::ALL
+            .into_iter()
+            .filter(|panel| panel.refresh_stop_details())
+        {
+            let refresh = Rc::clone(&refresh);
 
-                glib::idle_add_local_once(move || {
-                    let Some(ui) = weak_ui.upgrade() else {
-                        return;
-                    };
-
-                    if ui.inspector_notebook.current_page() == Some(page)
-                        && ui.model.stopped_inspection_available()
-                    {
-                        crate::app::refresh_cached_inspector_details(
-                            &Rc::downgrade(&ui),
-                            &client,
-                            page,
-                        );
+            if let Some(root) = self.panels.root(panel) {
+                workspace::connect_presentation(root, move |presented| {
+                    if presented {
+                        refresh();
                     }
                 });
-            });
-
-        let weak_ui = Rc::downgrade(self);
-        let client_for_tls = Rc::clone(client);
+            }
+        }
 
         self.kernel_view
             .pages
-            .connect_visible_child_name_notify(move |_| {
-                let weak_ui = weak_ui.clone();
-                let client = Rc::clone(&client_for_tls);
-
-                glib::idle_add_local_once(move || {
-                    let Some(ui) = weak_ui.upgrade() else {
-                        return;
-                    };
-
-                    if ui.tls_details_visible() && ui.model.stopped_inspection_available() {
-                        crate::app::refresh_cached_inspector_details(
-                            &Rc::downgrade(&ui),
-                            &client,
-                            7,
-                        );
-                    }
-                });
-            });
+            .connect_visible_child_name_notify(move |_| refresh());
 
         let client_for_run = Rc::clone(client);
         let weak_ui = Rc::downgrade(self);
@@ -1692,7 +1689,7 @@ impl Ui {
             .replace(Some(Rc::new(handler)));
     }
 
-    pub fn set_variable_editor_handler(&self, handler: impl Fn(Variable) + 'static) {
+    pub fn set_variable_editor_handler(&self, handler: impl Fn(Variable, PanelId) + 'static) {
         self.variable_editor_handler.replace(Some(Rc::new(handler)));
     }
 
@@ -1716,7 +1713,7 @@ impl Ui {
 
     pub(crate) fn set_variable_viewer_handler(
         &self,
-        handler: impl Fn(VariableViewerRequest) + 'static,
+        handler: impl Fn(VariableViewerRequest, gtk::Widget) + 'static,
     ) {
         self.variable_viewer_handler.replace(Some(Rc::new(handler)));
     }

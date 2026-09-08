@@ -31,6 +31,7 @@ mod variable_presentation;
 mod variable_viewers;
 mod views;
 mod watches;
+mod workspace;
 
 use std::{
     borrow::Cow,
@@ -62,6 +63,7 @@ use domain::{
 };
 use log_view::{ApplicationLog, LogLevel};
 pub(crate) use syscall_view::SyscallAction;
+pub(crate) use workspace::PanelId;
 
 use crate::model::DebuggerStateDelta;
 #[cfg(test)]
@@ -282,10 +284,10 @@ const MORE_SIGNALS: &[(&str, &str)] = &[
 type FrameSelectionHandler = Rc<dyn Fn(u32)>;
 type StringSelectionHandler = Rc<dyn Fn(String)>;
 type VariableAssignmentHandler = Rc<dyn Fn(Variable, String)>;
-type VariableEditorHandler = Rc<dyn Fn(Variable)>;
+type VariableEditorHandler = Rc<dyn Fn(Variable, PanelId)>;
 type FloatAssignmentHandler = Rc<dyn Fn(Variable, Vec<u8>)>;
 type VariableChildrenHandler = Rc<dyn Fn(Variable, usize)>;
-type VariableViewerHandler = Rc<dyn Fn(VariableViewerRequest)>;
+type VariableViewerHandler = Rc<dyn Fn(VariableViewerRequest, gtk::Widget)>;
 type ExpressionWatchRefreshHandler = Rc<dyn Fn()>;
 type StringAssignmentHandler = Rc<dyn Fn(Variable, Vec<u8>, StringAssignmentKind)>;
 pub(crate) type VectorWriteCompletion = Box<dyn FnOnce(Result<(), String>)>;
@@ -356,6 +358,7 @@ struct ValueEditorHandlers {
 pub(crate) struct VariableEditorRequest {
     pub(crate) generation: u64,
     id: u64,
+    origin: PanelId,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1070,9 +1073,7 @@ struct StackWordInspector {
 
 #[derive(Clone)]
 struct KernelView {
-    root: gtk::Box,
-    wide_subtabs: gtk::Box,
-    compact_subtabs: gtk::Box,
+    root: workspace::ResponsiveBox,
     pages: gtk::Stack,
     active: Rc<Cell<bool>>,
     in_flight: Rc<Cell<bool>>,
@@ -1132,9 +1133,7 @@ struct MiscStartupSummary {
 
 #[derive(Clone)]
 struct MiscView {
-    root: gtk::Box,
-    wide_subtabs: gtk::Box,
-    compact_subtabs: gtk::Box,
+    root: workspace::ResponsiveBox,
     active: Rc<Cell<bool>>,
     in_flight: Rc<Cell<bool>>,
     needs_refresh: Rc<Cell<bool>>,
@@ -1495,7 +1494,8 @@ pub struct Ui {
     pub status_detail: gtk::Label,
     status_visual_generation: Rc<Cell<u64>>,
     pause_visual_generation: Rc<Cell<u64>>,
-    inspector_notebook: gtk::Notebook,
+    panels: Rc<workspace::Panels>,
+    panel_hosts: Rc<workspace::Hosts>,
     source_notebook: gtk::Notebook,
     source_documents: Rc<RefCell<Vec<SourceDocument>>>,
     source_navigation: SourceNavigationControls,
@@ -1730,6 +1730,7 @@ struct Topbar {
 
 struct Workspace {
     root: gtk::Paned,
+    panels: workspace::Panels,
     layout_panes: Vec<layout::Pane>,
     console: gtk::Stack,
     application_log: ApplicationLog,
@@ -1737,7 +1738,7 @@ struct Workspace {
     source_navigation: SourceNavigationControls,
     source_tree: SourceTreeControls,
     left_navigation: gtk::Notebook,
-    inspector_notebook: gtk::Notebook,
+    inspector_navigation: gtk::Notebook,
     call_stack_list: gtk::Box,
     threads_list: gtk::Box,
     thread_controls: ThreadControls,
@@ -1801,9 +1802,8 @@ struct Workspace {
 }
 
 struct Inspector {
-    root: gtk::Box,
+    root: workspace::ResponsiveBox,
     notebook: gtk::Notebook,
-    compact_tabs: gtk::Box,
     context_split: gtk::Paned,
     status_detail: gtk::Label,
     locals_store: gio::ListStore,

@@ -145,7 +145,7 @@ impl Ui {
             .modal(true)
             .build();
 
-        let window = self.window.clone();
+        let window = self.action_window();
         let handler = Rc::clone(&self.session_action_handler);
 
         glib::spawn_future_local(async move {
@@ -162,7 +162,7 @@ impl Ui {
     fn present_session_manager(&self) {
         let editor = gtk::Window::builder()
             .title("New debug session")
-            .transient_for(&self.window)
+            .transient_for(&self.action_window())
             .modal(true)
             .default_width(720)
             .build();

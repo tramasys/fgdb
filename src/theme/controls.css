@@ -309,9 +309,10 @@ checkbutton:disabled {
     color: @app_disabled;
 }
 
-/* A common navigation treatment for both notebook tabs and stack switchers. */
+/* A common navigation treatment for tabs, switchers, and source navigation. */
 notebook > header,
-stackswitcher {
+stackswitcher,
+.source-navigation-toolbar {
     padding: 0;
     background: @app_surface;
     border: 0;
@@ -323,12 +324,15 @@ notebook > header > tabs {
     padding: 2px;
 }
 
-stackswitcher {
+stackswitcher,
+.source-navigation-toolbar {
     padding: 2px;
 }
 
 notebook > header > tabs > tab,
-stackswitcher button {
+stackswitcher button,
+button.source-navigation-action,
+menubutton.source-navigation-menu-button > button {
     min-height: 24px;
     margin: 0;
     padding: 2px 8px;
@@ -348,13 +352,19 @@ stackswitcher button > label {
 }
 
 notebook > header > tabs > tab:hover,
-stackswitcher button:hover {
+stackswitcher button:hover,
+button.source-navigation-action:hover,
+button.source-navigation-action:focus-visible,
+menubutton.source-navigation-menu-button > button:hover,
+menubutton.source-navigation-menu-button > button:focus-visible {
     color: @app_fg;
     background: @app_hover;
 }
 
 notebook > header > tabs > tab:checked,
-stackswitcher button:checked {
+stackswitcher button:checked,
+button.source-navigation-action:active,
+menubutton.source-navigation-menu-button > button:checked {
     color: @app_fg;
     background: @app_selected;
 }
@@ -397,7 +407,7 @@ popover > contents {
     color: @app_fg;
     background: @app_surface;
     border: 1px solid @app_border;
-    border-radius: 4px;
+    border-radius: 0;
 }
 
 button.menu-action {
@@ -408,7 +418,7 @@ button.menu-action {
     color: @app_fg;
     background: transparent;
     border: 0;
-    border-radius: 2px;
+    border-radius: 0;
 }
 
 button.menu-action:hover,

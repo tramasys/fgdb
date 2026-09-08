@@ -5,11 +5,16 @@ use crate::ui::VariableEditorRequest;
 const METADATA_PREFIX: &str = "FGDB_TYPE_METADATA:";
 const MAX_METADATA_BYTES: usize = 256 * 1024;
 
-pub(super) fn request_value_type_metadata(ui: Weak<Ui>, client: Rc<MiClient>, variable: Variable) {
+pub(super) fn request_value_type_metadata(
+    ui: Weak<Ui>,
+    client: Rc<MiClient>,
+    variable: Variable,
+    origin: crate::ui::PanelId,
+) {
     let Some(request) = ui
         .upgrade()
         .filter(|ui| ui.variable_action_is_current(&variable))
-        .and_then(|ui| ui.begin_variable_editor_request())
+        .and_then(|ui| ui.begin_variable_editor_request(origin))
     else {
         return;
     };

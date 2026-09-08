@@ -22,6 +22,7 @@ pub(super) fn open_variable_viewer(
     ui: Weak<Ui>,
     client: Rc<MiClient>,
     request: VariableViewerRequest,
+    origin: &gtk::Widget,
 ) {
     let Some(current_ui) = ui.upgrade() else {
         return;
@@ -32,7 +33,9 @@ pub(super) fn open_variable_viewer(
     }
 
     let generation = current_ui.model.current_stop_refresh_generation();
-    let session = current_ui.begin_variable_viewer(&request);
+    let Some(session) = current_ui.begin_variable_viewer(&request, origin) else {
+        return;
+    };
 
     if current_ui.model.inferior_is_running() {
         session.fail("Pause the target before opening a variable viewer");

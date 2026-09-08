@@ -190,7 +190,9 @@ pub(in crate::app) fn enrich_registers(
         return;
     };
 
-    if !current_ui.register_details_visible() {
+    if !current_ui.register_details_visible()
+        || !current_ui.model.register_details_pending(generation)
+    {
         return;
     }
 

@@ -521,6 +521,7 @@ struct Cli {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct ConfigLayer {
     keybindings: keybindings::Overrides,
+    restore_panel_windows: Option<bool>,
     source_font: Option<String>,
     source_tab_width: Option<u32>,
     source_wrap: Option<bool>,
@@ -585,6 +586,7 @@ impl ConfigLayer {
         }
 
         overlay_fields!(
+            restore_panel_windows,
             source_font,
             source_tab_width,
             source_wrap,
@@ -844,6 +846,7 @@ fn canonical_config_key(key: &str) -> Option<&'static str> {
     }
 
     match key {
+        "restore_panel_windows" => Some("restore_panel_windows"),
         "source_font" => Some("source_font"),
         "source_tab_width" => Some("source_tab_width"),
         "source_wrap" => Some("source_wrap"),
@@ -964,7 +967,8 @@ fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> 
         "terminal_cursor_blink" => {
             layer.terminal_cursor_blink = Some(settings::CursorBlink::parse(required()?)?);
         }
-        "source_wrap"
+        "restore_panel_windows"
+        | "source_wrap"
         | "source_highlight_line"
         | "instruction_bytes"
         | "instruction_symbols"
@@ -980,6 +984,7 @@ fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> 
                 parse_boolean(unquoted).ok_or_else(|| format!("Invalid {key} value '{value}'"))?;
 
             let field = match key {
+                "restore_panel_windows" => &mut layer.restore_panel_windows,
                 "source_wrap" => &mut layer.source_wrap,
                 "source_highlight_line" => &mut layer.source_highlight_line,
                 "instruction_bytes" => &mut layer.instruction_bytes,

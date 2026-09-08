@@ -146,7 +146,7 @@ impl Editor {
     pub(super) fn new(settings: &Rc<Settings>, ui: &Ui) -> Rc<Self> {
         let window = gtk::Window::builder()
             .title("fgdb settings")
-            .transient_for(&ui.window)
+            .transient_for(&ui.action_window())
             .destroy_with_parent(true)
             .default_width(960)
             .default_height(700)
@@ -187,6 +187,7 @@ impl Editor {
 
         for page in [
             "Appearance",
+            "Layout",
             "Keybindings",
             "Debugging",
             "Instructions",
@@ -206,6 +207,9 @@ impl Editor {
                 }
                 "Appearance" => {
                     "Changes to the active configuration apply immediately to source views"
+                }
+                "Layout" => {
+                    "Panel placement, window sizes, and selected tabs are saved automatically. Workspace controls below apply immediately across config profiles. Window positions are managed by your desktop"
                 }
                 "Instructions" => {
                     "Column preferences apply live. Source annotations refresh when inspection is available. Assembly syntax is a default for new debugger backends"
@@ -305,7 +309,11 @@ impl Editor {
                 });
             }
 
-            if page == "Keybindings" {
+            if page == "Layout" {
+                content.append(&rows);
+                content.append(&ui.panel_hosts.settings_controls());
+                stack.add_titled(&content, Some(page), page);
+            } else if page == "Keybindings" {
                 content.append(&scroll(&rows));
                 stack.add_titled(&content, Some(page), page);
             } else {
@@ -497,11 +505,12 @@ impl Editor {
         });
     }
 
-    pub(super) fn present(&self, diagnostics: bool) {
+    pub(super) fn present(&self, parent: &gtk::Window, diagnostics: bool) {
         if diagnostics {
             self.stack.set_visible_child_name("Configuration");
         }
 
+        self.window.set_transient_for(Some(parent));
         self.window.present();
     }
 

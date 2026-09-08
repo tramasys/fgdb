@@ -618,7 +618,7 @@ impl Ui {
                     .build();
 
                 ui.replay_controls.popover.popdown();
-                let window = ui.window.clone();
+                let window = ui.action_window();
                 let weak = Rc::downgrade(&ui);
                 let Some(context) = ui.model.stop_context(ui.model.current_stop_refresh_generation()) else {
                     return;

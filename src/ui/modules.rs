@@ -54,7 +54,7 @@ impl ModuleControls {
 }
 
 pub(super) fn build_module_controls() -> ModuleControls {
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    let root = components::panel();
     let load_all = gtk::Button::with_label("Load symbols for all");
     load_all.add_css_class("inline-action");
     load_all.set_hexpand(true);
@@ -65,7 +65,7 @@ pub(super) fn build_module_controls() -> ModuleControls {
     ));
 
     let toolbar = components::control_row();
-    components::inset(&toolbar, 4);
+    toolbar.add_css_class("module-toolbar");
     toolbar.append(&load_all);
     root.append(&toolbar);
     let list = dynamic_list("Modules appear after the inferior starts");

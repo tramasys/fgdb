@@ -78,6 +78,7 @@ choices!(#[derive(Default)] SymbolDownloads {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Preferences {
+    pub restore_panel_windows: bool,
     pub symbol_downloads: SymbolDownloads,
     pub debug_file_directories: String,
     pub keybindings: keybindings::Bindings,
@@ -113,6 +114,10 @@ impl Preferences {
 
     fn values(&self) -> Values {
         let mut entries: Values = [
+            (
+                "restore_panel_windows",
+                self.restore_panel_windows.to_string(),
+            ),
             ("symbol_downloads", self.symbol_downloads.as_str().into()),
             (
                 "debug_file_directories",
@@ -168,6 +173,7 @@ impl Preferences {
 
     pub(super) fn from_layer(layer: &ConfigLayer) -> Self {
         Self {
+            restore_panel_windows: layer.restore_panel_windows.unwrap_or(true),
             symbol_downloads: layer.symbol_downloads.unwrap_or_default(),
             debug_file_directories: layer.debug_file_directories.clone().unwrap_or_default(),
             keybindings: keybindings::Bindings::from_overrides(&layer.keybindings),
@@ -250,6 +256,13 @@ pub(crate) struct Setting {
 
 // The catalog supplies presentation metadata only. Validation stays in set_config_value.
 pub(crate) const SETTINGS: &[Setting] = &[
+    Setting {
+        key: "restore_panel_windows",
+        title: "Restore detached panels on startup",
+        help: "Reopen detached panels on the next launch. Disabling this starts with all panels docked without moving windows in the current session",
+        page: "Layout",
+        control: Control::Toggle,
+    },
     Setting {
         key: "source_font",
         title: "Source font",
@@ -764,6 +777,7 @@ mod tests {
             ("source_font", "Monospace 0"),
             ("source_font", "Monospace 49"),
             ("source_wrap", "maybe"),
+            ("restore_panel_windows", "maybe"),
             ("integer_display", "binary"),
             ("assembly_syntax", "unknown"),
             ("terminal_cursor_shape", "circle"),

@@ -311,6 +311,7 @@ pub(in crate::ui) fn open_source_document(
     tab_label.set_tooltip_text(Some(&path.to_string_lossy()));
     let close = gtk::Button::from_icon_name("window-close-symbolic");
     close.add_css_class("source-tab-close");
+    close.set_valign(gtk::Align::Center);
     close.set_tooltip_text(Some("Close source tab"));
     tab.append(&tab_label);
     tab.append(&close);
@@ -1152,10 +1153,20 @@ mod tests {
         let theme = Theme::graphite();
         theme.install();
         let notebook = build_source_notebook(None);
+        let editor = build_editor_panel(&notebook);
         let terminal = build_terminal(&theme);
+        let tools = gtk::ToggleButton::new();
+        tools.set_visible(false);
+        let terminal_panel = build_terminal_panel(&terminal, &tools);
+        let terminal_header = terminal_panel.first_child().unwrap();
+        assert!(!terminal_header.get_visible());
+        tools.set_visible(true);
+        assert!(terminal_header.get_visible());
+        tools.set_visible(false);
+        assert!(!terminal_header.get_visible());
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root.append(&notebook);
-        root.append(&terminal);
+        root.append(&editor.root);
+        root.append(&terminal_panel);
 
         let window = gtk::Window::builder()
             .default_width(800)
@@ -1194,6 +1205,54 @@ mod tests {
                 Some(terminal.upcast_ref::<gtk::Widget>()),
                 "source refresh stole terminal focus for {file}"
             );
+
+            let toolbar = editor.root.first_child().unwrap();
+            let action = editor
+                .navigation
+                .open_file
+                .compute_bounds(&editor.root)
+                .unwrap();
+
+            let tab = document
+                .tab
+                .parent()
+                .unwrap()
+                .compute_bounds(&editor.root)
+                .unwrap();
+
+            let page = document.page.compute_bounds(&editor.root).unwrap();
+            let top = action.y() - toolbar.compute_bounds(&editor.root).unwrap().y();
+            let between = tab.y() - action.y() - action.height();
+            let bottom = page.y() - tab.y() - tab.height();
+            assert_eq!(between, top, "source navigation rows have doubled padding");
+            assert_eq!(bottom, top, "source tabs have uneven outer padding");
+
+            let close = document
+                .tab_label
+                .next_sibling()
+                .unwrap()
+                .downcast::<gtk::Button>()
+                .unwrap();
+
+            let close_bounds = close.compute_bounds(&editor.root).unwrap();
+            let inset = close_bounds.y() - tab.y();
+            assert_eq!(close_bounds.width(), close_bounds.height());
+            assert_eq!(
+                tab.y() + tab.height() - close_bounds.y() - close_bounds.height(),
+                inset,
+                "source close button has uneven vertical spacing"
+            );
+
+            assert_eq!(
+                tab.x() + tab.width() - close_bounds.x() - close_bounds.width(),
+                inset,
+                "source close button has uneven edge spacing"
+            );
+
+            close.set_state_flags(gtk::StateFlags::PRELIGHT, false);
+            main.block_on(glib::timeout_future(Duration::from_millis(50)));
+            assert_eq!(close.compute_bounds(&editor.root).unwrap(), close_bounds);
+            close.unset_state_flags(gtk::StateFlags::PRELIGHT);
         }
 
         window.close();

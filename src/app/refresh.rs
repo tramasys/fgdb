@@ -42,6 +42,15 @@ impl LazyStopNeeds {
     fn any(self) -> bool {
         self.stack || self.memory || self.tls
     }
+
+    fn pending(ui: &Ui, generation: u64) -> Self {
+        Self {
+            stack: ui.stack_details_visible() && ui.model.stack_details_pending(generation),
+            memory: ui.memory_details_visible()
+                && ui.model.memory_watches_refresh_pending(generation),
+            tls: ui.tls_details_visible() && ui.model.tls_runtime_refresh_pending(generation),
+        }
+    }
 }
 
 pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
@@ -196,42 +205,46 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     refresh_threads(ui, client);
 }
 
-/// Add the expensive pointer-chain details for an inspector page from the
-/// current stop cache. Switching tabs must never invalidate and rebuild the
+/// Add the expensive pointer-chain details for visible panels from the
+/// current stop cache. Changing presentation must never invalidate and rebuild the
 /// complete stopped state.
-pub(crate) fn refresh_cached_inspector_details(ui: &Weak<Ui>, client: &MiClient, page: u32) {
+pub(crate) fn refresh_cached_inspector_details(ui: &Weak<Ui>, client: &MiClient) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
 
     let generation = current_ui.model.current_stop_refresh_generation();
+    let register_details = current_ui.register_details_visible()
+        && current_ui.model.register_details_pending(generation);
+    let stop_details = LazyStopNeeds::pending(&current_ui, generation).any();
+
+    if !register_details && !stop_details {
+        return;
+    }
 
     let Some(requests) = stop_requests(ui, client, generation) else {
         return;
     };
 
-    match page {
-        2 => {
-            let Some(registers) = current_ui.model.registers_for_details(generation) else {
-                return;
-            };
+    let Some(registers) = current_ui.model.registers_for_details(generation) else {
+        return;
+    };
 
-            drop(current_ui);
-            enrich_registers(ui.clone(), client, requests.clone(), registers);
+    let frames = stop_details
+        .then(|| current_ui.model.frames_for_details(generation))
+        .flatten();
+
+    drop(current_ui);
+
+    // Existing per-stop claims deduplicate shared work across visible panels.
+    if let Some(frames) = frames {
+        if register_details {
+            enrich_registers(ui.clone(), client, requests.clone(), registers.clone());
         }
-        3 | 4 | 7 => {
-            let Some(registers) = current_ui.model.registers_for_details(generation) else {
-                return;
-            };
 
-            let Some(frames) = current_ui.model.frames_for_details(generation) else {
-                return;
-            };
-
-            drop(current_ui);
-            refresh_visible_stop_details(ui.clone(), client, requests.clone(), registers, frames);
-        }
-        _ => {}
+        refresh_visible_stop_details(ui.clone(), client, requests, registers, frames);
+    } else if register_details {
+        enrich_registers(ui.clone(), client, requests, registers);
     }
 }
 
@@ -503,11 +516,7 @@ fn refresh_visible_stop_details(
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
-    let needs = LazyStopNeeds::for_visibility(
-        current_ui.stack_details_visible(),
-        current_ui.memory_details_visible(),
-        current_ui.tls_details_visible(),
-    );
+    let needs = LazyStopNeeds::pending(&current_ui, generation);
     if !needs.any() {
         return;
     }
@@ -521,15 +530,16 @@ fn refresh_visible_stop_details(
     } else {
         architecture
     };
-    let regions = memory_regions_for_stop(&ui, generation);
-
     if needs.memory && current_ui.model.claim_memory_watches_refresh(generation) {
         current_ui.refresh_memory_watches();
     }
 
+    let mut regions = None;
+
     if needs.tls && current_ui.model.claim_tls_runtime_refresh(generation) {
+        let regions = regions.insert(memory_regions_for_stop(&ui, generation));
         drop(current_ui);
-        request_tls_runtime(&ui, requests.clone(), &registers, &regions, architecture);
+        request_tls_runtime(&ui, requests.clone(), &registers, regions, architecture);
     } else {
         drop(current_ui);
     }
@@ -564,6 +574,7 @@ fn refresh_visible_stop_details(
             endian,
         );
     } else if current_ui.model.claim_stack_memory_refresh(generation) {
+        let regions = regions.unwrap_or_else(|| memory_regions_for_stop(&ui, generation));
         drop(current_ui);
         request_stack_memory(ui, requests.clone(), registers, frames, regions);
     }

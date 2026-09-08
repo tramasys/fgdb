@@ -1,54 +1,32 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt::Write as _,
-    fs, io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     rc::Rc,
     time::Duration,
 };
 
 use gtk::{glib, prelude::*};
 
-use super::KernelSectionHandler;
+use super::workspace::console::Selection as ConsoleView;
+use super::{KernelSectionHandler, PanelId, workspace::Panels};
+
+mod writer;
 
 const SAVE_DELAY: Duration = Duration::from_millis(350);
-const MAPPED_PANE_RESTORE_DELAY: Duration = Duration::from_millis(100);
+const FINAL_SAVE_GRACE: Duration = Duration::from_secs(2);
 const MIN_WINDOW_WIDTH: i32 = 320;
 const MIN_WINDOW_HEIGHT: i32 = 200;
 const MAX_WINDOW_DIMENSION: i32 = 32_768;
 const DISCLOSURE_PREFIX: &str = "disclosure.";
 const NOTEBOOK_PREFIX: &str = "notebook.";
+const STACK_PREFIX: &str = "stack.";
 const TERMINAL_VISIBLE_KEY: &str = "terminal.visible";
 const CONSOLE_VIEW_KEY: &str = "console.view";
+const PANEL_PREFIX: &str = "panel.";
 const MAX_LAYOUT_BYTES: usize = 1024 * 1024;
 const MAX_NOTEBOOK_PAGE: u32 = 1024;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConsoleView {
-    Hidden,
-    Terminal,
-    Log,
-}
-
-impl ConsoleView {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Hidden => "hidden",
-            Self::Terminal => "terminal",
-            Self::Log => "log",
-        }
-    }
-
-    fn parse(text: &str) -> Option<Self> {
-        match text {
-            "hidden" => Some(Self::Hidden),
-            "terminal" => Some(Self::Terminal),
-            "log" => Some(Self::Log),
-            _ => None,
-        }
-    }
-}
 
 fn layout_path() -> PathBuf {
     glib::user_config_dir().join("fgdb/layout.conf")
@@ -96,39 +74,41 @@ pub(super) struct Persistence(Rc<State>);
 
 impl Persistence {
     pub(super) fn install(window: &gtk::ApplicationWindow, panes: Vec<Pane>) -> Self {
-        let path = layout_path();
+        Self::install_at(window, panes, layout_path())
+    }
 
+    pub(super) fn install_at(
+        window: &gtk::ApplicationWindow,
+        panes: Vec<Pane>,
+        path: PathBuf,
+    ) -> Self {
         let remembered = crate::bounded::read_string(&path, MAX_LAYOUT_BYTES)
             .map(|contents| parse_layout(&contents))
             .unwrap_or_default();
 
-        let normal_window_size = remembered
-            .window
-            .map(|geometry| geometry.size)
-            .unwrap_or_else(|| WindowSize {
-                width: window.default_width(),
-                height: window.default_height(),
-            });
-
         if let Some(geometry) = remembered.window {
-            window.set_default_size(geometry.size.width, geometry.size.height);
-
-            if geometry.maximized {
-                window.maximize();
-            }
+            geometry.apply(window);
         }
 
         let state = Rc::new(State {
-            path,
+            writer: std::sync::Arc::new(writer::Writer::new(path)),
             window: window.clone(),
             panes,
             remembered: RefCell::new(remembered),
-            normal_window_size: Cell::new(normal_window_size),
+            ready_handler: RefCell::new(None),
+            error_handler: RefCell::new(None),
+            error: RefCell::new(None),
+            status_labels: RefCell::new(Vec::new()),
+            read_only: Cell::new(false),
+            writing: Cell::new(false),
+            pending_write: RefCell::new(None),
+            finished: Cell::new(false),
+            #[cfg(test)]
+            final_save_done: Cell::new(false),
             pending_save: RefCell::new(None),
-            pending_pane_restores: RefCell::new(HashSet::new()),
+            pending_pane_restores: RefCell::new(HashMap::new()),
             restore_started: Cell::new(false),
             restoring_position: Cell::new(false),
-            surface_connected: Cell::new(false),
             ready_to_save: Cell::new(false),
         });
 
@@ -141,10 +121,8 @@ impl Persistence {
                     return;
                 };
 
-                let restore_pending = state.pending_pane_restores.borrow().contains(key);
-
-                if state.ready_to_save.get() && !state.restoring_position.get() && !restore_pending
-                {
+                if state.ready_to_save.get() && !state.restoring_position.get() {
+                    state.cancel_pane_restore(key);
                     state.remember_position(key, widget);
                     state.schedule_save();
                 }
@@ -159,25 +137,35 @@ impl Persistence {
                     return;
                 };
 
-                if !state.ready_to_save.get() {
+                if !state.ready_to_save.get() || state.finished.get() {
                     return;
                 }
 
-                state.pending_pane_restores.borrow_mut().insert(key);
+                state.cancel_pane_restore(key);
                 let widget = widget.clone();
                 let weak_state = Rc::downgrade(&state);
 
-                glib::timeout_add_local_once(MAPPED_PANE_RESTORE_DELAY, move || {
+                let source = glib::idle_add_local_once(move || {
                     let Some(state) = weak_state.upgrade() else {
                         return;
                     };
 
-                    if state.ready_to_save.get() && widget.is_mapped() {
+                    state.pending_pane_restores.borrow_mut().remove(key);
+
+                    if !state.finished.get() && widget.is_mapped() {
                         state.restore_position(key, default_fraction, &widget);
                     }
-
-                    state.pending_pane_restores.borrow_mut().remove(key);
                 });
+
+                state.pending_pane_restores.borrow_mut().insert(key, source);
+            });
+
+            let weak_state = Rc::downgrade(&state);
+
+            pane.widget.connect_unmap(move |_| {
+                if let Some(state) = weak_state.upgrade() {
+                    state.cancel_pane_restore(key);
+                }
             });
         }
 
@@ -185,22 +173,23 @@ impl Persistence {
 
         window.connect_map(move |_| {
             if let Some(state) = weak_state.upgrade() {
-                state.connect_surface_size_tracking();
                 state.start_restore();
             }
         });
 
-        let weak_state = Rc::downgrade(&state);
+        for property in ["default-width", "default-height", "maximized"] {
+            let weak_state = Rc::downgrade(&state);
 
-        window.connect_maximized_notify(move |_| {
-            let Some(state) = weak_state.upgrade() else {
-                return;
-            };
+            window.connect_notify_local(Some(property), move |_, _| {
+                if let Some(state) = weak_state.upgrade()
+                    && state.ready_to_save.get()
+                {
+                    state.schedule_save();
+                }
+            });
+        }
 
-            if state.ready_to_save.get() {
-                state.schedule_save();
-            }
-        });
+        state.write(None);
 
         Self(state)
     }
@@ -209,86 +198,168 @@ impl Persistence {
         self.0.save_now();
     }
 
-    pub(super) fn bind_console(
-        &self,
-        stack: &gtk::Stack,
-        terminal_button: &gtk::ToggleButton,
-        log_button: &gtk::ToggleButton,
-        terminal: &gtk::Widget,
-        log: &gtk::Widget,
-    ) {
-        let selected = self.0.remembered.borrow().console_view();
-        terminal_button.set_active(selected == ConsoleView::Terminal);
-        log_button.set_active(selected == ConsoleView::Log);
-        if selected != ConsoleView::Hidden {
-            stack.set_visible_child_name(selected.name());
+    pub(super) fn finish(&self) {
+        if self.0.finished.replace(true) {
+            return;
         }
-        stack.set_visible(selected != ConsoleView::Hidden);
-        let updating = Rc::new(Cell::new(false));
 
-        for (button, other, focus, selected) in [
-            (terminal_button, log_button, terminal, ConsoleView::Terminal),
-            (log_button, terminal_button, log, ConsoleView::Log),
-        ] {
-            let weak_state = Rc::downgrade(&self.0);
-            let stack = stack.downgrade();
-            let other = other.downgrade();
-            let focus = focus.downgrade();
-            let updating = Rc::clone(&updating);
-            button.connect_toggled(move |button| {
-                let (Some(state), Some(stack), Some(other)) =
-                    (weak_state.upgrade(), stack.upgrade(), other.upgrade())
-                else {
-                    return;
-                };
-                if updating.replace(true) {
-                    return;
-                }
+        self.0.cancel_save();
+        self.0.pending_write.borrow_mut().take();
+        let contents = self.0.snapshot();
 
-                // Switch once without temporarily collapsing the shared pane.
-                let selected = if button.is_active() {
-                    other.set_active(false);
-                    stack.set_visible_child_name(selected.name());
-                    selected
-                } else {
-                    ConsoleView::Hidden
-                };
-                stack.set_visible(selected != ConsoleView::Hidden);
-                state.remembered.borrow_mut().console_view = Some(selected);
-                state.remembered.borrow_mut().terminal_visible =
-                    Some(selected == ConsoleView::Terminal);
-                if state.ready_to_save.get() {
-                    state.schedule_save();
-                }
-                updating.set(false);
+        for (_, source) in self.0.pending_pane_restores.borrow_mut().drain() {
+            source.remove();
+        }
 
-                if selected != ConsoleView::Hidden
-                    && let Some(focus) = focus.upgrade()
-                {
-                    focus.grab_focus();
-                }
-            });
+        // Freeze the snapshot before hosts are dismantled. Neither acquiring
+        // the writer gate nor flushing storage may block debugger shutdown.
+        self.0.writer.retire();
+        let writer = std::sync::Arc::clone(&self.0.writer);
+        let work = gtk::gio::spawn_blocking(move || writer.finish(&contents));
+        let hold = self.0.window.application().map(|app| app.hold());
+        let weak = Rc::downgrade(&self.0);
+
+        glib::spawn_future_local(async move {
+            let result = match glib::future_with_timeout(FINAL_SAVE_GRACE, work).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(std::io::Error::other("The layout writer stopped")),
+                Err(_) => Err(std::io::Error::other(
+                    "Storage is still busy. The final layout save may not finish before exit",
+                )),
+            };
+
+            if let Some(state) = weak.upgrade() {
+                state.report_write(result);
+                #[cfg(test)]
+                state.final_save_done.set(true);
+            }
+
+            drop(hold);
+        });
+    }
+
+    pub(super) fn on_ready(&self, callback: impl FnOnce() + 'static) {
+        if self.0.ready_to_save.get() {
+            callback();
+        } else {
+            self.0.ready_handler.replace(Some(Box::new(callback)));
         }
     }
 
-    pub(super) fn bind_notebook(&self, key: &'static str, notebook: &gtk::Notebook) {
+    #[cfg(test)]
+    pub(super) fn final_save_done(&self) -> bool {
+        self.0.final_save_done.get()
+    }
+
+    pub(super) fn on_error(&self, callback: impl Fn(&str) + 'static) {
+        if let Some(error) = self.0.error.borrow().as_deref() {
+            callback(error);
+        }
+
+        self.0.error_handler.replace(Some(Rc::new(callback)));
+    }
+
+    pub(super) fn status_note(&self) -> gtk::Label {
+        let error = self.0.error.borrow();
+        let label = super::components::empty_label(error.as_deref().unwrap_or(""));
+        label.set_visible(error.is_some());
+        let mut labels = self.0.status_labels.borrow_mut();
+        labels.retain(|label| label.upgrade().is_some());
+        labels.push(label.downgrade());
+
+        label
+    }
+
+    pub(super) fn panel(&self, id: PanelId) -> Option<PanelPlacement> {
+        self.0.remembered.borrow().panels.get(&id).copied()
+    }
+
+    pub(super) fn remember_panel(&self, id: PanelId, placement: PanelPlacement) {
+        if self.0.finished.get() || self.panel(id) == Some(placement) {
+            return;
+        }
+
+        self.0.remembered.borrow_mut().panels.insert(id, placement);
+
+        if self.0.ready_to_save.get() {
+            self.0.schedule_save();
+        }
+    }
+
+    pub(super) fn console_view(&self) -> ConsoleView {
+        self.0.remembered.borrow().console_view()
+    }
+
+    pub(super) fn console_handler(&self) -> impl Fn(ConsoleView) + 'static {
+        let weak = Rc::downgrade(&self.0);
+
+        move |selected| {
+            let Some(state) = weak.upgrade().filter(|state| !state.finished.get()) else {
+                return;
+            };
+
+            let mut remembered = state.remembered.borrow_mut();
+            remembered.console_view = Some(selected);
+            remembered.terminal_visible = Some(selected == ConsoleView::Terminal);
+            drop(remembered);
+
+            if state.ready_to_save.get() {
+                state.schedule_save();
+            }
+        }
+    }
+
+    pub(super) fn bind_notebook(
+        &self,
+        key: &'static str,
+        notebook: &gtk::Notebook,
+        panels: &Panels,
+    ) {
         let page = self.0.remembered.borrow().notebooks.get(key).copied();
+
+        let page = page.and_then(|page| match page {
+            SavedPage::Panel(id) => panels.slot(id).and_then(|slot| notebook.page_num(slot)),
+            SavedPage::Legacy(index) => Some(index),
+        });
 
         if let Some(page) = page.filter(|page| *page < notebook.n_pages()) {
             notebook.set_current_page(Some(page));
         }
 
+        let identities = (0..notebook.n_pages())
+            .filter_map(|position| {
+                let root = notebook.nth_page(Some(position))?;
+                Some((panels.id(&root)?, root.downgrade()))
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(root) = notebook
+            .current_page()
+            .and_then(|page| notebook.nth_page(Some(page)))
+            && let Some(id) = panels.id(&root)
+        {
+            self.0
+                .remembered
+                .borrow_mut()
+                .notebooks
+                .insert(key.to_owned(), SavedPage::Panel(id));
+        }
+
         let weak_state = Rc::downgrade(&self.0);
 
-        notebook.connect_switch_page(move |notebook, _, page| {
+        notebook.connect_switch_page(move |_, root, _| {
             let Some(state) = weak_state.upgrade() else {
                 return;
             };
 
-            if page >= notebook.n_pages() || page > MAX_NOTEBOOK_PAGE {
+            let Some((id, _)) = identities
+                .iter()
+                .find(|(_, widget)| widget.upgrade().as_ref() == Some(root))
+            else {
                 return;
-            }
+            };
 
+            let page = SavedPage::Panel(*id);
             let changed = state.remembered.borrow().notebooks.get(key).copied() != Some(page);
 
             if !changed {
@@ -316,23 +387,78 @@ impl Persistence {
             }
         })
     }
+
+    pub(super) fn bind_stack(&self, key: &'static str, stack: &gtk::Stack) {
+        let selected = self.0.remembered.borrow().stacks.get(key).cloned();
+
+        if let Some(selected) = selected
+            && stack.child_by_name(&selected).is_some()
+        {
+            stack.set_visible_child_name(&selected);
+        }
+
+        let weak = Rc::downgrade(&self.0);
+
+        stack.connect_visible_child_name_notify(move |stack| {
+            if let Some(state) = weak.upgrade()
+                && let Some(name) = stack.visible_child_name()
+            {
+                let changed = state
+                    .remembered
+                    .borrow()
+                    .stacks
+                    .get(key)
+                    .map(String::as_str)
+                    != Some(name.as_str());
+
+                if changed {
+                    state
+                        .remembered
+                        .borrow_mut()
+                        .stacks
+                        .insert(key.to_owned(), name.to_string());
+
+                    if state.ready_to_save.get() {
+                        state.schedule_save();
+                    }
+                }
+            }
+        });
+    }
 }
 
+type ReadyHandler = Box<dyn FnOnce()>;
+type ErrorHandler = Rc<dyn Fn(&str)>;
+
 struct State {
-    path: PathBuf,
+    writer: std::sync::Arc<writer::Writer>,
     window: gtk::ApplicationWindow,
     panes: Vec<Pane>,
     remembered: RefCell<RememberedLayout>,
-    normal_window_size: Cell<WindowSize>,
+    ready_handler: RefCell<Option<ReadyHandler>>,
+    error_handler: RefCell<Option<ErrorHandler>>,
+    error: RefCell<Option<String>>,
+    status_labels: RefCell<Vec<glib::WeakRef<gtk::Label>>>,
+    read_only: Cell<bool>,
+    writing: Cell<bool>,
+    pending_write: RefCell<Option<String>>,
+    finished: Cell<bool>,
+    #[cfg(test)]
+    final_save_done: Cell<bool>,
     pending_save: RefCell<Option<glib::SourceId>>,
-    pending_pane_restores: RefCell<HashSet<&'static str>>,
+    pending_pane_restores: RefCell<HashMap<&'static str, glib::SourceId>>,
     restore_started: Cell<bool>,
     restoring_position: Cell<bool>,
-    surface_connected: Cell<bool>,
     ready_to_save: Cell<bool>,
 }
 
 impl State {
+    fn cancel_pane_restore(&self, key: &str) {
+        if let Some(source) = self.pending_pane_restores.borrow_mut().remove(key) {
+            source.remove();
+        }
+    }
+
     fn set_disclosure(self: &Rc<Self>, key: &str, expanded: bool) {
         self.remembered
             .borrow_mut()
@@ -345,7 +471,7 @@ impl State {
     }
 
     fn start_restore(self: &Rc<Self>) {
-        if self.restore_started.replace(true) {
+        if self.finished.get() || self.restore_started.replace(true) {
             return;
         }
 
@@ -355,6 +481,10 @@ impl State {
             let Some(state) = weak_state.upgrade() else {
                 return;
             };
+
+            if state.finished.get() {
+                return;
+            }
 
             state.restore_positions();
 
@@ -368,8 +498,17 @@ impl State {
                     return;
                 };
 
+                if state.finished.get() {
+                    return;
+                }
+
                 state.restore_positions();
                 state.ready_to_save.set(true);
+                let callback = state.ready_handler.borrow_mut().take();
+
+                if let Some(callback) = callback {
+                    callback();
+                }
             });
         });
     }
@@ -391,7 +530,7 @@ impl State {
         let maximum = widget.max_position();
         let minimum = widget.min_position();
 
-        if !valid_pane_range(minimum, maximum) {
+        if !pane_children_visible(widget) || !valid_pane_range(minimum, maximum) {
             return;
         }
 
@@ -430,7 +569,7 @@ impl State {
     }
 
     fn remember_position(&self, key: &'static str, widget: &gtk::Paned) {
-        if !widget.is_mapped() {
+        if !widget.is_mapped() || !pane_children_visible(widget) {
             return;
         }
 
@@ -449,50 +588,12 @@ impl State {
         }
     }
 
-    fn connect_surface_size_tracking(self: &Rc<Self>) {
-        if self.surface_connected.replace(true) {
-            return;
-        }
-
-        let Some(surface) = self.window.surface() else {
-            self.surface_connected.set(false);
-            return;
-        };
-
-        let weak_state = Rc::downgrade(self);
-
-        surface.connect_width_notify(move |surface| {
-            if let Some(state) = weak_state.upgrade() {
-                state.window_size_changed(surface.width(), surface.height());
-            }
-        });
-
-        let weak_state = Rc::downgrade(self);
-
-        surface.connect_height_notify(move |surface| {
-            if let Some(state) = weak_state.upgrade() {
-                state.window_size_changed(surface.width(), surface.height());
-            }
-        });
-    }
-
-    fn window_size_changed(self: &Rc<Self>, width: i32, height: i32) {
-        if self.window.is_maximized() || !valid_window_size(width, height) {
-            return;
-        }
-
-        self.normal_window_size.set(WindowSize { width, height });
-
-        if self.ready_to_save.get() {
-            self.schedule_save();
-        }
-    }
-
     fn schedule_save(self: &Rc<Self>) {
-        if let Some(source) = self.pending_save.borrow_mut().take() {
-            source.remove();
+        if self.finished.get() || self.read_only.get() {
+            return;
         }
 
+        self.cancel_save();
         let weak_state = Rc::downgrade(self);
 
         let source = glib::timeout_add_local_once(SAVE_DELAY, move || {
@@ -501,41 +602,113 @@ impl State {
             };
 
             state.pending_save.borrow_mut().take();
-            state.write_current_layout();
+            state.save_now();
         });
 
         self.pending_save.replace(Some(source));
     }
 
-    fn save_now(&self) {
+    fn cancel_save(&self) {
         if let Some(source) = self.pending_save.borrow_mut().take() {
             source.remove();
         }
-
-        self.write_current_layout();
     }
 
-    fn write_current_layout(&self) {
-        let mut remembered = self.remembered.borrow().clone();
-
-        if !self.window.is_maximized() {
-            let size = WindowSize {
-                width: self.window.width(),
-                height: self.window.height(),
-            };
-
-            if valid_window_size(size.width, size.height) {
-                self.normal_window_size.set(size);
-            }
+    fn save_now(self: &Rc<Self>) {
+        if self.finished.get() || self.read_only.get() {
+            return;
         }
 
-        remembered.window = Some(WindowGeometry {
-            size: self.normal_window_size.get(),
-            maximized: self.window.is_maximized(),
+        self.cancel_save();
+        self.write(Some(self.snapshot()));
+    }
+
+    fn write(self: &Rc<Self>, contents: Option<String>) {
+        if self.writing.replace(true) {
+            if let Some(contents) = contents {
+                self.pending_write.replace(Some(contents));
+            }
+
+            return;
+        }
+
+        let writer = std::sync::Arc::clone(&self.writer);
+        let weak = Rc::downgrade(self);
+
+        let work = gtk::gio::spawn_blocking(move || match contents {
+            Some(contents) => writer.write(&contents),
+            None => writer.initialize(),
         });
 
+        glib::spawn_future_local(async move {
+            let result = work
+                .await
+                .unwrap_or_else(|_| Err(std::io::Error::other("The layout writer stopped")));
+
+            if let Some(state) = weak.upgrade() {
+                state.writing.set(false);
+
+                if state.finished.get() {
+                    return;
+                }
+
+                state.report_write(result);
+                let pending = state.pending_write.borrow_mut().take();
+
+                if let Some(contents) = pending
+                    && !state.read_only.get()
+                {
+                    state.write(Some(contents));
+                }
+            }
+        });
+    }
+
+    fn report_write(&self, result: std::io::Result<writer::Outcome>) {
+        let error = match result {
+            Ok(writer::Outcome::Saved) => None,
+            Ok(writer::Outcome::ReadOnly) => {
+                self.read_only.set(true);
+                Some("Another fgdb instance owns the shared layout. Layout changes in this instance are not saved.".to_owned())
+            }
+            Err(error) => Some(format!("Could not save layout: {error}")),
+        };
+
+        if *self.error.borrow() == error {
+            return;
+        }
+
+        self.error.replace(error.clone());
+        self.status_labels.borrow_mut().retain(|label| {
+            let Some(label) = label.upgrade() else {
+                return false;
+            };
+
+            label.set_label(error.as_deref().unwrap_or(""));
+            label.set_visible(error.is_some());
+            true
+        });
+
+        let callback = self.error_handler.borrow().clone();
+
+        if let (Some(error), Some(callback)) = (error, callback) {
+            callback(&error);
+        }
+    }
+
+    fn snapshot(&self) -> String {
+        let mut remembered = self.remembered.borrow_mut();
+
+        if let Some(geometry) = WindowGeometry::capture(&self.window) {
+            remembered.window = Some(geometry);
+        }
+
         for pane in &self.panes {
-            if !pane.widget.is_mapped() {
+            if !self.ready_to_save.get()
+                || !pane.widget.is_mapped()
+                || !pane_children_visible(&pane.widget)
+                || self.pending_pane_restores.borrow().contains_key(pane.key)
+            {
                 continue;
             }
 
@@ -554,10 +727,14 @@ impl State {
             }
         }
 
-        if write_layout(&self.path, &self.panes, &remembered).is_ok() {
-            *self.remembered.borrow_mut() = remembered;
-        }
+        serialize_layout(&self.panes, &remembered)
     }
+}
+
+fn pane_children_visible(pane: &gtk::Paned) -> bool {
+    // A detached pane must not replace the remembered docked proportions.
+    pane.start_child().is_some_and(|child| child.get_visible())
+        && pane.end_child().is_some_and(|child| child.get_visible())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -573,9 +750,48 @@ struct WindowSize {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct WindowGeometry {
+pub(super) struct WindowGeometry {
     size: WindowSize,
     maximized: bool,
+}
+
+impl WindowGeometry {
+    pub(super) fn capture(window: &impl IsA<gtk::Window>) -> Option<Self> {
+        let (width, height) = window.default_size();
+
+        valid_window_size(width, height).then(|| Self {
+            size: WindowSize { width, height },
+            maximized: window.is_maximized(),
+        })
+    }
+
+    pub(super) fn apply(self, window: &impl IsA<gtk::Window>) {
+        // GTK tracks the normal size even while maximized. Widget allocations
+        // include decoration differences and can drift across launches.
+        window.set_default_size(self.size.width, self.size.height);
+
+        if self.maximized {
+            window.maximize();
+        }
+    }
+
+    fn parse(value: &str) -> Option<Self> {
+        let mut values = value.split(',').map(str::trim);
+        let width = values.next()?.parse().ok()?;
+        let height = values.next()?.parse().ok()?;
+        let maximized = parse_bool(values.next()?)?;
+
+        (values.next().is_none() && valid_window_size(width, height)).then_some(Self {
+            size: WindowSize { width, height },
+            maximized,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PanelPlacement {
+    pub floating: bool,
+    pub geometry: WindowGeometry,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -584,8 +800,16 @@ struct RememberedLayout {
     terminal_visible: Option<bool>,
     console_view: Option<ConsoleView>,
     panes: HashMap<String, PanePosition>,
-    notebooks: HashMap<String, u32>,
+    notebooks: HashMap<String, SavedPage>,
+    stacks: HashMap<String, String>,
     disclosures: HashMap<String, bool>,
+    panels: HashMap<PanelId, PanelPlacement>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SavedPage {
+    Panel(PanelId),
+    Legacy(u32),
 }
 
 impl RememberedLayout {
@@ -643,20 +867,22 @@ fn parse_layout(contents: &str) -> RememberedLayout {
         };
 
         if key.trim() == "window" {
-            let values = geometry.split(',').map(str::trim).collect::<Vec<_>>();
+            if let Some(geometry) = WindowGeometry::parse(geometry) {
+                remembered.window = Some(geometry);
+            }
 
-            if let [width, height, maximized] = values.as_slice()
-                && let (Ok(width), Ok(height), Some(maximized)) = (
-                    width.parse::<i32>(),
-                    height.parse::<i32>(),
-                    parse_bool(maximized),
-                )
-                && valid_window_size(width, height)
+            continue;
+        }
+
+        if let Some(key) = key.trim().strip_prefix(PANEL_PREFIX) {
+            if let Some(id) = PanelId::from_key(key)
+                && let Some((floating, geometry)) = geometry.split_once(',')
+                && let Some(floating) = parse_bool(floating.trim())
+                && let Some(geometry) = WindowGeometry::parse(geometry)
             {
-                remembered.window = Some(WindowGeometry {
-                    size: WindowSize { width, height },
-                    maximized,
-                });
+                remembered
+                    .panels
+                    .insert(id, PanelPlacement { floating, geometry });
             }
 
             continue;
@@ -683,11 +909,29 @@ fn parse_layout(contents: &str) -> RememberedLayout {
         }
 
         if let Some(key) = key.trim().strip_prefix(NOTEBOOK_PREFIX) {
+            let value = geometry.trim();
+            let page = PanelId::from_key(value).map(SavedPage::Panel).or_else(|| {
+                value
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|page| *page <= MAX_NOTEBOOK_PAGE)
+                    .map(SavedPage::Legacy)
+            });
+
             if !key.is_empty()
-                && let Ok(page) = geometry.trim().parse::<u32>()
-                && page <= MAX_NOTEBOOK_PAGE
+                && let Some(page) = page
             {
                 remembered.notebooks.insert(key.to_owned(), page);
+            }
+
+            continue;
+        }
+
+        if let Some(key) = key.trim().strip_prefix(STACK_PREFIX) {
+            let page = geometry.trim();
+
+            if !key.is_empty() && !page.is_empty() && page.len() <= 128 {
+                remembered.stacks.insert(key.to_owned(), page.to_owned());
             }
 
             continue;
@@ -721,8 +965,8 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
-fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> io::Result<()> {
-    let mut contents = String::from("# fgdb layout v6\n");
+fn serialize_layout(panes: &[Pane], remembered: &RememberedLayout) -> String {
+    let mut contents = String::from("# fgdb layout v8\n");
 
     if let Some(window) = remembered.window {
         writeln!(
@@ -745,6 +989,23 @@ fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> i
             .expect("writing to a String cannot fail");
     }
 
+    for id in PanelId::ALL {
+        if let Some(placement) = remembered.panels.get(&id) {
+            let window = placement.geometry;
+
+            writeln!(
+                contents,
+                "{PANEL_PREFIX}{}={},{},{},{}",
+                id.key(),
+                u8::from(placement.floating),
+                window.size.width,
+                window.size.height,
+                u8::from(window.maximized)
+            )
+            .expect("writing to a String cannot fail");
+        }
+    }
+
     for pane in panes {
         let Some(position) = remembered.panes.get(pane.key) else {
             continue;
@@ -762,8 +1023,11 @@ fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> i
     notebooks.sort_unstable_by_key(|(key, _)| *key);
 
     for (key, page) in notebooks {
-        writeln!(contents, "{NOTEBOOK_PREFIX}{key}={page}")
-            .expect("writing to a String cannot fail");
+        match page {
+            SavedPage::Panel(id) => writeln!(contents, "{NOTEBOOK_PREFIX}{key}={}", id.key()),
+            SavedPage::Legacy(index) => writeln!(contents, "{NOTEBOOK_PREFIX}{key}={index}"),
+        }
+        .expect("writing to a String cannot fail");
     }
 
     let mut disclosures = remembered.disclosures.iter().collect::<Vec<_>>();
@@ -774,18 +1038,14 @@ fn write_layout(path: &Path, panes: &[Pane], remembered: &RememberedLayout) -> i
             .expect("writing to a String cannot fail");
     }
 
-    let parent = path.parent().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "the layout path does not have a parent directory",
-        )
-    })?;
+    let mut stacks = remembered.stacks.iter().collect::<Vec<_>>();
+    stacks.sort_unstable_by_key(|(key, _)| *key);
 
-    fs::create_dir_all(parent)?;
-    let temporary = parent.join(format!(".layout.{}.tmp", std::process::id()));
-    fs::write(&temporary, contents)?;
+    for (key, page) in stacks {
+        writeln!(contents, "{STACK_PREFIX}{key}={page}").expect("writing to a String cannot fail");
+    }
 
-    fs::rename(temporary, path)
+    contents
 }
 
 #[cfg(test)]
@@ -794,6 +1054,11 @@ mod tests {
 
     #[test]
     fn parses_valid_layout_entries_and_ignores_malformed_ones() {
+        for (index, panel) in PanelId::ALL.into_iter().enumerate() {
+            assert_eq!(panel as usize, index);
+            assert_eq!(PanelId::from_key(panel.key()), Some(panel));
+        }
+
         let parsed = parse_layout(
             "# layout\nwindow=1440,900,1\nterminal.visible=0\nworkspace_inspector=980,1375\nnotebook.left_sidebar=4\nnotebook.invalid=2048\ndisclosure.kernel.overview.process=1\ndisclosure.kernel.overview.scheduler=0\ndisclosure.invalid=maybe\nbroken=nope\nnegative=-1,100\ncollapsed=100,100\nzero=0,100\noversized=1507950899,2147483647\n",
         );
@@ -818,7 +1083,10 @@ mod tests {
         );
 
         assert_eq!(parsed.terminal_visible, Some(false));
-        assert_eq!(parsed.notebooks.get("left_sidebar"), Some(&4));
+        assert_eq!(
+            parsed.notebooks.get("left_sidebar"),
+            Some(&SavedPage::Legacy(4))
+        );
         assert!(!parsed.notebooks.contains_key("invalid"));
         assert!(!parsed.panes.contains_key("broken"));
         assert!(!parsed.panes.contains_key("negative"));
@@ -837,6 +1105,27 @@ mod tests {
         );
 
         assert!(!parsed.disclosures.contains_key("invalid"));
+
+        let named = parse_layout("notebook.left_sidebar=threads\nnotebook.future=unknown-panel\n");
+
+        assert_eq!(
+            named.notebooks.get("left_sidebar"),
+            Some(&SavedPage::Panel(PanelId::Threads))
+        );
+
+        assert!(!named.notebooks.contains_key("future"));
+
+        let panels = parse_layout(
+            "panel.right-pane=1,960,700,1\npanel.registers=0,640,480,0\npanel.console=1,800,300,0\nconsole.view=hidden\nstack.misc=cfg\nnotebook.inspector=misc\npanel.unknown=1,800,600,0\npanel.stack=1,1,1,0\npanel.memory=maybe,800,600,0\npanel.threads=1,800,600,0,extra\n",
+        );
+
+        assert_eq!(panels.panels.len(), 3);
+        let right = panels.panels[&PanelId::RightPane];
+        assert!(right.floating && right.geometry.maximized);
+        assert!(!panels.panels[&PanelId::Registers].floating);
+        assert_eq!(panels.console_view(), ConsoleView::Hidden);
+        assert_eq!(panels.stacks.get("misc").map(String::as_str), Some("cfg"));
+        assert_eq!(parse_layout(&serialize_layout(&[], &panels)), panels);
     }
 
     #[test]
@@ -871,5 +1160,45 @@ mod tests {
         assert_eq!(scale_position(saved, 700, 2_000), 700);
         assert_eq!(fractional_position(0.5, 1_000, 0, 900), 500);
         assert_eq!(fractional_position(0.5, 1_000, 600, 900), 600);
+    }
+
+    #[test]
+    fn final_layout_write_retires_older_work_and_preserves_the_file_on_failure() {
+        let temporary =
+            glib::mkdtemp(std::env::temp_dir().join("fgdb-layout-writer-XXXXXX")).unwrap();
+        let path = temporary.join("layout.conf");
+        let writer = writer::Writer::new(path.clone());
+        assert_eq!(writer.initialize().unwrap(), writer::Outcome::Saved);
+        let secondary = writer::Writer::new(path.clone());
+        assert_eq!(secondary.initialize().unwrap(), writer::Outcome::ReadOnly);
+        writer.write("panel.stack=1,640,480,0\n").unwrap();
+        assert_eq!(
+            secondary.write("stale instance").unwrap(),
+            writer::Outcome::ReadOnly
+        );
+        writer.finish("panel.stack=0,640,480,0\n").unwrap();
+        writer.write("stale snapshot").unwrap();
+        assert_eq!(
+            secondary.finish("stale final save").unwrap(),
+            writer::Outcome::ReadOnly
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "panel.stack=0,640,480,0\n"
+        );
+        let invalid = writer::Writer::new(path.join("layout.conf"));
+        assert!(invalid.write("not a directory").is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "panel.stack=0,640,480,0\n"
+        );
+        assert_eq!(std::fs::read_dir(&temporary).unwrap().count(), 2);
+        let next = writer::Writer::new(path.clone());
+        assert_eq!(next.initialize().unwrap(), writer::Outcome::Saved);
+        drop(next);
+        std::fs::remove_file(path.with_extension("lock")).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(temporary).unwrap();
     }
 }

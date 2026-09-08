@@ -93,7 +93,7 @@ impl Settings {
         let existing = self.editor.borrow().clone();
 
         if let Some(editor) = existing {
-            editor.present(diagnostics);
+            editor.present(&ui.action_window(), diagnostics);
             return;
         }
 
@@ -109,7 +109,7 @@ impl Settings {
             editor.status(error, true);
         }
 
-        editor.present(diagnostics);
+        editor.present(&ui.action_window(), diagnostics);
         self.reload();
     }
 
@@ -313,6 +313,9 @@ impl Settings {
 
         let previous = self.preferences.borrow();
         let font_changed = initial || previous.source_font != preferences.source_font;
+
+        ui.panel_hosts
+            .set_restore_on_startup(preferences.restore_panel_windows);
 
         ui.model.symbols.policy.set(preferences.symbol_downloads);
 

@@ -258,29 +258,7 @@ pub(super) fn build_topbar(
     trailing.add_css_class("titlebar-actions");
     trailing.append(&status);
     trailing.append(&controls);
-    let window_controls = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    window_controls.add_css_class("window-controls");
-    let minimize = window_control_button("−", "Minimize", "minimize");
-    let maximize = window_control_button("□", "Maximize or restore", "maximize");
-    let close = window_control_button("×", "Close", "close");
-    let controlled_window = window.clone();
-    minimize.connect_clicked(move |_| controlled_window.minimize());
-    let controlled_window = window.clone();
-
-    maximize.connect_clicked(move |_| {
-        if controlled_window.is_maximized() {
-            controlled_window.unmaximize();
-        } else {
-            controlled_window.maximize();
-        }
-    });
-
-    let controlled_window = window.clone();
-    close.connect_clicked(move |_| controlled_window.close());
-    window_controls.append(&minimize);
-    window_controls.append(&maximize);
-    window_controls.append(&close);
-    trailing.append(&window_controls);
+    trailing.append(&components::window_controls(window));
     topbar.pack_end(&trailing);
 
     Topbar {
@@ -644,16 +622,6 @@ pub(super) fn run_terminal_command(
     terminal.grab_focus();
 }
 
-pub(super) fn window_control_button(label: &str, tooltip: &str, class: &str) -> gtk::Button {
-    let button = gtk::Button::with_label(label);
-    button.add_css_class("window-control");
-    button.add_css_class(class);
-    button.set_focus_on_click(false);
-    button.set_tooltip_text(Some(tooltip));
-
-    button
-}
-
 pub(super) fn build_workspace(
     source_notebook: &gtk::Notebook,
     terminal: &vte4::Terminal,
@@ -668,18 +636,20 @@ pub(super) fn build_workspace(
     workspace.set_shrink_start_child(false);
     workspace.set_resize_start_child(true);
     workspace.set_wide_handle(false);
-    let inspector = build_inspector(inspector_bindings);
-    workspace.set_end_child(Some(&inspector.root));
-    connect_inspector_responsiveness(&workspace, &inspector);
+    let mut panels = workspace::Panels::default();
+    let inspector = build_inspector(inspector_bindings, &mut panels);
+    let inspector_slot = panels.register_collapsible(PanelId::RightPane, &inspector.root);
+    workspace.set_end_child(Some(&inspector_slot));
     let navigation_and_editor = gtk::Paned::new(gtk::Orientation::Horizontal);
     navigation_and_editor.add_css_class("workspace-columns");
     navigation_and_editor.set_position(260);
     navigation_and_editor.set_shrink_start_child(false);
     navigation_and_editor.set_resize_start_child(false);
-    let left_sidebar = build_left_sidebar();
+    let left_sidebar = build_left_sidebar(&mut panels);
     let source_editor = build_editor_panel(source_notebook);
+    let source_slot = panels.register(PanelId::Editor, &source_editor.root);
     navigation_and_editor.set_start_child(Some(&left_sidebar.root));
-    navigation_and_editor.set_end_child(Some(&source_editor.root));
+    navigation_and_editor.set_end_child(Some(&source_slot));
     let main_and_terminal = gtk::Paned::new(gtk::Orientation::Vertical);
     main_and_terminal.set_position(515);
     main_and_terminal.set_shrink_start_child(false);
@@ -693,7 +663,8 @@ pub(super) fn build_workspace(
     console.set_vexpand(true);
     console.add_named(&terminal_panel, Some("terminal"));
     console.add_named(application_log.root(), Some("log"));
-    main_and_terminal.set_end_child(Some(&console));
+    let console_slot = panels.register(PanelId::Console, &console);
+    main_and_terminal.set_end_child(Some(&console_slot));
     workspace.set_start_child(Some(&main_and_terminal));
 
     let layout_panes = vec![
@@ -727,6 +698,7 @@ pub(super) fn build_workspace(
 
     Workspace {
         root: workspace,
+        panels,
         layout_panes,
         console,
         application_log,
@@ -734,7 +706,7 @@ pub(super) fn build_workspace(
         source_navigation: source_editor.navigation,
         source_tree: left_sidebar.source_tree,
         left_navigation: left_sidebar.navigation,
-        inspector_notebook: inspector.notebook.clone(),
+        inspector_navigation: inspector.notebook,
         call_stack_list: left_sidebar.call_stack_list,
         threads_list: left_sidebar.threads_list,
         thread_controls: left_sidebar.thread_controls,
@@ -798,53 +770,8 @@ pub(super) fn build_workspace(
     }
 }
 
-fn connect_inspector_responsiveness(workspace: &gtk::Paned, inspector: &Inspector) {
-    const COMPACT_INSPECTOR_WIDTH: i32 = 620;
-    let inspector_notebook = inspector.notebook.clone();
-    let compact_inspector_tabs = inspector.compact_tabs.clone();
-    let kernel_root = inspector.kernel_view.root.clone();
-    let kernel_wide_subtabs = inspector.kernel_view.wide_subtabs.clone();
-    let kernel_compact_subtabs = inspector.kernel_view.compact_subtabs.clone();
-    let misc_root = inspector.misc_view.root.clone();
-    let misc_wide_subtabs = inspector.misc_view.wide_subtabs.clone();
-    let misc_compact_subtabs = inspector.misc_view.compact_subtabs.clone();
-
-    let update: Rc<dyn Fn(&gtk::Paned)> = Rc::new(move |workspace| {
-        let width = workspace.width().saturating_sub(workspace.position());
-        let compact = width > 0 && width < COMPACT_INSPECTOR_WIDTH;
-
-        for root in [&kernel_root, &misc_root] {
-            if compact {
-                root.add_css_class("inspector-compact");
-            } else {
-                root.remove_css_class("inspector-compact");
-            }
-        }
-
-        inspector_notebook.set_show_tabs(!compact);
-        compact_inspector_tabs.set_visible(compact);
-        kernel_wide_subtabs.set_visible(!compact);
-        kernel_compact_subtabs.set_visible(compact);
-        misc_wide_subtabs.set_visible(!compact);
-        misc_compact_subtabs.set_visible(compact);
-    });
-
-    let update_for_position = Rc::clone(&update);
-    workspace.connect_position_notify(move |workspace| update_for_position(workspace));
-    let update_for_allocation = Rc::clone(&update);
-    workspace.connect_max_position_notify(move |workspace| update_for_allocation(workspace));
-    let update_for_map = Rc::clone(&update);
-
-    workspace.connect_map(move |workspace| {
-        let workspace = workspace.clone();
-        let update = Rc::clone(&update_for_map);
-        glib::idle_add_local_once(move || update(&workspace));
-    });
-}
-
-pub(super) fn build_left_sidebar() -> LeftSidebar {
-    let sidebar = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    sidebar.add_css_class("sidebar");
+pub(super) fn build_left_sidebar(panels: &mut workspace::Panels) -> LeftSidebar {
+    let sidebar = components::panel();
     sidebar.set_size_request(190, -1);
     let call_stack_list = dynamic_list("Frames appear when the target is paused");
 
@@ -865,23 +792,11 @@ pub(super) fn build_left_sidebar() -> LeftSidebar {
     navigation.set_vexpand(true);
     navigation.set_scrollable(true);
 
-    navigation.append_page(
-        &inferior_controls.page,
-        Some(&gtk::Label::new(Some("Inferiors"))),
-    );
-
-    navigation.append_page(&stack_scrolled, Some(&gtk::Label::new(Some("Call stack"))));
-
-    navigation.append_page(
-        &thread_controls.root,
-        Some(&gtk::Label::new(Some("Threads"))),
-    );
-
-    navigation.append_page(
-        &module_controls.root,
-        Some(&gtk::Label::new(Some("Modules"))),
-    );
-    navigation.append_page(&source_tree.root, Some(&gtk::Label::new(Some("Sources"))));
+    panels.append(&navigation, PanelId::Inferiors, &inferior_controls.page);
+    panels.append(&navigation, PanelId::CallStack, &stack_scrolled);
+    panels.append(&navigation, PanelId::Threads, &thread_controls.root);
+    panels.append(&navigation, PanelId::Modules, &module_controls.root);
+    panels.append(&navigation, PanelId::Sources, &source_tree.root);
     navigation.connect_switch_page(move |_, page, _| {
         clear_label_selections_after_switch(page);
     });
@@ -901,13 +816,15 @@ pub(super) fn build_left_sidebar() -> LeftSidebar {
     }
 }
 
-pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
+pub(super) fn build_inspector(
+    bindings: &InspectorBindings<'_>,
+    panels: &mut workspace::Panels,
+) -> Inspector {
     let notebook = gtk::Notebook::new();
     notebook.set_size_request(0, 0);
     notebook.set_scrollable(true);
     notebook.add_css_class("panel");
-    let state = gtk::Box::new(gtk::Orientation::Vertical, 5);
-    state.add_css_class("sidebar");
+    let state = components::panel();
     let detail = gtk::Label::new(Some("Waiting for the MI channel"));
     detail.add_css_class("status-detail");
     detail.set_halign(gtk::Align::Start);
@@ -1167,8 +1084,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     context.set_start_child(Some(&locals_panel));
     context.set_end_child(Some(&instructions_panel));
     state.append(&context);
-    let expression_watches_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
-    expression_watches_page.add_css_class("sidebar");
+    let expression_watches_page = components::panel();
     let expression_watch_header = gtk::Box::new(gtk::Orientation::Horizontal, 3);
     expression_watch_header.add_css_class("subpanel-header");
 
@@ -1198,6 +1114,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     ));
 
     expression_watch_hint.add_css_class("muted");
+    expression_watch_hint.add_css_class("pane-note");
     expression_watch_hint.set_halign(gtk::Align::Start);
     expression_watch_hint.set_wrap(true);
     expression_watches_page.append(&expression_watch_hint);
@@ -1211,8 +1128,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
         .build();
 
     expression_watches_page.append(&expression_watches_scrolled);
-    let registers_page = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    registers_page.add_css_class("sidebar");
+    let registers_page = components::panel();
     let (registers_view, register_groups) = build_register_view();
     let registers_empty = empty_label("Values appear when the target is paused");
 
@@ -1225,8 +1141,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
 
     registers_page.append(&registers_empty);
     registers_page.append(&registers_scrolled);
-    let stack_page = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    stack_page.add_css_class("sidebar");
+    let stack_page = components::panel();
     stack_page.append(&build_context_legend());
     let (stack_view, stack_store, stack_word_inspector) = build_stack_view();
     let stack_empty = empty_label("Stack values appear when the target is paused");
@@ -1241,8 +1156,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     stack_page.append(&stack_empty);
     stack_page.append(&stack_scrolled);
     stack_page.append(&stack_word_inspector.root);
-    let memory_page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    memory_page.add_css_class("sidebar");
+    let memory_page = components::panel();
     let memory_controls = gtk::Box::new(gtk::Orientation::Vertical, 3);
     memory_controls.add_css_class("memory-watch-command");
     let memory_command_header = gtk::Box::new(gtk::Orientation::Horizontal, 3);
@@ -1411,8 +1325,8 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     });
 
     memory_page.append(&memory_split);
-    let breakpoints_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
-    breakpoints_page.add_css_class("sidebar");
+    let breakpoints_page = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    breakpoints_page.add_css_class("panel-content");
 
     let hint = gtk::Label::new(Some(
         "Use the source gutter for line breakpoints, or Add breakpoint for advanced locations and behavior.",
@@ -1615,7 +1529,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
 
     breakpoints_page.append(&catchpoint_section);
     let signals_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    signals_content.add_css_class("sidebar");
+    signals_content.add_css_class("panel-content");
     let current_signal_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
     current_signal_section.add_css_class("signal-tool-section");
     current_signal_section.append(&section_title("CURRENT STOP"));
@@ -1700,47 +1614,47 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
 
     let kernel_view = build_kernel_view(&bindings.kernel);
     let misc_view = build_misc_view(bindings.theme);
-    append_responsive_inspector_page(&notebook, &state, "Context");
-    append_responsive_inspector_page(&notebook, &expression_watches_page, "Watches");
-    append_responsive_inspector_page(&notebook, &registers_page, "Registers");
-    append_responsive_inspector_page(&notebook, &stack_page, "Stack");
-    append_responsive_inspector_page(&notebook, &memory_page, "Memory");
-    append_responsive_inspector_page(&notebook, &breakpoints_page, "Breakpoints");
-    append_responsive_inspector_page(&notebook, &signals_page, "Signals");
+    for (id, child) in [
+        (PanelId::Context, state.upcast::<gtk::Widget>()),
+        (PanelId::Watches, expression_watches_page.upcast()),
+        (PanelId::Registers, registers_page.upcast()),
+        (PanelId::Stack, stack_page.upcast()),
+        (PanelId::Memory, memory_page.upcast()),
+        (PanelId::Breakpoints, breakpoints_page.upcast()),
+        (PanelId::Signals, signals_page.upcast()),
+    ] {
+        append_responsive_inspector_page(&notebook, &child, id, panels);
+    }
 
-    let kernel_page =
-        notebook.append_page(&kernel_view.root, Some(&gtk::Label::new(Some("Kernel"))));
-
-    let misc_page = notebook.append_page(&misc_view.root, Some(&gtk::Label::new(Some("Misc"))));
-    let compact_tabs = build_compact_inspector_navigation(&notebook);
+    panels.append(&notebook, PanelId::Kernel, &kernel_view.root);
+    panels.append(&notebook, PanelId::Misc, &misc_view.root);
+    let compact_tabs = workspace::build_compact_navigation(&notebook);
     notebook.connect_switch_page(move |_, page, _| {
         clear_label_selections_after_switch(page);
     });
 
-    connect_kernel_tab_visibility(
-        &notebook,
-        kernel_page,
-        &kernel_view,
-        bindings.kernel.refresh_handler,
-    );
+    connect_kernel_tab_visibility(&kernel_view, bindings.kernel.refresh_handler);
 
-    connect_misc_tab_visibility(
-        &notebook,
-        misc_page,
-        &misc_view,
-        bindings.misc.refresh_handler,
-    );
+    connect_misc_tab_visibility(&misc_view, bindings.misc.refresh_handler);
 
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let root = workspace::ResponsiveBox::new();
     root.set_size_request(0, 0);
     root.set_vexpand(true);
     root.append(&compact_tabs);
     root.append(&notebook);
+    let tabs = compact_tabs.downgrade();
+    let book = notebook.downgrade();
+
+    root.connect_compact_changed(move |compact| {
+        if let (Some(tabs), Some(book)) = (tabs.upgrade(), book.upgrade()) {
+            book.set_show_tabs(!compact);
+            tabs.set_visible(compact);
+        }
+    });
 
     Inspector {
         root,
         notebook,
-        compact_tabs,
         context_split: context,
         status_detail: detail,
         locals_store,
@@ -1805,8 +1719,9 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
 fn append_responsive_inspector_page(
     notebook: &gtk::Notebook,
     child: &impl IsA<gtk::Widget>,
-    title: &str,
-) -> u32 {
+    id: PanelId,
+    panels: &mut workspace::Panels,
+) {
     let viewport = gtk::ScrolledWindow::new();
     viewport.add_css_class("inspector-page-viewport");
     viewport.set_policy(gtk::PolicyType::Automatic, gtk::PolicyType::Never);
@@ -1818,79 +1733,7 @@ fn append_responsive_inspector_page(
     viewport.set_vexpand(true);
     viewport.set_child(Some(child));
 
-    notebook.append_page(&viewport, Some(&gtk::Label::new(Some(title))))
-}
-
-fn build_compact_inspector_navigation(notebook: &gtk::Notebook) -> gtk::Box {
-    const PAGES: [&str; 9] = [
-        "Context",
-        "Watches",
-        "Registers",
-        "Stack",
-        "Memory",
-        "Breakpoints",
-        "Signals",
-        "Kernel",
-        "Misc",
-    ];
-
-    let previous = gtk::Button::with_label("‹");
-    previous.add_css_class("kernel-tab-nav-button");
-    previous.set_tooltip_text(Some("Open the previous inspector"));
-    let selector = gtk::DropDown::from_strings(&PAGES);
-    selector.add_css_class("kernel-compact-tab-selector");
-    selector.set_hexpand(true);
-    selector.set_selected(notebook.current_page().unwrap_or(0));
-    selector.set_tooltip_text(Some("Select an inspector"));
-    let next = gtk::Button::with_label("›");
-    next.add_css_class("kernel-tab-nav-button");
-    next.set_tooltip_text(Some("Open the next inspector"));
-    let root = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    root.add_css_class("kernel-tab-navigation");
-    root.add_css_class("kernel-compact-tab-navigation");
-    root.set_hexpand(true);
-    root.append(&previous);
-    root.append(&selector);
-    root.append(&next);
-    root.set_visible(false);
-    let notebook_for_selector = notebook.clone();
-
-    selector.connect_selected_notify(move |selector| {
-        let page = selector.selected();
-
-        if page != gtk::INVALID_LIST_POSITION {
-            notebook_for_selector.set_current_page(Some(page));
-        }
-    });
-
-    let notebook_for_previous = notebook.clone();
-
-    previous.connect_clicked(move |_| {
-        let page = notebook_for_previous.current_page().unwrap_or(0);
-        notebook_for_previous.set_current_page(Some(page.saturating_sub(1)));
-    });
-
-    let notebook_for_next = notebook.clone();
-
-    next.connect_clicked(move |_| {
-        let page = notebook_for_next.current_page().unwrap_or(0);
-        notebook_for_next.set_current_page(Some((page + 1).min(PAGES.len() as u32 - 1)));
-    });
-
-    let selector_for_page = selector;
-    let previous_for_page = previous;
-    let next_for_page = next;
-
-    let update = move |page: u32| {
-        selector_for_page.set_selected(page);
-        previous_for_page.set_sensitive(page > 0);
-        next_for_page.set_sensitive(page + 1 < PAGES.len() as u32);
-    };
-
-    update(notebook.current_page().unwrap_or(0));
-    notebook.connect_switch_page(move |_, _, page| update(page));
-
-    root
+    panels.append(notebook, id, &viewport);
 }
 
 fn compact_instruction_button(label: &str, tooltip: &str) -> gtk::Button {

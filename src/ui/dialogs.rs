@@ -1,7 +1,10 @@
 use super::*;
 
 impl Ui {
-    pub(crate) fn begin_variable_editor_request(&self) -> Option<VariableEditorRequest> {
+    pub(crate) fn begin_variable_editor_request(
+        &self,
+        origin: PanelId,
+    ) -> Option<VariableEditorRequest> {
         let generation = self.model.current_stop_refresh_generation();
 
         if !self.model.can_edit_variable(generation) {
@@ -10,7 +13,11 @@ impl Ui {
 
         let id = self.variable_editor_request.get().wrapping_add(1);
         self.variable_editor_request.set(id);
-        Some(VariableEditorRequest { generation, id })
+        Some(VariableEditorRequest {
+            generation,
+            id,
+            origin,
+        })
     }
 
     pub(crate) fn variable_editor_request_is_current(
@@ -31,8 +38,12 @@ impl Ui {
             return;
         }
 
-        open_variable_editor(
-            &self.window,
+        let Some(parent) = self.panels.window(request.origin) else {
+            return;
+        };
+
+        let editor = open_variable_editor(
+            &parent,
             variable,
             self.target_pointer_bits.get(),
             self.target_architecture(),
@@ -45,6 +56,8 @@ impl Ui {
                 string: Rc::clone(&self.string_assignment_handler),
             },
         );
+
+        self.panels.track_dialog(request.origin, &editor);
     }
 }
 
@@ -459,14 +472,14 @@ pub(super) fn remove_load_more_rows(store: &gio::ListStore) {
 }
 
 pub(super) fn open_variable_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     variable: Variable,
     target_pointer_bits: u32,
     target_architecture: TargetArchitecture,
     source_language: crate::language::Language,
     metadata: Option<&ValueTypeMetadata>,
     handlers: ValueEditorHandlers,
-) {
+) -> gtk::Window {
     let generation = handlers.model.current_stop_refresh_generation();
     let is_current: Rc<dyn Fn() -> bool> = {
         let current = Rc::clone(&handlers.model);
@@ -520,6 +533,8 @@ pub(super) fn open_variable_editor(
 
         glib::ControlFlow::Continue
     });
+
+    editor
 }
 
 type EditorAssignment<T> = Rc<RefCell<Option<Rc<dyn Fn(Variable, T)>>>>;
@@ -543,7 +558,7 @@ fn guard_assignment_handler<T: 'static>(
 }
 
 fn build_variable_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     variable: Variable,
     target_pointer_bits: u32,
     target_architecture: TargetArchitecture,
@@ -858,7 +873,7 @@ fn build_variable_editor(
 }
 
 fn open_float_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     variable: Variable,
     float: value::FloatEdit,
     handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
@@ -1065,7 +1080,7 @@ fn update_float_validation(
 }
 
 fn open_enum_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     variable: Variable,
     metadata: &ValueTypeMetadata,
     handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
@@ -1210,7 +1225,7 @@ fn update_enum_detail(detail: &gtk::Label, metadata: &ValueTypeMetadata, selecte
 }
 
 fn open_boolean_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     variable: Variable,
     original: bool,
     dialect: crate::language::Language,
@@ -1343,7 +1358,7 @@ fn update_scalar_validation(
 }
 
 fn open_string_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     variable: Variable,
     string: value::StringEdit,
     assignment_handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
@@ -1634,7 +1649,7 @@ fn update_string_editor(
 }
 
 fn open_unavailable_rust_string_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     variable: &Variable,
 ) -> gtk::Window {
     let editor = gtk::Window::builder()
@@ -1675,13 +1690,11 @@ fn open_unavailable_rust_string_editor(
 }
 
 pub(super) fn open_flag_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     register: Register,
     handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
-) {
-    let Some(original) = hex_value(&register.value) else {
-        return;
-    };
+) -> Option<gtk::Window> {
+    let original = hex_value(&register.value)?;
 
     let editor = gtk::Window::builder()
         .title(format!("Edit ${}", register.name))
@@ -1769,13 +1782,15 @@ pub(super) fn open_flag_editor(
     let editor_for_cancel = editor.clone();
     cancel.connect_clicked(move |_| editor_for_cancel.close());
     editor.present();
+
+    Some(editor)
 }
 
 pub(super) fn open_breakpoint_condition_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     breakpoint: Breakpoint,
     handler: Rc<RefCell<Option<BreakpointConditionHandler>>>,
-) {
+) -> gtk::Window {
     let editor = gtk::Window::builder()
         .title(format!("Breakpoint #{} condition", breakpoint.number))
         .transient_for(parent)
@@ -1865,14 +1880,16 @@ pub(super) fn open_breakpoint_condition_editor(
     editor.present();
     entry.grab_focus();
     entry.select_region(0, -1);
+
+    editor
 }
 
 pub(super) fn open_breakpoint_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     breakpoint: Option<Breakpoint>,
     pending_supported: bool,
     handler: Rc<RefCell<Option<BreakpointEditorHandler>>>,
-) {
+) -> gtk::Window {
     let original = breakpoint.clone();
 
     let spec = breakpoint.as_ref().map_or_else(
@@ -2160,14 +2177,16 @@ pub(super) fn open_breakpoint_editor(
     if breakpoint.is_none() {
         location.select_region(0, -1);
     }
+
+    editor
 }
 
 pub(super) fn open_stop_point_metadata_editor(
-    parent: &gtk::ApplicationWindow,
+    parent: &impl IsA<gtk::Window>,
     number: &str,
     metadata: &StopPointMetadata,
     on_apply: Rc<dyn Fn(StopPointMetadata)>,
-) {
+) -> gtk::Window {
     let editor = gtk::Window::builder()
         .title(format!("Organize stop point #{number}"))
         .transient_for(parent)
@@ -2238,6 +2257,8 @@ pub(super) fn open_stop_point_metadata_editor(
     editor.present();
     group.grab_focus();
     group.select_region(0, -1);
+
+    editor
 }
 
 pub(super) fn connect_escape_to_close(window: &gtk::Window) {

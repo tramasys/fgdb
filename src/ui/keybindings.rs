@@ -82,7 +82,8 @@ impl Ui {
         }
     }
 
-    pub(super) fn connect_keyboard_shortcuts(&self) {
+    // Install once per workspace host, not on its transient value editors.
+    pub(super) fn connect_keyboard_shortcuts(&self, host: &impl IsA<gtk::Window>) {
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         let targets = self.shortcut_targets();
@@ -90,14 +91,14 @@ impl Ui {
         let terminal = self.terminal.clone();
         let find_bar = self.source_navigation.find_bar.clone();
         let find_close = self.source_navigation.find_close.clone();
-        let window = self.window.downgrade();
+        let window = host.as_ref().downgrade();
         let log = self.application_log.clone();
         let warned = Cell::new(None);
 
         keys.connect_key_pressed(move |controller, key, _, modifiers| {
-            let focus = window
-                .upgrade()
-                .and_then(|window| gtk::prelude::GtkWindowExt::focus(&window));
+            let host = window.upgrade();
+            let focus = host.as_ref().and_then(gtk::prelude::GtkWindowExt::focus);
+
             let in_terminal = focus.as_ref().is_some_and(|focus| {
                 focus == terminal.upcast_ref::<gtk::Widget>() || focus.is_ancestor(&terminal)
             });
@@ -107,6 +108,7 @@ impl Ui {
                 && (modifiers - gtk::gdk::ModifierType::LOCK_MASK).is_empty()
                 && find_bar.is_visible()
                 && !in_terminal
+                && workspace::host_window(&find_bar).as_ref() == host.as_ref()
             {
                 find_close.emit_clicked();
                 return glib::Propagation::Stop;
@@ -155,13 +157,23 @@ impl Ui {
                 return glib::Propagation::Proceed;
             }
 
-            if targets[action as usize].1.activate() {
+            let target = &targets[action as usize].1;
+
+            if action.scope() == Scope::Source
+                && target.button().is_sensitive()
+                && let Some(window) = workspace::host_window(target.button())
+                && Some(&window) != host.as_ref()
+            {
+                window.present();
+            }
+
+            if target.activate() {
                 glib::Propagation::Stop
             } else {
                 glib::Propagation::Proceed
             }
         });
 
-        self.window.add_controller(keys);
+        host.as_ref().add_controller(keys);
     }
 }

@@ -376,11 +376,12 @@ impl Ui {
 
         let dialog = gtk::Window::builder()
             .title("Go to source line")
-            .transient_for(&self.window)
+            .transient_for(&self.panel_window(PanelId::Editor))
             .modal(true)
             .default_width(380)
             .build();
 
+        self.panels.track_dialog(PanelId::Editor, &dialog);
         let content = gtk::Box::new(gtk::Orientation::Vertical, 7);
         components::inset(&content, components::DIALOG_INSET);
 
@@ -604,6 +605,7 @@ impl Ui {
 
         if let Some((existing_mode, existing_scope, window, entry)) = existing {
             if existing_mode == mode && existing_scope == scope {
+                window.set_transient_for(Some(&self.panel_window(PanelId::Editor)));
                 window.present();
                 entry.grab_focus();
                 return;
@@ -642,13 +644,14 @@ impl Ui {
 
         let window = gtk::Window::builder()
             .title(title)
-            .transient_for(&self.window)
+            .transient_for(&self.panel_window(PanelId::Editor))
             .modal(false)
             .default_width(760)
             .default_height(520)
             .build();
 
         window.add_css_class("source-palette");
+        self.panels.track_dialog(PanelId::Editor, &window);
         let root = gtk::Box::new(gtk::Orientation::Vertical, 7);
         components::inset(&root, components::DIALOG_INSET);
         let heading = gtk::Label::new(Some(title));

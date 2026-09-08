@@ -427,7 +427,7 @@ impl Ui {
                 dialog.set_initial_folder(Some(&gio::File::for_path(root)));
             }
 
-            let window = ui.window.clone();
+            let window = ui.panel_window(PanelId::Editor);
             let weak_ui = Rc::downgrade(&ui);
             drop(ui);
 

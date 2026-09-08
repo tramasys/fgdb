@@ -1027,7 +1027,6 @@ impl Ui {
             widget.add_controller(events);
         }
 
-        let window = self.window.clone();
         let selection = self.locals_selection.clone();
         let handler = Rc::clone(&self.variable_assignment_handler);
         let float_handler = Rc::clone(&self.float_assignment_handler);
@@ -1040,7 +1039,9 @@ impl Ui {
         let model = Rc::clone(&self.model);
         let locals_generation = Rc::clone(&self.locals_generation);
 
-        self.locals_view.connect_activate(move |_, position| {
+        let panels = Rc::clone(&self.panels);
+
+        self.locals_view.connect_activate(move |view, position| {
             if !local_snapshot_is_inspectable(&model, locals_generation.get()) {
                 return;
             }
@@ -1076,9 +1077,9 @@ impl Ui {
                     let editor_handler = editor_handler.borrow().clone();
 
                     if let Some(editor_handler) = editor_handler {
-                        editor_handler(variable);
-                    } else {
-                        open_variable_editor(
+                        editor_handler(variable, PanelId::Context);
+                    } else if let Some(window) = workspace::host_window(view) {
+                        let editor = open_variable_editor(
                             &window,
                             variable,
                             target_pointer_bits.get(),
@@ -1092,12 +1093,13 @@ impl Ui {
                                 string: Rc::clone(&string_handler),
                             },
                         );
+
+                        panels.track_dialog(PanelId::Context, &editor);
                     }
                 }
             }
         });
 
-        let window = self.window.clone();
         let selection = self.locals_selection.clone();
         let handler = Rc::clone(&self.variable_assignment_handler);
         let float_handler = Rc::clone(&self.float_assignment_handler);
@@ -1109,7 +1111,9 @@ impl Ui {
         let model = Rc::clone(&self.model);
         let locals_generation = Rc::clone(&self.locals_generation);
 
-        self.locals_edit_button.connect_clicked(move |_| {
+        let panels = Rc::clone(&self.panels);
+
+        self.locals_edit_button.connect_clicked(move |button| {
             if !local_snapshot_is_inspectable(&model, locals_generation.get()) {
                 return;
             }
@@ -1120,9 +1124,9 @@ impl Ui {
                 let editor_handler = editor_handler.borrow().clone();
 
                 if let Some(editor_handler) = editor_handler {
-                    editor_handler(variable);
-                } else {
-                    open_variable_editor(
+                    editor_handler(variable, PanelId::Context);
+                } else if let Some(window) = workspace::host_window(button) {
+                    let editor = open_variable_editor(
                         &window,
                         variable,
                         target_pointer_bits.get(),
@@ -1136,6 +1140,8 @@ impl Ui {
                             string: Rc::clone(&string_handler),
                         },
                     );
+
+                    panels.track_dialog(PanelId::Context, &editor);
                 }
             }
         });
@@ -1143,7 +1149,8 @@ impl Ui {
 
     pub(super) fn connect_register_activation(&self) {
         for group in &self.register_groups {
-            let parent = self.window.clone();
+            let panel = group.panel.downgrade();
+            let panels = Rc::clone(&self.panels);
             let store = group.store.clone();
             let handler = Rc::clone(&self.variable_assignment_handler);
             let float_handler = Rc::clone(&self.float_assignment_handler);
@@ -1177,8 +1184,15 @@ impl Ui {
                 let display = row.vector_display;
                 drop(row);
 
-                if matches!(register.name.as_str(), "eflags" | "rflags") {
-                    open_flag_editor(&parent, register, Rc::clone(&handler));
+                let Some(parent) = panel
+                    .upgrade()
+                    .and_then(|panel| workspace::host_window(&panel))
+                else {
+                    return;
+                };
+
+                let editor = if matches!(register.name.as_str(), "eflags" | "rflags") {
+                    open_flag_editor(&parent, register, Rc::clone(&handler))
                 } else if vector_register_bytes(&register.name).is_some() {
                     let Some(context) = register_context.borrow().clone() else {
                         return;
@@ -1191,9 +1205,9 @@ impl Ui {
                         Rc::clone(&model),
                         context,
                         Rc::clone(&vector_handler),
-                    );
+                    )
                 } else {
-                    open_variable_editor(
+                    Some(open_variable_editor(
                         &parent,
                         Variable {
                             local_index: None,
@@ -1217,7 +1231,11 @@ impl Ui {
                             float: Rc::clone(&float_handler),
                             string: Rc::clone(&string_handler),
                         },
-                    );
+                    ))
+                };
+
+                if let Some(editor) = editor {
+                    panels.track_dialog(PanelId::Registers, &editor);
                 }
             });
         }
@@ -1959,7 +1977,7 @@ impl Ui {
             128,
             MemoryWatchFormat::Bytes,
         ) {
-            self.inspector_notebook.set_current_page(Some(4));
+            self.panels.reveal(PanelId::Memory);
 
             self.set_status(
                 "Memory",
@@ -2463,13 +2481,20 @@ impl Ui {
     }
 
     pub(super) fn connect_breakpoint_bulk_controls(&self) {
-        let parent = self.window.clone();
         let handler = Rc::clone(&self.breakpoint_editor_handler);
         let model = Rc::clone(&self.model);
+        let panels = Rc::clone(&self.panels);
 
-        self.add_breakpoint_button.connect_clicked(move |_| {
+        self.add_breakpoint_button.connect_clicked(move |button| {
+            let Some(parent) = workspace::host_window(button) else {
+                return;
+            };
+
             let pending_supported = model.gdb_supports("pending-breakpoints");
-            open_breakpoint_editor(&parent, None, pending_supported, Rc::clone(&handler));
+            let editor =
+                open_breakpoint_editor(&parent, None, pending_supported, Rc::clone(&handler));
+
+            panels.track_dialog(PanelId::Breakpoints, &editor);
         });
 
         let breakpoints = Rc::clone(&self.breakpoints);
@@ -3082,43 +3107,53 @@ impl Ui {
                     row.append(&commands);
                 }
 
-                let parent = self.window.clone();
                 let breakpoint_for_condition = breakpoint.clone();
                 let condition_handler = Rc::clone(&self.breakpoint_condition_handler);
                 let editor_handler = Rc::clone(&self.breakpoint_editor_handler);
+                let panels = Rc::clone(&self.panels);
 
-                condition_button.connect_clicked(move |_| {
-                    if breakpoint_for_condition.is_watchpoint()
+                condition_button.connect_clicked(move |button| {
+                    let Some(parent) = workspace::host_window(button) else {
+                        return;
+                    };
+
+                    let editor = if breakpoint_for_condition.is_watchpoint()
                         || breakpoint_for_condition.is_catchpoint()
                     {
                         open_breakpoint_condition_editor(
                             &parent,
                             breakpoint_for_condition.clone(),
                             Rc::clone(&condition_handler),
-                        );
+                        )
                     } else {
                         open_breakpoint_editor(
                             &parent,
                             Some(breakpoint_for_condition.clone()),
                             pending_supported,
                             Rc::clone(&editor_handler),
-                        );
-                    }
+                        )
+                    };
+
+                    panels.track_dialog(PanelId::Breakpoints, &editor);
                 });
 
-                let parent = self.window.clone();
                 let number = breakpoint.command_number().to_owned();
                 let metadata = Rc::clone(&self.stop_point_metadata);
                 let filter_controls = self.stop_point_filter.clone();
+                let panels = Rc::clone(&self.panels);
 
-                organize_button.connect_clicked(move |_| {
+                organize_button.connect_clicked(move |button| {
+                    let Some(parent) = workspace::host_window(button) else {
+                        return;
+                    };
+
                     let current = metadata.borrow().get(&number).cloned().unwrap_or_default();
                     let metadata_for_apply = Rc::clone(&metadata);
                     let controls_for_apply = filter_controls.clone();
                     let organization = organization.clone();
                     let number_for_apply = number.clone();
 
-                    open_stop_point_metadata_editor(
+                    let editor = open_stop_point_metadata_editor(
                         &parent,
                         &number,
                         &current,
@@ -3140,6 +3175,8 @@ impl Ui {
                                 .emit_by_name::<()>("search-changed", &[]);
                         }),
                     );
+
+                    panels.track_dialog(PanelId::Breakpoints, &editor);
                 });
 
                 let number = breakpoint.command_number().to_owned();

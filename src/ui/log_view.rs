@@ -50,8 +50,7 @@ impl Drop for LogState {
 
 impl ApplicationLog {
     pub(super) fn new(theme: &Theme) -> Self {
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        root.add_css_class("panel");
+        let root = components::panel();
         let header = components::control_row();
         header.add_css_class("panel-header");
         header.add_css_class("application-log-header");
@@ -551,6 +550,7 @@ mod tests {
     #[ignore = "requires a GTK display"]
     fn follow_paints_the_complete_tail_and_resumes_after_selection() {
         gtk::init().unwrap();
+        Theme::graphite().install();
         let log = ApplicationLog::new(&Theme::graphite());
         let window = gtk::Window::builder()
             .default_width(800)

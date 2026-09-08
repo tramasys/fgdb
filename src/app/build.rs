@@ -12,6 +12,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         &theme,
         Rc::clone(&model),
     ));
+    ui.connect_panel_hosts();
     ui.connect_source_loading();
     ui.connect_terminal_synchronization();
     ui.connect_local_paging();
@@ -711,12 +712,12 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
 
-    ui.set_variable_editor_handler(move |variable| {
+    ui.set_variable_editor_handler(move |variable, origin| {
         let (Some(client), weak_ui) = (weak_client.upgrade(), weak_ui.clone()) else {
             return;
         };
 
-        request_value_type_metadata(weak_ui, client, variable);
+        request_value_type_metadata(weak_ui, client, variable, origin);
     });
 
     let weak_ui = Rc::downgrade(&ui);
@@ -848,12 +849,12 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
 
-    ui.set_variable_viewer_handler(move |request| {
+    ui.set_variable_viewer_handler(move |request, origin| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
 
-        open_variable_viewer(weak_ui.clone(), client, request);
+        open_variable_viewer(weak_ui.clone(), client, request, &origin);
     });
 
     let weak_ui = Rc::downgrade(&ui);
@@ -920,6 +921,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
 
     application.connect_shutdown(move |_| {
         if let Some((ui, _backend)) = retained_application.borrow_mut().take() {
+            ui.shutdown_panel_hosts();
             ui.save_layout();
         }
     });

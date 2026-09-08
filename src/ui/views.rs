@@ -846,7 +846,7 @@ fn show_variable_context_menu(
                 let handler = viewer_handler.borrow().clone();
 
                 if let Some(handler) = handler {
-                    handler(request.clone());
+                    handler(request.clone(), button.clone().upcast());
                 }
 
                 if let Some(popover) = popover.upgrade() {
@@ -1915,9 +1915,8 @@ pub(super) fn instruction_column(
 }
 
 pub(super) fn build_editor_panel(notebook: &gtk::Notebook) -> SourceEditorPanel {
-    let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    panel.add_css_class("panel");
-    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 1);
+    let panel = components::panel();
+    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
     toolbar.add_css_class("source-navigation-toolbar");
     let back = gtk::Button::with_label("‹");
     back.set_tooltip_text(Some("Back in source navigation history"));
@@ -2423,8 +2422,7 @@ pub(super) fn build_terminal_panel(
     terminal: &vte4::Terminal,
     gef_tools_button: &gtk::ToggleButton,
 ) -> gtk::Box {
-    let panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    panel.add_css_class("panel");
+    let panel = components::panel();
     let header = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     header.add_css_class("panel-header");
     header.add_css_class("terminal-header");
@@ -2433,6 +2431,11 @@ pub(super) fn build_terminal_panel(
     header.append(&title);
     header.append(gef_tools_button);
     panel.append(&header);
+
+    gef_tools_button
+        .bind_property("visible", &header, "visible")
+        .sync_create()
+        .build();
 
     let scrolled = gtk::ScrolledWindow::builder()
         .child(terminal)

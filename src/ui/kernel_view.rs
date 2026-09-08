@@ -200,9 +200,9 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     let needs_refresh = Rc::new(Cell::new(true));
     let tls_requested = Rc::new(Cell::new(false));
     let metadata_only_refresh = Rc::new(Cell::new(false));
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let root = workspace::ResponsiveBox::new();
     root.set_size_request(0, 0);
-    root.add_css_class("sidebar");
+    root.add_css_class("panel");
     root.add_css_class("kernel-page");
     let warnings = gtk::Box::new(gtk::Orientation::Vertical, 2);
     warnings.add_css_class("kernel-warnings");
@@ -300,6 +300,7 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     let next_page = navigation.next.clone();
     root.append(&navigation.root);
     root.append(&navigation.compact_root);
+    root.bind_navigation(&navigation.root, &navigation.compact_root);
     root.append(&warnings);
     root.append(&pages);
     let previous_for_page = previous_page.clone();
@@ -351,8 +352,6 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
 
     KernelView {
         root,
-        wide_subtabs: navigation.root,
-        compact_subtabs: navigation.compact_root,
         pages,
         active,
         in_flight,
@@ -404,8 +403,6 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
 }
 
 pub(super) fn connect_kernel_tab_visibility(
-    notebook: &gtk::Notebook,
-    kernel_page: u32,
     view: &KernelView,
     refresh_handler: &Rc<RefCell<Option<KernelRefreshHandler>>>,
 ) {
@@ -413,8 +410,7 @@ pub(super) fn connect_kernel_tab_visibility(
     let needs_refresh = Rc::clone(&view.needs_refresh);
     let handler = Rc::clone(refresh_handler);
 
-    notebook.connect_switch_page(move |_, _, page| {
-        let now_active = page == kernel_page;
+    workspace::connect_presentation(&view.root, move |now_active| {
         active.set(now_active);
 
         if now_active && needs_refresh.get() {
@@ -471,19 +467,35 @@ pub(super) fn build_subtab_navigation(
     let scroll_for_next = scroll.clone();
     next.connect_clicked(move |_| scroll_subtabs(&scroll_for_next, 1.0));
     let adjustment = scroll.hadjustment();
-    let previous_for_adjustment = previous.clone();
-    let next_for_adjustment = next.clone();
+    let pending = Rc::new(Cell::new(false));
+    let previous_for_adjustment = previous.downgrade();
+    let next_for_adjustment = next.downgrade();
 
-    adjustment.connect_value_changed(move |adjustment| {
-        update_subtab_arrows(adjustment, &previous_for_adjustment, &next_for_adjustment);
-    });
+    // Adjustment changes can originate inside allocation. Revealing arrows
+    // there gives GTK newly visible children with no allocated rectangle.
+    let schedule = move |adjustment: &gtk::Adjustment| {
+        if pending.replace(true) {
+            return;
+        }
 
-    let previous_for_range = previous.clone();
-    let next_for_range = next.clone();
+        let pending = Rc::clone(&pending);
+        let adjustment = adjustment.downgrade();
+        let previous = previous_for_adjustment.clone();
+        let next = next_for_adjustment.clone();
 
-    adjustment.connect_changed(move |adjustment| {
-        update_subtab_arrows(adjustment, &previous_for_range, &next_for_range);
-    });
+        glib::idle_add_local_once(move || {
+            pending.set(false);
+
+            if let (Some(adjustment), Some(previous), Some(next)) =
+                (adjustment.upgrade(), previous.upgrade(), next.upgrade())
+            {
+                update_subtab_arrows(&adjustment, &previous, &next);
+            }
+        });
+    };
+
+    adjustment.connect_value_changed(schedule.clone());
+    adjustment.connect_changed(schedule);
 
     update_subtab_arrows(&adjustment, &previous, &next);
 
@@ -700,12 +712,14 @@ fn build_overview(
         key.add_css_class("kernel-fact-key");
         key.add_css_class("muted");
         key.set_halign(gtk::Align::Start);
+        key.set_xalign(0.0);
         key.set_max_width_chars(KERNEL_FACT_LABEL_MAX_WIDTH);
         key.set_ellipsize(pango::EllipsizeMode::End);
         fact_key_group_for_setup.add_widget(&key);
         let value = gtk::Label::new(None);
         value.add_css_class("kernel-fact-value");
         value.set_halign(gtk::Align::Start);
+        value.set_xalign(0.0);
         value.set_hexpand(true);
         enable_stable_text_selection(&value);
         value.set_ellipsize(pango::EllipsizeMode::None);
@@ -842,7 +856,7 @@ fn build_overview(
             key.set_width_chars(-1);
             key.set_max_width_chars(KERNEL_FACT_LABEL_MAX_WIDTH);
             key.set_hexpand(false);
-            key.set_xalign(0.5);
+            key.set_xalign(0.0);
             key.set_ellipsize(pango::EllipsizeMode::End);
             value.set_visible(true);
             row.set_cursor_from_name(None);
