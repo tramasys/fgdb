@@ -1,5 +1,6 @@
 mod command;
 pub(crate) mod context;
+pub(crate) mod instruction;
 mod mi;
 mod model;
 mod session;

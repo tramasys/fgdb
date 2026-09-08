@@ -49,7 +49,10 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         }
     };
 
-    ui.connect_debug_controls(&mi_client);
+    ui.connect_debug_controls(&mi_client, |ui, client| {
+        refresh_cached_inspector_details(&Rc::downgrade(ui), client);
+    });
+
     memory_search::connect(&ui, &mi_client);
     let weak = Rc::downgrade(&ui);
     let client = Rc::clone(&mi_client);

@@ -140,6 +140,7 @@ dependencies = [
  "goblin",
  "gtk4",
  "libbpf-rs",
+ "memchr",
  "nix",
  "rustix",
  "shell-words",

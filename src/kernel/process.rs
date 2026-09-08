@@ -674,7 +674,9 @@ pub(super) fn populate_hierarchy(
 }
 
 pub(super) fn read_key_values(path: &Path) -> io::Result<HashMap<String, String>> {
-    Ok(crate::bounded::read_string(path, 1024 * 1024)?
+    let bytes = crate::bounded::read_bytes(path, 1024 * 1024)?;
+
+    Ok(String::from_utf8_lossy(&bytes)
         .lines()
         .filter_map(|line| line.split_once(':'))
         .map(|(key, value)| (key.trim().to_owned(), value.trim().to_owned()))
@@ -682,7 +684,10 @@ pub(super) fn read_key_values(path: &Path) -> io::Result<HashMap<String, String>
 }
 
 pub(super) fn read_proc_stat(path: &Path) -> Option<ProcStat> {
-    let stat = crate::bounded::read_string(path, 64 * 1024).ok()?;
+    let bytes =
+        crate::bounded::read_bytes(path, crate::local_process::stat::MAX_STAT_BYTES).ok()?;
+
+    let stat = crate::local_process::stat::Stat::parse(&bytes)?;
     let mut minor_faults = None;
     let mut major_faults = None;
     let mut user_ticks = None;
@@ -692,7 +697,7 @@ pub(super) fn read_proc_stat(path: &Path) -> Option<ProcStat> {
     let mut start_time = None;
     let mut processor = None;
 
-    for (index, value) in stat.rsplit_once(") ")?.1.split_whitespace().enumerate() {
+    for (index, value) in stat.fields().enumerate() {
         match index {
             7 => minor_faults = value.parse().ok(),
             9 => major_faults = value.parse().ok(),

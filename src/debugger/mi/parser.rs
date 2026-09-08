@@ -5,6 +5,12 @@ pub(super) const MAX_MI_NESTING: usize = 64;
 const MAX_MI_ITEMS: usize = 100_000;
 
 #[cfg(test)]
+mod benchmarks;
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
 pub(super) fn parse_stream_output(input: &str) -> Result<String, String> {
     parse_stream_output_with_kinds(input, b"~")
 }
@@ -235,33 +241,30 @@ impl<'a> Parser<'a> {
     fn c_string(&mut self) -> Result<String, String> {
         self.expect(b'"')?;
         let start = self.position;
-        while let Some(byte) = self.peek() {
-            match byte {
-                b'"' => {
-                    let end = self.position;
-                    self.position += 1;
+        self.position += string_delimiter(&self.input[self.position..])
+            .ok_or_else(|| String::from("unterminated MI string"))?;
 
-                    return Ok(std::str::from_utf8(&self.input[start..end])
-                        .expect("MI parser input originates from a Rust string")
-                        .to_owned());
-                }
-                b'\\' => break,
-                _ => self.position += 1,
-            }
-        }
-
-        if self.peek().is_none() {
-            return Err(String::from("unterminated MI string"));
+        if self.consume(b'"') {
+            return Ok(std::str::from_utf8(&self.input[start..self.position - 1])
+                .expect("MI parser input originates from a Rust string")
+                .to_owned());
         }
 
         let mut bytes = Vec::with_capacity(self.position.saturating_sub(start).saturating_add(16));
         bytes.extend_from_slice(&self.input[start..self.position]);
+
         loop {
-            match self.next() {
-                Some(b'"') => break,
-                Some(b'\\') => self.escape(&mut bytes)?,
-                Some(byte) => bytes.push(byte),
-                None => return Err(String::from("unterminated MI string")),
+            self.expect(b'\\')?;
+            self.escape(&mut bytes)?;
+            let start = self.position;
+
+            self.position += string_delimiter(&self.input[self.position..])
+                .ok_or_else(|| String::from("unterminated MI string"))?;
+
+            bytes.extend_from_slice(&self.input[start..self.position]);
+
+            if self.consume(b'"') {
+                break;
             }
         }
 
@@ -362,6 +365,14 @@ impl<'a> Parser<'a> {
         let byte = self.peek()?;
         self.position += 1;
         Some(byte)
+    }
+}
+
+fn string_delimiter(input: &[u8]) -> Option<usize> {
+    if input.len() < 16 {
+        input.iter().position(|byte| matches!(byte, b'"' | b'\\'))
+    } else {
+        memchr::memchr2(b'"', b'\\', input)
     }
 }
 

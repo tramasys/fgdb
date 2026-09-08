@@ -178,9 +178,10 @@ fn collect(target: Target, shared: &Shared) -> Result<(), String> {
             let namespace = std::fs::metadata(process.root().join("ns/pid"))
                 .map_err(|error| format!("Cannot inspect the process PID namespace: {error}"))?;
 
-            let status =
-                crate::bounded::read_string(&process.root().join("status"), 1024 * 1024)
-                    .map_err(|error| format!("Cannot inspect the process identity: {error}"))?;
+            let status = crate::bounded::read_bytes(&process.root().join("status"), 1024 * 1024)
+                .map_err(|error| format!("Cannot inspect the process identity: {error}"))?;
+
+            let status = String::from_utf8_lossy(&status);
 
             let namespace_pid = status
                 .lines()

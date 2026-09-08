@@ -2,6 +2,9 @@
 
 mod pattern;
 
+#[cfg(test)]
+mod benchmarks;
+
 use crate::debugger::{MemoryBlock, TargetEndian};
 pub(crate) use pattern::{Pattern, SearchKind, parse_address};
 use std::{collections::VecDeque, ops::Range};
@@ -169,24 +172,29 @@ impl Scan {
                 self.pattern.reset();
             }
 
-            for (offset, &byte) in block.bytes.iter().enumerate() {
-                let address = block.begin + offset as u64;
-                self.progress.searched += 1;
+            let alignment = self.alignment;
+            let hits = &mut self.progress.hits;
+            let max_results = self.max_results;
 
-                if self.pattern.push(byte) {
-                    let start = address + 1 - self.pattern.len() as u64;
+            let consumed = self.pattern.search(&block.bytes, |end, pattern| {
+                let start = block.begin + end as u64 - pattern.len() as u64;
 
-                    if start.is_multiple_of(self.alignment) {
-                        self.progress.hits.push(Hit {
-                            address: start,
-                            bytes: self.pattern.matched_bytes(),
-                        });
+                if start.is_multiple_of(alignment) {
+                    hits.push(Hit {
+                        address: start,
+                        bytes: pattern.matched_bytes(),
+                    });
 
-                        if self.progress.hits.len() == self.max_results {
-                            return;
-                        }
-                    }
+                    return hits.len() < max_results;
                 }
+
+                true
+            });
+
+            self.progress.searched += consumed as u64;
+
+            if self.progress.hits.len() == self.max_results {
+                return;
             }
 
             cursor = block.begin + block.bytes.len() as u64;
@@ -251,6 +259,45 @@ mod tests {
         };
 
         Scan::new(query, None, None).unwrap()
+    }
+
+    #[test]
+    fn accelerated_skips_preserve_alignment_and_partial_result_accounting() {
+        let query = Query {
+            kind: SearchKind::Unsigned(16),
+            value: String::from("0x6666"),
+            ranges: std::iter::once(1..1101).collect(),
+            aligned: true,
+            max_results: 2,
+            max_bytes: 1100,
+        };
+
+        let mut scan = Scan::new(query, None, Some(TargetEndian::Little)).unwrap();
+        let mut bytes = vec![0; 1100];
+        bytes[95..103].fill(0x66);
+        let range = scan.next_read().unwrap();
+        scan.accept(range, &[MemoryBlock { begin: 1, bytes }]);
+        assert_eq!(
+            scan.progress
+                .hits
+                .iter()
+                .map(|hit| hit.address)
+                .collect::<Vec<_>>(),
+            [96, 98]
+        );
+
+        assert!(
+            scan.progress
+                .hits
+                .iter()
+                .all(|hit| hit.bytes == [0x66, 0x66])
+        );
+
+        assert_eq!(scan.progress.searched, 99);
+        assert_eq!(scan.progress.skipped, 0);
+        assert_eq!(scan.progress.remaining(), 1001);
+        assert_eq!(scan.limit_reached(), Some("Result limit reached"));
+        assert!(scan.next_read().is_none());
     }
 
     #[test]

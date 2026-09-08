@@ -16,6 +16,9 @@ const MAX_CACHED_SOURCE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_CACHED_LINE_RANGES: usize = 1_000_000;
 const MAX_STABLE_READ_ATTEMPTS: usize = 2;
 
+#[cfg(test)]
+mod benchmarks;
+
 #[derive(Clone)]
 pub(crate) struct CachedSource {
     pub(crate) contents: Arc<String>,
@@ -237,7 +240,7 @@ fn source_cache() -> &'static Mutex<SourceFileCache> {
 }
 
 pub(super) fn searchable_source(path: &Path) -> Option<CachedSource> {
-    let (identity, source) = stable_read(
+    let (identity, (source, loaded)) = stable_read(
         || SourceFileIdentity::read(path).ok(),
         |identity| {
             if identity.size > MAX_SEARCHABLE_SOURCE_BYTES as u64 {
@@ -249,21 +252,23 @@ pub(super) fn searchable_source(path: &Path) -> Option<CachedSource> {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(identity)
             {
-                return Some(source);
+                return Some((source, false));
             }
 
             #[cfg(test)]
             record_source_file_read(path);
             let bytes = crate::bounded::read_bytes(path, MAX_SEARCHABLE_SOURCE_BYTES).ok()?;
 
-            Some(CachedSource::from_bytes(bytes))
+            Some((CachedSource::from_bytes(bytes), true))
         },
     )?;
 
-    source_cache()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(identity, source.clone());
+    if loaded {
+        source_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(identity, source.clone());
+    }
 
     Some(source)
 }
@@ -290,14 +295,39 @@ where
 
 fn source_line_ranges(contents: &str) -> Option<Vec<(usize, usize)>> {
     let bytes = contents.as_bytes();
-    let mut ranges = Vec::new();
+    let newlines = memchr::memchr_iter(b'\n', bytes).count();
+
+    if newlines >= MAX_CACHED_LINE_RANGES {
+        return None;
+    }
+
+    let lines = newlines + usize::from(!bytes.is_empty() && bytes.last() != Some(&b'\n'));
+
+    // SIMD counting also gives an exact allocation size and a density check.
+    // Dense line endings favor the scalar walk, including after a long header.
+    Some(if bytes.len() < 64 || newlines > bytes.len() / 16 {
+        line_ranges_at(
+            bytes,
+            lines,
+            bytes
+                .iter()
+                .enumerate()
+                .filter_map(|(position, byte)| (*byte == b'\n').then_some(position)),
+        )
+    } else {
+        line_ranges_at(bytes, lines, memchr::memchr_iter(b'\n', bytes))
+    })
+}
+
+fn line_ranges_at(
+    bytes: &[u8],
+    lines: usize,
+    newlines: impl Iterator<Item = usize>,
+) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::with_capacity(lines);
     let mut start = 0;
 
-    for (position, byte) in bytes.iter().enumerate() {
-        if *byte != b'\n' {
-            continue;
-        }
-
+    for position in newlines {
         let end = if position > start && bytes[position - 1] == b'\r' {
             position - 1
         } else {
@@ -306,10 +336,6 @@ fn source_line_ranges(contents: &str) -> Option<Vec<(usize, usize)>> {
 
         ranges.push((start, end));
 
-        if ranges.len() >= MAX_CACHED_LINE_RANGES {
-            return None;
-        }
-
         start = position + 1;
     }
 
@@ -317,7 +343,7 @@ fn source_line_ranges(contents: &str) -> Option<Vec<(usize, usize)>> {
         ranges.push((start, bytes.len()));
     }
 
-    Some(ranges)
+    ranges
 }
 
 #[cfg(test)]
@@ -351,6 +377,48 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn indexed_lines_match_rust_lines_across_dense_sparse_and_unicode_input() {
+        for ending in ["\n", "\r\n"] {
+            for width in [0, 1, 2, 15, 16, 31, 32, 63, 64, 511, 512, 4096] {
+                let line = format!("{}λ界{ending}", "x".repeat(width));
+                let mut input = line.repeat(100);
+
+                for suffix in ["", "tail", "\r", "\n", "λ\r\n"] {
+                    input.push_str(suffix);
+                    let ranges = source_line_ranges(&input).unwrap();
+
+                    let indexed = ranges
+                        .iter()
+                        .map(|(start, end)| &input[*start..*end])
+                        .collect::<Vec<_>>();
+
+                    assert_eq!(indexed, input.lines().collect::<Vec<_>>());
+                }
+            }
+        }
+
+        let mixed = format!("{}\r\n{}tail", "x".repeat(4096), "\n\r\nλ\n".repeat(4096));
+        let ranges = source_line_ranges(&mixed).unwrap();
+
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|(start, end)| &mixed[*start..*end])
+                .collect::<Vec<_>>(),
+            mixed.lines().collect::<Vec<_>>()
+        );
+
+        assert_eq!(source_line_ranges(""), Some(Vec::new()));
+        assert!(source_line_ranges(&"\n".repeat(MAX_CACHED_LINE_RANGES)).is_none());
+        let input = format!("{}last", "\n".repeat(MAX_CACHED_LINE_RANGES - 1));
+
+        assert_eq!(
+            source_line_ranges(&input).unwrap().len(),
+            MAX_CACHED_LINE_RANGES
+        );
+    }
 
     struct TestDirectory(PathBuf);
 

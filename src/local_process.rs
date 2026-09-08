@@ -1,6 +1,7 @@
 //! Host process discovery and attach validation, independent of GTK and GDB.
 
 mod procfs;
+pub(crate) mod stat;
 
 use std::{
     collections::HashMap,

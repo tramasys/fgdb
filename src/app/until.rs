@@ -1359,11 +1359,16 @@ fn classify_instruction_window(
         .map(|instruction| {
             let address = parse_address(&instruction.address);
 
-            let matched =
-                crate::ui::formatting::instruction_matches_until(action, instruction, architecture);
+            let matched = crate::debugger::instruction::instruction_matches_until(
+                action,
+                instruction,
+                architecture,
+            );
 
-            let ends_linear_flow =
-                crate::ui::formatting::instruction_ends_linear_flow(instruction, architecture);
+            let ends_linear_flow = crate::debugger::instruction::instruction_ends_linear_flow(
+                instruction,
+                architecture,
+            );
 
             let cacheable =
                 address.is_some_and(|address| address_is_cacheable(address_space, address));
@@ -1955,13 +1960,13 @@ mod tests {
 
         let prefixed_return = instruction("0x1100", "repz retq");
 
-        assert!(crate::ui::formatting::instruction_matches_until(
+        assert!(crate::debugger::instruction::instruction_matches_until(
             &UntilAction::NextReturn,
             &prefixed_return,
             TargetArchitecture::X86_64,
         ));
 
-        assert!(crate::ui::formatting::instruction_ends_linear_flow(
+        assert!(crate::debugger::instruction::instruction_ends_linear_flow(
             &instruction("0x1101", "ds ljmp $0x8,$0x1200"),
             TargetArchitecture::X86_64,
         ));

@@ -207,10 +207,10 @@ fn target_abi_cache() -> &'static Mutex<TargetAbiCache> {
 
 pub(crate) fn read_local_parent_pid(pid: u32, debugger_pid: u32) -> Option<u32> {
     read_verified_local_proc(pid, debugger_pid, |target| {
-        let status = crate::bounded::read_string(&target.root().join("status"), 1024 * 1024)
+        let status = crate::bounded::read_bytes(&target.root().join("status"), 1024 * 1024)
             .map_err(|error| format!("Cannot inspect /proc/{pid}/status: {error}"))?;
 
-        status
+        String::from_utf8_lossy(&status)
             .lines()
             .find_map(|line| line.strip_prefix("PPid:"))
             .and_then(|value| value.trim().parse().ok())
@@ -228,10 +228,10 @@ fn observe_identity(
 ) -> Result<u64, String> {
     let before = super::process::read_proc_stat(&root.join("stat")).map(|stat| stat.start_time);
 
-    let status = crate::bounded::read_string(&root.join("status"), 1024 * 1024)
+    let status = crate::bounded::read_bytes(&root.join("status"), 1024 * 1024)
         .map_err(|error| format!("Cannot inspect /proc/{pid}/status: {error}"))?;
 
-    let tracer = tracer_pid(&status);
+    let tracer = tracer_pid(&String::from_utf8_lossy(&status));
     let after = super::process::read_proc_stat(&root.join("stat")).map(|stat| stat.start_time);
 
     validate_identity_observation(
@@ -285,6 +285,33 @@ fn validate_identity_observation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_utf8_names_do_not_hide_the_tracer_or_process_identity() {
+        let root =
+            gtk::glib::mkdtemp(std::env::temp_dir().join("fgdb-proc-identity-XXXXXX")).unwrap();
+
+        std::fs::write(
+            root.join("stat"),
+            b"42 (bad\xffname) t 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 99 0",
+        )
+        .unwrap();
+
+        std::fs::write(
+            root.join("status"),
+            b"Name:\tbad\xffname\nTracerPid:\t17\nUid:\t1000\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            observe_identity(&root, 42, 17, Some(99), "checked").unwrap(),
+            99
+        );
+
+        let values = super::super::process::read_key_values(&root.join("status")).unwrap();
+        assert_eq!(values.get("TracerPid").map(String::as_str), Some("17"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn abi_identity(pid: u32, start_time: u64, executable_inode: u64) -> TargetAbiIdentity {
         TargetAbiIdentity {

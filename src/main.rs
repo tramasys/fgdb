@@ -1,5 +1,7 @@
 mod app;
 mod background;
+#[cfg(test)]
+mod benchmarks;
 mod bounded;
 mod config;
 mod debug_info;

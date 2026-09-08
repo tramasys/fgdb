@@ -5,7 +5,9 @@ use super::*;
 use gtk::gdk;
 
 mod models;
+mod subtabs;
 pub(super) use models::{replace_boxed_store, replace_boxed_store_if_changed};
+pub(super) use subtabs::{build_subtab_navigation, update_subtab_arrows};
 
 pub(super) const CONTROL_GAP: i32 = 6;
 pub(super) const CONTENT_INSET: i32 = 8;

@@ -545,10 +545,15 @@ impl Ui {
             && self.kernel_view.pages.visible_child_name().as_deref() == Some("tls")
     }
 
-    pub fn connect_debug_controls(self: &Rc<Self>, client: &Rc<MiClient>) {
+    pub fn connect_debug_controls(
+        self: &Rc<Self>,
+        client: &Rc<MiClient>,
+        refresh_details: impl Fn(&Rc<Self>, &MiClient) + 'static,
+    ) {
         let pending = Rc::new(Cell::new(false));
         let weak_ui = Rc::downgrade(self);
         let client_for_details = Rc::clone(client);
+        let refresh_details = Rc::new(refresh_details);
 
         let refresh = Rc::new(move || {
             if pending.replace(true) {
@@ -558,6 +563,7 @@ impl Ui {
             let pending = Rc::clone(&pending);
             let weak_ui = weak_ui.clone();
             let client = Rc::clone(&client_for_details);
+            let refresh_details = Rc::clone(&refresh_details);
 
             glib::idle_add_local_once(move || {
                 pending.set(false);
@@ -565,7 +571,7 @@ impl Ui {
                 if let Some(ui) = weak_ui.upgrade()
                     && ui.model.stopped_inspection_available()
                 {
-                    crate::app::refresh_cached_inspector_details(&Rc::downgrade(&ui), &client);
+                    refresh_details(&ui, &client);
                 }
             });
         });

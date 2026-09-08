@@ -35,7 +35,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use crate::debugger::StopRequests;
+use crate::debugger::{StopRequests, instruction::UntilAction};
 use gtk::prelude::*;
 
 use crate::{
@@ -59,9 +59,9 @@ use crate::{
         BreakpointEditRequest, BreakpointSpec, CallAbiTargetRequest, DisassemblyRequest,
         DisassemblySyntax, EventCatchpoint, FilteredCatchpointKind, FilteredCatchpointRequest,
         GefContextControl, HeapInspectionAction, HeapInspectionRequest, SourceDiscoveryRequest,
-        ThreadBacktrace, ThreadComparison, ThreadComparisonRow, Ui, UntilAction,
-        VariableViewerPlan, VariableViewerRequest, VariableViewerRow, VariableViewerSession,
-        WatchpointAccess, WatchpointRequest, compact_variable_type,
+        ThreadBacktrace, ThreadComparison, ThreadComparisonRow, Ui, VariableViewerPlan,
+        VariableViewerRequest, VariableViewerRow, VariableViewerSession, WatchpointAccess,
+        WatchpointRequest, compact_variable_type,
     },
 };
 
@@ -81,7 +81,7 @@ use inferiors::*;
 use kernel::*;
 use lifecycle::*;
 use misc::*;
-pub(crate) use refresh::*;
+use refresh::*;
 use session::*;
 use source_control::*;
 use symbols::*;

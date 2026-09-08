@@ -1,7 +1,6 @@
-use super::{Process, ProcessIdentity};
+use super::{Process, ProcessIdentity, stat::MAX_STAT_BYTES};
 use std::{collections::HashMap, path::Path};
 
-const STAT_LIMIT: usize = 16 * 1024;
 const COMMAND_LIMIT: usize = 8 * 1024;
 
 struct Stat {
@@ -37,7 +36,7 @@ fn compare_identity(expected: ProcessIdentity, current: ProcessIdentity) -> Resu
 }
 
 fn read_stat(root: &Path, pid: u32) -> Result<Stat, String> {
-    let bytes = crate::bounded::read_bytes(&root.join("stat"), STAT_LIMIT)
+    let bytes = crate::bounded::read_bytes(&root.join("stat"), MAX_STAT_BYTES)
         .map_err(|error| format!("Cannot verify PID {pid}: {error}. The process may have exited or /proc access may be restricted"))?;
 
     let stat = parse_stat(&bytes, pid).ok_or_else(|| {
@@ -54,36 +53,19 @@ fn read_stat(root: &Path, pid: u32) -> Result<Stat, String> {
 }
 
 fn parse_stat(bytes: &[u8], pid: u32) -> Option<Stat> {
-    let open = bytes.iter().position(|byte| *byte == b'(')?;
-    let close = bytes.iter().rposition(|byte| *byte == b')')?;
+    let stat = super::stat::Stat::parse(bytes)?;
 
-    if close <= open
-        || std::str::from_utf8(&bytes[..open])
-            .ok()?
-            .trim()
-            .parse::<u32>()
-            .ok()?
-            != pid
-    {
+    if stat.pid != pid {
         return None;
     }
-
-    let mut fields = bytes[close + 1..]
-        .split(u8::is_ascii_whitespace)
-        .filter(|field| !field.is_empty());
-
-    let state = fields.next()?;
-
-    if state.len() != 1 {
-        return None;
-    }
-
-    let start_time = std::str::from_utf8(fields.nth(18)?).ok()?.parse().ok()?;
 
     Some(Stat {
-        identity: ProcessIdentity { pid, start_time },
-        name: display_text(&String::from_utf8_lossy(&bytes[open + 1..close])),
-        state: state[0],
+        identity: ProcessIdentity {
+            pid,
+            start_time: stat.start_time()?,
+        },
+        name: display_text(&String::from_utf8_lossy(stat.name)),
+        state: stat.state,
     })
 }
 

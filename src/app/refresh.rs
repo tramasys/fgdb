@@ -208,7 +208,7 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
 /// Add the expensive pointer-chain details for visible panels from the
 /// current stop cache. Changing presentation must never invalidate and rebuild the
 /// complete stopped state.
-pub(crate) fn refresh_cached_inspector_details(ui: &Weak<Ui>, client: &MiClient) {
+pub(super) fn refresh_cached_inspector_details(ui: &Weak<Ui>, client: &MiClient) {
     let Some(current_ui) = ui.upgrade() else {
         return;
     };

@@ -26,21 +26,7 @@ pub(crate) struct ThreadComparison {
     pub(crate) warnings: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum UntilAction {
-    CurrentLine,
-    FunctionReturns,
-    NextCall,
-    NextReturn,
-    NextSyscall,
-    NextIndirectBranch,
-    NextControlFlow,
-    MemoryAccess,
-    UserCode,
-    LibcCode,
-    RegionChange,
-    Expression(String),
-}
+pub(crate) use crate::debugger::instruction::UntilAction;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum HeapInspectionAction {

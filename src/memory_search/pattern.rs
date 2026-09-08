@@ -1,6 +1,9 @@
 use super::MAX_PATTERN;
 use crate::debugger::TargetEndian;
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SearchKind {
     Text,
@@ -30,10 +33,12 @@ impl SearchKind {
 }
 
 const WORDS: usize = MAX_PATTERN / u64::BITS as usize;
+const MIN_PREFILTER_SKIP: usize = 16;
 
 /// Shift-And supports wildcard bytes with bounded work per input byte.
 /// State and a small ring buffer carry overlapping matches across read boundaries.
 pub(crate) struct Pattern {
+    first: Option<u8>,
     masks: Box<[[u64; WORDS]; 256]>,
     state: [u64; WORDS],
     tail: [u8; MAX_PATTERN],
@@ -183,6 +188,7 @@ impl Pattern {
         }
 
         Ok(Self {
+            first: bytes[0],
             masks,
             state: [0; WORDS],
             tail: [0; MAX_PATTERN],
@@ -205,12 +211,85 @@ impl Pattern {
         self.position = 0;
     }
 
+    /// Visit matches with their exclusive end offset in this input. Returning
+    /// false stops after that match, and the result is the consumed byte count.
+    pub(crate) fn search(
+        &mut self,
+        input: &[u8],
+        mut matched: impl FnMut(usize, &Self) -> bool,
+    ) -> usize {
+        let Some(first) = self.first else {
+            return self.search_scalar(input, 0, &mut matched);
+        };
+
+        if self.state != [0; WORDS] {
+            return self.search_scalar(input, 0, &mut matched);
+        }
+
+        let mut offset = 0;
+        let mut skipped = 0_usize;
+        let mut probes = 0_usize;
+
+        while offset < input.len() {
+            // Skipping is valid only without a partial match. A later complete
+            // match replaces the entire ring, so skipped bytes need no copying.
+            if self.state == [0; WORDS] {
+                let Some(skip) = memchr::memchr(first, &input[offset..]) else {
+                    return input.len();
+                };
+
+                // Dense candidates do not benefit from a SIMD prefilter. Use
+                // the original bounded matcher for the rest of this block.
+                skipped += skip;
+                probes += 1;
+
+                if skipped < probes.saturating_mul(MIN_PREFILTER_SKIP) {
+                    return self.search_scalar(input, offset, &mut matched);
+                }
+
+                offset += skip;
+            }
+
+            let found = self.push(input[offset]);
+            offset += 1;
+
+            if found && !matched(offset, self) {
+                return offset;
+            }
+        }
+
+        input.len()
+    }
+
+    #[inline]
+    fn search_scalar(
+        &mut self,
+        input: &[u8],
+        from: usize,
+        matched: &mut impl FnMut(usize, &Self) -> bool,
+    ) -> usize {
+        for (offset, &byte) in input.iter().enumerate().skip(from) {
+            if self.push(byte) && !matched(offset + 1, self) {
+                return offset + 1;
+            }
+        }
+
+        input.len()
+    }
+
+    #[inline]
     pub(crate) fn push(&mut self, byte: u8) -> bool {
         self.tail[self.position] = byte;
         self.position += 1;
 
         if self.position == self.len {
             self.position = 0;
+        }
+
+        if self.len <= u64::BITS as usize {
+            self.state[0] = ((self.state[0] << 1) | 1) & self.masks[byte as usize][0];
+
+            return self.state[0] & (1_u64 << (self.len - 1)) != 0;
         }
 
         let mut carry = 1;
@@ -228,11 +307,10 @@ impl Pattern {
     }
 
     pub(crate) fn matched_bytes(&self) -> Vec<u8> {
-        self.tail[self.position..self.len]
-            .iter()
-            .chain(&self.tail[..self.position])
-            .copied()
-            .collect()
+        let mut bytes = Vec::with_capacity(self.len);
+        bytes.extend_from_slice(&self.tail[self.position..self.len]);
+        bytes.extend_from_slice(&self.tail[..self.position]);
+        bytes
     }
 }
 
