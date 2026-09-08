@@ -25,7 +25,14 @@ pub(super) fn populate_register_group(
 
     let count = rows.len() as i32;
     let previous_count = group.store.n_items();
-    replace_boxed_store_if_changed(&group.store, rows);
+
+    match &group.view {
+        RegisterGroupWidget::Table(_) => {
+            replace_boxed_store_if_changed(&group.store, rows);
+        }
+        RegisterGroupWidget::Vector(list) => simd::replace_rows(&group.store, list, rows),
+    }
+
     let visible = count != 0;
 
     if group.panel.is_visible() != visible {
@@ -36,8 +43,10 @@ pub(super) fn populate_register_group(
         return;
     }
 
-    if previous_count != count as u32 {
-        group.view.set_size_request(-1, 24 + count * 26);
+    if previous_count != count as u32
+        && let RegisterGroupWidget::Table(view) = &group.view
+    {
+        view.set_size_request(-1, 24 + count * 26);
     }
 }
 
@@ -347,14 +356,7 @@ pub(super) fn vector_lane_values(register: &str, value: &str) -> Option<Vec<Stri
 }
 
 pub(super) fn vector_register_bytes(register: &str) -> Option<usize> {
-    [("xmm", 16), ("ymm", 32), ("zmm", 64)]
-        .into_iter()
-        .find_map(|(prefix, bytes)| {
-            register.strip_prefix(prefix).and_then(|index| {
-                (!index.is_empty() && index.chars().all(|character| character.is_ascii_digit()))
-                    .then_some(bytes)
-            })
-        })
+    crate::debugger::vector::register_bytes(register)
 }
 
 pub(super) fn vector_field_values(

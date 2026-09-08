@@ -1728,7 +1728,7 @@ impl Ui {
 
     pub fn set_vector_assignment_handler(
         &self,
-        handler: impl Fn(String, String, Vec<(usize, String)>) + 'static,
+        handler: impl Fn(crate::debugger::vector::VectorWrite, VectorWriteCompletion) + 'static,
     ) {
         self.vector_assignment_handler
             .replace(Some(Rc::new(handler)));

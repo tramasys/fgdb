@@ -825,65 +825,13 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
 
-    ui.set_vector_assignment_handler(move |register, field, changes| {
-        let (Some(client), Some(current_ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
+    ui.set_vector_assignment_handler(move |write, completed| {
+        let Some(client) = weak_client.upgrade() else {
+            completed(Err(String::from("The debugger connection closed")));
             return;
         };
 
-        let generation = current_ui.model.current_stop_refresh_generation();
-
-        let Some(expression) = vector_assignment_expression(&register, &field, &changes) else {
-            return;
-        };
-
-        let command = format!(
-            "-data-evaluate-expression {}",
-            crate::debugger::quote(&expression)
-        );
-
-        let Some(requests) = stop_requests(&weak_ui, &client, generation) else {
-            return;
-        };
-
-        drop(current_ui);
-        let weak_ui = weak_ui.clone();
-        let register_for_response = register;
-        let weak_ui_for_response = weak_ui.clone();
-
-        if let Err(error) = requests.frame(&command).control(move |client, record| {
-            let Some(ui) = weak_ui_for_response.upgrade() else {
-                return;
-            };
-
-            if record.is_done() {
-                ui.set_status(
-                    "Paused",
-                    &format!(
-                        "Updated {} lane{} in ${register_for_response}",
-                        changes.len(),
-                        if changes.len() == 1 { "" } else { "s" }
-                    ),
-                    Some("status-ready"),
-                );
-
-                refresh_stopped_state(&weak_ui_for_response, client);
-            } else if record.class != "superseded" {
-                ui.set_status(
-                    "Register assignment failed",
-                    record
-                        .error_message()
-                        .unwrap_or("GDB rejected one of the lane values"),
-                    Some("status-error"),
-                );
-            }
-        }) && let Some(ui) = weak_ui.upgrade()
-        {
-            ui.set_status(
-                "Register assignment failed",
-                &error.to_string(),
-                Some("status-error"),
-            );
-        }
+        super::assignments::assign_vector(weak_ui.clone(), client, write, completed);
     });
 
     let weak_ui = Rc::downgrade(&ui);

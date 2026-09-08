@@ -809,6 +809,41 @@ popover.debugger-context-menu button.local-variable-viewer-action:not(:disabled)
     color: @app_muted;
 }
 
+.simd-controls {
+    padding: 8px;
+}
+
+.simd-lanes {
+    padding: 4px;
+}
+
+.simd-column-header {
+    color: @app_muted;
+    background: @app_raised;
+    font-size: 11px;
+}
+
+list.simd-register-list {
+    background: @app_surface;
+}
+
+.simd-register-list > row {
+    padding: 0;
+}
+
+.simd-register-list > row:nth-child(odd) {
+    background: @app_row_alt;
+}
+
+.simd-register-list > row:hover {
+    background: @app_hover;
+}
+
+.simd-register-list > row:selected {
+    color: @app_fg;
+    background: @app_selected;
+}
+
 .register-group-panel {
     background: @app_surface;
     border: 0;

@@ -22,6 +22,7 @@ mod modules;
 mod replay;
 mod session;
 mod settings;
+mod simd;
 mod state;
 mod syscall_view;
 mod threads;
@@ -121,6 +122,7 @@ use kernel_view::*;
 use memory_view::*;
 use misc_view::*;
 use modules::ModuleControls;
+use simd::{VectorControls, VectorDisplay, open_vector_editor};
 use threads::*;
 use views::*;
 
@@ -286,7 +288,9 @@ type VariableChildrenHandler = Rc<dyn Fn(Variable, usize)>;
 type VariableViewerHandler = Rc<dyn Fn(VariableViewerRequest)>;
 type ExpressionWatchRefreshHandler = Rc<dyn Fn()>;
 type StringAssignmentHandler = Rc<dyn Fn(Variable, Vec<u8>, StringAssignmentKind)>;
-type VectorAssignmentHandler = Rc<dyn Fn(String, String, Vec<(usize, String)>)>;
+pub(crate) type VectorWriteCompletion = Box<dyn FnOnce(Result<(), String>)>;
+type VectorAssignmentHandler =
+    Rc<dyn Fn(crate::debugger::vector::VectorWrite, VectorWriteCompletion)>;
 type BreakpointConditionHandler = Rc<dyn Fn(String, Option<String>)>;
 type BreakpointEditorHandler = Rc<dyn Fn(BreakpointEditRequest)>;
 type BreakpointEnabledHandler = Rc<dyn Fn(String, bool)>;
@@ -600,6 +604,7 @@ struct RegisterRowData {
     architecture: TargetArchitecture,
     endian: Option<TargetEndian>,
     pointer_bits: u32,
+    vector_display: VectorDisplay,
 }
 
 #[derive(Clone)]
@@ -798,8 +803,28 @@ impl VariableNode {
 struct RegisterGroupView {
     kind: RegisterGroupKind,
     store: gio::ListStore,
-    view: gtk::ColumnView,
+    view: RegisterGroupWidget,
     panel: gtk::Box,
+    vector_controls: Option<VectorControls>,
+}
+
+#[derive(Clone)]
+enum RegisterGroupWidget {
+    Table(gtk::ColumnView),
+    Vector(simd::VectorRegisterList),
+}
+
+impl RegisterGroupWidget {
+    fn connect_activate(&self, store: &gio::ListStore, action: impl Fn(u32) + 'static) {
+        match self {
+            Self::Table(view) => {
+                view.connect_activate(move |_, position| action(position));
+            }
+            Self::Vector(view) => {
+                view.connect_activate(store, action);
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -1149,12 +1149,13 @@ impl Ui {
             let float_handler = Rc::clone(&self.float_assignment_handler);
             let string_handler = Rc::clone(&self.string_assignment_handler);
             let vector_handler = Rc::clone(&self.vector_assignment_handler);
+            let register_context = Rc::clone(&self.register_render_context);
             let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
             let target_architecture = Rc::clone(&self.target_architecture);
             let current_source_language = Rc::clone(&self.current_source_language);
             let model = Rc::clone(&self.model);
 
-            group.view.connect_activate(move |_, position| {
+            group.view.connect_activate(&group.store, move |position| {
                 if !model.execution().ready
                     || !model.execution().state.inferior_started()
                     || model.execution().state.inferior_running()
@@ -1171,12 +1172,26 @@ impl Ui {
                     return;
                 };
 
-                let register = item.borrow::<RegisterRowData>().register.clone();
+                let row = item.borrow::<RegisterRowData>();
+                let register = row.register.clone();
+                let display = row.vector_display;
+                drop(row);
 
                 if matches!(register.name.as_str(), "eflags" | "rflags") {
                     open_flag_editor(&parent, register, Rc::clone(&handler));
                 } else if vector_register_bytes(&register.name).is_some() {
-                    open_vector_editor(&parent, register, Rc::clone(&vector_handler));
+                    let Some(context) = register_context.borrow().clone() else {
+                        return;
+                    };
+
+                    open_vector_editor(
+                        &parent,
+                        register,
+                        display,
+                        Rc::clone(&model),
+                        context,
+                        Rc::clone(&vector_handler),
+                    );
                 } else {
                     open_variable_editor(
                         &parent,
@@ -2088,6 +2103,10 @@ impl Ui {
                     architecture,
                     endian,
                     pointer_bits,
+                    vector_display: group
+                        .vector_controls
+                        .as_ref()
+                        .map_or_else(VectorDisplay::default, VectorControls::display),
                 });
                 populate_register_group(group, rows, preserve_details);
             }
@@ -3635,6 +3654,7 @@ mod render_tests {
             architecture: TargetArchitecture::X86_64,
             endian: Some(TargetEndian::Little),
             pointer_bits: 64,
+            vector_display: VectorDisplay::default(),
         };
         let mut raw = previous.clone();
         raw.register.pointer_chain.clear();

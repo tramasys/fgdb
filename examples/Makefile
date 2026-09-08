@@ -24,6 +24,7 @@ MIMALLOC_LIBS ?= -lmimalloc
 
 TARGET_DIR := ../target/debug-fixtures
 C_TARGETS := \
+	$(TARGET_DIR)/c-simd-target \
 	$(TARGET_DIR)/c-allocation-target \
 	$(TARGET_DIR)/c-memory-target \
 	$(TARGET_DIR)/c-page-target \
@@ -102,6 +103,9 @@ $(TARGET_DIR):
 	mkdir -p $@
 
 $(TARGET_DIR)/c-memory-target: c_memory_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@
+
+$(TARGET_DIR)/c-simd-target: c_simd_target.c | $(TARGET_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@
 
 $(TARGET_DIR)/c-allocation-target: c_allocation_target.c | $(TARGET_DIR)

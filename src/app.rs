@@ -103,7 +103,6 @@ mod tests {
     use super::{
         assignment_expression, parse_gdb_integer, pointer_expression, register_string_address,
         source_symbol_pattern, stack_pointer_expression, stack_string_address, symbol_annotation,
-        vector_assignment_expression,
     };
     use crate::debugger::{MemoryKind, Register, StackEntry, TargetArchitecture, TargetEndian};
 
@@ -221,20 +220,5 @@ mod tests {
         assert_eq!(source_symbol_pattern("mmap"), "mmap");
         assert_eq!(source_symbol_pattern("Vec::new"), "Vec.*::new");
         assert_eq!(source_symbol_pattern("foo.bar+1"), r"foo\.bar\+1");
-    }
-
-    #[test]
-    fn builds_typed_vector_lane_assignments() {
-        assert_eq!(
-            vector_assignment_expression(
-                "ymm0",
-                "v8_float",
-                &[(0, String::from("1.5")), (7, String::from("-2.0"))],
-            )
-            .as_deref(),
-            Some("($ymm0.v8_float[0] = (1.5), $ymm0.v8_float[7] = (-2.0))")
-        );
-
-        assert_eq!(vector_assignment_expression("xmm0", "v2_int64", &[]), None);
     }
 }

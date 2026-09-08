@@ -1446,6 +1446,13 @@ pub(super) fn build_register_view() -> (gtk::Box, Vec<RegisterGroupView>) {
         ("FLOATING POINT", RegisterGroupKind::FloatingPoint),
         ("OTHER", RegisterGroupKind::Other),
     ] {
+        if kind == RegisterGroupKind::Vector {
+            let group = simd::build_register_group(title);
+            content.append(&group.panel);
+            groups.push(group);
+            continue;
+        }
+
         let (view, store) = build_register_group_table();
         let expanded = matches!(
             kind,
@@ -1454,6 +1461,7 @@ pub(super) fn build_register_view() -> (gtk::Box, Vec<RegisterGroupView>) {
                 | RegisterGroupKind::Flags
                 | RegisterGroupKind::Segments
         );
+
         let panel = build_disclosure(title, &view, expanded, "register-disclosure");
         panel.add_css_class("register-group-panel");
         panel.set_visible(false);
@@ -1461,8 +1469,9 @@ pub(super) fn build_register_view() -> (gtk::Box, Vec<RegisterGroupView>) {
         groups.push(RegisterGroupView {
             kind,
             store,
-            view,
+            view: RegisterGroupWidget::Table(view),
             panel,
+            vector_controls: None,
         });
     }
 

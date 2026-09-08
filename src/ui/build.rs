@@ -1219,6 +1219,7 @@ pub(super) fn build_inspector(bindings: &InspectorBindings<'_>) -> Inspector {
     let registers_scrolled = gtk::ScrolledWindow::builder()
         .child(&registers_view)
         .vexpand(true)
+        .overlay_scrolling(false)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
 

@@ -1,5 +1,104 @@
 use super::*;
 
+pub(super) fn assign_vector(
+    ui: Weak<Ui>,
+    client: Rc<MiClient>,
+    write: crate::debugger::vector::VectorWrite,
+    completed: crate::ui::VectorWriteCompletion,
+) {
+    let current = ui.upgrade().is_some_and(|ui| {
+        ui.model.is_stop_context_current(&write.context)
+            && ui.model.can_edit_variable(write.context.generation())
+    });
+
+    if !current {
+        completed(Err(String::from(
+            "The debugger context changed. Reopen the register editor.",
+        )));
+        return;
+    }
+
+    let Some(expression) = write.expression() else {
+        completed(Err(String::from(
+            "The register edit is empty or has an unsupported layout",
+        )));
+        return;
+    };
+
+    let Some(requests) = edit_requests(&ui, &client, write.context.generation()) else {
+        completed(Err(String::from(
+            "The debugger is no longer ready for this edit",
+        )));
+        return;
+    };
+
+    let command = format!(
+        "-data-evaluate-expression --language c {}",
+        crate::debugger::quote(&expression)
+    );
+
+    let completed = Rc::new(RefCell::new(Some(completed)));
+    let completion = Rc::clone(&completed);
+    let ui_for_response = ui.clone();
+
+    let queued = requests.frame(&command).control(move |client, record| {
+        let result = if record.is_done() {
+            if crate::debugger::evaluated_value(&record)
+                .as_deref()
+                .and_then(parse_gdb_integer) == Some(1)
+            {
+                Ok(())
+            } else {
+                Err(String::from(
+                    "The register changed since it was opened. No edits were written. Reopen the editor.",
+                ))
+            }
+        } else {
+            Err(record
+                .error_message()
+                .unwrap_or("GDB could not apply this register edit")
+                .to_owned())
+        };
+
+        if let Some(ui) = ui_for_response.upgrade() {
+            match &result {
+                Ok(()) => ui.set_status(
+                    "Paused",
+                    &format!("Updated ${}", write.register),
+                    Some("status-ready"),
+                ),
+                Err(error) if record.class != "superseded" => ui.set_status(
+                    "Register assignment failed", error, Some("status-error"),
+                ),
+                Err(_) => {}
+            }
+        }
+
+        let success = result.is_ok();
+        let completed = completion.borrow_mut().take();
+
+        if let Some(completed) = completed {
+            completed(result);
+        }
+
+        if success {
+            refresh_stopped_state(&ui_for_response, client);
+        }
+    });
+
+    if let Err(error) = queued
+        && let Some(completed) = completed.borrow_mut().take()
+    {
+        let message = error.to_string();
+
+        if let Some(ui) = ui.upgrade() {
+            ui.set_status("Register assignment failed", &message, Some("status-error"));
+        }
+
+        completed(Err(message));
+    }
+}
+
 pub(super) fn assign_string(
     ui: Weak<Ui>,
     client: Rc<MiClient>,

@@ -341,23 +341,6 @@ pub(super) fn source_symbol_pattern(symbol: &str) -> String {
         .join(".*::")
 }
 
-pub(super) fn vector_assignment_expression(
-    register: &str,
-    field: &str,
-    changes: &[(usize, String)],
-) -> Option<String> {
-    (!changes.is_empty()).then(|| {
-        format!(
-            "({})",
-            changes
-                .iter()
-                .map(|(lane, value)| format!("${register}.{field}[{lane}] = ({value})"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
-    })
-}
-
 pub(super) fn parse_gdb_integer(value: &str) -> Option<u64> {
     let value = value.trim();
 

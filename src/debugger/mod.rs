@@ -4,6 +4,7 @@ mod mi;
 mod model;
 mod session;
 mod target;
+pub(crate) mod vector;
 
 pub(crate) use command::{CliCommandBuilder, MiCommandBuilder, console_command, gdb_cli_string};
 pub(crate) use context::StopContext;
