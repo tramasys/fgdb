@@ -1,6 +1,8 @@
 use super::lifecycle_reducer::{EventAdmission, admit_event, reduce_stop_transition};
 use super::*;
 
+mod initial_stop;
+
 pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEvent) {
     let Some(ui) = weak_ui.upgrade() else {
         return;
@@ -824,7 +826,7 @@ fn refresh_after_target_abi_detection(ui: &Weak<Ui>, client: &MiClient) {
     if started && !running {
         refresh_stopped_state(ui, client);
     } else if !started {
-        infer_initial_stop_reason(ui, client);
+        initial_stop::refresh(ui, client);
     }
 
     if resynchronized

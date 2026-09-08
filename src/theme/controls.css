@@ -272,6 +272,7 @@ spinbutton {
 spinbutton > text {
     min-height: 22px;
     padding: 2px 6px;
+    color: inherit;
 }
 
 spinbutton > button {

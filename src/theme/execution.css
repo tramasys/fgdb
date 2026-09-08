@@ -1,4 +1,4 @@
-/* These widgets remain insensitive while a short execution transition runs.
+/* These widgets remain insensitive while execution or inspection is in flight.
    Match their enabled paint to avoid flashing the chrome at every step. */
 
 button.pause-availability-pending,
@@ -16,6 +16,19 @@ button.pause-availability-pending:active {
 
 .execution-interlocked:disabled * {
     opacity: 1;
+}
+
+/* GTK also dims inner labels independently of the control's foreground. */
+button.execution-interlocked:disabled > label,
+button.execution-interlocked:disabled image,
+dropdown.execution-interlocked:disabled label,
+checkbutton.execution-interlocked:disabled > label,
+entry.execution-interlocked:disabled > text,
+.execution-interlocked:disabled button:disabled > label,
+.execution-interlocked:disabled button:disabled image,
+.execution-interlocked:disabled entry:disabled > text,
+.execution-interlocked:disabled columnview.debug-table > header label {
+    color: inherit;
 }
 
 entry.execution-interlocked:disabled,
@@ -72,4 +85,28 @@ button.execution-interlocked:disabled:checked,
     color: @app_fg;
     background: @app_selected;
     border-color: alpha(@app_accent, 0.55);
+}
+
+/* Composite controls keep their own surfaces and secondary text colors. */
+dropdown.execution-interlocked:disabled > button:disabled,
+.execution-interlocked:disabled dropdown:disabled > button:disabled {
+    background: @app_bg;
+}
+
+spinbutton.execution-interlocked:disabled > text {
+    color: @app_fg;
+}
+
+spinbutton.execution-interlocked:disabled > button:disabled {
+    background: transparent;
+}
+
+button.icon-action.execution-interlocked:disabled {
+    color: @app_muted;
+    background: transparent;
+}
+
+.execution-interlocked:disabled columnview.debug-table.view > header > button:disabled {
+    color: @app_muted;
+    background: @app_raised;
 }

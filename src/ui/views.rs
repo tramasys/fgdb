@@ -2463,14 +2463,38 @@ pub(super) fn append_welcome_source(
 ) {
     let buffer = build_source_buffer(INITIAL_SOURCE, None, style_scheme);
     let view = build_source_view(&buffer);
+
     let page = gtk::ScrolledWindow::builder()
         .child(&view)
         .hexpand(true)
         .vexpand(true)
         .build();
-    let tab = gtk::Label::new(Some("welcome.c"));
-    tab.add_css_class("source-tab");
+
+    let (tab, _, close) = build_source_tab("Welcome");
     notebook.append_page(&page, Some(&tab));
+    let notebook = notebook.downgrade();
+    let page = page.downgrade();
+
+    close.connect_clicked(move |_| {
+        if let (Some(notebook), Some(page)) = (notebook.upgrade(), page.upgrade())
+            && let Some(page_number) = notebook.page_num(&page)
+        {
+            notebook.remove_page(Some(page_number));
+        }
+    });
+}
+
+pub(super) fn build_source_tab(title: &str) -> (gtk::Box, gtk::Label, gtk::Button) {
+    let tab = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    tab.add_css_class("source-tab");
+    let label = gtk::Label::new(Some(title));
+    let close = gtk::Button::from_icon_name("window-close-symbolic");
+    close.add_css_class("source-tab-close");
+    close.set_valign(gtk::Align::Center);
+    close.set_tooltip_text(Some("Close source tab"));
+    tab.append(&label);
+    tab.append(&close);
+    (tab, label, close)
 }
 
 pub(super) fn build_source_buffer(

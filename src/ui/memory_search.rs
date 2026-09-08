@@ -12,7 +12,6 @@ struct ResultRow {
 pub(super) struct MemorySearchView {
     pub root: gtk::Box,
     pages: gtk::Stack,
-    form: gtk::Box,
     kind: gtk::DropDown,
     value: gtk::Entry,
     scope: gtk::DropDown,
@@ -270,7 +269,6 @@ impl MemorySearchView {
         let view = Rc::new(Self {
             root,
             pages,
-            form,
             kind,
             value,
             scope,
@@ -370,8 +368,7 @@ impl MemorySearchView {
         view.kind.connect_selected_notify(move |_| {
             if let Some(view) = weak.upgrade() {
                 let kind = view.selected_kind();
-                view.aligned
-                    .set_sensitive(!matches!(kind, SearchKind::Text | SearchKind::Bytes));
+                view.update_alignment();
 
                 view.value.set_placeholder_text(Some(match kind {
                     SearchKind::Text => "Text to find, without quotes",
@@ -452,8 +449,13 @@ impl MemorySearchView {
     }
 
     fn update_mapping_summary(&self) {
-        self.mapping_clear
-            .set_sensitive(!self.running.get() && !self.mapping_selection.selection().is_empty());
+        let selected = !self.mapping_selection.selection().is_empty();
+        let running = self.running.get();
+        set_execution_sensitive(
+            &self.mapping_clear,
+            selected && !running,
+            selected && running,
+        );
 
         if self.running.get() {
             return;
@@ -473,6 +475,40 @@ impl MemorySearchView {
         SearchKind::ALL
             .get(self.kind.selected() as usize)
             .map_or(SearchKind::Text, |(kind, _)| *kind)
+    }
+
+    fn can_start(&self) -> bool {
+        self.start.is_sensitive() && !self.running.get()
+    }
+
+    fn update_alignment(&self) {
+        let available = !matches!(self.selected_kind(), SearchKind::Text | SearchKind::Bytes);
+        let running = self.running.get();
+        set_execution_sensitive(&self.aligned, available && !running, available && running);
+    }
+
+    fn set_running(&self, running: bool) {
+        self.running.set(running);
+
+        // Lock the query without repainting its chrome. Apply the lock to
+        // controls individually so unavailable options keep their disabled paint.
+        for widget in [
+            self.kind.upcast_ref::<gtk::Widget>(),
+            self.value.upcast_ref(),
+            self.scope.upcast_ref(),
+            self.begin.upcast_ref(),
+            self.end.upcast_ref(),
+            self.max_results.upcast_ref(),
+            self.max_mib.upcast_ref(),
+            self.mapping_body.upcast_ref(),
+            self.mapping_search.upcast_ref(),
+        ] {
+            set_execution_sensitive(widget, !running, running);
+        }
+
+        self.update_alignment();
+        self.update_mapping_summary();
+        self.cancel.set_sensitive(running);
     }
 
     pub(super) fn show_inspector(&self) {
@@ -544,8 +580,10 @@ impl MemorySearchView {
             .stop_context(generation)
             .is_some_and(|context| ui.model.is_stop_context_current(&context));
 
-        self.start.set_sensitive(
+        set_transient_execution_sensitive(
+            &self.start,
             current && ui.model.debugger_synchronization_available() && !self.running.get(),
+            current && self.running.get(),
         );
 
         if self
@@ -567,13 +605,10 @@ impl MemorySearchView {
         self.issues.set_visible(false);
         self.generation.set(Some(generation));
         self.origin.set_text(origin);
-        self.running.set(true);
-        self.mapping_clear.set_sensitive(false);
-        self.form.set_sensitive(false);
-        self.mapping_body.set_sensitive(false);
-        self.mapping_search.set_sensitive(false);
-        self.start.set_sensitive(false);
-        self.cancel.set_sensitive(true);
+        self.set_running(true);
+        // Preserve the initiating button's hover and focus. Both mouse and
+        // keyboard submission use can_start to reject another active search.
+        set_transient_execution_sensitive(&self.start, false, true);
         self.status.set_text("Searching…");
     }
 
@@ -629,12 +664,7 @@ impl MemorySearchView {
         }
 
         if finished {
-            self.running.set(false);
-            self.form.set_sensitive(true);
-            self.mapping_body.set_sensitive(true);
-            self.mapping_search.set_sensitive(true);
-            self.cancel.set_sensitive(false);
-            self.update_mapping_summary();
+            self.set_running(false);
         }
 
         self.update_state(ui);
@@ -651,7 +681,7 @@ impl Ui {
         let weak = Rc::downgrade(self);
 
         view.start.connect_clicked(move |_| {
-            if let Some(ui) = weak.upgrade() {
+            if let Some(ui) = weak.upgrade().filter(|ui| ui.memory_search.can_start()) {
                 match ui.memory_search.query(&ui) {
                     Ok(query) => ui.memory_search.emit(Action::Start(query)),
                     Err(error) => ui.memory_search.status.set_text(&error),
@@ -668,7 +698,7 @@ impl Ui {
 
         let weak = Rc::downgrade(view);
         view.value.connect_activate(move |_| {
-            if let Some(view) = weak.upgrade().filter(|view| view.start.is_sensitive()) {
+            if let Some(view) = weak.upgrade().filter(|view| view.can_start()) {
                 view.start.emit_clicked();
             }
         });
@@ -1156,6 +1186,87 @@ mod tests {
         assert!(address.selection_bounds().is_none());
         view.store.remove_all();
 
+        // Compare actual paint as well as sensitivity. Ancestor locks can
+        // otherwise change dropdown surfaces and table-header colors unnoticed.
+        gtk::prelude::GtkWindowExt::set_focus(&window, None::<&gtk::Widget>);
+
+        for (kind, hovered) in [(0, false), (2, false), (2, true)] {
+            view.kind.set_selected(kind);
+            view.value
+                .set_text(if kind == 0 { "fgdb" } else { "0x410000" });
+
+            view.max_results.set_value(1.0);
+            view.start.set_sensitive(true);
+
+            if hovered {
+                view.start.set_state_flags(gtk::StateFlags::PRELIGHT, false);
+            }
+
+            main.block_on(glib::timeout_future(Duration::from_millis(50)));
+
+            let widgets = [
+                view.start.upcast_ref::<gtk::Widget>(),
+                view.kind.upcast_ref(),
+                view.value.upcast_ref(),
+                view.scope.upcast_ref(),
+                view.aligned.upcast_ref(),
+                view.max_results.upcast_ref(),
+                view.max_mib.upcast_ref(),
+                view.mapping_clear.upcast_ref(),
+                view.mapping_search.upcast_ref(),
+                &table.first_child().unwrap(),
+            ];
+
+            let before: Vec<_> = widgets
+                .iter()
+                .map(|widget| paint(&window, widget))
+                .collect();
+
+            let flags: Vec<_> = widgets.iter().map(|widget| widget.state_flags()).collect();
+            view.begin(1, "Target memory through GDB");
+            main.block_on(glib::timeout_future(Duration::from_millis(50)));
+
+            for (index, (widget, expected)) in widgets.iter().zip(&before).enumerate() {
+                assert_eq!(
+                    widget.is_sensitive(),
+                    index == 0,
+                    "{} lock state",
+                    widget.type_()
+                );
+
+                let actual = paint(&window, widget);
+
+                assert!(
+                    same_paint(expected, &actual),
+                    "{} changed paint during search (kind {kind}, index {index}, flags {:?} -> {:?}, classes {:?})",
+                    widget.type_(),
+                    flags[index],
+                    widget.state_flags(),
+                    widget.css_classes()
+                );
+            }
+
+            assert!(!view.can_start());
+            assert!(view.cancel.is_sensitive());
+            view.set_running(false);
+            set_transient_execution_sensitive(&view.start, true, false);
+            main.block_on(glib::timeout_future(Duration::from_millis(50)));
+
+            for (widget, expected) in widgets.iter().zip(&before) {
+                assert!(
+                    same_paint(expected, &paint(&window, widget)),
+                    "{} changed paint after search (kind {kind})",
+                    widget.type_()
+                );
+            }
+
+            assert!(!view.cancel.is_sensitive());
+            assert!(view.can_start());
+            assert_eq!(view.aligned.is_sensitive(), kind == 2);
+
+            view.start.unset_state_flags(gtk::StateFlags::PRELIGHT);
+        }
+
         let summary = view.mapping_summary.text();
         view.begin(1, "Target memory through GDB");
         assert!(!body.is_sensitive());
@@ -1170,8 +1281,7 @@ mod tests {
         assert!(!body.is_sensitive());
         selection.unselect_all();
         assert_eq!(view.mapping_summary.text(), summary);
-        view.running.set(false);
-        view.update_mapping_summary();
+        view.set_running(false);
         assert_eq!(
             view.mapping_summary.text(),
             "Select mappings in the table below"
@@ -1193,6 +1303,38 @@ mod tests {
         );
 
         window.close();
+    }
+
+    fn paint(window: &gtk::Window, widget: &gtk::Widget) -> Vec<u8> {
+        use gtk::gsk::prelude::*;
+
+        let snapshot = gtk::Snapshot::new();
+        let paintable = gtk::WidgetPaintable::new(Some(widget));
+        paintable.snapshot(
+            &snapshot,
+            f64::from(widget.width()),
+            f64::from(widget.height()),
+        );
+
+        let node = snapshot
+            .to_node()
+            .expect("mapped control has visible paint");
+
+        let texture = window.renderer().unwrap().render_texture(&node, None);
+        let stride = texture.width() as usize * 4;
+        let mut pixels = vec![0; stride * texture.height() as usize];
+        texture.download(&mut pixels, stride);
+        pixels
+    }
+
+    fn same_paint(expected: &[u8], actual: &[u8]) -> bool {
+        // Allow one channel level for rasterization rounding, not dimmed text
+        // or changed backgrounds and borders.
+        expected.len() == actual.len()
+            && expected
+                .iter()
+                .zip(actual)
+                .all(|(before, after)| before.abs_diff(*after) <= 1)
     }
 
     fn assert_mapping_toggle_spacing(view: &MemorySearchView) {

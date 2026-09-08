@@ -337,19 +337,11 @@ pub(in crate::ui) fn open_source_document(
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.append(freshness.notice());
     page.append(&scroll);
-    let tab = gtk::Box::new(gtk::Orientation::Horizontal, 3);
-    tab.add_css_class("source-tab");
-    let tab_label = gtk::Label::new(Some(&source_tab_title(&path)));
+    let (tab, tab_label, close) = build_source_tab(&source_tab_title(&path));
     tab_label.set_ellipsize(pango::EllipsizeMode::Middle);
     tab_label.set_width_chars(18);
     tab_label.set_max_width_chars(32);
     tab_label.set_tooltip_text(Some(&path.to_string_lossy()));
-    let close = gtk::Button::from_icon_name("window-close-symbolic");
-    close.add_css_class("source-tab-close");
-    close.set_valign(gtk::Align::Center);
-    close.set_tooltip_text(Some("Close source tab"));
-    tab.append(&tab_label);
-    tab.append(&close);
 
     let document = SourceDocument {
         path,
@@ -1186,6 +1178,61 @@ pub(in crate::ui) fn source_tab_title(path: &Path) -> String {
 mod tests {
     use super::*;
 
+    fn assert_tab_close_spacing(tab: &gtk::Box, root: &gtk::Box) -> gtk::Button {
+        let close = tab
+            .first_child()
+            .unwrap()
+            .next_sibling()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap();
+
+        let tab_bounds = tab.parent().unwrap().compute_bounds(root).unwrap();
+        let close_bounds = close.compute_bounds(root).unwrap();
+        let inset = close_bounds.y() - tab_bounds.y();
+        assert_eq!(close_bounds.width(), close_bounds.height());
+
+        assert_eq!(
+            tab_bounds.y() + tab_bounds.height() - close_bounds.y() - close_bounds.height(),
+            inset,
+            "source close button has uneven vertical spacing"
+        );
+
+        assert_eq!(
+            tab_bounds.x() + tab_bounds.width() - close_bounds.x() - close_bounds.width(),
+            inset,
+            "source close button has uneven edge spacing"
+        );
+
+        close.set_state_flags(gtk::StateFlags::PRELIGHT, false);
+        glib::MainContext::default().block_on(glib::timeout_future(Duration::from_millis(50)));
+        assert_eq!(close.compute_bounds(root).unwrap(), close_bounds);
+        close.unset_state_flags(gtk::StateFlags::PRELIGHT);
+        close
+    }
+
+    fn close_welcome_tab(notebook: &gtk::Notebook, root: &gtk::Box) {
+        assert_eq!(notebook.n_pages(), 1);
+        let page = notebook.nth_page(Some(0)).unwrap();
+
+        let tab = notebook
+            .tab_label(&page)
+            .unwrap()
+            .downcast::<gtk::Box>()
+            .unwrap();
+
+        let label = tab.first_child().unwrap().downcast::<gtk::Label>().unwrap();
+        assert_eq!(label.text(), "Welcome");
+        assert!(tab.has_css_class("source-tab"));
+        let close = assert_tab_close_spacing(&tab, root);
+        assert!(close.has_css_class("source-tab-close"));
+        close.emit_clicked();
+        assert_eq!(notebook.n_pages(), 0);
+        let page_weak = page.downgrade();
+        drop(page);
+        assert!(page_weak.upgrade().is_none());
+    }
+
     #[test]
     #[ignore = "requires a GTK display, run separately from other GTK tests"]
     fn source_refresh_keeps_terminal_focus_for_new_and_existing_tabs() {
@@ -1233,6 +1280,7 @@ mod tests {
         window.present();
         let main = glib::MainContext::default();
         main.block_on(glib::timeout_future(Duration::from_millis(50)));
+        close_welcome_tab(&notebook, &editor.root);
         assert!(terminal.grab_focus());
 
         for file in ["first.c", "first.c", "second.c", "first.c"] {
@@ -1271,34 +1319,29 @@ mod tests {
             assert_eq!(between, top, "source navigation rows have doubled padding");
             assert_eq!(bottom, top, "source tabs have uneven outer padding");
 
-            let close = document
-                .tab_label
-                .next_sibling()
-                .unwrap()
-                .downcast::<gtk::Button>()
-                .unwrap();
-
-            let close_bounds = close.compute_bounds(&editor.root).unwrap();
-            let inset = close_bounds.y() - tab.y();
-            assert_eq!(close_bounds.width(), close_bounds.height());
-            assert_eq!(
-                tab.y() + tab.height() - close_bounds.y() - close_bounds.height(),
-                inset,
-                "source close button has uneven vertical spacing"
-            );
-
-            assert_eq!(
-                tab.x() + tab.width() - close_bounds.x() - close_bounds.width(),
-                inset,
-                "source close button has uneven edge spacing"
-            );
-
-            close.set_state_flags(gtk::StateFlags::PRELIGHT, false);
-            main.block_on(glib::timeout_future(Duration::from_millis(50)));
-            assert_eq!(close.compute_bounds(&editor.root).unwrap(), close_bounds);
-            close.unset_state_flags(gtk::StateFlags::PRELIGHT);
+            assert_tab_close_spacing(&document.tab, &editor.root);
         }
 
+        let pages = context
+            .documents
+            .borrow()
+            .iter()
+            .map(|document| document.page.clone())
+            .collect::<Vec<_>>();
+
+        close_source_pages(
+            &notebook,
+            context.documents,
+            &pages,
+            None,
+            context.closed_tabs,
+            context.reopen_closed,
+        );
+
+        main.block_on(glib::timeout_future(Duration::from_millis(50)));
+        close_welcome_tab(&notebook, &editor.root);
+        assert!(context.documents.borrow().is_empty());
+        assert_eq!(context.closed_tabs.borrow().len(), 2);
         window.close();
     }
 }

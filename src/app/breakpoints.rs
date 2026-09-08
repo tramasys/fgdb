@@ -1248,58 +1248,6 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
     );
 }
 
-pub(super) fn infer_initial_stop_reason(ui: &Weak<Ui>, client: &MiClient) {
-    let weak_ui = ui.clone();
-
-    let _ = client.request(
-        &format!(
-            "-data-evaluate-expression {}",
-            crate::debugger::quote("$_hit_bpnum")
-        ),
-        move |client, record| {
-            let hit_breakpoint = record.is_done()
-                && crate::debugger::evaluated_value(&record)
-                    .as_deref()
-                    .and_then(parse_gdb_integer)
-                    .is_some_and(|number| number != 0);
-
-            if hit_breakpoint {
-                if let Some(ui) = weak_ui.upgrade() {
-                    ui.set_thread_stop_reason(Some("breakpoint-hit"));
-                    ui.set_inferior_started(true);
-                }
-
-                // Startup commands can stop before fgdb's MI channel is
-                // attached, in which case no async *stopped event reaches us.
-                refresh_stopped_state(&weak_ui, client);
-            } else {
-                infer_existing_stopped_thread(&weak_ui, client);
-            }
-        },
-    );
-}
-
-fn infer_existing_stopped_thread(ui: &Weak<Ui>, client: &MiClient) {
-    let weak_ui = ui.clone();
-
-    let _ = client.request("-thread-info", move |client, record| {
-        if !record.is_done()
-            || !crate::debugger::threads(&record)
-                .iter()
-                .any(|thread| thread.state == "stopped")
-        {
-            return;
-        }
-
-        if let Some(ui) = weak_ui.upgrade() {
-            ui.set_thread_stop_reason(Some("stopped"));
-            ui.set_inferior_started(true);
-        }
-
-        refresh_stopped_state(&weak_ui, client);
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
