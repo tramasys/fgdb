@@ -5,6 +5,7 @@ mod build;
 mod debug_data;
 mod disassembly;
 mod inferiors;
+mod investigation;
 mod kernel;
 mod lifecycle;
 mod lifecycle_reducer;

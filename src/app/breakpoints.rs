@@ -854,7 +854,7 @@ fn breakpoint_failure(ui: &Weak<Ui>, title: &str, detail: &str) {
     }
 }
 
-fn breakpoint_insert_command(spec: &BreakpointSpec) -> String {
+pub(super) fn breakpoint_insert_command(spec: &BreakpointSpec) -> String {
     let mut command = String::from("-break-insert");
 
     if spec.hardware {
@@ -982,7 +982,7 @@ fn mutable_breakpoint_commands(
     commands
 }
 
-fn breakpoint_commands_command(number: &str, commands: &[String]) -> String {
+pub(super) fn breakpoint_commands_command(number: &str, commands: &[String]) -> String {
     let mut command = format!("-break-commands {number}");
 
     for breakpoint_command in commands {

@@ -18,6 +18,7 @@ use std::{
 };
 pub(crate) mod actions;
 mod execution;
+pub(crate) use execution::CommandOperationId;
 pub(crate) mod printers;
 pub(crate) mod processes;
 pub(crate) mod replay;
@@ -58,6 +59,8 @@ struct ExecutionState {
     debugger_ready: Cell<bool>,
     debugger_state: Cell<DebuggerState>,
     command_pending: Cell<bool>,
+    command_operation: Cell<Option<CommandOperationId>>,
+    next_command_operation: Cell<u64>,
     session_pending: Cell<bool>,
     execution_transition_generation: Cell<u64>,
     native_until_active: Cell<bool>,
@@ -81,6 +84,8 @@ impl ExecutionState {
             debugger_ready: Cell::new(false),
             debugger_state: Cell::new(DebuggerState::default()),
             command_pending: Cell::new(false),
+            command_operation: Cell::new(None),
+            next_command_operation: Cell::new(0),
             session_pending: Cell::new(false),
             execution_transition_generation: Cell::new(0),
             native_until_active: Cell::new(false),
@@ -244,6 +249,25 @@ pub(crate) fn configured_target_can_start(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn command_operations_own_their_interlock_across_callbacks_and_backend_resets() {
+        let model = super::DebuggerModel::new(None);
+        let first = model.begin_command_operation().unwrap();
+        model.set_command_pending(false);
+        assert!(model.execution().command_pending);
+        assert!(model.begin_command_operation().is_none());
+        model.set_controls_ready(false);
+        let second = model.begin_command_operation().unwrap();
+        assert!(!model.finish_command_operation(first));
+        assert!(model.execution().command_pending);
+        model.set_command_pending(true);
+        assert!(model.finish_command_operation(second));
+        assert!(model.execution().command_pending);
+        model.set_command_pending(false);
+        assert!(!model.execution().command_pending);
+        assert!(!model.finish_command_operation(second));
+    }
+
     use super::*;
 
     fn launch_session() -> DebugSession {

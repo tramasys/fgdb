@@ -4,6 +4,7 @@ use super::*;
 
 mod actions;
 mod breakpoints;
+pub(super) mod freshness;
 mod gutter;
 mod loading;
 mod navigation;

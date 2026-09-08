@@ -306,6 +306,10 @@ where
         self.newest = None;
     }
 
+    pub(crate) fn keys(&self) -> impl Iterator<Item = &K> {
+        self.indices.keys()
+    }
+
     #[cfg(test)]
     fn len(&self) -> usize {
         self.entries.len()

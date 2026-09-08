@@ -526,6 +526,8 @@ struct ConfigLayer {
     source_tab_width: Option<u32>,
     source_wrap: Option<bool>,
     source_highlight_line: Option<bool>,
+    source_auto_reload: Option<bool>,
+    source_editor: Option<String>,
     terminal_font: Option<String>,
     terminal_scrollback: Option<u32>,
     integer_display: Option<settings::IntegerDisplay>,
@@ -591,6 +593,8 @@ impl ConfigLayer {
             source_tab_width,
             source_wrap,
             source_highlight_line,
+            source_auto_reload,
+            source_editor,
             terminal_font,
             terminal_scrollback,
             integer_display,
@@ -851,6 +855,8 @@ fn canonical_config_key(key: &str) -> Option<&'static str> {
         "source_tab_width" => Some("source_tab_width"),
         "source_wrap" => Some("source_wrap"),
         "source_highlight_line" => Some("source_highlight_line"),
+        "source_auto_reload" => Some("source_auto_reload"),
+        "source_editor" => Some("source_editor"),
         "terminal_font" => Some("terminal_font"),
         "terminal_scrollback" => Some("terminal_scrollback"),
         "integer_display" => Some("integer_display"),
@@ -967,7 +973,23 @@ fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> 
         "terminal_cursor_blink" => {
             layer.terminal_cursor_blink = Some(settings::CursorBlink::parse(required()?)?);
         }
+        "source_editor" => {
+            let command = unquoted;
+
+            if command.len() > 4096 || command.contains(['\0', '\r', '\n']) {
+                return Err(String::from(
+                    "The editor command must be at most 4096 bytes without line breaks",
+                ));
+            }
+
+            if !command.is_empty() {
+                shell_words::split(command).map_err(|error| error.to_string())?;
+            }
+
+            layer.source_editor = Some(command.to_owned());
+        }
         "restore_panel_windows"
+        | "source_auto_reload"
         | "source_wrap"
         | "source_highlight_line"
         | "instruction_bytes"
@@ -987,6 +1009,7 @@ fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> 
                 "restore_panel_windows" => &mut layer.restore_panel_windows,
                 "source_wrap" => &mut layer.source_wrap,
                 "source_highlight_line" => &mut layer.source_highlight_line,
+                "source_auto_reload" => &mut layer.source_auto_reload,
                 "instruction_bytes" => &mut layer.instruction_bytes,
                 "instruction_symbols" => &mut layer.instruction_symbols,
                 "instruction_source" => &mut layer.instruction_source,
@@ -1324,6 +1347,8 @@ fn read_environment_overrides() -> (EnvironmentOverrides, Vec<ConfigurationIssue
         ("source_tab_width", "FGDB_SOURCE_TAB_WIDTH"),
         ("source_wrap", "FGDB_SOURCE_WRAP"),
         ("source_highlight_line", "FGDB_SOURCE_HIGHLIGHT_LINE"),
+        ("source_auto_reload", "FGDB_SOURCE_AUTO_RELOAD"),
+        ("source_editor", "FGDB_SOURCE_EDITOR"),
         ("terminal_font", "FGDB_TERMINAL_FONT"),
         ("terminal_scrollback", "FGDB_TERMINAL_SCROLLBACK"),
     ] {

@@ -19,9 +19,9 @@ enum SourceTabCloseScope {
 fn source_pages_for_close(
     notebook: &gtk::Notebook,
     documents: &Rc<RefCell<Vec<SourceDocument>>>,
-    anchor: &gtk::ScrolledWindow,
+    anchor: &gtk::Box,
     scope: SourceTabCloseScope,
-) -> Vec<gtk::ScrolledWindow> {
+) -> Vec<gtk::Box> {
     let Some(anchor_page) = notebook.page_num(anchor) else {
         return Vec::new();
     };
@@ -48,7 +48,7 @@ fn source_pages_for_close(
 fn close_source_pages(
     notebook: &gtk::Notebook,
     documents: &Rc<RefCell<Vec<SourceDocument>>>,
-    pages: &[gtk::ScrolledWindow],
+    pages: &[gtk::Box],
     style_scheme: Option<&sourceview5::StyleScheme>,
     closed_tabs: &Rc<RefCell<Vec<ClosedSourceTab>>>,
     reopen_closed: &gtk::Button,
@@ -131,6 +131,37 @@ fn connect_source_tab_context_menu(
         menu.append(button);
     }
 
+    menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let reload = context_menu_action("Reload source");
+    let freshness = Rc::downgrade(&document.freshness);
+    let popover_reload = popover.downgrade();
+
+    reload.connect_clicked(move |_| {
+        if let Some(popover) = popover_reload.upgrade() {
+            popover.popdown()
+        }
+
+        if let Some(freshness) = freshness.upgrade() {
+            freshness.reload();
+        }
+    });
+
+    let edit = context_menu_action("Open in external editor");
+    let freshness = Rc::downgrade(&document.freshness);
+    let popover_edit = popover.downgrade();
+
+    edit.connect_clicked(move |_| {
+        if let Some(popover) = popover_edit.upgrade() {
+            popover.popdown()
+        }
+
+        if let Some(freshness) = freshness.upgrade() {
+            freshness.edit();
+        }
+    });
+
+    menu.append(&reload);
+    menu.append(&edit);
     menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
     let copy_name = context_menu_action("Copy file name");
     let copy_path = context_menu_action("Copy full path");
@@ -269,7 +300,7 @@ fn connect_source_tab_context_menu(
 
 pub(in crate::ui) fn open_source_document(
     path: &Path,
-    contents: &str,
+    contents: &Arc<String>,
     context: SourceOpenContext<'_>,
 ) -> SourceDocument {
     let path = path.to_path_buf();
@@ -295,13 +326,17 @@ pub(in crate::ui) fn open_source_document(
     sourceview5::prelude::ViewExt::gutter(&view, gtk::TextWindowType::Left)
         .insert(&breakpoint_renderer, -30);
 
-    let page = gtk::ScrolledWindow::builder()
+    let scroll = gtk::ScrolledWindow::builder()
         .child(&view)
         .hexpand(true)
         .vexpand(true)
         .build();
 
-    connect_breakpoint_gutter_context_click(&page, &view, &breakpoint_renderer);
+    connect_breakpoint_gutter_context_click(&scroll, &view, &breakpoint_renderer);
+    let freshness = super::freshness::SourceFreshness::new(&path, contents, &buffer, &scroll);
+    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.append(freshness.notice());
+    page.append(&scroll);
     let tab = gtk::Box::new(gtk::Orientation::Horizontal, 3);
     tab.add_css_class("source-tab");
     let tab_label = gtk::Label::new(Some(&source_tab_title(&path)));
@@ -321,6 +356,7 @@ pub(in crate::ui) fn open_source_document(
         buffer,
         view,
         page,
+        freshness,
         tab,
         tab_label,
         breakpoint_renderer,
@@ -659,6 +695,10 @@ pub(in crate::ui) fn connect_source_symbol_navigation(
 
     document.buffer.tag_table().add(&link_tag);
     let highlighted_range = Rc::new(RefCell::new(None::<(i32, i32)>));
+    let range = Rc::clone(&highlighted_range);
+    document.buffer.connect_changed(move |_| {
+        range.borrow_mut().take();
+    });
     let control_pressed = Rc::new(Cell::new(false));
     let pointer_position = Rc::new(Cell::new((0.0, 0.0)));
     let motion = gtk::EventControllerMotion::new();
@@ -1196,7 +1236,11 @@ mod tests {
         assert!(terminal.grab_focus());
 
         for file in ["first.c", "first.c", "second.c", "first.c"] {
-            let document = open_source_document(Path::new(file), "int value = 1;\n", context);
+            let document = open_source_document(
+                Path::new(file),
+                &Arc::new("int value = 1;\n".into()),
+                context,
+            );
             scroll_source_document(&document, 1);
             main.block_on(glib::timeout_future(Duration::from_millis(50)));
             assert_eq!(notebook.current_page(), notebook.page_num(&document.page));

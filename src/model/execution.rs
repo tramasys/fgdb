@@ -1,5 +1,8 @@
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CommandOperationId(u64);
+
 impl DebuggerModel {
     pub(crate) fn gdb_recovery_required(&self) -> bool {
         self.execution.gdb_recovery_available.get()
@@ -67,7 +70,7 @@ impl DebuggerModel {
         self.execution.debugger_ready.get()
             && self.inferior_has_started()
             && !self.inferior_is_running()
-            && !self.execution.command_pending.get()
+            && !self.command_pending()
             && !self.execution.debugger_state.get().transition_pending()
             && !self.execution.session_pending.get()
             && !self.execution.debugger_state.get().resynchronizing()
@@ -89,7 +92,7 @@ impl DebuggerModel {
         self.execution.debugger_ready.get()
             && self.inferior_has_started()
             && !self.inferior_is_running()
-            && !self.execution.command_pending.get()
+            && !self.command_pending()
             && !self.execution.debugger_state.get().transition_pending()
             && !self.execution.session_pending.get()
             && !self.execution.native_until_active.get()
@@ -100,7 +103,7 @@ impl DebuggerModel {
     pub(crate) fn debugger_synchronization_available(&self) -> bool {
         self.execution.debugger_ready.get()
             && !self.inferior_is_running()
-            && !self.execution.command_pending.get()
+            && !self.command_pending()
             && !self.execution.debugger_state.get().transition_pending()
             && !self.execution.session_pending.get()
             && !self.execution.native_until_active.get()
@@ -114,7 +117,7 @@ impl DebuggerModel {
 
         self.execution.debugger_ready.get()
             && !debugger_state.inferior_running()
-            && !self.execution.command_pending.get()
+            && !self.command_pending()
             && !debugger_state.transition_pending()
             && !self.execution.session_pending.get()
             && !self.execution.native_until_active.get()
@@ -185,7 +188,7 @@ impl DebuggerModel {
         ExecutionSnapshot {
             ready: self.execution.debugger_ready.get(),
             state: self.execution.debugger_state.get(),
-            command_pending: self.execution.command_pending.get(),
+            command_pending: self.command_pending(),
             session_pending: self.execution.session_pending.get(),
             native_until_active: self.execution.native_until_active.get(),
             inferior_action_pending: self.execution.inferior_action_pending.get(),
@@ -203,6 +206,7 @@ impl DebuggerModel {
                 .debugger_state
                 .set(self.execution.debugger_state.get().reset_backend());
             self.execution.command_pending.set(false);
+            self.execution.command_operation.set(None);
             self.execution.execution_transition_generation.set(
                 self.execution
                     .execution_transition_generation
@@ -396,6 +400,35 @@ impl DebuggerModel {
 
     pub(crate) fn set_command_pending(&self, value: bool) -> bool {
         self.execution.command_pending.replace(value) != value
+    }
+
+    pub(crate) fn command_pending(&self) -> bool {
+        self.execution.command_pending.get() || self.execution.command_operation.get().is_some()
+    }
+
+    pub(crate) fn begin_command_operation(&self) -> Option<CommandOperationId> {
+        if self.command_pending() {
+            return None;
+        }
+
+        let next = self.execution.next_command_operation.get().wrapping_add(1);
+        let id = CommandOperationId(next);
+        self.execution.next_command_operation.set(next);
+        self.execution.command_operation.set(Some(id));
+        Some(id)
+    }
+
+    pub(crate) fn finish_command_operation(&self, id: CommandOperationId) -> bool {
+        if self.execution.command_operation.get() != Some(id) {
+            return false;
+        }
+
+        self.execution.command_operation.set(None);
+        true
+    }
+
+    pub(crate) fn command_operation_is_current(&self, id: CommandOperationId) -> bool {
+        self.execution.command_operation.get() == Some(id)
     }
 
     pub(crate) fn set_session_pending(&self, value: bool) -> bool {

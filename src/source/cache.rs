@@ -130,6 +130,8 @@ struct SourceFileIdentity {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    #[cfg(unix)]
+    changed: (i64, i64),
 }
 
 impl SourceFileIdentity {
@@ -144,6 +146,8 @@ impl SourceFileIdentity {
             device: metadata.dev(),
             #[cfg(unix)]
             inode: metadata.ino(),
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
         })
     }
 }
@@ -389,6 +393,20 @@ mod tests {
         );
 
         assert_eq!(source_file_reads(&path), reads + 2);
+
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, "second VALUE\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+        assert_eq!(
+            &*searchable_source(&path).unwrap().contents,
+            "second VALUE\n"
+        );
+        assert_eq!(source_file_reads(&path), reads + 3);
     }
 
     #[test]
@@ -416,6 +434,8 @@ mod tests {
             device: 1,
             #[cfg(unix)]
             inode: name.len() as u64,
+            #[cfg(unix)]
+            changed: (0, 0),
         };
 
         let source = |text: &str| CachedSource::from_bytes(text.as_bytes().to_vec());
@@ -443,6 +463,8 @@ mod tests {
             device: 1,
             #[cfg(unix)]
             inode: 2,
+            #[cfg(unix)]
+            changed: (0, 0),
         };
 
         let mut changed_size = original.clone();

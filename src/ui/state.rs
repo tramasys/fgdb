@@ -99,12 +99,13 @@ impl Ui {
         let source_tree_base_roots = source::search_roots(config);
 
         let ui = Self {
+            investigation: Rc::new(investigation::Workspace::default()),
             replay_controls: topbar.replay_controls,
             model,
             self_weak: Rc::new(RefCell::new(std::rc::Weak::new())),
             source_open_generation: Arc::new(AtomicU64::new(0)),
-            source_io_epoch: Arc::new(AtomicU64::new(0)),
-            disassembly_source_pending: Rc::new(RefCell::new(HashSet::new())),
+            source_annotation_epoch: Arc::new(AtomicU64::new(0)),
+            disassembly_source_pending: Rc::new(RefCell::new(HashMap::new())),
             window,
             terminal,
             application_log: workspace.application_log,
@@ -1056,6 +1057,22 @@ impl Ui {
         self.update_control_sensitivity();
         self.update_thread_control_sensitivity();
         self.render_inferior_controls();
+    }
+
+    pub(crate) fn begin_command_operation(&self) -> Option<crate::model::CommandOperationId> {
+        let id = self.model.begin_command_operation()?;
+        self.update_control_sensitivity();
+        self.update_thread_control_sensitivity();
+        self.render_inferior_controls();
+        Some(id)
+    }
+
+    pub(crate) fn finish_command_operation(&self, id: crate::model::CommandOperationId) {
+        if self.model.finish_command_operation(id) {
+            self.update_control_sensitivity();
+            self.update_thread_control_sensitivity();
+            self.render_inferior_controls();
+        }
     }
 
     pub fn set_session_pending(&self, pending: bool) {

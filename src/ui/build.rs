@@ -300,7 +300,7 @@ pub(super) fn build_topbar(
     }
 }
 
-fn session_menu_action(label: &str, detail: &str) -> gtk::Button {
+pub(super) fn session_menu_action(label: &str, detail: &str) -> gtk::Button {
     let button = components::menu_action(label, Some(detail));
     button.add_css_class("session-action");
     button

@@ -11,6 +11,7 @@ mod domain;
 mod editor;
 pub(crate) mod formatting;
 mod inferiors;
+pub(crate) mod investigation;
 mod kernel_view;
 mod keybindings;
 mod layout;
@@ -88,9 +89,9 @@ use crate::{
     debug_info::ModuleDebugMetadata,
     debugger::{
         Breakpoint, GdbCapabilities, InferiorInfo, InferiorState, Instruction, MemoryBlock,
-        MemoryKind, MiClient, Register, SharedLibrary, SourceFile, SourceLocation, StackEntry,
-        StackFrame, TargetArchitecture, TargetEndian, ThreadInfo, ValueTypeKind, ValueTypeMetadata,
-        Variable, VariableUpdate,
+        MemoryFormat as MemoryWatchFormat, MemoryKind, MiClient, Register, SharedLibrary,
+        SourceFile, SourceLocation, StackEntry, StackFrame, TargetArchitecture, TargetEndian,
+        ThreadInfo, ValueTypeKind, ValueTypeMetadata, Variable, VariableUpdate,
         context::{MemoryRegion, memory_region_for_address},
     },
     kernel::{
@@ -846,7 +847,8 @@ struct SourceDocument {
     path: PathBuf,
     buffer: sourceview5::Buffer,
     view: sourceview5::View,
-    page: gtk::ScrolledWindow,
+    page: gtk::Box,
+    freshness: Rc<editor::freshness::SourceFreshness>,
     tab: gtk::Box,
     tab_label: gtk::Label,
     breakpoint_renderer: BreakpointGutterRenderer,
@@ -1003,17 +1005,6 @@ struct ThreadControls {
     action_handler: Rc<RefCell<Option<ThreadActionHandler>>>,
     analysis_window: Rc<RefCell<Option<gtk::Window>>>,
     analysis_content: Rc<RefCell<Option<gtk::Box>>>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MemoryWatchFormat {
-    Bytes,
-    U16,
-    U32,
-    U64,
-    F32,
-    F64,
-    Pointers,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1451,12 +1442,13 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 
 #[derive(Clone)]
 pub struct Ui {
+    investigation: Rc<investigation::Workspace>,
     replay_controls: replay::ReplayControls,
     pub(crate) model: Rc<crate::model::DebuggerModel>,
     self_weak: Rc<RefCell<std::rc::Weak<Ui>>>,
     source_open_generation: Arc<AtomicU64>,
-    source_io_epoch: Arc<AtomicU64>,
-    disassembly_source_pending: Rc<RefCell<HashSet<PathBuf>>>,
+    source_annotation_epoch: Arc<AtomicU64>,
+    disassembly_source_pending: Rc<RefCell<HashMap<PathBuf, Arc<AtomicBool>>>>,
     pub window: gtk::ApplicationWindow,
     pub terminal: vte4::Terminal,
     application_log: ApplicationLog,

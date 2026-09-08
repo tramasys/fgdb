@@ -12,9 +12,9 @@ pub(crate) use mi::StopRequests;
 pub use mi::{GdbCapabilities, MiClient, MiEvent, MiRecord, quote};
 pub(crate) use mi::{MiListItem, MiValue, parse_record};
 pub use model::{
-    Breakpoint, EnumVariant, InferiorInfo, InferiorState, Instruction, MemoryBlock, MemoryKind,
-    Register, SharedLibrary, SourceFile, SourceLocation, StackEntry, StackFrame, ThreadInfo,
-    ValueTypeKind, ValueTypeMetadata, Variable, VariableUpdate, breakpoints,
+    Breakpoint, EnumVariant, InferiorInfo, InferiorState, Instruction, MemoryBlock, MemoryFormat,
+    MemoryKind, Register, SharedLibrary, SourceFile, SourceLocation, StackEntry, StackFrame,
+    ThreadInfo, ValueTypeKind, ValueTypeMetadata, Variable, VariableUpdate, breakpoints,
     compact_register_numbers, compare_thread_ids, current_frame, current_source, evaluated_value,
     executable_source_lines, has_exact_command_completion, inferior_pid, inferior_pid_for_group,
     inferiors, inserted_breakpoints, instructions, memory_block, register_names, registers,

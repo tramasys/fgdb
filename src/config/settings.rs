@@ -86,6 +86,8 @@ pub(crate) struct Preferences {
     pub source_tab_width: u32,
     pub source_wrap: bool,
     pub source_highlight_line: bool,
+    pub source_auto_reload: bool,
+    pub source_editor: String,
     pub terminal_font: String,
     pub terminal_scrollback: u32,
     pub integer_display: IntegerDisplay,
@@ -126,6 +128,8 @@ impl Preferences {
             ("source_font", self.source_font.clone()),
             ("source_tab_width", self.source_tab_width.to_string()),
             ("source_wrap", self.source_wrap.to_string()),
+            ("source_auto_reload", self.source_auto_reload.to_string()),
+            ("source_editor", self.source_editor.clone()),
             (
                 "source_highlight_line",
                 self.source_highlight_line.to_string(),
@@ -184,6 +188,8 @@ impl Preferences {
             source_tab_width: layer.source_tab_width.unwrap_or(4),
             source_wrap: layer.source_wrap.unwrap_or(false),
             source_highlight_line: layer.source_highlight_line.unwrap_or(true),
+            source_auto_reload: layer.source_auto_reload.unwrap_or(false),
+            source_editor: layer.source_editor.clone().unwrap_or_default(),
             terminal_font: layer
                 .terminal_font
                 .clone()
@@ -290,6 +296,20 @@ pub(crate) const SETTINGS: &[Setting] = &[
         help: "Emphasize the source cursor line without changing the stopped-line marker",
         page: "Appearance",
         control: Control::Toggle,
+    },
+    Setting {
+        key: "source_auto_reload",
+        title: "Reload changed source",
+        help: "Automatically reload externally edited source files. Otherwise show a Reload action. Reloading does not rebuild or replace the executable",
+        page: "Appearance",
+        control: Control::Toggle,
+    },
+    Setting {
+        key: "source_editor",
+        title: "External source editor",
+        help: "Command with {file}, {line}, and {column} placeholders, for example code --goto {file}:{line}:{column}. Arguments are passed directly without a shell. Leave empty to use the system default editor",
+        page: "Appearance",
+        control: Control::Text,
     },
     Setting {
         key: "terminal_font",

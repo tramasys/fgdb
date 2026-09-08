@@ -333,6 +333,12 @@ impl Settings {
             .apply_preferences(&previous, preferences, initial);
         ui.apply_instruction_preferences(&previous, preferences, initial);
 
+        if preferences.source_auto_reload && !previous.source_auto_reload {
+            for document in ui.source_documents.borrow().iter() {
+                document.freshness.check();
+            }
+        }
+
         if initial || previous.keybindings != preferences.keybindings {
             ui.update_keybinding_hints(&preferences.keybindings);
         }
@@ -399,6 +405,14 @@ impl Settings {
 
     pub(super) fn apply_source(&self, view: &sourceview5::View) {
         apply_source(view, &self.preferences.borrow());
+    }
+
+    pub(super) fn source_auto_reload(&self) -> bool {
+        self.preferences.borrow().source_auto_reload
+    }
+
+    pub(super) fn source_editor(&self) -> String {
+        self.preferences.borrow().source_editor.clone()
     }
 
     pub(super) fn assembly_syntax(&self) -> crate::config::settings::AssemblySyntax {

@@ -40,6 +40,33 @@ pub(super) fn add_memory_watch(
     byte_count: usize,
     format: MemoryWatchFormat,
 ) -> bool {
+    create_memory_watch(
+        container, watches, handler, expression, byte_count, format, true,
+    )
+}
+
+pub(super) fn restore_memory_watch(
+    container: &MemoryWatchContainer,
+    watches: &Rc<RefCell<Vec<MemoryWatchView>>>,
+    handler: &Rc<RefCell<Option<MemoryWatchHandler>>>,
+    expression: String,
+    byte_count: usize,
+    format: MemoryWatchFormat,
+) -> bool {
+    create_memory_watch(
+        container, watches, handler, expression, byte_count, format, false,
+    )
+}
+
+fn create_memory_watch(
+    container: &MemoryWatchContainer,
+    watches: &Rc<RefCell<Vec<MemoryWatchView>>>,
+    handler: &Rc<RefCell<Option<MemoryWatchHandler>>>,
+    expression: String,
+    byte_count: usize,
+    format: MemoryWatchFormat,
+    read_immediately: bool,
+) -> bool {
     let existing = {
         let watches = watches.borrow();
 
@@ -55,7 +82,11 @@ pub(super) fn add_memory_watch(
 
     if let Some(watch) = existing {
         select_memory_watch(container, &watch);
-        request_memory_watch(&watch, handler);
+
+        if read_immediately {
+            request_memory_watch(&watch, handler)
+        }
+
         return true;
     }
 
@@ -97,7 +128,11 @@ pub(super) fn add_memory_watch(
     page.append(&toolbar);
     let summary = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     summary.add_css_class("memory-watch-summary");
-    let status = gtk::Label::new(Some("reading…"));
+    let status = gtk::Label::new(Some(if read_immediately {
+        "reading…"
+    } else {
+        "Waiting for a paused target"
+    }));
     status.set_halign(gtk::Align::Start);
     status.set_ellipsize(pango::EllipsizeMode::Middle);
     status.set_hexpand(true);
@@ -216,7 +251,9 @@ pub(super) fn add_memory_watch(
     connect_memory_follow(&follow, id, container, watches, handler);
     connect_memory_remove(&remove, id, container, watches);
     connect_memory_remove(&tab_close, id, container, watches);
-    request_memory_watch(&watch, handler);
+    if read_immediately {
+        request_memory_watch(&watch, handler)
+    }
 
     true
 }

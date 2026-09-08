@@ -3,6 +3,17 @@ use std::sync::Arc;
 use super::mi::{MiListItem, MiRecord, MiResult, MiValue, result_field};
 use super::target::{TargetArchitecture, TargetEndian};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryFormat {
+    Bytes,
+    U16,
+    U32,
+    U64,
+    F32,
+    F64,
+    Pointers,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StackFrame {
     pub level: u32,

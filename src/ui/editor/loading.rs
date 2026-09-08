@@ -1,7 +1,7 @@
 use super::*;
 use std::sync::mpsc::{self, TryRecvError};
 
-fn load_source(
+pub(super) fn load_source(
     reported: &Path,
     roots: &[PathBuf],
     index: Option<&source::SourceIndex>,
@@ -16,6 +16,10 @@ fn load_source(
 
     let metadata =
         std::fs::metadata(&path).map_err(|error| format!("Could not read {reported}: {error}"))?;
+    if !metadata.is_file() {
+        return Err(format!("{reported} is not a regular source file"));
+    }
+
     if metadata.len() > maximum_bytes as u64 {
         return Err(format!(
             "{reported} exceeds the {} MiB source-file limit",
@@ -98,6 +102,10 @@ impl Ui {
 
     pub(crate) fn connect_source_loading(self: &Rc<Self>) {
         self.self_weak.replace(Rc::downgrade(self));
+        for document in self.source_documents.borrow().iter() {
+            document.freshness.bind(self);
+        }
+
         let generation = Arc::clone(&self.source_open_generation);
         self.source_notebook.connect_switch_page(move |_, _, _| {
             generation.fetch_add(1, Ordering::Relaxed);
@@ -105,10 +113,106 @@ impl Ui {
     }
 
     pub(in crate::ui) fn invalidate_source_io(&self) {
-        self.source_io_epoch.fetch_add(1, Ordering::Relaxed);
         self.source_open_generation.fetch_add(1, Ordering::Relaxed);
+        self.invalidate_source_annotations();
+    }
+
+    fn invalidate_source_annotations(&self) {
+        self.source_annotation_epoch.fetch_add(1, Ordering::Relaxed);
         self.disassembly_source_cache.borrow_mut().clear();
+
+        for live in self.disassembly_source_pending.borrow().values() {
+            live.store(false, Ordering::Relaxed);
+        }
+
         self.disassembly_source_pending.borrow_mut().clear();
+    }
+
+    pub(super) fn reload_source_annotations(&self, path: &Path, snapshot: source::CachedSource) {
+        let index = self.source_index_snapshot();
+        let mut paths: HashSet<_> = self
+            .disassembly_source_cache
+            .borrow()
+            .keys()
+            .chain(self.disassembly_source_pending.borrow().keys())
+            .filter(|reported| {
+                reported.as_path() == path
+                    || self
+                        .resolved_source_paths
+                        .borrow_mut()
+                        .get_cloned(reported.to_string_lossy().as_ref())
+                        .as_deref()
+                        == Some(path)
+                    || index.as_ref().is_some_and(|index| {
+                        matches!(index.resolve_indexed(&reported.to_string_lossy()),
+                            source::SourceResolution::Unique(resolved) if resolved == path)
+                    })
+            })
+            .cloned()
+            .collect();
+
+        paths.insert(path.to_owned());
+        let snapshot = (snapshot.contents.len() <= 2 * 1024 * 1024).then_some(snapshot);
+
+        // Retire only the edited file's jobs. Other files keep their cache entries and pending reads.
+        for path in &paths {
+            if let Some(live) = self.disassembly_source_pending.borrow_mut().remove(path) {
+                live.store(false, Ordering::Relaxed);
+            }
+
+            self.cache_disassembly_source(
+                path.to_owned(),
+                self.model.current_stop_refresh_generation(),
+                snapshot.clone(),
+            );
+        }
+
+        self.update_source_annotation_rows(&paths, snapshot.as_ref());
+    }
+
+    fn update_source_annotation_rows(
+        &self,
+        paths: &HashSet<PathBuf>,
+        snapshot: Option<&source::CachedSource>,
+    ) {
+        for position in 0..self.instructions_store.n_items() {
+            let Some(object) = self
+                .instructions_store
+                .item(position)
+                .and_downcast::<glib::BoxedAnyObject>()
+            else {
+                continue;
+            };
+
+            let replacement = {
+                let row = object.borrow::<InstructionRowData>();
+                let Some(location) = row.instruction.source.as_ref() else {
+                    continue;
+                };
+
+                if !paths.contains(Path::new(location.source_path())) {
+                    continue;
+                }
+
+                let source_text = snapshot.and_then(|snapshot| {
+                    location
+                        .line
+                        .checked_sub(1)
+                        .and_then(|line| snapshot.line(line as usize))
+                });
+
+                (row.source_text != source_text).then(|| {
+                    let mut row = row.clone();
+                    row.source_text = source_text;
+                    row
+                })
+            };
+
+            if let Some(row) = replacement {
+                self.instructions_store
+                    .splice(position, 1, &[glib::BoxedAnyObject::new(row)]);
+            }
+        }
     }
 
     // Loading and selecting a source tab must not take focus from an active
@@ -146,7 +250,6 @@ impl Ui {
         let roots = self.source_roots.borrow().clone();
         let index = self.source_index_snapshot();
         let current = Arc::clone(&self.source_open_generation);
-        let epoch = self.source_io_epoch.load(Ordering::Relaxed);
         let (sender, receiver) = mpsc::sync_channel(1);
 
         if let Err(error) = crate::background::submit_cancellable_with_priority(
@@ -178,9 +281,7 @@ impl Ui {
             let Some(ui) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            if ui.source_open_generation.load(Ordering::Relaxed) != generation
-                || ui.source_io_epoch.load(Ordering::Relaxed) != epoch
-            {
+            if ui.source_open_generation.load(Ordering::Relaxed) != generation {
                 return glib::ControlFlow::Break;
             }
 
@@ -207,6 +308,7 @@ impl Ui {
 
                     let document = open_source_document(&path, &snapshot.contents, context);
                     ui.settings.apply_source(&document.view);
+                    document.freshness.bind(&ui);
 
                     if let Some(ready) = ready.take() {
                         ready(&ui, Some(document));
@@ -260,24 +362,25 @@ impl Ui {
             }
         }
 
-        if !self
-            .disassembly_source_pending
-            .borrow_mut()
-            .insert(path.clone())
-        {
+        if self.disassembly_source_pending.borrow().contains_key(&path) {
             return None;
         }
 
+        let live = Arc::new(AtomicBool::new(true));
+        self.disassembly_source_pending
+            .borrow_mut()
+            .insert(path.clone(), Arc::clone(&live));
+        let queued = Arc::clone(&live);
         let roots = self.source_roots.borrow().clone();
         let source_index = self.source_index_snapshot();
-        let current = Arc::clone(&self.source_io_epoch);
+        let current = Arc::clone(&self.source_annotation_epoch);
         let epoch = current.load(Ordering::Relaxed);
         let (sender, receiver) = mpsc::sync_channel(1);
         let load_path = path.clone();
 
         if crate::background::submit_cancellable_with_priority(
             crate::background::Priority::Background,
-            move || current.load(Ordering::Relaxed) == epoch,
+            move || queued.load(Ordering::Relaxed) && current.load(Ordering::Relaxed) == epoch,
             move || {
                 let snapshot =
                     load_source(&load_path, &roots, source_index.as_deref(), 2 * 1024 * 1024)
@@ -298,7 +401,9 @@ impl Ui {
             let Some(ui) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            if ui.source_io_epoch.load(Ordering::Relaxed) != epoch {
+            if !live.load(Ordering::Relaxed)
+                || ui.source_annotation_epoch.load(Ordering::Relaxed) != epoch
+            {
                 return glib::ControlFlow::Break;
             }
 
@@ -307,33 +412,10 @@ impl Ui {
                     ui.disassembly_source_pending.borrow_mut().remove(&path);
                     ui.cache_disassembly_source(path.clone(), stop_generation, snapshot.clone());
 
-                    // Rebind only matching rows, preserving selection and the
-                    // scroll anchor while source annotations arrive.
-                    if let Some(snapshot) = snapshot {
-                        for position in 0..ui.instructions_store.n_items() {
-                            let Some(object) = ui
-                                .instructions_store
-                                .item(position)
-                                .and_downcast::<glib::BoxedAnyObject>()
-                            else {
-                                continue;
-                            };
-                            let mut row = object.borrow::<InstructionRowData>().clone();
-                            if let Some(location) = row.instruction.source.as_ref()
-                                && Path::new(location.source_path()) == path
-                            {
-                                row.source_text = location
-                                    .line
-                                    .checked_sub(1)
-                                    .and_then(|line| snapshot.line(line as usize));
-                                ui.instructions_store.splice(
-                                    position,
-                                    1,
-                                    &[glib::BoxedAnyObject::new(row)],
-                                );
-                            }
-                        }
-                    }
+                    ui.update_source_annotation_rows(
+                        &HashSet::from([path.clone()]),
+                        snapshot.as_ref(),
+                    );
                     glib::ControlFlow::Break
                 }
                 Err(TryRecvError::Empty) => glib::ControlFlow::Continue,

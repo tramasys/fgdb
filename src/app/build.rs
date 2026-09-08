@@ -118,6 +118,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         Rc::clone(&model),
         launch_config.replay.rr_executable.clone(),
     );
+    investigation::connect(&ui, &mi_client, &session_controller);
     let controller = Rc::clone(&session_controller);
     let weak = Rc::downgrade(&ui);
     let client = Rc::clone(&mi_client);

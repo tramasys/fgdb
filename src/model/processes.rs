@@ -3,7 +3,7 @@ use super::*;
 impl DebuggerModel {
     pub(crate) fn inferior_action_is_current(&self, action: &InferiorAction) -> bool {
         if !self.execution.debugger_ready.get()
-            || self.execution.command_pending.get()
+            || self.command_pending()
             || self.execution.debugger_state.get().transition_pending()
             || self.execution.session_pending.get()
             || self.execution.native_until_active.get()
@@ -292,7 +292,7 @@ impl DebuggerModel {
 
     pub(crate) fn thread_action_dispatch_available(&self) -> bool {
         self.execution.debugger_ready.get()
-            && !self.execution.command_pending.get()
+            && !self.command_pending()
             && !self.execution.debugger_state.get().transition_pending()
             && !self.execution.session_pending.get()
             && !self.execution.native_until_active.get()
@@ -302,7 +302,7 @@ impl DebuggerModel {
 
     pub(crate) fn thread_selection_can_dispatch(&self, id: &str) -> bool {
         self.execution.debugger_ready.get()
-            && !self.execution.command_pending.get()
+            && !self.command_pending()
             && !self.execution.debugger_state.get().transition_pending()
             && !self.execution.session_pending.get()
             && !self.execution.native_until_active.get()

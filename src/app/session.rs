@@ -5,6 +5,7 @@ use crate::model::{DebuggerStateDelta, TargetConnection};
 use std::cell::Cell;
 
 pub(super) struct SessionController {
+    configured: RefCell<Option<ConfiguredHandler>>,
     model: Rc<crate::model::DebuggerModel>,
     ui: Weak<Ui>,
     client: Rc<MiClient>,
@@ -16,6 +17,8 @@ pub(super) struct SessionController {
     rr_integration_loaded: Cell<bool>,
     rr_starting: Cell<bool>,
 }
+
+type ConfiguredHandler = Rc<dyn Fn(Result<DebugSession, String>)>;
 
 enum SequenceCompletion {
     PrepareRr(DebugSession),
@@ -79,6 +82,7 @@ impl SessionController {
         rr_executable: String,
     ) -> Rc<Self> {
         Rc::new(Self {
+            configured: RefCell::new(None),
             rr_executable,
             rr: RefCell::new(None),
             rr_integration_loaded: Cell::new(false),
@@ -90,6 +94,24 @@ impl SessionController {
             busy: Cell::new(false),
             generation: Cell::new(0),
         })
+    }
+
+    pub(super) fn set_configuration_handler(
+        &self,
+        handler: impl Fn(Result<DebugSession, String>) + 'static,
+    ) {
+        self.configured.replace(Some(Rc::new(handler)));
+    }
+
+    pub(super) fn generation(&self) -> u64 {
+        self.generation.get()
+    }
+
+    fn notify_configuration(&self, result: Result<DebugSession, String>) {
+        let handler = self.configured.borrow().clone();
+        if let Some(handler) = handler {
+            handler(result)
+        }
     }
 
     pub fn configure(self: &Rc<Self>, session: DebugSession) {
@@ -274,6 +296,8 @@ impl SessionController {
             ui.set_session_pending(false);
             ui.set_status("Session command failed", message, Some("status-error"));
         }
+
+        self.notify_configuration(Err(message.to_owned()));
     }
 
     fn fail_invalid_configuration(&self, ui: &Ui) {
@@ -285,6 +309,7 @@ impl SessionController {
             "A GDB CLI setting contained a NUL or line break and was not sent.",
             Some("status-error"),
         );
+        self.notify_configuration(Err(String::from("Invalid session configuration")));
     }
 
     fn finish(self: &Rc<Self>, completion: SequenceCompletion) {
@@ -303,6 +328,7 @@ impl SessionController {
 
         match completion {
             SequenceCompletion::Configure(session) => {
+                let configured_session = session.clone();
                 self.rr_starting.set(false);
                 self.client.refresh_pretty_printer_capabilities();
 
@@ -356,6 +382,8 @@ impl SessionController {
                         establish_session_target(&self.ui, &self.client, session.kind_label());
                     }
                 }
+
+                self.notify_configuration(Ok(configured_session));
             }
             SequenceCompletion::Kill => {
                 ui.set_debug_state_stale(false);

@@ -2587,3 +2587,7 @@ scrollbar slider {
 scrollbar slider:hover {
     background: alpha(@app_fg, 0.58);
 }
+.source-change-notice {
+    padding: 4px 8px;
+    background-color: @app_card;
+}

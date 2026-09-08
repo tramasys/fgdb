@@ -4,6 +4,7 @@ mod bounded;
 mod config;
 mod debug_info;
 mod debugger;
+mod investigation;
 mod kernel;
 mod language;
 mod misc;
