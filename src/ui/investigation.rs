@@ -74,7 +74,7 @@ impl Ui {
         let handler = self.session_handler.borrow().clone();
 
         if let Some(handler) = handler {
-            handler(session)
+            handler(session.into())
         }
     }
 

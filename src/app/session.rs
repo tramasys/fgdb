@@ -2,7 +2,9 @@ use super::*;
 use crate::debugger::{CliCommandBuilder, MiCommandBuilder, console_command};
 use crate::model::{DebuggerStateDelta, TargetConnection};
 
+use crate::{local_process::ProcessIdentity, session_request::SessionRequest};
 use std::cell::Cell;
+mod attach;
 
 pub(super) struct SessionController {
     configured: RefCell<Option<ConfiguredHandler>>,
@@ -22,17 +24,17 @@ type ConfiguredHandler = Rc<dyn Fn(Result<DebugSession, String>)>;
 
 enum SequenceCompletion {
     PrepareRr(DebugSession),
-    Configure(DebugSession),
+    Configure(SessionRequest),
     Kill,
     Detach,
 }
 
 impl SequenceCompletion {
-    fn configure(session: DebugSession) -> Self {
-        if matches!(session, DebugSession::RrReplay { .. }) {
-            Self::PrepareRr(session)
+    fn configure(request: SessionRequest) -> Self {
+        if matches!(request.session, DebugSession::RrReplay { .. }) {
+            Self::PrepareRr(request.session)
         } else {
-            Self::Configure(session)
+            Self::Configure(request)
         }
     }
 }
@@ -43,6 +45,7 @@ struct CommandSequence {
     completion: RefCell<Option<SequenceCompletion>>,
     generation: u64,
     epoch: u64,
+    attach_identity: Option<ProcessIdentity>,
 }
 
 impl CommandSequence {
@@ -56,6 +59,7 @@ impl CommandSequence {
 struct SessionCommand {
     text: String,
     state_after: Option<DebuggerStateDelta>,
+    attach_pid: Option<u32>,
 }
 
 impl SessionCommand {
@@ -63,6 +67,7 @@ impl SessionCommand {
         Self {
             text: text.into(),
             state_after: None,
+            attach_pid: None,
         }
     }
 
@@ -70,7 +75,13 @@ impl SessionCommand {
         Self {
             text: text.into(),
             state_after: Some(state_after),
+            attach_pid: None,
         }
+    }
+
+    fn attaching(mut self, pid: u32) -> Self {
+        self.attach_pid = Some(pid);
+        self
     }
 }
 
@@ -114,12 +125,20 @@ impl SessionController {
         }
     }
 
-    pub fn configure(self: &Rc<Self>, session: DebugSession) {
+    pub fn configure(self: &Rc<Self>, request: SessionRequest) {
+        let session = &request.session;
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
 
         if self.busy.replace(true) {
+            return;
+        }
+
+        if self.model.inferior_has_started()
+            && self.model.target_connection() != TargetConnection::Core
+        {
+            self.fail("Kill or detach the current inferior before configuring another session");
             return;
         }
 
@@ -129,7 +148,7 @@ impl SessionController {
             self.model.inferior_has_started(),
         );
 
-        let Ok(setup_commands) = session_commands(&session, &self.configured_environment.borrow())
+        let Ok(setup_commands) = session_commands(session, &self.configured_environment.borrow())
         else {
             self.fail_invalid_configuration(&ui);
             return;
@@ -144,7 +163,7 @@ impl SessionController {
             None,
         );
 
-        self.run_sequence(commands, SequenceCompletion::configure(session));
+        self.run_sequence(commands, SequenceCompletion::configure(request));
     }
 
     pub fn configure_initial(self: &Rc<Self>, session: DebugSession) {
@@ -170,10 +189,11 @@ impl SessionController {
             return;
         };
 
-        self.run_sequence(commands, SequenceCompletion::configure(session));
+        self.run_sequence(commands, SequenceCompletion::configure(session.into()));
     }
 
-    pub fn restore(self: &Rc<Self>, session: DebugSession) {
+    pub fn restore(self: &Rc<Self>, request: SessionRequest) {
+        let session = &request.session;
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
@@ -194,12 +214,12 @@ impl SessionController {
             None,
         );
 
-        let Ok(commands) = session_commands(&session, &HashSet::new()) else {
+        let Ok(commands) = session_commands(session, &HashSet::new()) else {
             self.fail_invalid_configuration(&ui);
             return;
         };
 
-        self.run_sequence(commands, SequenceCompletion::configure(session));
+        self.run_sequence(commands, SequenceCompletion::configure(request));
     }
 
     pub fn action(self: &Rc<Self>, action: SessionAction) {
@@ -271,6 +291,23 @@ impl SessionController {
         commands: Vec<SessionCommand>,
         completion: SequenceCompletion,
     ) {
+        let attach_identity = if let SequenceCompletion::Configure(request) = &completion {
+            match request.validate_attach(self.model.debugger_pid()) {
+                Ok(identity) => identity,
+                Err(message) => {
+                    if let DebugSession::Attach { pid, .. } = request.session {
+                        self.fail_attach(pid, &message);
+                    } else {
+                        self.fail(&message);
+                    }
+
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
 
@@ -280,6 +317,7 @@ impl SessionController {
             completion: RefCell::new(Some(completion)),
             generation,
             epoch: self.client.transport_epoch(),
+            attach_identity,
         });
 
         run_next(sequence);
@@ -298,6 +336,15 @@ impl SessionController {
         }
 
         self.notify_configuration(Err(message.to_owned()));
+    }
+
+    fn fail_attach(&self, pid: u32, reason: &str) {
+        let message = crate::local_process::attach_error(pid, reason);
+        self.fail(&message);
+
+        if let Some(ui) = self.ui.upgrade() {
+            ui.present_attach_failure(&message);
+        }
     }
 
     fn fail_invalid_configuration(&self, ui: &Ui) {
@@ -327,7 +374,8 @@ impl SessionController {
         ui.set_session_pending(false);
 
         match completion {
-            SequenceCompletion::Configure(session) => {
+            SequenceCompletion::Configure(request) => {
+                let session = request.session;
                 let configured_session = session.clone();
                 self.rr_starting.set(false);
                 self.client.refresh_pretty_printer_capabilities();
@@ -486,7 +534,7 @@ impl SessionController {
                         controller.rr_integration_loaded.set(true);
                         controller.run_sequence(
                             commands,
-                            SequenceCompletion::Configure(session_for_ready),
+                            SequenceCompletion::Configure(session_for_ready.into()),
                         );
                     }
                     Err(error) => controller.fail(&error),
@@ -607,13 +655,35 @@ fn run_next(sequence: Rc<CommandSequence>) {
     let sequence_for_response = Rc::clone(&sequence);
     let sequence_for_guard = Rc::clone(&sequence);
     let state_after = command.state_after;
+    let attach_pid = command.attach_pid;
+    let identity = attach_pid.and(sequence.attach_identity);
+    let validation = identity.map(|identity| Rc::new(attach::Validation::new(identity)));
+    let validation_for_guard = validation.clone();
 
     let result = sequence.controller.client.request_for_session(
         &command.text,
         sequence.generation,
-        move || sequence_for_guard.current(),
+        move || {
+            if !sequence_for_guard.current() {
+                return false;
+            }
+
+            validation_for_guard
+                .as_ref()
+                .is_none_or(|validation| validation.is_current())
+        },
         move |_, record| {
             if !sequence_for_response.current() {
+                return;
+            }
+
+            if let (Some(pid), Some(error)) = (
+                attach_pid,
+                validation
+                    .as_ref()
+                    .and_then(|validation| validation.take_error()),
+            ) {
+                attach::release_unverified_attach(sequence_for_response, pid, error);
                 return;
             }
 
@@ -630,6 +700,13 @@ fn run_next(sequence: Rc<CommandSequence>) {
                 // An unsent session request can fail without retiring the backend.
                 sequence_for_response.controller.fail(
                     "GDB did not answer. Refresh debugger state or restart GDB before retrying",
+                );
+            } else if let Some(pid) = attach_pid {
+                sequence_for_response.controller.fail_attach(
+                    pid,
+                    record
+                        .error_message()
+                        .unwrap_or("GDB rejected the attach command"),
                 );
             } else {
                 sequence_for_response.controller.fail(
@@ -772,10 +849,13 @@ fn session_commands(
         DebugSession::Attach { pid, executable } => {
             commands.push(SessionCommand::new(file_command(executable.as_deref())));
 
-            commands.push(SessionCommand::with_state(
-                MiCommandBuilder::new("-target-attach").number(pid).finish(),
-                DebuggerStateDelta::establish_stopped_target(TargetConnection::Local),
-            ));
+            commands.push(
+                SessionCommand::with_state(
+                    MiCommandBuilder::new("-target-attach").number(pid).finish(),
+                    DebuggerStateDelta::establish_stopped_target(TargetConnection::Local),
+                )
+                .attaching(*pid),
+            );
         }
 
         DebugSession::CoreDump {

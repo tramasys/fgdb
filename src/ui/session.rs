@@ -1,7 +1,19 @@
 use super::*;
+mod process_picker;
 
 impl Ui {
-    pub fn set_session_handler(&self, handler: impl Fn(DebugSession) + 'static) {
+    pub(crate) fn present_attach_failure(&self, message: &str) {
+        gtk::AlertDialog::builder()
+            .message("Attach failed")
+            .detail(message)
+            .build()
+            .show(Some(&self.action_window()));
+    }
+
+    pub fn set_session_handler(
+        &self,
+        handler: impl Fn(crate::session_request::SessionRequest) + 'static,
+    ) {
         self.session_handler.replace(Some(Rc::new(handler)));
     }
 
@@ -164,7 +176,7 @@ impl Ui {
             .title("New debug session")
             .transient_for(&self.action_window())
             .modal(true)
-            .default_width(720)
+            .default_width(900)
             .build();
 
         editor.add_css_class("session-editor");
@@ -191,6 +203,7 @@ impl Ui {
         root.append(&status);
         let notebook = gtk::Notebook::new();
         notebook.set_hexpand(true);
+        notebook.set_vexpand(true);
         notebook.add_css_class("session-tabs");
 
         let launch_executable = gtk::Entry::builder()
@@ -269,9 +282,17 @@ impl Ui {
             "Attach leaves the process alive when you later choose Detach. Kill is a separate action.",
         ));
 
-        let attach_pid = gtk::SpinButton::with_range(1.0, f64::from(u32::MAX), 1.0);
-        attach_pid.set_numeric(true);
-        attach_pid.set_width_chars(12);
+        let attach_pid = gtk::Entry::builder()
+            .placeholder_text("Select a process or enter a PID")
+            .input_purpose(gtk::InputPurpose::Digits)
+            .max_length(10)
+            .hexpand(true)
+            .build();
+
+        let process_picker =
+            process_picker::ProcessPicker::new(&attach_pid, self.model.debugger_pid());
+
+        attach_page.append(&process_picker.root);
 
         let attach_executable = gtk::Entry::builder()
             .placeholder_text("Optional local executable for symbols")
@@ -406,7 +427,7 @@ impl Ui {
                 0
             }
             Some(DebugSession::Attach { pid, executable }) => {
-                attach_pid.set_value(f64::from(*pid));
+                attach_pid.set_text(&pid.to_string());
 
                 if let Some(executable) = executable {
                     attach_executable.set_text(&executable.to_string_lossy());
@@ -496,7 +517,8 @@ impl Ui {
 
         attach.connect_clicked(move |_| {
             submit_session(
-                build_attach_session(&attach_pid, &attach_executable),
+                build_attach_session(&attach_pid, &attach_executable)
+                    .and_then(|session| process_picker.request(session)),
                 &handler,
                 &editor_for_attach,
                 &validation_for_attach,
@@ -600,7 +622,7 @@ fn append_page_actions(page: &gtk::Box, primary: &gtk::Button, editor: &gtk::Win
 }
 
 fn submit_session(
-    session: Result<DebugSession, String>,
+    session: Result<impl Into<crate::session_request::SessionRequest>, String>,
     handler: &Rc<RefCell<Option<DebugSessionHandler>>>,
     editor: &gtk::Window,
     validation: &gtk::Label,
@@ -611,7 +633,7 @@ fn submit_session(
             let handler = handler.borrow().clone();
 
             if let Some(handler) = handler {
-                handler(session);
+                handler(session.into());
                 editor.close();
             } else {
                 validation.set_text("GDB is not ready to create a session");
@@ -709,13 +731,13 @@ fn build_launch_session(
     })
 }
 
-fn build_attach_session(
-    pid: &gtk::SpinButton,
-    executable: &gtk::Entry,
-) -> Result<DebugSession, String> {
-    let pid = u32::try_from(pid.value_as_int())
+fn build_attach_session(pid: &gtk::Entry, executable: &gtk::Entry) -> Result<DebugSession, String> {
+    let pid = pid
+        .text()
+        .trim()
+        .parse::<u32>()
         .ok()
-        .filter(|pid| *pid > 0)
+        .filter(|pid| *pid > 0 && *pid <= i32::MAX as u32)
         .ok_or_else(|| String::from("PID must be a positive process ID"))?;
 
     Ok(DebugSession::Attach {

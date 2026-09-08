@@ -2,6 +2,7 @@ use super::*;
 
 use std::{cell::Cell, os::fd::OwnedFd, time::Duration};
 
+use crate::session_request::SessionRequest;
 use gtk::glib;
 use rustix::process::{Pid, PidfdFlags, Signal, kill_process, pidfd_open, pidfd_send_signal};
 use vte4::prelude::*;
@@ -97,7 +98,7 @@ pub(super) struct BackendController {
     initial_configuration_pending: Cell<bool>,
     restart_requested: Cell<bool>,
     waiting_for_old_exit: Cell<bool>,
-    pending_restore: RefCell<Option<DebugSession>>,
+    pending_restore: RefCell<Option<SessionRequest>>,
     closing: Cell<bool>,
     close_allowed: Cell<bool>,
     graceful_timeout: RefCell<Option<glib::SourceId>>,
@@ -208,10 +209,10 @@ impl BackendController {
     }
 
     fn restart(self: &Rc<Self>) {
-        self.restart_with_session(self.model.current_session());
+        self.restart_with_session(self.model.current_session().map(Into::into));
     }
 
-    fn restart_with_session(self: &Rc<Self>, session: Option<DebugSession>) {
+    fn restart_with_session(self: &Rc<Self>, session: Option<SessionRequest>) {
         let Some(ui) = self.ui.upgrade() else {
             return;
         };
