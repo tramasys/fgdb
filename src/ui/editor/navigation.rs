@@ -536,6 +536,7 @@ impl Ui {
             }
 
             scroll_source_document(&document, destination.line);
+            document.view.grab_focus();
             ui.update_source_history_buttons();
             ui.sync_source_tree_selection();
             completed(ui, true);

@@ -285,7 +285,6 @@ pub(in crate::ui) fn open_source_document(
             context.notebook.set_current_page(Some(page));
         }
 
-        document.view.grab_focus();
         return document;
     }
 
@@ -369,7 +368,6 @@ pub(in crate::ui) fn open_source_document(
     });
 
     context.notebook.set_current_page(Some(page_number));
-    document.view.grab_focus();
 
     document
 }
@@ -1141,4 +1139,63 @@ pub(in crate::ui) fn source_tab_title(path: &Path) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("source")
         .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires a GTK display, run separately from other GTK tests"]
+    fn source_refresh_keeps_terminal_focus_for_new_and_existing_tabs() {
+        gtk::init().unwrap();
+        let theme = Theme::graphite();
+        theme.install();
+        let notebook = build_source_notebook(None);
+        let terminal = build_terminal(&theme);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.append(&notebook);
+        root.append(&terminal);
+
+        let window = gtk::Window::builder()
+            .default_width(800)
+            .default_height(600)
+            .child(&root)
+            .build();
+
+        let context = SourceOpenContext {
+            notebook: &notebook,
+            documents: &Rc::default(),
+            theme: &theme,
+            style_scheme: None,
+            breakpoints: &Rc::default(),
+            breakpoint_index: &Rc::default(),
+            insert_handler: &Rc::default(),
+            jump_handler: &Rc::default(),
+            delete_handler: &Rc::default(),
+            enabled_handler: &Rc::default(),
+            symbol_handler: &Rc::default(),
+            closed_tabs: &Rc::default(),
+            reopen_closed: &gtk::Button::new(),
+        };
+
+        window.present();
+        let main = glib::MainContext::default();
+        main.block_on(glib::timeout_future(Duration::from_millis(50)));
+        assert!(terminal.grab_focus());
+
+        for file in ["first.c", "first.c", "second.c", "first.c"] {
+            let document = open_source_document(Path::new(file), "int value = 1;\n", context);
+            scroll_source_document(&document, 1);
+            main.block_on(glib::timeout_future(Duration::from_millis(50)));
+            assert_eq!(notebook.current_page(), notebook.page_num(&document.page));
+            assert_eq!(
+                gtk::prelude::GtkWindowExt::focus(&window).as_ref(),
+                Some(terminal.upcast_ref::<gtk::Widget>()),
+                "source refresh stole terminal focus for {file}"
+            );
+        }
+
+        window.close();
+    }
 }

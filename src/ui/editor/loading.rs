@@ -111,6 +111,8 @@ impl Ui {
         self.disassembly_source_pending.borrow_mut().clear();
     }
 
+    // Loading and selecting a source tab must not take focus from an active
+    // input. Only explicit navigation requests keyboard focus after loading.
     pub(in crate::ui) fn open_source_when_ready(
         &self,
         reported: &Path,
@@ -135,7 +137,7 @@ impl Ui {
             if let Some(page) = self.source_notebook.page_num(&document.page) {
                 self.source_notebook.set_current_page(Some(page));
             }
-            document.view.grab_focus();
+
             ready(self, Some(document));
             return true;
         }
