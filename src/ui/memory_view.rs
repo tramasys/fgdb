@@ -1,5 +1,9 @@
 use super::*;
 
+mod navigation;
+pub(super) use navigation::Controls as MemoryNavigation;
+pub(crate) use navigation::MemoryWatchRequest;
+
 static NEXT_MEMORY_WATCH_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy)]
@@ -97,34 +101,34 @@ fn create_memory_watch(
     let id = NEXT_MEMORY_WATCH_ID.fetch_add(1, Ordering::Relaxed).max(1);
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
     page.add_css_class("memory-watch-page");
-    let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+    let toolbar = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
     toolbar.add_css_class("memory-watch-toolbar");
+    let heading = components::control_row();
+    heading.set_halign(gtk::Align::Start);
+    heading.set_valign(gtk::Align::Center);
     let title = gtk::Label::new(Some(&expression));
     title.add_css_class("memory-watch-expression");
     title.set_halign(gtk::Align::Start);
     title.set_ellipsize(pango::EllipsizeMode::Middle);
-    title.set_hexpand(true);
+    title.set_max_width_chars(24);
     title.set_tooltip_text(Some(&expression));
     enable_stable_text_selection(&title);
     let offset = gtk::Label::new(Some("base"));
     offset.add_css_class("memory-watch-offset");
-    let previous = memory_toolbar_button("‹ Page", "Read the preceding block");
-    let base = memory_toolbar_button("Base", "Return to the original expression");
-    base.set_sensitive(false);
-    let next = memory_toolbar_button("Page ›", "Read the following block");
+    let navigation = MemoryNavigation::new(byte_count);
     let follow = memory_toolbar_button("Follow pointer", "Inspect the selected pointer value");
     follow.set_sensitive(false);
     let refresh = memory_toolbar_button("Refresh", "Read this memory again");
-    let remove = memory_toolbar_button("Close", "Close this memory inspector");
-    remove.add_css_class("danger-action");
-    toolbar.append(&title);
-    toolbar.append(&offset);
-    toolbar.append(&previous);
-    toolbar.append(&base);
-    toolbar.append(&next);
-    toolbar.append(&follow);
-    toolbar.append(&refresh);
-    toolbar.append(&remove);
+    heading.append(&title);
+    heading.append(&offset);
+    navigation.root.insert(&heading, 0);
+
+    let actions =
+        components::control_group("VIEW", &[follow.clone().upcast(), refresh.clone().upcast()]);
+
+    actions.set_halign(gtk::Align::Start);
+    navigation.root.insert(&actions, -1);
+    toolbar.append(&navigation.root);
     page.append(&toolbar);
     let summary = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     summary.add_css_class("memory-watch-summary");
@@ -145,6 +149,8 @@ fn create_memory_watch(
     )));
 
     range.add_css_class("memory-watch-range");
+    range.set_ellipsize(pango::EllipsizeMode::Middle);
+    range.set_hexpand(true);
     range.set_halign(gtk::Align::End);
     enable_stable_text_selection(&range);
     summary.append(&status);
@@ -155,6 +161,7 @@ fn create_memory_watch(
     let scrolled = gtk::ScrolledWindow::builder()
         .child(&view)
         .vexpand(true)
+        .overlay_scrolling(false)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
 
@@ -168,8 +175,9 @@ fn create_memory_watch(
     tab_label.set_max_width_chars(22);
     tab_label.set_hexpand(true);
     tab_label.set_tooltip_text(Some(&expression));
-    let tab_close = gtk::Button::with_label("×");
+    let tab_close = gtk::Button::from_icon_name("window-close-symbolic");
     tab_close.add_css_class("memory-watch-tab-close");
+    tab_close.set_valign(gtk::Align::Center);
     tab_close.set_focus_on_click(false);
     tab_close.set_tooltip_text(Some("Close this memory inspector"));
     tab.append(&tab_label);
@@ -182,7 +190,9 @@ fn create_memory_watch(
         byte_count,
         format,
         page,
-        page_offset: Rc::new(Cell::new(0)),
+        byte_offset: Rc::new(Cell::new(0)),
+        request_revision: Rc::new(Cell::new(0)),
+        navigation,
         status,
         range,
         offset,
@@ -204,31 +214,9 @@ fn create_memory_watch(
         }
     });
 
-    connect_memory_page_navigation(&previous, id, -(byte_count as i64), watches, handler);
-    connect_memory_page_navigation(&next, id, byte_count as i64, watches, handler);
-    let weak_watches = Rc::downgrade(watches);
-    let handler_for_base = Rc::clone(handler);
-
-    base.connect_clicked(move |button| {
-        let Some(watches) = weak_watches.upgrade() else {
-            return;
-        };
-
-        let watch = watches
-            .borrow()
-            .iter()
-            .find(|watch| watch.id == id)
-            .cloned();
-
-        let Some(watch) = watch else {
-            return;
-        };
-
-        watch.page_offset.set(0);
-        update_memory_watch_offset(&watch);
-        button.set_sensitive(false);
-        request_memory_watch(&watch, &handler_for_base);
-    });
+    watch
+        .navigation
+        .connect(id, watches, handler, &container.commands_available);
 
     let weak_watches = Rc::downgrade(watches);
     let handler_for_refresh = Rc::clone(handler);
@@ -249,7 +237,6 @@ fn create_memory_watch(
     });
 
     connect_memory_follow(&follow, id, container, watches, handler);
-    connect_memory_remove(&remove, id, container, watches);
     connect_memory_remove(&tab_close, id, container, watches);
     if read_immediately {
         request_memory_watch(&watch, handler)
@@ -264,41 +251,6 @@ fn memory_toolbar_button(label: &str, tooltip: &str) -> gtk::Button {
     button.set_tooltip_text(Some(tooltip));
 
     button
-}
-
-fn connect_memory_page_navigation(
-    button: &gtk::Button,
-    id: u64,
-    delta: i64,
-    watches: &Rc<RefCell<Vec<MemoryWatchView>>>,
-    handler: &Rc<RefCell<Option<MemoryWatchHandler>>>,
-) {
-    let weak_watches = Rc::downgrade(watches);
-    let handler = Rc::clone(handler);
-
-    button.connect_clicked(move |_| {
-        let Some(watches) = weak_watches.upgrade() else {
-            return;
-        };
-
-        let watch = watches
-            .borrow()
-            .iter()
-            .find(|watch| watch.id == id)
-            .cloned();
-
-        let Some(watch) = watch else {
-            return;
-        };
-
-        let Some(offset) = watch.page_offset.get().checked_add(delta) else {
-            return;
-        };
-
-        watch.page_offset.set(offset);
-        update_memory_watch_offset(&watch);
-        request_memory_watch(&watch, &handler);
-    });
 }
 
 fn connect_memory_follow(
@@ -447,15 +399,11 @@ pub(super) fn request_memory_watch(
     watch: &MemoryWatchView,
     handler: &Rc<RefCell<Option<MemoryWatchHandler>>>,
 ) {
-    set_memory_watch_reading(watch);
+    let request = begin_memory_watch_request(watch);
     let handler = handler.borrow().clone();
 
     if let Some(handler) = handler {
-        handler(
-            watch.id,
-            memory_watch_request_expression(watch),
-            watch.byte_count,
-        );
+        handler(request);
     }
 }
 
@@ -464,28 +412,31 @@ pub(super) fn set_memory_watch_reading(watch: &MemoryWatchView) {
     watch.status.set_text("reading…");
 }
 
-pub(super) fn memory_watch_request_expression(watch: &MemoryWatchView) -> String {
-    memory_watch_request_expression_at(&watch.expression, watch.page_offset.get())
-}
+pub(super) fn begin_memory_watch_request(watch: &MemoryWatchView) -> MemoryWatchRequest {
+    set_memory_watch_reading(watch);
+    let revision = watch.request_revision.get().wrapping_add(1);
+    watch.request_revision.set(revision);
 
-fn memory_watch_request_expression_at(expression: &str, offset: i64) -> String {
-    match offset.cmp(&0) {
-        std::cmp::Ordering::Less => format!("({})-0x{:x}", expression, offset.unsigned_abs()),
-        std::cmp::Ordering::Equal => expression.to_owned(),
-        std::cmp::Ordering::Greater => format!("({expression})+0x{offset:x}"),
+    MemoryWatchRequest {
+        id: watch.id,
+        revision,
+        expression: watch.expression.clone(),
+        byte_offset: watch.byte_offset.get(),
+        byte_count: watch.byte_count,
     }
 }
 
 fn update_memory_watch_offset(watch: &MemoryWatchView) {
-    let offset = watch.page_offset.get();
+    let offset = watch.byte_offset.get();
 
     let text = match offset.cmp(&0) {
-        std::cmp::Ordering::Less => format!("−0x{:x}", offset.unsigned_abs()),
+        std::cmp::Ordering::Less => format!("-0x{:x}", offset.unsigned_abs()),
         std::cmp::Ordering::Equal => String::from("base"),
         std::cmp::Ordering::Greater => format!("+0x{offset:x}"),
     };
 
     watch.offset.set_text(&text);
+    watch.navigation.update_offset(offset);
 }
 
 pub(super) fn show_memory_watch_data(
@@ -875,6 +826,230 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires a GTK display, run separately from other GTK tests"]
+    fn inspector_tab_close_has_symmetric_hover_spacing() {
+        gtk::init().unwrap();
+        Theme::graphite().install();
+        let notebook = gtk::Notebook::new();
+        notebook.add_css_class("memory-watch-notebook");
+        notebook.set_scrollable(true);
+        notebook.set_show_border(false);
+
+        let container = MemoryWatchContainer {
+            notebook: notebook.clone(),
+            empty: gtk::Label::new(None),
+            refresh_all: gtk::Button::new(),
+            clear_all: gtk::Button::new(),
+            refresh_batch: Rc::default(),
+            commands_available: Rc::default(),
+        };
+
+        let watches = Rc::default();
+        let requests = Rc::new(RefCell::new(Vec::<MemoryWatchRequest>::new()));
+        let received = Rc::clone(&requests);
+
+        let handler: Rc<RefCell<Option<MemoryWatchHandler>>> =
+            Rc::new(RefCell::new(Some(Rc::new(move |request| {
+                received.borrow_mut().push(request)
+            }))));
+
+        assert!(restore_memory_watch(
+            &container,
+            &watches,
+            &handler,
+            String::from("$rsp"),
+            128,
+            MemoryWatchFormat::Bytes,
+        ));
+
+        let window = gtk::Window::builder()
+            .default_width(390)
+            .default_height(600)
+            .child(&notebook)
+            .build();
+
+        window.present();
+        let main = glib::MainContext::default();
+        main.block_on(glib::timeout_future(Duration::from_millis(50)));
+        let page = watches.borrow()[0].page.clone();
+        assert!(page.width() <= 390);
+        let watch = watches.borrow()[0].clone();
+        let navigation = &watch.navigation;
+        assert!(!navigation.base.is_sensitive());
+        container.commands_available.set(true);
+        navigation.next.emit_clicked();
+        assert_eq!(watch.byte_offset.get(), 128);
+        assert!(navigation.base.is_sensitive());
+        navigation.distance.set_text("0x10");
+        navigation.units.set_selected(0);
+        navigation.forward.emit_clicked();
+        assert_eq!(watch.byte_offset.get(), 144);
+        navigation.backward.emit_clicked();
+        assert_eq!(watch.byte_offset.get(), 128);
+        navigation.base.emit_clicked();
+        assert_eq!(watch.byte_offset.get(), 0);
+        assert!(!navigation.base.is_sensitive());
+        navigation.previous.emit_clicked();
+        assert_eq!(watch.byte_offset.get(), -128);
+        navigation.distance.set_text("2");
+        navigation.units.set_selected(3);
+        navigation.distance.emit_activate();
+        assert_eq!(watch.byte_offset.get(), 128);
+        assert_eq!(requests.borrow().len(), 6);
+        assert!(
+            requests
+                .borrow()
+                .iter()
+                .all(|request| request.expression == "$rsp" && request.byte_count == 128)
+        );
+
+        assert_eq!(requests.borrow()[0].byte_offset, 128);
+        assert_eq!(requests.borrow()[4].byte_offset, -128);
+        assert_eq!(requests.borrow()[5].revision, watch.request_revision.get());
+        assert_ne!(requests.borrow()[0].revision, watch.request_revision.get());
+
+        show_memory_watch_data(
+            &watch,
+            MemoryBlock {
+                begin: 0x1080,
+                bytes: vec![0x5a; 128],
+            },
+            &[],
+            64,
+            TargetEndian::Little,
+        );
+
+        let first_row = watch.store.item(0).unwrap();
+        navigation.distance.set_text("0");
+        navigation.forward.emit_clicked();
+        assert_eq!(watch.byte_offset.get(), 128);
+        assert_eq!(requests.borrow().len(), 6);
+        navigation.distance.set_text("9223372036854775807");
+        navigation.forward.emit_clicked();
+        assert_eq!(requests.borrow().len(), 6);
+        navigation.distance.set_text("1");
+        container.commands_available.set(false);
+        navigation.forward.emit_clicked();
+        assert_eq!(watch.byte_offset.get(), 128);
+        assert_eq!(requests.borrow().len(), 6);
+        assert!(watch.status.text().contains("Pause the target"));
+        assert_eq!(watch.store.item(0), Some(first_row));
+        assert_eq!(watch.previous_begin.get(), Some(0x1080));
+        assert_eq!(watch.previous_bytes.borrow().as_slice(), &[0x5a; 128]);
+        let label = notebook.tab_label(&page).unwrap();
+        let tab = label.parent().unwrap().compute_bounds(&notebook).unwrap();
+        let close = label
+            .last_child()
+            .unwrap()
+            .downcast::<gtk::Button>()
+            .unwrap();
+
+        let bounds = close.compute_bounds(&notebook).unwrap();
+        let inset = bounds.y() - tab.y();
+        assert!(inset > 0.0);
+        assert_eq!(bounds.width(), bounds.height());
+        assert_eq!(tab.y() + tab.height() - bounds.y() - bounds.height(), inset);
+        assert_eq!(tab.x() + tab.width() - bounds.x() - bounds.width(), inset);
+        close.set_state_flags(gtk::StateFlags::PRELIGHT, false);
+        main.block_on(glib::timeout_future(Duration::from_millis(50)));
+        assert_eq!(close.compute_bounds(&notebook).unwrap(), bounds);
+
+        let groups = [
+            navigation.previous.parent().unwrap(),
+            navigation.backward.parent().unwrap(),
+            watch.follow_button.parent().unwrap(),
+        ];
+
+        let narrow = groups
+            .each_ref()
+            .map(|group| group.compute_bounds(&navigation.root).unwrap());
+
+        for pair in narrow.windows(2) {
+            assert_eq!(pair[0].x(), pair[1].x());
+            assert_eq!(pair[0].height(), pair[1].height());
+            assert_eq!(
+                pair[1].y() - pair[0].y() - pair[0].height(),
+                components::CONTROL_GAP as f32,
+            );
+        }
+
+        window.set_default_size(1400, 600);
+        main.block_on(glib::timeout_future(Duration::from_millis(50)));
+
+        let wide = groups
+            .each_ref()
+            .map(|group| group.compute_bounds(&navigation.root).unwrap());
+
+        let title_bounds = navigation
+            .root
+            .child_at_index(0)
+            .unwrap()
+            .child()
+            .unwrap()
+            .first_child()
+            .unwrap()
+            .compute_bounds(&navigation.root)
+            .unwrap();
+
+        let title_center = title_bounds.y() + title_bounds.height() / 2.0;
+        let controls_center = wide[0].y() + wide[0].height() / 2.0;
+
+        // Odd-sized text rounds its centered allocation to a whole pixel.
+        assert!((title_center - controls_center).abs() <= 0.5);
+
+        for pair in wide.windows(2) {
+            assert_eq!(pair[0].y(), pair[1].y());
+            assert_eq!(pair[0].height(), pair[1].height());
+            assert_eq!(
+                pair[1].x() - pair[0].x() - pair[0].width(),
+                components::CONTROL_GAP as f32,
+            );
+        }
+
+        let jump_bounds = wide[1];
+
+        for widget in [
+            navigation.backward.clone().upcast::<gtk::Widget>(),
+            navigation.distance.clone().upcast(),
+            navigation.units.clone().upcast(),
+            navigation.forward.clone().upcast(),
+        ] {
+            let bounds = widget.compute_bounds(&navigation.root).unwrap();
+            assert_eq!(bounds.y() - jump_bounds.y(), 1.0);
+            assert_eq!(bounds.height(), jump_bounds.height() - 2.0);
+        }
+
+        let arrow_bounds = navigation
+            .backward
+            .compute_bounds(&navigation.root)
+            .unwrap();
+
+        assert_eq!(arrow_bounds.width(), arrow_bounds.height());
+
+        navigation
+            .backward
+            .set_state_flags(gtk::StateFlags::PRELIGHT, false);
+
+        main.block_on(glib::timeout_future(Duration::from_millis(50)));
+
+        assert_eq!(
+            navigation
+                .backward
+                .compute_bounds(&navigation.root)
+                .unwrap(),
+            arrow_bounds,
+        );
+
+        close.emit_clicked();
+        assert!(watches.borrow().is_empty());
+        assert_eq!(notebook.n_pages(), 0);
+        container.commands_available.set(true);
+        navigation.forward.emit_clicked();
+        assert_eq!(requests.borrow().len(), 6);
+        window.close();
+    }
+
+    #[test]
     fn formats_conventional_hex_rows_and_typed_values() {
         let bytes = (0_u8..20).collect::<Vec<_>>();
 
@@ -965,18 +1140,36 @@ mod tests {
     }
 
     #[test]
-    fn builds_bounded_page_expressions() {
-        assert_eq!(
-            memory_watch_request_expression_at("$rsp", -128),
-            "($rsp)-0x80"
-        );
+    fn builds_byte_offset_requests_without_typed_pointer_arithmetic() {
+        let mut request = MemoryWatchRequest {
+            id: 1,
+            revision: 1,
+            expression: String::from("ptr + 1"),
+            byte_count: 128,
+            byte_offset: -128,
+        };
 
         assert_eq!(
-            memory_watch_request_expression_at("$rsp", 128),
-            "($rsp)+0x80"
+            request.command(),
+            "-data-read-memory-bytes -o -128 \"ptr + 1\" 128"
         );
 
-        assert_eq!(memory_watch_request_expression_at("$rsp", 0), "$rsp");
+        request.byte_offset = 128;
+
+        assert_eq!(
+            request.command(),
+            "-data-read-memory-bytes -o 128 \"ptr + 1\" 128"
+        );
+
+        request.byte_offset = 0;
+
+        assert_eq!(
+            request.command(),
+            "-data-read-memory-bytes -o 0 \"ptr + 1\" 128"
+        );
+
+        request.byte_offset = i64::MIN;
+        assert!(request.command().contains("-o -9223372036854775808 "));
     }
 
     #[test]

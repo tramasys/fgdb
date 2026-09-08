@@ -82,6 +82,17 @@ flowbox.ui-action-flow > flowboxchild {
     background: transparent;
 }
 
+.ui-control-group {
+    min-height: 23px;
+    background: @app_bg;
+    border: 1px solid @app_border;
+}
+
+.ui-control-label {
+    padding: 0 6px;
+    color: @app_muted;
+}
+
 button.debug-control,
 menubutton.debug-control > button,
 button.toolbar-action,

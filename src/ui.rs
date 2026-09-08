@@ -17,6 +17,7 @@ mod keybindings;
 mod layout;
 mod lifecycle;
 mod log_view;
+mod memory_search;
 mod memory_view;
 mod misc_view;
 mod modules;
@@ -310,7 +311,7 @@ type SignalCatchpointHandler = Rc<dyn Fn(String, Option<String>)>;
 type EventCatchpointHandler = Rc<dyn Fn(EventCatchpoint, Option<String>)>;
 type WatchpointInsertHandler = Rc<dyn Fn(WatchpointRequest)>;
 type FilteredCatchpointHandler = Rc<dyn Fn(FilteredCatchpointRequest)>;
-type MemoryWatchHandler = Rc<dyn Fn(u64, String, usize)>;
+type MemoryWatchHandler = Rc<dyn Fn(MemoryWatchRequest)>;
 type InstructionMemoryHandler = Rc<dyn Fn(String)>;
 type DisassemblyHandler = Rc<dyn Fn(DisassemblyRequest)>;
 type DisassemblySourceCache =
@@ -1031,7 +1032,9 @@ struct MemoryWatchView {
     byte_count: usize,
     format: MemoryWatchFormat,
     page: gtk::Box,
-    page_offset: Rc<Cell<i64>>,
+    byte_offset: Rc<Cell<i64>>,
+    request_revision: Rc<Cell<u64>>,
+    navigation: MemoryNavigation,
     status: gtk::Label,
     range: gtk::Label,
     offset: gtk::Label,
@@ -1608,6 +1611,7 @@ pub struct Ui {
     memory_region_store: gio::ListStore,
     memory_regions_view: gtk::ColumnView,
     memory_regions_empty: gtk::Label,
+    memory_search: Rc<memory_search::MemorySearchView>,
     memory_watches: Rc<RefCell<Vec<MemoryWatchView>>>,
     memory_watch_container: MemoryWatchContainer,
     memory_address_entry: gtk::Entry,
@@ -1784,6 +1788,7 @@ struct Workspace {
     memory_region_store: gio::ListStore,
     memory_regions_view: gtk::ColumnView,
     memory_regions_empty: gtk::Label,
+    memory_search: Rc<memory_search::MemorySearchView>,
     memory_watch_container: MemoryWatchContainer,
     memory_address_entry: gtk::Entry,
     memory_size: gtk::SpinButton,
@@ -1846,6 +1851,7 @@ struct Inspector {
     memory_region_store: gio::ListStore,
     memory_regions_view: gtk::ColumnView,
     memory_regions_empty: gtk::Label,
+    memory_search: Rc<memory_search::MemorySearchView>,
     memory_watch_container: MemoryWatchContainer,
     memory_split: gtk::Paned,
     memory_address_entry: gtk::Entry,

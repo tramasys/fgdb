@@ -9,6 +9,7 @@ mod investigation;
 mod kernel;
 mod lifecycle;
 mod lifecycle_reducer;
+mod memory_search;
 mod misc;
 mod refresh;
 mod replay;

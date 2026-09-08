@@ -242,9 +242,7 @@ pub(super) fn build_memory_region_view(
     });
 
     let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
-    let selection = gtk::SingleSelection::new(Some(filtered));
-    selection.set_autoselect(false);
-    selection.set_can_unselect(true);
+    let selection = gtk::MultiSelection::new(Some(filtered));
     let view = gtk::ColumnView::new(Some(selection));
     view.add_css_class("debug-table");
     view.add_css_class("memory-map-table");

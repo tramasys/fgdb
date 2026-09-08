@@ -64,6 +64,20 @@ pub(super) fn control_row() -> gtk::Box {
     gtk::Box::new(gtk::Orientation::Horizontal, CONTROL_GAP)
 }
 
+pub(super) fn control_group(label: &str, widgets: &[gtk::Widget]) -> gtk::Box {
+    let group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    group.add_css_class("ui-control-group");
+    let caption = gtk::Label::new(Some(label));
+    caption.add_css_class("ui-control-label");
+    group.append(&caption);
+
+    for widget in widgets {
+        group.append(widget);
+    }
+
+    group
+}
+
 pub(super) fn icon_label(icon: &str, label: &str) -> gtk::Box {
     let row = control_row();
     row.set_halign(gtk::Align::Center);

@@ -2359,6 +2359,7 @@ impl Ui {
         let watches = Rc::clone(&self.memory_watches);
         let handler = Rc::clone(&self.memory_watch_handler);
         let size = self.memory_size.clone();
+        let search = Rc::downgrade(&self.memory_search);
 
         self.memory_regions_view
             .connect_activate(move |view, position| {
@@ -2378,14 +2379,17 @@ impl Ui {
 
                 let byte_count = requested.min(region_size).max(1);
 
-                let _ = add_memory_watch(
+                if add_memory_watch(
                     &container,
                     &watches,
                     &handler,
                     format!("0x{:x}", region.start),
                     byte_count,
                     MemoryWatchFormat::Bytes,
-                );
+                ) && let Some(search) = search.upgrade()
+                {
+                    search.show_inspector();
+                }
             });
     }
 
@@ -2662,23 +2666,15 @@ impl Ui {
 
             watches
                 .iter()
-                .map(|watch| {
-                    set_memory_watch_reading(watch);
-
-                    (
-                        watch.id,
-                        memory_watch_request_expression(watch),
-                        watch.byte_count,
-                    )
-                })
+                .map(begin_memory_watch_request)
                 .collect::<Vec<_>>()
         };
 
         let handler = self.memory_watch_handler.borrow().clone();
 
         if let Some(handler) = handler {
-            for (id, expression, byte_count) in requests {
-                handler(id, expression, byte_count);
+            for request in requests {
+                handler(request);
             }
         } else {
             self.memory_watch_container
@@ -2688,6 +2684,13 @@ impl Ui {
 
             update_memory_container_state(&self.memory_watch_container, false);
         }
+    }
+
+    pub(crate) fn memory_watch_request_is_current(&self, id: u64, revision: u64) -> bool {
+        self.memory_watches
+            .borrow()
+            .iter()
+            .any(|watch| watch.id == id && watch.request_revision.get() == revision)
     }
 
     pub fn show_memory_watch(&self, id: u64, result: Result<MemoryBlock, &str>) {

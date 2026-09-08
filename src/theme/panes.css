@@ -545,17 +545,6 @@ button.instruction-row.current-instruction:hover {
     min-height: 23px;
 }
 
-.disassembly-control-group {
-    min-height: 23px;
-    background: @app_bg;
-    border: 1px solid @app_border;
-}
-
-.disassembly-control-label {
-    padding: 0 6px;
-    color: @app_muted;
-}
-
 .instruction-insight {
     padding: 4px 5px;
     background: alpha(@app_fg, 0.025);
@@ -979,6 +968,10 @@ list.simd-register-list {
     border-bottom: 1px solid @app_border;
 }
 
+.memory-map-section > .subpanel-header {
+    padding: 2px 6px 2px 2px;
+}
+
 .memory-map-search {
     min-height: 23px;
     margin: 1px 0;
@@ -996,6 +989,12 @@ list.simd-register-list {
 
 .memory-watch-expression {
     color: @app_accent_hover;
+}
+
+button.memory-navigation-button {
+    min-width: 22px;
+    padding: 2px;
+    -gtk-icon-size: 16px;
 }
 
 .memory-watch-offset {
@@ -1823,7 +1822,8 @@ notebook.source-notebook > header > tabs {
     padding-top: 0;
 }
 
-notebook.source-notebook > header > tabs > tab {
+notebook.source-notebook > header > tabs > tab,
+notebook.memory-watch-notebook > header > tabs > tab {
     padding: 2px 2px 2px 10px;
 }
 

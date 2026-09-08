@@ -271,6 +271,7 @@ impl Ui {
             memory_region_store: workspace.memory_region_store,
             memory_regions_view: workspace.memory_regions_view,
             memory_regions_empty: workspace.memory_regions_empty,
+            memory_search: workspace.memory_search,
             memory_watches: Rc::new(RefCell::new(Vec::new())),
             memory_watch_container: workspace.memory_watch_container,
             memory_address_entry: workspace.memory_address_entry,
@@ -495,6 +496,12 @@ impl Ui {
 
     pub fn target_pointer_bits(&self) -> u32 {
         self.target_pointer_bits.get()
+    }
+
+    pub(crate) fn known_target_pointer_bits(&self) -> Option<u32> {
+        self.target_pointer_bits_known
+            .get()
+            .then(|| self.target_pointer_bits.get())
     }
 
     pub fn set_target_pointer_bits(&self, bits: u32) {
@@ -1207,6 +1214,7 @@ impl Ui {
     }
 
     pub(super) fn update_control_sensitivity(&self) {
+        self.memory_search.update_state(self);
         self.update_module_control_sensitivity();
         let ready = self.model.execution().ready;
         let debugger_state = self.model.execution().state;
@@ -1694,7 +1702,7 @@ impl Ui {
             .replace(Some(Rc::new(handler)));
     }
 
-    pub fn set_memory_watch_handler(&self, handler: impl Fn(u64, String, usize) + 'static) {
+    pub fn set_memory_watch_handler(&self, handler: impl Fn(MemoryWatchRequest) + 'static) {
         self.memory_watch_handler.replace(Some(Rc::new(handler)));
     }
 

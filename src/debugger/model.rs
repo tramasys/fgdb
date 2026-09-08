@@ -711,13 +711,88 @@ pub fn memory_block(record: &MiRecord) -> Option<MemoryBlock> {
 
     let begin = parse_hex(constant(tuple, "begin")?)?;
     let contents = constant(tuple, "contents")?;
+    let bytes = decode_memory_bytes(contents)?;
+
+    Some(MemoryBlock { begin, bytes })
+}
+
+/// Decode every returned span without padding holes or accepting bytes outside
+/// the requested range. Callers can account for the complement as skipped data.
+pub(crate) fn memory_blocks(
+    record: &MiRecord,
+    range: std::ops::Range<u64>,
+) -> Result<Vec<MemoryBlock>, &'static str> {
+    let invalid = "GDB returned an invalid or oversized memory response";
+    let items = record
+        .field("memory")
+        .and_then(MiValue::as_list)
+        .ok_or(invalid)?;
+
+    if !record.is_done()
+        || record.kind != '^'
+        || record.output_was_truncated()
+        || range.start >= range.end
+        || range.end - range.start > 1024 * 1024
+        || items.len() > 4096
+    {
+        return Err(invalid);
+    }
+
+    let mut blocks = Vec::with_capacity(items.len());
+    let mut total = 0_u64;
+
+    for item in items {
+        let tuple = tuple_from_item(item).ok_or(invalid)?;
+        let begin = constant(tuple, "begin")
+            .and_then(parse_hex)
+            .ok_or(invalid)?;
+        let end = constant(tuple, "end").and_then(parse_hex).ok_or(invalid)?;
+        let offset = constant(tuple, "offset")
+            .and_then(parse_hex)
+            .ok_or(invalid)?;
+        let contents = constant(tuple, "contents").ok_or(invalid)?;
+
+        if begin < range.start
+            || end > range.end
+            || begin >= end
+            || offset != begin - range.start
+            || contents.len() as u64 != (end - begin) * 2
+        {
+            return Err(invalid);
+        }
+
+        total = total.checked_add(end - begin).ok_or(invalid)?;
+
+        if total > range.end - range.start {
+            return Err(invalid);
+        }
+
+        blocks.push(MemoryBlock {
+            begin,
+            bytes: decode_memory_bytes(contents).ok_or(invalid)?,
+        });
+    }
+
+    blocks.sort_unstable_by_key(|block| block.begin);
+
+    if blocks
+        .windows(2)
+        .any(|pair| pair[0].begin + pair[0].bytes.len() as u64 > pair[1].begin)
+    {
+        return Err(invalid);
+    }
+
+    Ok(blocks)
+}
+
+fn decode_memory_bytes(contents: &str) -> Option<Vec<u8>> {
     let (pairs, remainder) = contents.as_bytes().as_chunks::<2>();
 
     if !remainder.is_empty() {
         return None;
     }
 
-    let bytes = pairs
+    pairs
         .iter()
         .map(|pair| {
             let high = hex_nibble(pair[0])?;
@@ -725,9 +800,7 @@ pub fn memory_block(record: &MiRecord) -> Option<MemoryBlock> {
 
             Some((high << 4) | low)
         })
-        .collect::<Option<Vec<_>>>()?;
-
-    Some(MemoryBlock { begin, bytes })
+        .collect()
 }
 
 fn hex_nibble(byte: u8) -> Option<u8> {
@@ -1407,6 +1480,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(uppercase.bytes, [0xa0, 0xff]);
+
+        let partial = parse_record(r#"9^done,memory=[{begin="0x1004",end="0x1006",offset="0x4",contents="aabb"},{begin="0x1000",end="0x1002",offset="0x0",contents="0102"}]"#).unwrap();
+        let blocks = super::memory_blocks(&partial, 0x1000..0x1008).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].begin, 0x1000);
+        assert_eq!(blocks[1].begin, 0x1004);
+        assert_eq!(blocks[1].bytes, [0xaa, 0xbb]);
+        assert!(super::memory_blocks(&partial, 0x1001..0x1008).is_err());
+
+        for tuple in [
+            r#"{begin="0x1000",end="0x1004",offset="0x0",contents="0102"}"#,
+            r#"{begin="0x1000",end="0x1002",offset="0x1",contents="0102"}"#,
+            r#"{begin="0x1000",end="0x1002",offset="0x0",contents="xx02"}"#,
+        ] {
+            let record = parse_record(&format!("1^done,memory=[{tuple}]")).unwrap();
+            assert!(super::memory_blocks(&record, 0x1000..0x1010).is_err());
+        }
+
+        let overlap = parse_record(r#"1^done,memory=[{begin="0x1000",end="0x1002",offset="0x0",contents="0102"},{begin="0x1001",end="0x1003",offset="0x1",contents="0304"}]"#).unwrap();
+        assert!(super::memory_blocks(&overlap, 0x1000..0x1010).is_err());
 
         assert!(
             memory_block(

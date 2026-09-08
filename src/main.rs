@@ -7,6 +7,7 @@ mod debugger;
 mod investigation;
 mod kernel;
 mod language;
+mod memory_search;
 mod misc;
 mod model;
 mod performance;

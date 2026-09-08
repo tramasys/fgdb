@@ -148,6 +148,22 @@ impl StopRequest<'_> {
         )
     }
 
+    /// A stop-bound read scheduled behind interactive inspection and execution.
+    pub(crate) fn background(
+        mut self,
+        handler: impl FnOnce(&MiClient, MiRecord) + 'static,
+    ) -> io::Result<u64> {
+        let client = self.client()?;
+        let guard = self.guard();
+        client.request_inner(
+            &self.encoded_command(),
+            CommandClass::Background,
+            Some(CommandOwner::Stop(self.requests.generation())),
+            Some(Box::new(guard)),
+            Box::new(handler),
+        )
+    }
+
     pub(crate) fn with_print_limit(
         mut self,
         elements: usize,
@@ -234,6 +250,10 @@ mod tests {
                 .unscoped("-var-info-path-expression value")
                 .request(|_, _| {})
                 .unwrap();
+            let background = requests
+                .thread("-data-read-memory-bytes 0x1000 16")
+                .background(|_, _| {})
+                .unwrap();
             let written = client
                 .outgoing
                 .borrow()
@@ -247,6 +267,7 @@ mod tests {
                     format!("{frame}-stack-info-frame --thread 7 --frame 2\n"),
                     format!("{thread}-stack-list-frames --thread 7 0 24\n"),
                     format!("{object}-var-info-path-expression value\n"),
+                    format!("{background}-data-read-memory-bytes --thread 7 0x1000 16\n"),
                 ]
             );
 
@@ -266,7 +287,7 @@ mod tests {
                     .request(|_, _| panic!("Err must not invoke a handler"))
                     .is_err()
             );
-            assert_eq!(client.outgoing.borrow().commands.len(), 3);
+            assert_eq!(client.outgoing.borrow().commands.len(), 4);
         });
     }
 
@@ -296,6 +317,11 @@ mod tests {
                     .unscoped("-var-assign value 1")
                     .control(move |_, record| observed.borrow_mut().push(record.class))
                     .unwrap();
+                let observed = Rc::clone(&results);
+                requests
+                    .thread("-data-read-memory-bytes 0x1000 16")
+                    .background(move |_, record| observed.borrow_mut().push(record.class))
+                    .unwrap();
 
                 match change {
                     0 => {
@@ -324,7 +350,7 @@ mod tests {
                 client.cancel_stale_stop_requests(requests.generation().wrapping_add(1));
                 assert_eq!(
                     results.borrow().as_slice(),
-                    ["superseded", "superseded", "superseded"]
+                    ["superseded", "superseded", "superseded", "superseded"]
                 );
                 assert!(client.pending.borrow().is_empty());
                 assert!(client.scoped_request.borrow().is_none());
@@ -336,8 +362,8 @@ mod tests {
                     .when(|| true)
                     .request(move |_, record| observed.borrow_mut().push(record.class))
                     .unwrap();
-                assert_eq!(results.borrow().len(), 4);
-                assert_eq!(results.borrow()[3], "superseded");
+                assert_eq!(results.borrow().len(), 5);
+                assert_eq!(results.borrow()[4], "superseded");
                 assert!(client.outgoing.borrow().is_empty());
             });
         }

@@ -50,6 +50,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     };
 
     ui.connect_debug_controls(&mi_client);
+    memory_search::connect(&ui, &mi_client);
     let weak = Rc::downgrade(&ui);
     let client = Rc::clone(&mi_client);
     ui.connect_replay_actions(move |action| {
@@ -376,17 +377,20 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
 
-    ui.set_memory_watch_handler(move |id, expression, byte_count| {
+    ui.set_memory_watch_handler(move |request| {
         let (Some(client), Some(current_ui)) = (weak_client.upgrade(), weak_ui.upgrade()) else {
             return;
         };
 
         let generation = current_ui.model.current_stop_refresh_generation();
+        let id = request.id;
+        let revision = request.revision;
 
-        let command = format!(
-            "-data-read-memory-bytes {} {byte_count}",
-            crate::debugger::quote(&expression)
-        );
+        if !current_ui.memory_watch_request_is_current(id, revision) {
+            return;
+        }
+
+        let command = request.command();
 
         let Some(requests) = stop_requests(&weak_ui, &client, generation) else {
             current_ui.show_memory_watch(id, Err("Pause the target before reading memory"));
@@ -396,9 +400,15 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         drop(current_ui);
         let weak_ui = weak_ui.clone();
         let weak_ui_for_response = weak_ui.clone();
+        let weak_ui_for_guard = weak_ui.clone();
 
         if requests
             .frame(&command)
+            .when(move || {
+                weak_ui_for_guard
+                    .upgrade()
+                    .is_some_and(|ui| ui.memory_watch_request_is_current(id, revision))
+            })
             .request(move |_, record| {
                 let Some(ui) = weak_ui_for_response.upgrade() else {
                     return;
@@ -420,6 +430,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             .is_err()
             && let Some(ui) = weak_ui.upgrade()
             && ui.model.is_stop_refresh_current(generation)
+            && ui.memory_watch_request_is_current(id, revision)
         {
             ui.show_memory_watch(id, Err("MI channel is unavailable"));
         }

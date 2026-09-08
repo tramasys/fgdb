@@ -760,6 +760,7 @@ pub(super) fn build_workspace(
         memory_region_store: inspector.memory_region_store,
         memory_regions_view: inspector.memory_regions_view,
         memory_regions_empty: inspector.memory_regions_empty,
+        memory_search: inspector.memory_search,
         memory_watch_container: inspector.memory_watch_container,
         memory_address_entry: inspector.memory_address_entry,
         memory_size: inspector.memory_size,
@@ -992,7 +993,7 @@ pub(super) fn build_inspector(
         "Open the selected instruction's effective address in Memory",
     );
 
-    let history_group = disassembly_control_group(
+    let history_group = components::control_group(
         "HISTORY",
         &[
             disassembly_back.clone().upcast::<gtk::Widget>(),
@@ -1000,7 +1001,7 @@ pub(super) fn build_inspector(
         ],
     );
 
-    let location_group = disassembly_control_group(
+    let location_group = components::control_group(
         "LOCATION",
         &[
             disassembly_location.clone().upcast::<gtk::Widget>(),
@@ -1013,7 +1014,7 @@ pub(super) fn build_inspector(
     disassembly_navigation.append(&history_group);
     disassembly_navigation.append(&location_group);
 
-    let function_group = disassembly_control_group(
+    let function_group = components::control_group(
         "FUNCTION",
         &[
             disassembly_previous.clone().upcast::<gtk::Widget>(),
@@ -1021,7 +1022,7 @@ pub(super) fn build_inspector(
         ],
     );
 
-    let view_group = disassembly_control_group(
+    let view_group = components::control_group(
         "VIEW",
         &[
             disassembly_mixed.clone().upcast::<gtk::Widget>(),
@@ -1030,7 +1031,7 @@ pub(super) fn build_inspector(
         ],
     );
 
-    let selected_group = disassembly_control_group(
+    let selected_group = components::control_group(
         "SELECTED",
         &[
             disassembly_follow.clone().upcast::<gtk::Widget>(),
@@ -1270,11 +1271,7 @@ pub(super) fn build_inspector(
     let memory_map_title = section_title("VIRTUAL MEMORY MAP");
     memory_map_title.set_hexpand(true);
     memory_map_header.append(&memory_map_title);
-    let memory_map_hint = gtk::Label::new(Some("Double-click a mapping to inspect it"));
-    memory_map_hint.add_css_class("muted");
-    memory_map_hint.set_wrap(true);
-    memory_map_hint.set_xalign(1.0);
-    memory_map_header.append(&memory_map_hint);
+    memory_map_title.set_tooltip_text(Some("Double-click a mapping to inspect it. Ctrl-click or Shift-click to select mappings for search"));
 
     let memory_map_search = components::delayed_search_entry("Filter mappings");
     memory_map_search.set_width_request(190);
@@ -1286,8 +1283,9 @@ pub(super) fn build_inspector(
     ));
 
     memory_map_section.append(&memory_map_header);
+    let memory_map_body = components::panel();
     components::inset(&memory_map_search, components::CONTROL_GAP);
-    memory_map_section.append(&memory_map_search);
+    memory_map_body.append(&memory_map_search);
 
     let (memory_regions_view, memory_region_store) =
         build_memory_region_view(bindings.target_pointer_bits, &memory_map_search);
@@ -1298,21 +1296,27 @@ pub(super) fn build_inspector(
         .child(&memory_regions_view)
         .min_content_height(48)
         .vexpand(true)
+        .overlay_scrolling(false)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
 
-    memory_map_section.append(&memory_regions_empty);
-    memory_map_section.append(&memory_regions_scrolled);
+    memory_map_body.append(&memory_regions_empty);
+    memory_map_body.append(&memory_regions_scrolled);
+    memory_map_section.append(&memory_map_body);
+    memory_page.append(&memory_watch_section);
     let memory_split = gtk::Paned::new(gtk::Orientation::Vertical);
     memory_split.add_css_class("memory-inspector-split");
     memory_split.set_shrink_start_child(false);
     memory_split.set_shrink_end_child(true);
     memory_split.set_resize_start_child(true);
-    memory_split.set_start_child(Some(&memory_watch_section));
     memory_split.set_end_child(Some(&memory_map_section));
     memory_split.set_vexpand(true);
 
     memory_split.connect_position_notify(|split| {
+        if !split.end_child().is_some_and(|child| child.get_visible()) {
+            return;
+        }
+
         // GtkPaned otherwise lets the end child collapse completely. Keep the
         // map header, filter, and first table row reachable while still
         // allowing an actual 50/50 initial split on compact windows.
@@ -1324,7 +1328,17 @@ pub(super) fn build_inspector(
         }
     });
 
-    memory_page.append(&memory_split);
+    let memory_search = memory_search::MemorySearchView::new(
+        &memory_page,
+        &memory_split,
+        &memory_map_section,
+        &memory_map_body,
+        &memory_map_header,
+        &memory_regions_view,
+    );
+
+    let memory_page = memory_search.root.clone();
+
     let breakpoints_page = gtk::Box::new(gtk::Orientation::Vertical, 4);
     breakpoints_page.add_css_class("panel-content");
 
@@ -1705,6 +1719,7 @@ pub(super) fn build_inspector(
         memory_region_store,
         memory_regions_view,
         memory_regions_empty,
+        memory_search,
         memory_watch_container,
         memory_split,
         memory_address_entry,
@@ -1742,20 +1757,6 @@ fn compact_instruction_button(label: &str, tooltip: &str) -> gtk::Button {
     button.set_tooltip_text(Some(tooltip));
 
     button
-}
-
-fn disassembly_control_group(label: &str, widgets: &[gtk::Widget]) -> gtk::Box {
-    let group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    group.add_css_class("disassembly-control-group");
-    let caption = gtk::Label::new(Some(label));
-    caption.add_css_class("disassembly-control-label");
-    group.append(&caption);
-
-    for widget in widgets {
-        group.append(widget);
-    }
-
-    group
 }
 
 pub(super) fn build_signal_grid(

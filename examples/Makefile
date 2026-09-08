@@ -27,6 +27,7 @@ C_TARGETS := \
 	$(TARGET_DIR)/c-simd-target \
 	$(TARGET_DIR)/c-allocation-target \
 	$(TARGET_DIR)/c-memory-target \
+	$(TARGET_DIR)/c-memory-search-target \
 	$(TARGET_DIR)/c-page-target \
 	$(TARGET_DIR)/c-misc-allocator-target \
 	$(TARGET_DIR)/c-misc-auxv-target \
@@ -104,6 +105,10 @@ $(TARGET_DIR):
 
 $(TARGET_DIR)/c-memory-target: c_memory_target.c | $(TARGET_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@
+
+# Match the non-PIE search fixture so addresses stay stable across launches.
+$(TARGET_DIR)/c-memory-search-target: c_memory_search_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fno-pie $< $(LDFLAGS) -no-pie -o $@
 
 $(TARGET_DIR)/c-simd-target: c_simd_target.c | $(TARGET_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@

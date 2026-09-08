@@ -291,9 +291,13 @@ impl DebuggerModel {
     }
 
     pub(crate) fn memory_regions_for_details(&self, generation: u64) -> Option<Vec<MemoryRegion>> {
-        (self.is_stop_refresh_current(generation)
-            && self.stopped.memory_regions_generation.get() == Some(generation))
-        .then(|| self.stopped.memory_regions.borrow().clone())
+        self.memory_regions_are_current(generation)
+            .then(|| self.stopped.memory_regions.borrow().clone())
+    }
+
+    pub(crate) fn memory_regions_are_current(&self, generation: u64) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self.stopped.memory_regions_generation.get() == Some(generation)
     }
 
     pub(crate) fn frames_for_details(&self, generation: u64) -> Option<Vec<StackFrame>> {
