@@ -346,6 +346,46 @@ pub(super) fn memory_region_column(
         label.add_css_class("debug-table-cell");
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::Middle);
+        enable_recycled_text_selection(&label);
+        let click = gtk::GestureClick::new();
+        click.set_button(gtk::gdk::BUTTON_PRIMARY);
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let weak_item = item.downgrade();
+
+        click.connect_pressed(move |click, presses, _, _| {
+            let Some(item) = weak_item.upgrade().filter(|item| {
+                item.position() != gtk::INVALID_LIST_POSITION && item.item().is_some()
+            }) else {
+                return;
+            };
+
+            if presses != 1 {
+                return;
+            }
+
+            let state = click.current_event_state();
+            let modify = state.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+            let extend = state.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+
+            // Copying text in a selected mapping must not discard the other
+            // search regions. Delegate new/range selections to GTK so its
+            // anchor, filtering and keyboard selection remain authoritative.
+            if (modify || extend || !item.is_selected())
+                && let Some(widget) = click.widget()
+            {
+                let _ = widget.activate_action(
+                    "list.select-item",
+                    Some(&(item.position(), modify, extend).to_variant()),
+                );
+            }
+
+            if modify || extend {
+                // Modified clicks select rows, ordinary drags select text.
+                click.set_state(gtk::EventSequenceState::Claimed);
+            }
+        });
+
+        label.add_controller(click);
         item.set_child(Some(&label));
     });
 
@@ -390,6 +430,14 @@ pub(super) fn memory_region_column(
             region.end,
             region.description()
         )));
+    });
+
+    factory.connect_unbind(|_, object| {
+        if let Some(item) = object.downcast_ref::<gtk::ListItem>()
+            && let Some(label) = item.child().and_downcast::<gtk::Label>()
+        {
+            clear_label_selection(&label);
+        }
     });
 
     components::table_column(title, width, factory)
@@ -1075,7 +1123,7 @@ fn local_location_column(
         };
         let label = gtk::Label::new(None);
         label.add_css_class("debug-table-cell");
-        label.add_css_class("stack-address");
+        label.add_css_class("memory-none");
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::Middle);
         enable_recycled_text_selection(&label);
@@ -1085,17 +1133,9 @@ fn local_location_column(
     });
 
     factory.connect_bind(move |_, object| {
-        if let Some(label) = object
-            .downcast_ref::<gtk::ListItem>()
-            .and_then(gtk::ListItem::child)
-            .and_downcast::<gtk::Label>()
-        {
-            clear_label_selection(&label);
-            label.set_text("");
-            label.set_tooltip_text(None);
+        if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
+            for_bind.bind(item);
         }
-
-        for_bind.schedule();
     });
 
     factory.connect_unbind(move |_, object| {
@@ -1700,7 +1740,7 @@ pub(super) fn build_stack_view(
         ("offset", "OFFSET", 82, StackColumn::Offset),
         ("index", "INDEX", 62, StackColumn::Index),
         ("references", "REFERENCES", 155, StackColumn::References),
-        ("region", "REGION", 210, StackColumn::Region),
+        ("region", "POINTER TARGET", 210, StackColumn::Region),
     ] {
         layout.append(&view, key, &stack_column(title, width, column, &selection));
     }
@@ -1732,7 +1772,7 @@ pub(super) fn build_stack_word_inspector() -> StackWordInspector {
     let raw = stack_inspector_row(&grid, 1, "RAW");
     let interpretation = stack_inspector_row(&grid, 2, "INTERPRETATION");
     let role = stack_inspector_row(&grid, 3, "ROLE");
-    let region = stack_inspector_row(&grid, 4, "REGION");
+    let region = stack_inspector_row(&grid, 4, "POINTER TARGET");
     for value in [&interpretation, &role, &region] {
         value.set_ellipsize(pango::EllipsizeMode::None);
         value.set_wrap(false);
@@ -1803,7 +1843,7 @@ impl StackWordInspector {
         let role = stack_word_role(entry);
         self.role.set_text(&role);
         self.role.set_tooltip_text(Some(&role));
-        let region = entry.region.as_deref().unwrap_or("unmapped / scalar");
+        let region = stack_pointer_target(entry);
         self.region.set_text(region);
         self.region.set_tooltip_text(Some(region));
     }
@@ -1870,7 +1910,7 @@ pub(super) fn stack_column(
             StackColumn::Offset => format!("+0x{:04x}", entry.offset),
             StackColumn::Index => format!("+{:03}", entry.index),
             StackColumn::References => stack_references(&entry),
-            StackColumn::Region => entry.region.clone().unwrap_or_default(),
+            StackColumn::Region => entry.region.clone().unwrap_or_else(|| String::from("—")),
         };
         label.set_text(&text);
         label.set_tooltip_text(Some(&stack_tooltip(&entry)));
@@ -1933,14 +1973,34 @@ pub(super) fn instruction_column(
         label.add_css_class(class);
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
-        enable_stable_text_selection(&label);
+        enable_recycled_text_selection(&label);
         label.set_cursor_from_name(Some("text"));
+        label.set_has_tooltip(true);
+        let tooltip_item = item.downgrade();
+        label.connect_query_tooltip(move |_, _, _, _, tooltip| {
+            let Some(data) = tooltip_item.upgrade()
+                .and_then(|item| item.item())
+                .and_downcast::<glib::BoxedAnyObject>()
+            else {
+                return false;
+            };
+            let data = data.borrow::<InstructionRowData>();
+            tooltip.set_text(Some(&format!(
+                "{}  {}\n{}\nSelect text to copy. Press Enter or double-click outside a text selection to toggle an instruction breakpoint",
+                data.instruction.address,
+                data.instruction.text,
+                instruction_symbol_full(&data.instruction),
+            )));
+            true
+        });
         let click = gtk::GestureClick::new();
         click.set_button(gtk::gdk::BUTTON_PRIMARY);
-        let item_for_click = item.clone();
+        let item_for_click = item.downgrade();
         let selection = selection.clone();
         click.connect_pressed(move |_, _, _, _| {
-            selection.set_selected(item_for_click.position());
+            if let Some(item) = item_for_click.upgrade() {
+                selection.set_selected(item.position());
+            }
         });
         label.add_controller(click);
         item.set_child(Some(&label));
@@ -1967,12 +2027,6 @@ pub(super) fn instruction_column(
         }
 
         label.set_text(&text(&data));
-        label.set_tooltip_text(Some(&format!(
-            "{}  {}\n{}\nSelect text to copy. Press Enter or double-click outside a text selection to toggle an instruction breakpoint",
-            data.instruction.address,
-            data.instruction.text,
-            instruction_symbol_full(&data.instruction),
-        )));
     });
 
     components::table_column(title, width, factory)

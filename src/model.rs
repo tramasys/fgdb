@@ -22,6 +22,7 @@ pub(crate) use execution::CommandOperationId;
 pub(crate) mod printers;
 pub(crate) mod processes;
 pub(crate) mod replay;
+pub(crate) mod stack;
 mod state;
 mod stopped;
 #[cfg(test)]
@@ -164,6 +165,9 @@ struct StoppedState {
     latest_stack_generation: Cell<Option<u64>>,
     stack_memory_refresh_generation: Cell<Option<u64>>,
     stack_details_generation: Cell<Option<u64>>,
+    stack_details_count: Cell<usize>,
+    stack_details_active: Cell<bool>,
+    stack_paging: RefCell<Option<stack::StackPaging>>,
     memory_regions: RefCell<Vec<MemoryRegion>>,
     memory_regions_generation: Cell<Option<u64>>,
     memory_watches_refresh_generation: Cell<Option<u64>>,
@@ -186,6 +190,9 @@ impl StoppedState {
             latest_stack_generation: Cell::new(None),
             stack_memory_refresh_generation: Cell::new(None),
             stack_details_generation: Cell::new(None),
+            stack_details_count: Cell::new(0),
+            stack_details_active: Cell::new(false),
+            stack_paging: RefCell::new(None),
             memory_regions: RefCell::new(Vec::new()),
             memory_regions_generation: Cell::new(None),
             memory_watches_refresh_generation: Cell::new(None),

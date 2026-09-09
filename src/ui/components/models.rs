@@ -2,6 +2,9 @@
 
 use gtk::{gio, glib, prelude::*};
 
+mod ordered;
+pub(in crate::ui) use ordered::replace_sorted_boxed_store_if_changed;
+
 pub(in crate::ui) fn replace_boxed_store<T: 'static>(
     store: &gio::ListStore,
     values: impl IntoIterator<Item = T>,
@@ -103,7 +106,7 @@ fn boxed_store_item_equals<T: PartialEq + 'static>(
     store
         .item(u32::try_from(index).unwrap_or(u32::MAX))
         .and_downcast::<glib::BoxedAnyObject>()
-        .is_some_and(|item| *item.borrow::<T>() == *value)
+        .is_some_and(|item| item.try_borrow::<T>().is_ok_and(|item| *item == *value))
 }
 
 #[cfg(test)]

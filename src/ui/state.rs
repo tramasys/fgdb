@@ -43,6 +43,7 @@ impl Ui {
         let variable_locations = variables::locations::Locations::new(
             config.preferences.variable_locations,
             Rc::clone(&target_pointer_bits),
+            Rc::clone(&model),
         );
 
         let inspector_bindings = InspectorBindings {
@@ -259,6 +260,7 @@ impl Ui {
             stack_store: workspace.stack_store,
             displayed_stack: Rc::new(RefCell::new(Vec::new())),
             stack_empty: workspace.stack_empty,
+            stack_paging: workspace.stack_paging,
             breakpoints_list: workspace.breakpoints_list,
             stop_point_filter: workspace.stop_point_filter,
             add_breakpoint_button: workspace.add_breakpoint_button,
@@ -1241,6 +1243,7 @@ impl Ui {
             }));
 
         self.memory_search.update_state(self);
+        self.update_stack_paging();
         self.update_module_control_sensitivity();
         let ready = self.model.execution().ready;
         let debugger_state = self.model.execution().state;

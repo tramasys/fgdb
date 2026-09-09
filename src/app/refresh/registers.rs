@@ -1,4 +1,8 @@
 use super::*;
+use pointers::reads;
+
+#[cfg(test)]
+mod tests;
 
 pub(in crate::app) struct RegisterRefresh {
     ui: Weak<Ui>,
@@ -9,6 +13,7 @@ pub(in crate::app) struct RegisterRefresh {
     architecture: TargetArchitecture,
     endian: TargetEndian,
     pointer_bits: u32,
+    reads: reads::Reads,
 }
 
 pub(in crate::app) fn refresh_registers(
@@ -231,6 +236,7 @@ pub(in crate::app) fn enrich_registers(
         architecture,
         endian,
         pointer_bits,
+        reads: reads::Reads::default(),
     }));
 
     schedule_register_chains(client, refresh);
@@ -272,12 +278,34 @@ pub(in crate::app) fn request_register_chain(
         return;
     }
 
-    let name = refresh.borrow().registers[register_index].name.clone();
-    let expression = pointer_expression(&name, depth);
+    let position = reads::Position {
+        index: register_index,
+        depth,
+    };
+    let address = (depth > 0).then(|| {
+        let state = refresh.borrow();
+        state.registers[register_index]
+            .pointer_chain
+            .last()
+            .and_then(|value| pointer_address(value))
+            .expect("a continued register chain has a numeric address")
+    });
 
-    let command = format!(
-        "-data-evaluate-expression {}",
-        crate::debugger::quote(&expression)
+    if let Some(address) = address {
+        let lookup = refresh.borrow_mut().reads.request(address, position);
+        match lookup {
+            reads::Lookup::Pending => return,
+            reads::Lookup::Ready(value) => {
+                apply_register_chain_value(client, &refresh, position, value);
+                return;
+            }
+            reads::Lookup::Start => {}
+        }
+    }
+
+    let command = address.map_or_else(
+        || pointers::register_command(&refresh.borrow().registers[register_index].name, 0),
+        pointers::read_command,
     );
 
     let requests = refresh.borrow().requests.clone();
@@ -286,7 +314,7 @@ pub(in crate::app) fn request_register_chain(
 
     if requests
         .frame(&command)
-        .request(move |client, record| {
+        .enrich(move |client, record| {
             if record.class == "superseded" {
                 return;
             }
@@ -296,63 +324,82 @@ pub(in crate::app) fn request_register_chain(
                 .then(|| crate::debugger::evaluated_value(&record))
                 .flatten();
 
-            let mut continue_chain = false;
-            let mut string_address = None;
-
-            if let Some(value) = value
-                && let Some(address) = pointer_address(&value)
-            {
-                let mut state = refresh_for_handler.borrow_mut();
-                let endian = state.endian;
-                let architecture = state.architecture;
-                let pointer_bits = state.pointer_bits;
-                let register = &mut state.registers[register_index];
-                let chain = &mut register.pointer_chain;
-
-                if chain
-                    .iter()
-                    .filter_map(|previous| pointer_address(previous))
-                    .any(|previous| previous == address)
-                {
-                    chain.push(String::from("[loop detected]"));
-                } else {
-                    chain.push(value);
-
-                    string_address = register_string_address(
-                        register,
-                        address,
-                        depth,
-                        endian,
-                        pointer_bits,
-                        architecture,
-                    );
-
-                    continue_chain =
-                        string_address.is_none() && address != 0 && depth < MAX_POINTER_CHAIN_DEPTH;
-                }
-            }
-
-            if let Some(address) = string_address {
-                request_register_string(
-                    client,
-                    Rc::clone(&refresh_for_handler),
-                    register_index,
-                    address,
-                );
-            } else if continue_chain {
-                request_register_chain(
-                    client,
-                    Rc::clone(&refresh_for_handler),
-                    register_index,
-                    depth + 1,
-                );
-            } else {
-                complete_register_sequence(client, &refresh_for_handler);
-            }
+            register_chain_reply(client, &refresh_for_handler, address, position, value);
         })
         .is_err()
     {
-        complete_register_sequence(client, &refresh);
+        register_chain_reply(client, &refresh, address, position, None);
+    }
+}
+
+fn register_chain_reply(
+    client: &MiClient,
+    refresh: &Rc<RefCell<RegisterRefresh>>,
+    address: Option<u64>,
+    position: reads::Position,
+    value: Option<String>,
+) {
+    if let Some(address) = address {
+        let waiters = refresh.borrow_mut().reads.complete(address, value.clone());
+        for position in waiters {
+            apply_register_chain_value(client, refresh, position, value.clone());
+        }
+    } else {
+        apply_register_chain_value(client, refresh, position, value);
+    }
+}
+
+fn apply_register_chain_value(
+    client: &MiClient,
+    refresh: &Rc<RefCell<RegisterRefresh>>,
+    position: reads::Position,
+    value: Option<String>,
+) {
+    if !refresh.borrow().requests.is_current() {
+        return;
+    }
+
+    let reads::Position { index, depth } = position;
+    let mut continue_chain = false;
+    let mut string_address = None;
+
+    if let Some(value) = value
+        && let Some(address) = pointer_address(&value)
+    {
+        let mut state = refresh.borrow_mut();
+        let endian = state.endian;
+        let architecture = state.architecture;
+        let pointer_bits = state.pointer_bits;
+        let register = &mut state.registers[index];
+        let chain = &mut register.pointer_chain;
+
+        if chain
+            .iter()
+            .filter_map(|previous| pointer_address(previous))
+            .any(|previous| previous == address)
+        {
+            chain.push(String::from("[loop detected]"));
+        } else {
+            chain.push(value);
+            string_address = register_string_address(
+                register,
+                address,
+                depth,
+                endian,
+                pointer_bits,
+                architecture,
+            );
+            continue_chain =
+                string_address.is_none() && address != 0 && depth < MAX_POINTER_CHAIN_DEPTH;
+        }
+    }
+
+    if let Some(address) = string_address {
+        request_register_string(client, Rc::clone(refresh), index, address);
+    } else if continue_chain {
+        request_register_chain(client, Rc::clone(refresh), index, depth + 1);
+    } else {
+        complete_register_sequence(client, refresh);
     }
 }
 
@@ -394,12 +441,7 @@ pub(in crate::app) fn request_register_string(
         return;
     }
 
-    let expression = format!("(char*)0x{address:x}");
-
-    let command = format!(
-        "-data-evaluate-expression {}",
-        crate::debugger::quote(&expression)
-    );
+    let command = pointers::string_command(address);
 
     let requests = refresh.borrow().requests.clone();
 
@@ -438,8 +480,16 @@ pub(in crate::app) fn complete_register_sequence(
 ) {
     let completed = {
         let mut state = refresh.borrow_mut();
+        if !state.requests.is_current() {
+            return;
+        }
+
         state.active = state.active.saturating_sub(1);
         if state.active == 0 && state.pending.is_empty() {
+            if state.ui.upgrade().is_none() {
+                return;
+            }
+
             let ui = state.ui.clone();
             let generation = state.requests.generation();
             Some((ui, generation, std::mem::take(&mut state.registers)))
@@ -454,17 +504,4 @@ pub(in crate::app) fn complete_register_sequence(
     } else {
         schedule_register_chains(client, Rc::clone(refresh));
     }
-}
-
-pub(in crate::app) fn pointer_expression(register: &str, depth: usize) -> String {
-    let mut expression = format!("${register}");
-    if depth == 0 {
-        return format!("(void*)({expression})");
-    }
-
-    for _ in 0..depth {
-        expression = format!("*(void**)({expression})");
-    }
-
-    expression
 }

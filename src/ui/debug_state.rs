@@ -46,7 +46,7 @@ fn center_scroll_adjustment(scrolled: &gtk::ScrolledWindow, position: u32, item_
     adjustment.set_value((row_center - page_size / 2.0).clamp(lower, maximum));
 }
 
-fn preserve_stack_render_details(entries: &mut [StackEntry], previous: &[StackEntry]) {
+pub(super) fn preserve_stack_render_details(entries: &mut [StackEntry], previous: &[StackEntry]) {
     if previous.is_empty() || entries.iter().all(|entry| !entry.pointer_chain.is_empty()) {
         return;
     }
@@ -770,6 +770,7 @@ impl Ui {
     }
 
     fn render_stack(&self, entries: Cow<'_, [StackEntry]>) {
+        self.update_stack_paging();
         if self.displayed_stack.borrow().as_slice() != entries.as_ref() {
             replace_boxed_store_if_changed(&self.stack_store, entries.iter().cloned());
             self.displayed_stack.replace(entries.into_owned());
@@ -803,6 +804,7 @@ impl Ui {
         self.stack_store.remove_all();
         self.stack_empty.set_text(reason);
         self.stack_empty.set_visible(true);
+        self.update_stack_paging();
     }
 
     pub fn show_memory_regions_for_refresh(&self, generation: u64, regions: &[MemoryRegion]) {
@@ -815,6 +817,7 @@ impl Ui {
         }
 
         self.memory_regions_empty.set_visible(regions.is_empty());
+        self.variable_locations.schedule();
     }
 
     pub(super) fn connect_memory_controls(&self) {

@@ -1,6 +1,13 @@
 use super::*;
 
-const STACK_WORD_COUNT: usize = 32;
+mod pages;
+mod progress;
+use pointers::reads;
+
+#[cfg(test)]
+mod tests;
+
+pub(in crate::app) use pages::{connect_stack_paging, request_stack_memory};
 
 pub(in crate::app) struct StackRefresh {
     ui: Weak<Ui>,
@@ -11,128 +18,20 @@ pub(in crate::app) struct StackRefresh {
     active: usize,
     word_size: usize,
     endian: TargetEndian,
-}
-
-pub(in crate::app) fn request_stack_memory(
-    ui: Weak<Ui>,
-    requests: StopRequests,
-    registers: Vec<Register>,
-    frames: Vec<StackFrame>,
-    regions: Vec<MemoryRegion>,
-) {
-    let generation = requests.generation();
-    if !requests.is_current() {
-        return;
-    }
-
-    let Some((endian, pointer_bits)) = ui.upgrade().and_then(|ui| {
-        ui.target_endian()
-            .map(|endian| (endian, ui.target_pointer_bits()))
-    }) else {
-        if let Some(ui) = ui.upgrade() {
-            ui.show_stack_unavailable_for_refresh(
-                generation,
-                "Stack decoding is unavailable because the target byte order could not be determined",
-            );
-        }
-
-        return;
-    };
-    let architecture = ui
-        .upgrade()
-        .map_or(TargetArchitecture::Unknown, |ui| ui.target_architecture());
-    let architecture = if architecture == TargetArchitecture::Unknown {
-        let bits = ui.upgrade().map(|ui| ui.target_pointer_bits());
-        TargetArchitecture::infer_from_register_names_with_bits(
-            registers.iter().map(|register| register.name.as_str()),
-            bits,
-        )
-    } else {
-        architecture
-    };
-    let Some(stack_register) =
-        architecture.stack_pointer(registers.iter().map(|register| register.name.as_str()))
-    else {
-        if let Some(ui) = ui.upgrade() {
-            ui.show_stack_unavailable_for_refresh(
-                generation,
-                "Stack decoding is unavailable because no supported stack-pointer register was identified",
-            );
-        }
-
-        return;
-    };
-    let word_size = usize::try_from(pointer_bits / 8).unwrap_or(8).clamp(4, 8);
-    let command = format!(
-        "-data-read-memory-bytes ${stack_register} {}",
-        word_size * STACK_WORD_COUNT
-    );
-    let ui_for_request = ui.clone();
-
-    let requests_for_response = requests.clone();
-    if requests
-        .frame(&command)
-        .request(move |client, record| {
-            if record.class == "superseded" {
-                return;
-            }
-
-            let Some(memory) = crate::debugger::memory_block(&record) else {
-                if let Some(ui) = ui.upgrade() {
-                    ui.show_stack_unavailable_for_refresh(
-                        generation,
-                        record
-                            .error_message()
-                            .unwrap_or("GDB could not read memory at the stack pointer"),
-                    );
-                }
-
-                return;
-            };
-            let entries = build_stack_entries(
-                &memory,
-                word_size,
-                endian,
-                architecture,
-                &registers,
-                &frames,
-                &regions,
-            );
-            if let Some(ui) = ui.upgrade() {
-                ui.show_stack_for_refresh(generation, &entries);
-            }
-
-            enrich_stack(
-                ui,
-                client,
-                requests_for_response,
-                entries,
-                stack_register,
-                word_size,
-                endian,
-            );
-        })
-        .is_err()
-        && let Some(ui) = ui_for_request.upgrade()
-    {
-        ui.show_stack_unavailable_for_refresh(
-            generation,
-            "The MI channel could not issue the stack-memory request",
-        );
-    }
+    progress: progress::Progress,
+    reads: reads::Reads,
 }
 
 pub(in crate::app) fn enrich_stack(
     ui: Weak<Ui>,
     client: &MiClient,
     requests: StopRequests,
-    entries: Vec<StackEntry>,
     stack_register: &'static str,
     word_size: usize,
     endian: TargetEndian,
 ) {
     let generation = requests.generation();
-    if entries.is_empty() || !requests.is_current() {
+    if !requests.is_current() {
         return;
     }
 
@@ -143,20 +42,30 @@ pub(in crate::app) fn enrich_stack(
         return;
     }
 
-    let indices = entries
-        .iter()
-        .enumerate()
-        .filter(|(_, entry)| {
-            pointer_address(&entry.value).is_some_and(|value| value != 0)
-                && (entry.region.is_some()
-                    || !entry.value_registers.is_empty()
-                    || entry.return_frame.is_some())
-        })
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    if indices.is_empty() || !current_ui.model.claim_stack_details(generation) {
-        return;
-    }
+    // Only one bounded enrichment batch is active, even when scrolling queues
+    // another memory page. Already attempted words are never re-requested.
+    let (entries, indices) = loop {
+        let Some(entries) = current_ui.model.claim_stack_details(generation) else {
+            return;
+        };
+        let indices = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                pointer_address(&entry.value).is_some_and(|value| value != 0)
+                    && (entry.region.is_some()
+                        || !entry.value_registers.is_empty()
+                        || entry.return_frame.is_some())
+            })
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if !indices.is_empty() {
+            break (entries, indices);
+        }
+
+        current_ui.show_stack_details(generation, &entries);
+        current_ui.model.complete_stack_details(generation);
+    };
 
     drop(current_ui);
     let refresh = Rc::new(RefCell::new(StackRefresh {
@@ -168,6 +77,8 @@ pub(in crate::app) fn enrich_stack(
         active: 0,
         word_size,
         endian,
+        progress: progress::Progress::default(),
+        reads: reads::Reads::default(),
     }));
     schedule_stack_chains(client, refresh);
 }
@@ -184,13 +95,13 @@ fn schedule_stack_chains(client: &MiClient, refresh: Rc<RefCell<StackRefresh>>) 
                     state.active += 1;
                 }
 
-                next.map(|index| (index, state.stack_register))
+                next
             }
         };
-        let Some((index, stack_register)) = next else {
+        let Some(index) = next else {
             return;
         };
-        request_stack_chain(client, Rc::clone(&refresh), index, stack_register, 0);
+        request_stack_chain(client, Rc::clone(&refresh), index, 0);
     }
 }
 
@@ -198,25 +109,52 @@ pub(in crate::app) fn request_stack_chain(
     client: &MiClient,
     refresh: Rc<RefCell<StackRefresh>>,
     entry_index: usize,
-    stack_register: &'static str,
     depth: usize,
 ) {
     if !refresh.borrow().requests.is_current() {
         return;
     }
 
-    let offset = refresh.borrow().entries[entry_index].offset;
-    let expression = stack_pointer_expression(stack_register, offset, depth);
-    let command = format!(
-        "-data-evaluate-expression {}",
-        crate::debugger::quote(&expression)
-    );
-    let requests = refresh.borrow().requests.clone();
+    let (requests, address, cached) = {
+        let mut state = refresh.borrow_mut();
+        let entry = &state.entries[entry_index];
+        let address = if depth == 0 {
+            entry.address
+        } else {
+            // The preceding hop is already resolved. Re-evaluating the path
+            // from SP would reread every earlier word at each depth.
+            entry
+                .pointer_chain
+                .last()
+                .and_then(|value| pointer_address(value))
+                .expect("a continued chain has a decoded address")
+        };
+        let cached = state.reads.request(
+            address,
+            reads::Position {
+                index: entry_index,
+                depth,
+            },
+        );
+
+        (state.requests.clone(), address, cached)
+    };
+
+    match cached {
+        reads::Lookup::Pending => return,
+        reads::Lookup::Ready(value) => {
+            apply_stack_chain_value(client, refresh, entry_index, depth, value);
+            return;
+        }
+        reads::Lookup::Start => {}
+    }
+
+    let command = pointers::read_command(address);
 
     let refresh_for_handler = Rc::clone(&refresh);
     if requests
         .frame(&command)
-        .request(move |client, record| {
+        .enrich(move |client, record| {
             if record.class == "superseded" {
                 return;
             }
@@ -225,52 +163,74 @@ pub(in crate::app) fn request_stack_chain(
                 .is_done()
                 .then(|| crate::debugger::evaluated_value(&record))
                 .flatten();
-            let mut continue_chain = false;
-            let mut string_address = None;
-            if let Some(value) = value
-                && let Some(address) = pointer_address(&value)
-            {
-                let mut state = refresh_for_handler.borrow_mut();
-                let endian = state.endian;
-                let word_size = state.word_size;
-                let entry = &mut state.entries[entry_index];
-                let chain = &mut entry.pointer_chain;
-                if chain
-                    .iter()
-                    .filter_map(|previous| pointer_address(previous))
-                    .any(|previous| previous == address)
-                {
-                    chain.push(String::from("[loop detected]"));
-                } else {
-                    chain.push(value);
-                    string_address = stack_string_address(entry, address, depth, endian, word_size);
-                    continue_chain =
-                        string_address.is_none() && address != 0 && depth < MAX_POINTER_CHAIN_DEPTH;
-                }
-            }
-
-            if let Some(address) = string_address {
-                request_stack_string(
-                    client,
-                    Rc::clone(&refresh_for_handler),
-                    entry_index,
-                    address,
-                );
-            } else if continue_chain {
-                request_stack_chain(
-                    client,
-                    Rc::clone(&refresh_for_handler),
-                    entry_index,
-                    stack_register,
-                    depth + 1,
-                );
-            } else {
-                complete_stack_sequence(client, &refresh_for_handler);
-            }
+            complete_stack_read(client, &refresh_for_handler, address, value);
         })
         .is_err()
     {
-        complete_stack_sequence(client, &refresh);
+        complete_stack_read(client, &refresh, address, None);
+    }
+}
+
+fn complete_stack_read(
+    client: &MiClient,
+    refresh: &Rc<RefCell<StackRefresh>>,
+    address: u64,
+    value: Option<String>,
+) {
+    let waiters = refresh.borrow_mut().reads.complete(address, value.clone());
+
+    for position in waiters {
+        apply_stack_chain_value(
+            client,
+            Rc::clone(refresh),
+            position.index,
+            position.depth,
+            value.clone(),
+        );
+    }
+}
+
+fn apply_stack_chain_value(
+    client: &MiClient,
+    refresh: Rc<RefCell<StackRefresh>>,
+    entry_index: usize,
+    depth: usize,
+    value: Option<String>,
+) {
+    if !refresh.borrow().requests.is_current() {
+        return;
+    }
+
+    let mut continue_chain = false;
+    let mut string_address = None;
+    if let Some(value) = value
+        && let Some(address) = pointer_address(&value)
+    {
+        let mut state = refresh.borrow_mut();
+        let endian = state.endian;
+        let word_size = state.word_size;
+        let entry = &mut state.entries[entry_index];
+        let chain = &mut entry.pointer_chain;
+        if chain
+            .iter()
+            .filter_map(|previous| pointer_address(previous))
+            .any(|previous| previous == address)
+        {
+            chain.push(String::from("[loop detected]"));
+        } else {
+            chain.push(value);
+            string_address = stack_string_address(entry, address, depth, endian, word_size);
+            continue_chain =
+                string_address.is_none() && address != 0 && depth < MAX_POINTER_CHAIN_DEPTH;
+        }
+    }
+
+    if let Some(address) = string_address {
+        request_stack_string(client, refresh, entry_index, address);
+    } else if continue_chain {
+        request_stack_chain(client, refresh, entry_index, depth + 1);
+    } else {
+        complete_stack_sequence(client, &refresh, entry_index);
     }
 }
 
@@ -306,11 +266,7 @@ pub(in crate::app) fn request_stack_string(
         return;
     }
 
-    let expression = format!("(char*)0x{address:x}");
-    let command = format!(
-        "-data-evaluate-expression {}",
-        crate::debugger::quote(&expression)
-    );
+    let command = pointers::string_command(address);
     let requests = refresh.borrow().requests.clone();
     let refresh_for_handler = Rc::clone(&refresh);
 
@@ -334,66 +290,73 @@ pub(in crate::app) fn request_stack_string(
                 entry.memory_kind = MemoryKind::String;
             }
 
-            complete_stack_sequence(client, &refresh_for_handler);
+            complete_stack_sequence(client, &refresh_for_handler, entry_index);
         })
         .is_err()
     {
-        complete_stack_sequence(client, &refresh);
+        complete_stack_sequence(client, &refresh, entry_index);
     }
 }
 
 pub(in crate::app) fn complete_stack_sequence(
     client: &MiClient,
     refresh: &Rc<RefCell<StackRefresh>>,
+    entry_index: usize,
 ) {
     let completed = {
         let mut state = refresh.borrow_mut();
+        if !state.requests.is_current() {
+            return;
+        }
+
+        let endian = state.endian;
+        let word_size = state.word_size;
+        let entry = &mut state.entries[entry_index];
+
+        if entry
+            .pointer_chain
+            .iter()
+            .skip(1)
+            .filter_map(|value| pointer_address(value))
+            .any(|value| looks_like_string_word(value, endian, word_size))
+        {
+            entry.memory_kind = MemoryKind::String;
+        }
+
+        state.progress.completed(entry_index);
         state.active = state.active.saturating_sub(1);
 
         if state.active == 0 && state.pending.is_empty() {
-            let endian = state.endian;
-            let word_size = state.word_size;
-
-            for entry in &mut state.entries {
-                if entry
-                    .pointer_chain
-                    .iter()
-                    .skip(1)
-                    .filter_map(|value| pointer_address(value))
-                    .any(|value| looks_like_string_word(value, endian, word_size))
-                {
-                    entry.memory_kind = MemoryKind::String;
-                }
-            }
-
             let ui = state.ui.clone();
-            let generation = state.requests.generation();
-
-            Some((ui, generation, std::mem::take(&mut state.entries)))
+            state.progress.finish();
+            // No presentation work or subsequent pages survive a closed UI.
+            if ui.upgrade().is_none() {
+                return;
+            }
+            Some((
+                ui,
+                state.requests.clone(),
+                state.stack_register,
+                word_size,
+                endian,
+                std::mem::take(&mut state.entries),
+            ))
         } else {
             None
         }
     };
 
-    if let Some((ui, generation, entries)) = completed
-        && let Some(ui) = ui.upgrade()
-    {
-        ui.show_stack_for_refresh(generation, &entries);
+    if let Some((ui, requests, register, word_size, endian, entries)) = completed {
+        if let Some(current_ui) = ui.upgrade() {
+            current_ui.show_stack_details(requests.generation(), &entries);
+            current_ui
+                .model
+                .complete_stack_details(requests.generation());
+        }
+
+        enrich_stack(ui, client, requests, register, word_size, endian);
     } else {
         schedule_stack_chains(client, Rc::clone(refresh));
+        progress::schedule(refresh);
     }
-}
-
-pub(in crate::app) fn stack_pointer_expression(
-    register: &str,
-    offset: usize,
-    depth: usize,
-) -> String {
-    let mut expression = format!("*(void**)(${register}+0x{offset:x})");
-
-    for _ in 0..depth {
-        expression = format!("*(void**)({expression})");
-    }
-
-    expression
 }

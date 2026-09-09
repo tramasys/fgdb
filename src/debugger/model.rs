@@ -293,6 +293,8 @@ pub struct StackEntry {
     pub value_registers: Vec<String>,
     pub return_frame: Option<u32>,
     pub memory_kind: MemoryKind,
+    /// Mapping containing the stored value interpreted as an address, not the
+    /// mapping containing this stack word's own storage address.
     pub region: Option<String>,
 }
 

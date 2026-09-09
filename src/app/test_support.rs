@@ -11,6 +11,12 @@ use std::{
 
 pub(super) struct Debugger(Child);
 
+impl Debugger {
+    pub(super) fn pid(&self) -> u32 {
+        self.0.id()
+    }
+}
+
 impl Drop for Debugger {
     fn drop(&mut self) {
         let _ = self.0.kill();

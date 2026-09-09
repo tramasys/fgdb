@@ -196,8 +196,11 @@ fn debugger_table_dividers_resize_with_optional_instruction_columns() {
     let pointer_bits = Rc::new(Cell::new(64));
     let presentation =
         VariablePresentation::new(IntegerDisplay::Automatic, Rc::clone(&pointer_bits));
-    let locations =
-        crate::ui::variables::locations::Locations::new(false, Rc::clone(&pointer_bits));
+    let locations = crate::ui::variables::locations::Locations::new(
+        false,
+        Rc::clone(&pointer_bits),
+        Rc::new(crate::model::DebuggerModel::new(None)),
+    );
 
     let (locals, _, _) = views::build_locals_view(
         &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::Locals),
@@ -264,4 +267,91 @@ fn debugger_table_dividers_resize_with_optional_instruction_columns() {
     }
 
     window.close();
+}
+
+#[test]
+#[ignore = "requires a GTK display, run separately from other GTK tests"]
+fn moving_instruction_windows_reuse_rows_and_release_cells() {
+    use crate::ui::{ColumnLayouts, InstructionRowData, TableId, views};
+    use std::cell::RefCell;
+
+    gtk::init().unwrap();
+    Theme::graphite().install();
+    let (view, store, selection, _) =
+        views::build_instruction_view(&ColumnLayouts::default().table(TableId::Instructions));
+
+    let binds = Rc::new(Cell::new(0));
+    let items = Rc::new(RefCell::new(Vec::<glib::WeakRef<gtk::ListItem>>::new()));
+
+    for column in columns(&view) {
+        let factory = column
+            .factory()
+            .and_downcast::<gtk::SignalListItemFactory>()
+            .unwrap();
+        let binds = Rc::clone(&binds);
+        factory.connect_bind(move |_, _| binds.set(binds.get() + 1));
+        let items = Rc::clone(&items);
+        factory.connect_setup(move |_, object| {
+            items
+                .borrow_mut()
+                .push(object.downcast_ref::<gtk::ListItem>().unwrap().downgrade());
+        });
+    }
+
+    let rows = |range: std::ops::Range<u64>, pc| {
+        range.map(move |index| InstructionRowData {
+            instruction: crate::debugger::Instruction {
+                address: format!("0x{:016x}", 0x1000 + index),
+                function: String::from(
+                    "rust_variable_viewer_target::rust_variable_viewer_checkpoint",
+                ),
+                offset: index.to_string(),
+                opcodes: Some(String::from("90")),
+                text: String::from("nop"),
+                source: None,
+            },
+            current: index == pc,
+            pointer_bits: 64,
+            source_text: None,
+        })
+    };
+
+    let key = |row: &InstructionRowData| row.instruction.address.clone();
+    super::super::replace_sorted_boxed_store_if_changed(&store, rows(0..440, 32), key);
+    let (window, scroll) = present(&view, 1200);
+    let initial_binds = binds.replace(0);
+    assert!(initial_binds > 0);
+    selection.set_selected(48);
+    let selected = selection.selected_item().unwrap();
+    let column = columns(&view).remove(2);
+    column.set_fixed_width(420);
+    settle();
+    binds.set(0);
+
+    super::super::replace_sorted_boxed_store_if_changed(&store, rows(16..456, 33), key);
+    settle();
+    assert_eq!(selection.selected_item().as_ref(), Some(&selected));
+    assert_eq!(selection.selected(), 32);
+    assert_eq!(column.fixed_width(), 420);
+    assert!(
+        binds.get() < initial_binds,
+        "{} >= {initial_binds}",
+        binds.get()
+    );
+
+    let current = store
+        .item(17)
+        .and_downcast::<glib::BoxedAnyObject>()
+        .unwrap();
+
+    assert!(current.borrow::<InstructionRowData>().current);
+    let weak_view = view.downgrade();
+    scroll.set_child(gtk::Widget::NONE);
+    window.close();
+    drop(view);
+    drop(scroll);
+    drop(window);
+    settle();
+    assert!(weak_view.upgrade().is_none());
+    assert!(items.borrow().iter().all(|item| item.upgrade().is_none()));
 }

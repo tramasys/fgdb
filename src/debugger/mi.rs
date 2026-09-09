@@ -465,9 +465,12 @@ impl MiClient {
         let pending_count = self.pending.borrow().len();
 
         let schedule = RequestSchedule::from_pending(self.pending.borrow().iter());
-        let inspection_count = schedule.pending_count(CommandClass::Inspection);
+        let inspection_count = schedule.pending_count(CommandClass::Inspection)
+            + schedule.pending_count(CommandClass::Enrichment);
 
-        if class == CommandClass::Inspection && inspection_count >= MAX_INSPECTION_REQUESTS {
+        if matches!(class, CommandClass::Inspection | CommandClass::Enrichment)
+            && inspection_count >= MAX_INSPECTION_REQUESTS
+        {
             let message = format!(
                 "inspection queue reached its {MAX_INSPECTION_REQUESTS}-request budget. Retry after the current refresh"
             );

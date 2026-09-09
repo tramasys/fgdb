@@ -5,6 +5,7 @@ use crate::debugger::{
     Variable,
     location::{BATCH_LIMIT, LocationReply, ValueLocation},
 };
+use crate::model::DebuggerModel;
 use gtk::{glib, prelude::*};
 use std::{
     cell::{Cell, RefCell},
@@ -20,11 +21,13 @@ const CACHE_LIMIT: usize = 1024;
 pub(in crate::ui) struct Locations {
     enabled: Cell<bool>,
     pointer_bits: Rc<Cell<u32>>,
+    model: Rc<DebuggerModel>,
     context: Cell<Option<(u64, u64)>>,
     epoch: Cell<u64>,
     active: Cell<bool>,
     scheduled: Cell<bool>,
     cache: RefCell<HashMap<Variable, ValueLocation>>,
+    retained: RefCell<retained::Retained>,
     wanted: RefCell<HashSet<Variable>>,
     items: RefCell<Vec<glib::WeakRef<gtk::ListItem>>>,
     columns: RefCell<Vec<glib::WeakRef<gtk::ColumnViewColumn>>>,
@@ -35,18 +38,26 @@ pub(in crate::ui) struct Locations {
 }
 
 mod menu;
+mod presentation;
+mod retained;
 use menu::LocationMenu;
 
 impl Locations {
-    pub(in crate::ui) fn new(enabled: bool, pointer_bits: Rc<Cell<u32>>) -> Rc<Self> {
+    pub(in crate::ui) fn new(
+        enabled: bool,
+        pointer_bits: Rc<Cell<u32>>,
+        model: Rc<DebuggerModel>,
+    ) -> Rc<Self> {
         Rc::new(Self {
             enabled: Cell::new(enabled),
             pointer_bits,
+            model,
             context: Cell::new(None),
             epoch: Cell::new(0),
             active: Cell::new(false),
             scheduled: Cell::new(false),
             cache: RefCell::default(),
+            retained: RefCell::default(),
             wanted: RefCell::default(),
             items: RefCell::default(),
             columns: RefCell::default(),
@@ -143,6 +154,24 @@ impl Locations {
         });
     }
 
+    pub(in crate::ui) fn bind(self: &Rc<Self>, item: &gtk::ListItem) {
+        let Some(label) = item.child().and_downcast::<gtk::Label>() else {
+            return;
+        };
+
+        crate::ui::views::clear_label_selection(&label);
+        if let Some(variable) = item_variable(item) {
+            self.render(&label, &variable, self.can_inspect(&variable));
+        } else {
+            label.set_text("");
+            label.set_tooltip_text(None);
+            crate::ui::views::reset_semantic_css(&label);
+            label.add_css_class("memory-none");
+        }
+
+        self.schedule();
+    }
+
     pub(in crate::ui) fn set_enabled(self: &Rc<Self>, enabled: bool) {
         if self.enabled.replace(enabled) == enabled {
             return;
@@ -164,6 +193,11 @@ impl Locations {
     }
 
     pub(in crate::ui) fn set_context(self: &Rc<Self>, context: Option<(u64, u64)>) {
+        self.retained.borrow_mut().context(
+            context.and_then(|(generation, _)| self.model.stop_context(generation)),
+            self.model.symbols.revision(),
+        );
+
         if self.context.replace(context) != context {
             self.cancel();
             self.cache.borrow_mut().clear();
@@ -218,15 +252,42 @@ impl Locations {
             .then(|| self.cache.borrow().get(variable).cloned())
             .flatten();
 
-        let (text, tooltip) = presentation(result.as_ref(), current, self.pointer_bits.get());
+        // Borrow the authoritative snapshot only while formatting. A mapping
+        // refresh can arrive after the location reply without requiring another
+        // GDB lookup or copying the mappings into this presentation cache.
+        let mut presentation = {
+            let regions = self.model.memory_regions();
+            let regions = self
+                .context
+                .get()
+                .filter(|(generation, _)| self.model.memory_regions_are_current(*generation))
+                .map(|_| regions.as_slice());
 
-        if label.text().as_str() != text {
-            crate::ui::views::clear_label_selection(label);
-            label.set_text(&text);
+            presentation::format(result.as_ref(), current, self.pointer_bits.get(), regions)
+        };
+
+        if result.is_some() {
+            self.retained.borrow_mut().remember(variable, &presentation);
+        } else if let Some(previous) = self.retained.borrow().get(variable) {
+            // Keep refresh placeholders out of an already populated column.
+            // Only `cache` authorizes copy/inspect actions, never this text.
+            presentation = previous;
         }
 
-        if label.tooltip_text().as_deref() != Some(tooltip.as_str()) {
-            label.set_tooltip_text(Some(&tooltip));
+        if label.text().as_str() != presentation.text {
+            crate::ui::views::clear_label_selection(label);
+            label.set_text(&presentation.text);
+        }
+
+        if label.tooltip_text().as_deref() != Some(presentation.tooltip.as_str()) {
+            label.set_tooltip_text(Some(&presentation.tooltip));
+        }
+
+        let class = crate::ui::formatting::memory_kind_css(presentation.kind);
+
+        if !label.has_css_class(class) {
+            crate::ui::views::reset_semantic_css(label);
+            label.add_css_class(class);
         }
     }
 
@@ -246,24 +307,9 @@ impl Locations {
                     continue;
                 };
 
-                let Some(data) = item
-                    .item()
-                    .and_downcast::<gtk::TreeListRow>()
-                    .and_then(|row| row.item())
-                    .and_downcast::<glib::BoxedAnyObject>()
-                else {
+                let Some(variable) = item_variable(&item) else {
                     continue;
                 };
-
-                let node = data.borrow::<VariableNode>();
-
-                if node.placeholder {
-                    label.set_text("");
-                    continue;
-                }
-
-                let variable = node.variable.clone();
-                drop(node);
                 let current = self.can_inspect(&variable);
                 self.render(&label, &variable, current);
 
@@ -317,6 +363,7 @@ impl Locations {
                 .retain(|variable, _| wanted.contains(variable));
         }
 
+        self.retained.borrow_mut().prune(&wanted);
         self.wanted.replace(wanted);
 
         if self.active.get() {
@@ -399,6 +446,17 @@ impl Locations {
     }
 }
 
+fn item_variable(item: &gtk::ListItem) -> Option<Variable> {
+    let data = item
+        .item()
+        .and_downcast::<gtk::TreeListRow>()?
+        .item()
+        .and_downcast::<glib::BoxedAnyObject>()?;
+    let node = data.borrow::<VariableNode>();
+
+    (!node.placeholder).then(|| node.variable.clone())
+}
+
 fn scroller(widget: &gtk::Widget) -> Option<gtk::ScrolledWindow> {
     widget
         .ancestor(gtk::ScrolledWindow::static_type())
@@ -422,46 +480,6 @@ fn visible(label: &gtk::Label) -> bool {
         && bounds.y() < scroller.height() as f32
         && bounds.x() + bounds.width() > 0.0
         && bounds.y() + bounds.height() > 0.0
-}
-
-fn presentation(location: Option<&ValueLocation>, current: bool, bits: u32) -> (String, String) {
-    let (text, detail) = match location {
-        Some(ValueLocation::Memory {
-            address,
-            referenced,
-        }) => {
-            let width = (bits / 4).clamp(1, 16) as usize;
-            let text = format!(
-                "0x{address:0width$x}{}",
-                if *referenced { " (referent)" } else { "" }
-            );
-
-            let detail = if *referenced {
-                "Address of the referenced object, not storage for the reference itself"
-            } else {
-                "Storage address reported by GDB. For a pointer this is the pointer's own storage, not its target. Bitfields may share a storage unit"
-            };
-
-            return (text, detail.into());
-        }
-        Some(ValueLocation::NonAddressable) => (
-            "No address",
-            "GDB reports no addressable storage. This does not identify a register. Computed and synthetic values may also have no address",
-        ),
-        Some(ValueLocation::OptimizedOut) => (
-            "Optimized out",
-            "The compiler optimized out this value or part of it",
-        ),
-        Some(ValueLocation::Unavailable) => (
-            "Unavailable",
-            "GDB cannot access the target state needed to locate this value",
-        ),
-        Some(ValueLocation::Unknown(detail)) => return ("Not resolved".into(), detail.clone()),
-        None if current => ("…", "Resolving storage at the current stop"),
-        None => ("—", "A current paused value is required"),
-    };
-
-    (text.into(), detail.into())
 }
 
 impl crate::ui::Ui {

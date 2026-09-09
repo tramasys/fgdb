@@ -81,6 +81,9 @@ impl DebuggerModel {
             && !self.stopped.latest_stack.borrow().is_empty()
         {
             self.stopped.stack_details_generation.get() != Some(generation)
+                || (!self.stopped.stack_details_active.get()
+                    && self.stopped.stack_details_count.get()
+                        < self.stopped.latest_stack.borrow().len())
         } else {
             self.stopped.stack_memory_refresh_generation.get() != Some(generation)
         }
@@ -96,20 +99,41 @@ impl DebuggerModel {
             && self.stopped.tls_runtime_refresh_generation.get() != Some(generation)
     }
 
-    pub(crate) fn stack_for_details(&self, generation: u64) -> Option<Vec<StackEntry>> {
-        (self.is_stop_refresh_current(generation)
-            && self.stopped.latest_stack_generation.get() == Some(generation))
-        .then(|| self.stopped.latest_stack.borrow().clone())
-        .filter(|entries| !entries.is_empty())
+    pub(crate) fn has_stack_for_details(&self, generation: u64) -> bool {
+        self.is_stop_refresh_current(generation)
+            && self.stopped.latest_stack_generation.get() == Some(generation)
+            && !self.stopped.latest_stack.borrow().is_empty()
     }
 
-    pub(crate) fn claim_stack_details(&self, generation: u64) -> bool {
-        self.is_stop_refresh_current(generation)
-            && self
-                .stopped
-                .stack_details_generation
-                .replace(Some(generation))
-                != Some(generation)
+    pub(crate) fn claim_stack_details(&self, generation: u64) -> Option<Vec<StackEntry>> {
+        if !self.has_stack_for_details(generation) {
+            return None;
+        }
+
+        if self
+            .stopped
+            .stack_details_generation
+            .replace(Some(generation))
+            != Some(generation)
+        {
+            self.stopped.stack_details_count.set(0);
+            self.stopped.stack_details_active.set(false);
+        }
+
+        if self.stopped.stack_details_active.get() {
+            return None;
+        }
+
+        let entries = self.stopped.latest_stack.borrow();
+        let start = self.stopped.stack_details_count.get();
+        let end = (start + stack::STACK_PAGE_WORDS).min(entries.len());
+        if start >= end {
+            return None;
+        }
+
+        self.stopped.stack_details_count.set(end);
+        self.stopped.stack_details_active.set(true);
+        Some(entries[start..end].to_vec())
     }
 
     pub(crate) fn claim_stack_memory_refresh(&self, generation: u64) -> bool {
@@ -141,6 +165,7 @@ impl DebuggerModel {
 
     pub(crate) fn start_stop_refresh(&self) -> u64 {
         self.stopped.active_stop_context.borrow_mut().take();
+        self.stopped.stack_paging.borrow_mut().take();
         let generation = self.stopped.stop_refresh_generation.get().wrapping_add(1);
         self.stopped.stop_refresh_generation.set(generation);
         let latest = self.stopped.latest_registers.borrow();
@@ -235,6 +260,9 @@ impl DebuggerModel {
             return false;
         }
 
+        self.stopped.stack_paging.borrow_mut().take();
+        self.stopped.stack_details_count.set(0);
+        self.stopped.stack_details_active.set(false);
         let mut latest = self.stopped.latest_stack.borrow_mut();
 
         if latest.as_slice() != entries {

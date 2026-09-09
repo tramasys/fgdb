@@ -9,6 +9,8 @@ impl Ui {
         architecture: Option<&str>,
         mixed: bool,
     ) {
+        let render_started = std::time::Instant::now();
+
         if let Some(description) = architecture {
             let detected = TargetArchitecture::from_gdb_description(description);
 
@@ -87,6 +89,7 @@ impl Ui {
             self.instruction_arguments.set_visible(false);
             self.instruction_memory.set_visible(false);
             self.update_control_sensitivity();
+            self.record_ui_render_duration("instruction pane", render_started);
             return;
         }
 
@@ -134,7 +137,10 @@ impl Ui {
             })
             .collect::<Vec<_>>();
 
-        replace_boxed_store_if_changed(&self.instructions_store, rows);
+        components::replace_sorted_boxed_store_if_changed(&self.instructions_store, rows, |row| {
+            hex_value(&row.instruction.address)
+        });
+
         let selected = u32::try_from(selected).unwrap_or(0);
         let selection_changed = self.instructions_selection.selected() != selected;
 
@@ -187,6 +193,7 @@ impl Ui {
         self.update_disassembly_selection();
         self.update_instruction_insight();
         self.update_control_sensitivity();
+        self.record_ui_render_duration("instruction pane", render_started);
     }
 
     pub(super) fn center_instruction_row(&self, position: u32, item_count: u32) {

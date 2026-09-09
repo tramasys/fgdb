@@ -25,6 +25,7 @@ mod replay;
 mod session;
 mod settings;
 mod simd;
+mod stack_view;
 mod state;
 mod syscall_view;
 mod threads;
@@ -947,7 +948,7 @@ struct MiscView {
     in_flight: Rc<Cell<bool>>,
     needs_refresh: Rc<Cell<bool>>,
     pages: gtk::Stack,
-    cfg: CfgView,
+    cfg: Rc<CfgView>,
     syscalls: syscall_view::SyscallView,
     allocator_requested: Rc<Cell<bool>>,
     allocator_probe_fresh: Rc<Cell<bool>>,
@@ -1404,6 +1405,7 @@ pub struct Ui {
     stack_store: gio::ListStore,
     displayed_stack: Rc<RefCell<Vec<StackEntry>>>,
     stack_empty: gtk::Label,
+    stack_paging: stack_view::Paging,
     breakpoints_list: gtk::Box,
     stop_point_filter: StopPointFilterControls,
     add_breakpoint_button: gtk::Button,
@@ -1585,6 +1587,7 @@ struct Workspace {
     registers_empty: gtk::Label,
     stack_store: gio::ListStore,
     stack_empty: gtk::Label,
+    stack_paging: stack_view::Paging,
     breakpoints_list: gtk::Box,
     stop_point_filter: StopPointFilterControls,
     add_breakpoint_button: gtk::Button,
@@ -1648,6 +1651,7 @@ struct Inspector {
     registers_empty: gtk::Label,
     stack_store: gio::ListStore,
     stack_empty: gtk::Label,
+    stack_paging: stack_view::Paging,
     breakpoints_list: gtk::Box,
     stop_point_filter: StopPointFilterControls,
     add_breakpoint_button: gtk::Button,

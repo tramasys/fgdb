@@ -29,14 +29,18 @@ pub(crate) enum CommandClass {
     #[default]
     Control,
     Inspection,
+    /// Bounded memory and pointer detail reads, behind initial values and
+    /// interactive inspection but ahead of supplemental background work.
+    Enrichment,
     Background,
 }
 
 impl CommandClass {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Execution,
         Self::Control,
         Self::Inspection,
+        Self::Enrichment,
         Self::Background,
     ];
 
@@ -44,7 +48,7 @@ impl CommandClass {
         match self {
             Self::Execution => usize::MAX,
             Self::Control => MAX_ACTIVE_CONTROL_REQUESTS,
-            Self::Inspection => MAX_ACTIVE_INSPECTION_REQUESTS,
+            Self::Inspection | Self::Enrichment => MAX_ACTIVE_INSPECTION_REQUESTS,
             Self::Background => MAX_ACTIVE_BACKGROUND_REQUESTS,
         }
     }
@@ -52,7 +56,7 @@ impl CommandClass {
     pub(super) fn timeout(self) -> Duration {
         match self {
             Self::Execution | Self::Control => REQUEST_TIMEOUT,
-            Self::Inspection => Duration::from_secs(15),
+            Self::Inspection | Self::Enrichment => Duration::from_secs(15),
             Self::Background => Duration::from_secs(60),
         }
     }
@@ -60,7 +64,7 @@ impl CommandClass {
     pub(super) fn maximum_lifetime(self) -> Duration {
         match self {
             Self::Execution | Self::Control => Duration::from_secs(60),
-            Self::Inspection => Duration::from_secs(90),
+            Self::Inspection | Self::Enrichment => Duration::from_secs(90),
             Self::Background => MAX_REQUEST_LIFETIME,
         }
     }
@@ -68,7 +72,7 @@ impl CommandClass {
     pub(super) fn performance_budget(self) -> Duration {
         match self {
             Self::Execution | Self::Control => MI_CONTROL_BUDGET,
-            Self::Inspection => MI_INSPECTION_BUDGET,
+            Self::Inspection | Self::Enrichment => MI_INSPECTION_BUDGET,
             Self::Background => MI_BACKGROUND_BUDGET,
         }
     }
@@ -76,7 +80,7 @@ impl CommandClass {
     pub(super) fn queue_timeout(self) -> Duration {
         match self {
             Self::Execution | Self::Control => Duration::from_secs(15),
-            Self::Inspection => Duration::from_secs(30),
+            Self::Inspection | Self::Enrichment => Duration::from_secs(30),
             Self::Background => Duration::from_secs(60),
         }
     }
@@ -86,7 +90,8 @@ impl CommandClass {
             Self::Execution => 0,
             Self::Control => 1,
             Self::Inspection => 2,
-            Self::Background => 3,
+            Self::Enrichment => 3,
+            Self::Background => 4,
         }
     }
 }
@@ -136,7 +141,7 @@ struct PendingClass {
 /// across cancellation, completion, reconnect, and reentrant handlers.
 #[derive(Default)]
 pub(super) struct RequestSchedule {
-    classes: [PendingClass; 4],
+    classes: [PendingClass; CommandClass::ALL.len()],
     pub(super) queued_bytes: usize,
 }
 
@@ -169,7 +174,17 @@ impl RequestSchedule {
     }
 
     pub(super) fn has_capacity(&self, class: CommandClass) -> bool {
-        self.classes[class.queue_priority() as usize].active < class.active_limit()
+        let priority = class.queue_priority() as usize;
+        // GDB executes commands serially. Filling a spare background slot
+        // while inspection is active puts that work ahead of the next
+        // pointer hop or value-update continuation, despite its priority.
+        // Apply this to both immediate admission and queued dispatch.
+        let foreground_idle = !matches!(class, CommandClass::Enrichment | CommandClass::Background)
+            || self.classes[..priority]
+                .iter()
+                .all(|class| class.count == 0);
+
+        foreground_idle && self.classes[priority].active < class.active_limit()
     }
 
     pub(super) fn next(
@@ -322,7 +337,8 @@ mod tests {
             let pending = (0..length)
                 .map(|index| {
                     random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                    let class = CommandClass::ALL[((random >> 16) % 4) as usize];
+                    let class =
+                        CommandClass::ALL[((random >> 16) as usize) % CommandClass::ALL.len()];
                     let started = random >> 20 & 3 == 0;
                     let command = (random >> 24 & 3 != 0).then(|| String::from("-thread-info"));
 
@@ -370,6 +386,7 @@ mod tests {
                     Some((1, 128)),
                     Some((2, 128)),
                     Some((3, 128)),
+                    Some((4, 128)),
                 ] {
                     let expected = pending
                         .iter()
@@ -383,7 +400,9 @@ mod tests {
                             let limit = match request.class {
                                 CommandClass::Execution => usize::MAX,
                                 CommandClass::Control => MAX_ACTIVE_CONTROL_REQUESTS,
-                                CommandClass::Inspection => MAX_ACTIVE_INSPECTION_REQUESTS,
+                                CommandClass::Inspection | CommandClass::Enrichment => {
+                                    MAX_ACTIVE_INSPECTION_REQUESTS
+                                }
                                 CommandClass::Background => MAX_ACTIVE_BACKGROUND_REQUESTS,
                             };
 
@@ -395,6 +414,12 @@ mod tests {
                                             (request.class.queue_priority(), **token) < priority
                                         })))
                                 && active < limit
+                                && (!matches!(
+                                    request.class,
+                                    CommandClass::Enrichment | CommandClass::Background
+                                ) || pending.values().all(|other| {
+                                    other.class.queue_priority() >= request.class.queue_priority()
+                                }))
                         })
                         .min_by_key(|(token, request)| (request.class.queue_priority(), **token))
                         .map(|(token, _)| *token);

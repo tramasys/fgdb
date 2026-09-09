@@ -135,6 +135,7 @@ name = "fgdb"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "futures-channel",
  "glib-build-tools",
  "glib-unix",
  "goblin",

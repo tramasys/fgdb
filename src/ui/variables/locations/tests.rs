@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     config::settings::IntegerDisplay,
+    debugger::{MemoryKind, context::MemoryRegion},
     ui::{
         variable_presentation::VariablePresentation, variable_viewers::VariableViewerRegistry,
         views,
@@ -8,7 +9,7 @@ use crate::{
 };
 use std::{collections::VecDeque, time::Duration};
 
-fn variable(index: usize) -> Variable {
+pub(super) fn variable(index: usize) -> Variable {
     Variable {
         local_index: Some(index),
         name: format!("value_{index}"),
@@ -32,35 +33,119 @@ fn presentation_does_not_confuse_absent_addresses_with_registers_or_pointer_targ
         ValueLocation::Unknown("synthetic child".into()),
     ] {
         assert_eq!(location.address(), None);
-        let (text, detail) = presentation(Some(&location), true, 64);
-        assert!(!text.is_empty());
-        assert!(!detail.is_empty());
-        assert!(!text.starts_with("0x"));
+        let display = presentation::format(Some(&location), true, 64, None);
+        assert!(!display.text.is_empty());
+        assert!(!display.tooltip.is_empty());
+        assert!(!display.text.starts_with("0x"));
+        assert_eq!(display.kind, MemoryKind::None);
     }
 
-    let (text, detail) = presentation(
+    let display = presentation::format(
         Some(&ValueLocation::Memory {
             address: 16,
             referenced: false,
         }),
         true,
         32,
+        None,
     );
 
-    assert_eq!(text, "0x00000010");
-    assert!(detail.contains("pointer's own storage"));
-    let (text, detail) = presentation(
+    assert_eq!(display.text, "0x00000010");
+    assert!(display.tooltip.contains("pointer's own storage"));
+    let display = presentation::format(
         Some(&ValueLocation::Memory {
             address: 16,
             referenced: true,
         }),
         true,
         64,
+        None,
     );
 
-    assert_eq!(text, "0x0000000000000010 (referent)");
-    assert!(detail.contains("referenced object"));
-    assert_eq!(presentation(None, false, 64).0, "—");
+    assert_eq!(display.text, "0x0000000000000010 (referent)");
+    assert!(display.tooltip.contains("referenced object"));
+    assert_eq!(presentation::format(None, false, 64, None).text, "—");
+}
+
+fn mapping(kind: MemoryKind, path: &str) -> MemoryRegion {
+    MemoryRegion {
+        start: 0x1000,
+        end: 0x2000,
+        permissions: "rw-p".into(),
+        path: Some(path.into()),
+        kind,
+        referenced_by: Vec::new(),
+    }
+}
+
+#[test]
+fn location_colors_reuse_mapping_kinds_and_half_open_bounds() {
+    for kind in [
+        MemoryKind::Code,
+        MemoryKind::Heap,
+        MemoryKind::Stack,
+        MemoryKind::Writable,
+        MemoryKind::ReadOnly,
+        MemoryKind::Rwx,
+        MemoryKind::String,
+        MemoryKind::None,
+    ] {
+        let regions = [mapping(kind, "/tmp/target λ")];
+
+        for referenced in [false, true] {
+            for address in [0, 0xfff, 0x1000, 0x1fff, 0x2000, u64::MAX] {
+                let location = ValueLocation::Memory {
+                    address,
+                    referenced,
+                };
+
+                let display = presentation::format(Some(&location), true, 64, Some(&regions));
+
+                if regions[0].contains(address) {
+                    assert_eq!(display.kind, kind);
+                    assert!(display.tooltip.contains(
+                        "Mapping: 0x0000000000001000-0x0000000000002000  rw-p  /tmp/target λ"
+                    ));
+                } else {
+                    assert_eq!(display.kind, MemoryKind::None);
+                    assert!(display.tooltip.contains("No known mapping"));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn unavailable_mappings_and_stale_locations_have_no_region_color() {
+    let location = ValueLocation::Memory {
+        address: 0x1000,
+        referenced: false,
+    };
+
+    for regions in [None, Some([].as_slice())] {
+        let display = presentation::format(Some(&location), true, 32, regions);
+        assert_eq!(display.text, "0x00001000");
+        assert_eq!(display.kind, MemoryKind::None);
+        assert!(display.tooltip.contains("mappings are unavailable"));
+    }
+
+    let regions = [mapping(MemoryKind::Stack, "[stack]")];
+    let stale = presentation::format(Some(&location), false, 64, Some(&regions));
+    assert_eq!(stale.text, "—");
+    assert_eq!(stale.kind, MemoryKind::None);
+    assert!(!stale.tooltip.contains("[stack]"));
+
+    for location in [
+        None,
+        Some(ValueLocation::NonAddressable),
+        Some(ValueLocation::OptimizedOut),
+        Some(ValueLocation::Unavailable),
+        Some(ValueLocation::Unknown("not available".into())),
+    ] {
+        let display = presentation::format(location.as_ref(), true, 64, Some(&regions));
+        assert_eq!(display.kind, MemoryKind::None);
+        assert!(!display.tooltip.contains("Mapping:"));
+    }
 }
 
 fn settle() {
@@ -143,9 +228,14 @@ fn assert_menu_alignment(menu: &gtk::Box, location: &LocationMenu) {
 #[ignore = "requires a GTK display"]
 fn locations_are_lazy_visible_bounded_and_invalidated_with_their_stop() {
     gtk::init().unwrap();
-    crate::theme::Theme::graphite().install();
+    let theme = crate::theme::Theme::graphite();
+    theme.install();
     let pointer_bits = Rc::new(Cell::new(64));
-    let locations = Locations::new(false, Rc::clone(&pointer_bits));
+    let model = Rc::new(DebuggerModel::new(None));
+    model.set_current_thread_id(Some("1"));
+    assert_eq!(model.start_stop_refresh(), 1);
+    model.bind_stop_context(1).unwrap();
+    let locations = Locations::new(false, Rc::clone(&pointer_bits), Rc::clone(&model));
     let pending = Rc::new(RefCell::new(VecDeque::new()));
     let queue = Rc::clone(&pending);
     let calls = Rc::new(Cell::new(0));
@@ -215,6 +305,78 @@ fn locations_are_lazy_visible_bounded_and_invalidated_with_their_stop() {
     settle();
     assert_eq!(calls.get(), previous_calls, "cache hit re-queried GDB");
 
+    // Text remains stable while the next stop is unresolved, but neither the
+    // current cache nor actions may use the retained presentation.
+    let item = locations
+        .items
+        .borrow()
+        .iter()
+        .filter_map(glib::WeakRef::upgrade)
+        .find(|item| {
+            item.child()
+                .and_downcast::<gtk::Label>()
+                .is_some_and(|label| visible(&label) && label.text() == "0x0000000000001000")
+        })
+        .unwrap();
+    let retained_label = item.child().and_downcast::<gtk::Label>().unwrap();
+    locations.set_context(None);
+    locations.bind(&item);
+    assert_eq!(retained_label.text(), "0x0000000000001000");
+    assert!(
+        retained_label
+            .tooltip_text()
+            .unwrap()
+            .contains("Previous location")
+    );
+    assert!(locations.cached(&variable(0)).is_none());
+    locations.set_context(Some((1, 0)));
+    settle();
+    complete(&pending);
+    let previous_calls = calls.get();
+
+    let label = locations
+        .items
+        .borrow()
+        .iter()
+        .filter_map(glib::WeakRef::upgrade)
+        .filter_map(|item| item.child().and_downcast::<gtk::Label>())
+        .find(|label| visible(label) && label.text() == "0x0000000000001000")
+        .unwrap();
+
+    assert!(label.has_css_class("memory-none"));
+    label.select_region(0, -1);
+    let selection = label.selection_bounds();
+    let regions = [mapping(MemoryKind::Stack, "[stack]")];
+    assert_eq!(model.publish_memory_regions(1, &regions), Some(true));
+    locations.schedule();
+    settle();
+    assert!(label.has_css_class("memory-stack"));
+    assert!(!label.has_css_class("memory-none"));
+    assert_eq!(
+        label.color(),
+        gtk::gdk::RGBA::parse(theme.colors.accent).unwrap()
+    );
+
+    assert!(label.tooltip_text().unwrap().contains("[stack]"));
+    assert_eq!(label.selection_bounds(), selection);
+    assert_eq!(calls.get(), previous_calls, "mapping update re-queried GDB");
+
+    let regions = [mapping(MemoryKind::Heap, "[heap]")];
+    assert_eq!(model.publish_memory_regions(1, &regions), Some(true));
+    locations.schedule();
+    settle();
+    assert!(label.has_css_class("memory-heap"));
+    assert!(!label.has_css_class("memory-stack"));
+    assert_eq!(
+        label.color(),
+        gtk::gdk::RGBA::parse(theme.colors.warning).unwrap()
+    );
+
+    assert!(label.tooltip_text().unwrap().contains("[heap]"));
+    assert_eq!(label.selection_bounds(), selection);
+    assert_eq!(calls.get(), previous_calls);
+    views::clear_label_selection(&label);
+
     window.set_default_size(1200, 500);
     settle();
     complete(&pending);
@@ -234,6 +396,8 @@ fn locations_are_lazy_visible_bounded_and_invalidated_with_their_stop() {
     }));
 
     let stale = pending.borrow_mut().pop_front().unwrap();
+    assert_eq!(model.start_stop_refresh(), 2);
+    model.bind_stop_context(1).unwrap();
     locations.set_context(Some((2, 0)));
     assert!(!(stale.current)());
     (stale.reply)(Some(vec![
@@ -254,6 +418,20 @@ fn locations_are_lazy_visible_bounded_and_invalidated_with_their_stop() {
             .any(|location| location.address() == Some(0xdead))
     );
 
+    for label in locations
+        .items
+        .borrow()
+        .iter()
+        .filter_map(glib::WeakRef::upgrade)
+        .filter_map(|item| item.child().and_downcast::<gtk::Label>())
+        .filter(visible)
+    {
+        assert!(label.has_css_class("memory-none"));
+        assert!(!label.has_css_class("memory-heap"));
+    }
+
+    assert_eq!(model.start_stop_refresh(), 3);
+    model.bind_stop_context(1).unwrap();
     locations.set_context(Some((3, 0)));
     settle();
     locations.set_enabled(false);
@@ -282,6 +460,21 @@ fn locations_are_lazy_visible_bounded_and_invalidated_with_their_stop() {
     let lease = locations.menus.borrow()[0].upgrade().unwrap();
     assert_menu_alignment(&menu, &lease);
     assert_eq!(lease.label.upgrade().unwrap().text(), "0x000000000000107b");
+    assert!(lease.label.upgrade().unwrap().has_css_class("memory-none"));
+    let regions = [mapping(MemoryKind::Stack, "[stack]")];
+    assert_eq!(model.publish_memory_regions(2, &regions), None);
+    assert_eq!(model.publish_memory_regions(3, &regions), Some(true));
+    let previous_calls = calls.get();
+    locations.schedule();
+    settle();
+    assert!(lease.label.upgrade().unwrap().has_css_class("memory-stack"));
+    assert_eq!(
+        lease.label.upgrade().unwrap().color(),
+        gtk::gdk::RGBA::parse(theme.colors.accent).unwrap()
+    );
+
+    assert_eq!(calls.get(), previous_calls);
+    assert_menu_alignment(&menu, &lease);
     assert!(lease.copy.upgrade().unwrap().is_sensitive());
     lease.inspect.upgrade().unwrap().emit_clicked();
     assert_eq!(opened.get(), Some(0x107b));
@@ -319,6 +512,14 @@ fn locations_are_lazy_visible_bounded_and_invalidated_with_their_stop() {
     settle();
     assert!(retry_popover.is_mapped(), "retry menu unexpectedly closed");
     assert_eq!(retry_lease.label.upgrade().unwrap().text(), "Not resolved");
+    assert!(
+        retry_lease
+            .label
+            .upgrade()
+            .unwrap()
+            .has_css_class("memory-none")
+    );
+
     assert!(retry_lease.retry.upgrade().unwrap().is_sensitive());
     assert!(!retry_lease.copy.upgrade().unwrap().is_sensitive());
     assert!(pending.borrow().is_empty());
@@ -342,11 +543,25 @@ fn locations_are_lazy_visible_bounded_and_invalidated_with_their_stop() {
 
     settle();
     assert!(!retry_lease.inspect.upgrade().unwrap().is_sensitive());
+    let previous = retry_lease.label.upgrade().unwrap();
+    assert_eq!(previous.text(), "0x000000000000107b");
+    assert!(previous.has_css_class("memory-stack"));
+    assert!(
+        previous
+            .tooltip_text()
+            .unwrap()
+            .contains("Previous location")
+    );
+    drop(previous);
+
     retry_popover.popdown();
     settle();
     retry_popover.unparent();
     window.close();
     drop((
+        label,
+        item,
+        retained_label,
         lease,
         popover,
         menu,

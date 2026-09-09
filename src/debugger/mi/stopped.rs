@@ -164,6 +164,23 @@ impl StopRequest<'_> {
         )
     }
 
+    /// Read bounded memory or pointer details after initial locals/registers,
+    /// before expensive background tables. All stop and object guards apply.
+    pub(crate) fn enrich(
+        mut self,
+        handler: impl FnOnce(&MiClient, MiRecord) + 'static,
+    ) -> io::Result<u64> {
+        let client = self.client()?;
+        let guard = self.guard();
+        client.request_inner(
+            &self.encoded_command(),
+            CommandClass::Enrichment,
+            Some(CommandOwner::Stop(self.requests.generation())),
+            Some(Box::new(guard)),
+            Box::new(handler),
+        )
+    }
+
     pub(crate) fn with_print_limit(
         mut self,
         elements: usize,
@@ -286,9 +303,21 @@ mod tests {
                     format!("{frame}-stack-info-frame --thread 7 --frame 2\n"),
                     format!("{thread}-stack-list-frames --thread 7 0 24\n"),
                     format!("{object}-var-info-path-expression value\n"),
-                    format!("{background}-data-read-memory-bytes --thread 7 0x1000 16\n"),
                 ]
             );
+
+            assert!(client.pending.borrow()[&background].started_at.is_none());
+            for token in [frame, thread, object] {
+                client.process_line(&format!("{token}^done"));
+            }
+
+            let outgoing = client.outgoing.borrow();
+            assert_eq!(
+                String::from_utf8(outgoing.commands.back().unwrap().bytes.clone()).unwrap(),
+                format!("{background}-data-read-memory-bytes --thread 7 0x1000 16\n"),
+            );
+
+            drop(outgoing);
 
             let result = Rc::new(RefCell::new(Vec::new()));
             let observed = Rc::clone(&result);

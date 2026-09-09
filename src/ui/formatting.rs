@@ -776,12 +776,12 @@ pub(super) const fn memory_kind_label(kind: MemoryKind) -> &'static str {
 pub(super) fn stack_tooltip(entry: &StackEntry) -> String {
     let anchors = format_register_names(&entry.address_registers);
     let references = stack_references(entry);
-    let region = entry.region.as_deref().unwrap_or("unmapped");
+    let region = stack_pointer_target(entry);
     let width = usize::try_from(entry.pointer_bits / 4)
         .unwrap_or(16)
         .clamp(8, 16);
     format!(
-        "0x{:0width$x}  +0x{:04x} / +{:03}\n{}\nanchors: {}  references: {}\n{}",
+        "0x{:0width$x}  +0x{:04x} / +{:03}\n{}\nanchors: {}  references: {}\nPointer target: {}",
         entry.address,
         entry.offset,
         entry.index,
@@ -795,6 +795,13 @@ pub(super) fn stack_tooltip(entry: &StackEntry) -> String {
         region,
         width = width,
     )
+}
+
+pub(super) fn stack_pointer_target(entry: &StackEntry) -> &str {
+    entry
+        .region
+        .as_deref()
+        .unwrap_or("No known mapped pointer target (value may be a scalar)")
 }
 
 pub(super) fn stack_entry_text(entry: &StackEntry) -> String {

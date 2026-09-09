@@ -740,6 +740,7 @@ pub(super) fn build_workspace(
         registers_empty: inspector.registers_empty,
         stack_store: inspector.stack_store,
         stack_empty: inspector.stack_empty,
+        stack_paging: inspector.stack_paging,
         breakpoints_list: inspector.breakpoints_list,
         stop_point_filter: inspector.stop_point_filter,
         add_breakpoint_button: inspector.add_breakpoint_button,
@@ -1156,11 +1157,14 @@ pub(super) fn build_inspector(
         .child(&stack_view)
         .min_content_height(1)
         .vexpand(true)
+        .overlay_scrolling(false)
         .hscrollbar_policy(gtk::PolicyType::Automatic)
         .build();
 
     stack_page.append(&stack_empty);
     stack_page.append(&stack_scrolled);
+    let stack_paging = stack_view::Paging::new(&stack_scrolled);
+    stack_page.append(&stack_paging.root);
     stack_page.append(&stack_word_inspector.root);
     let memory_page = components::panel();
     let memory_controls = gtk::Box::new(gtk::Orientation::Vertical, 3);
@@ -1709,6 +1713,7 @@ pub(super) fn build_inspector(
         registers_empty,
         stack_store,
         stack_empty,
+        stack_paging,
         breakpoints_list,
         stop_point_filter,
         add_breakpoint_button,

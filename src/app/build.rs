@@ -54,6 +54,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
 
     memory_search::connect(&ui, &mi_client);
+    connect_stack_paging(&ui, &mi_client);
     let weak = Rc::downgrade(&ui);
     let client = Rc::clone(&mi_client);
     ui.connect_replay_actions(move |action| {
@@ -412,7 +413,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                     .upgrade()
                     .is_some_and(|ui| ui.memory_watch_request_is_current(id, revision))
             })
-            .request(move |_, record| {
+            .enrich(move |_, record| {
                 let Some(ui) = weak_ui_for_response.upgrade() else {
                     return;
                 };

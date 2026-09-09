@@ -2,7 +2,9 @@
 
 use super::*;
 
+mod pointers;
 mod registers;
+mod snapshot;
 mod stack;
 mod variables;
 
@@ -19,6 +21,7 @@ pub(super) struct StackInputs {
     requests: StopRequests,
     frames: Option<Vec<StackFrame>>,
     registers: Option<Vec<Register>>,
+    process: Option<snapshot::ProcessSnapshotRequest>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -83,6 +86,11 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
         return;
     };
     client.cancel_stale_stop_requests(generation);
+    let process = current_ui
+        .model
+        .inferior_pid()
+        .zip(current_ui.model.debugger_pid())
+        .and_then(|(pid, debugger_pid)| snapshot::ProcessSnapshotRequest::start(pid, debugger_pid));
     drop(current_ui);
     let variable_update_batch = variable_update_batch(requests.clone(), 2);
 
@@ -91,6 +99,7 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
         requests: requests.clone(),
         frames: None,
         registers: None,
+        process,
     }));
 
     let weak_ui = ui.clone();
@@ -257,6 +266,7 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
                 refresh.requests.clone(),
                 registers,
                 frames,
+                refresh.process.take(),
             )),
             (frames, registers) => {
                 refresh.frames = frames;
@@ -265,7 +275,7 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
             }
         }
     };
-    let Some((ui, requests, registers, frames)) = inputs else {
+    let Some((ui, requests, registers, frames, process)) = inputs else {
         return;
     };
     let generation = requests.generation();
@@ -287,8 +297,8 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
             requests.clone(),
             registers,
             frames,
-            Some(*pid),
-            *debugger_pid,
+            (Some(*pid), *debugger_pid),
+            process,
         );
         return;
     }
@@ -315,8 +325,8 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
                 requests_for_response,
                 registers,
                 frames,
-                pid,
-                debugger_pid,
+                (pid, debugger_pid),
+                process,
             );
         })
         .is_err()
@@ -357,9 +367,10 @@ fn continue_stack_refresh(
     requests: StopRequests,
     registers: Vec<Register>,
     frames: Vec<StackFrame>,
-    pid: Option<u32>,
-    debugger_pid: Option<u32>,
+    target: (Option<u32>, Option<u32>),
+    process: Option<snapshot::ProcessSnapshotRequest>,
 ) {
+    let (pid, debugger_pid) = target;
     let generation = requests.generation();
     if !requests.is_current() {
         return;
@@ -381,59 +392,12 @@ fn continue_stack_refresh(
         return;
     };
 
-    let (sender, receiver) = std::sync::mpsc::channel();
-    if crate::background::submit_with_priority(crate::background::Priority::Critical, move || {
-        let snapshot = StopProcessSnapshot {
-            abi: crate::kernel::read_local_target_abi(pid, debugger_pid),
-            regions: read_memory_regions(pid, debugger_pid),
-        };
-        let _ = sender.send(snapshot);
-    })
-    .is_err()
-    {
-        finish_stop_process_snapshot(
-            ui,
-            client,
-            requests.clone(),
-            registers,
-            frames,
-            StopProcessSnapshot::default(),
-        );
-        return;
-    }
-
-    let weak_client = client.weak();
-    let started = std::time::Instant::now();
-    gtk::glib::timeout_add_local(std::time::Duration::from_millis(15), move || {
-        if !requests.is_current() {
-            return gtk::glib::ControlFlow::Break;
-        }
-
-        let snapshot = match receiver.try_recv() {
-            Ok(snapshot) => snapshot,
-            Err(std::sync::mpsc::TryRecvError::Empty)
-                if started.elapsed() < std::time::Duration::from_secs(5) =>
-            {
-                return gtk::glib::ControlFlow::Continue;
-            }
-
-            Err(
-                std::sync::mpsc::TryRecvError::Empty | std::sync::mpsc::TryRecvError::Disconnected,
-            ) => StopProcessSnapshot::default(),
-        };
-        let Some(client) = weak_client.upgrade() else {
-            return gtk::glib::ControlFlow::Break;
-        };
-        finish_stop_process_snapshot(
-            ui.clone(),
-            &client,
-            requests.clone(),
-            registers.clone(),
-            frames.clone(),
-            snapshot,
-        );
-        gtk::glib::ControlFlow::Break
-    });
+    snapshot::finish_process_snapshot(
+        (ui, requests, registers, frames),
+        client,
+        (pid, debugger_pid),
+        process,
+    );
 }
 
 fn finish_stop_process_snapshot(
@@ -551,7 +515,7 @@ fn refresh_visible_stop_details(
     let Some(current_ui) = ui.upgrade() else {
         return;
     };
-    if let Some(entries) = current_ui.model.stack_for_details(generation) {
+    if current_ui.model.has_stack_for_details(generation) {
         let Some(stack_register) =
             architecture.stack_pointer(registers.iter().map(|register| register.name.as_str()))
         else {
@@ -568,7 +532,6 @@ fn refresh_visible_stop_details(
             ui,
             client,
             requests.clone(),
-            entries,
             stack_register,
             word_size,
             endian,

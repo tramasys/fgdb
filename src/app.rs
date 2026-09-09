@@ -108,22 +108,10 @@ fn next_variable_object_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        assignment_expression, parse_gdb_integer, pointer_expression, register_string_address,
-        source_symbol_pattern, stack_pointer_expression, stack_string_address, symbol_annotation,
+        assignment_expression, parse_gdb_integer, register_string_address, source_symbol_pattern,
+        stack_string_address, symbol_annotation,
     };
     use crate::debugger::{MemoryKind, Register, StackEntry, TargetArchitecture, TargetEndian};
-
-    #[test]
-    fn builds_pointer_chain_expressions() {
-        assert_eq!(pointer_expression("rsp", 0), "(void*)($rsp)");
-        assert_eq!(pointer_expression("rsp", 1), "*(void**)($rsp)");
-        assert_eq!(pointer_expression("rsp", 2), "*(void**)(*(void**)($rsp))");
-
-        assert_eq!(
-            stack_pointer_expression("rsp", 8, 1),
-            "*(void**)(*(void**)($rsp+0x8))"
-        );
-    }
 
     #[test]
     fn finds_the_pointer_behind_an_inline_stack_string_preview() {

@@ -834,6 +834,144 @@ fn scoped_inspection_overtakes_queued_background_work() {
 }
 
 #[test]
+fn value_refresh_continuations_finish_before_queued_background_disassembly() {
+    let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+    let context = gtk::glib::MainContext::new();
+
+    context
+        .with_thread_default(|| {
+            let client = super::MiClient::open(|_, _| {}).unwrap();
+            client.ready.set(true);
+
+            client
+                .request_with_print_limit_for_owner(
+                    "-stack-list-variables --simple-values",
+                    128,
+                    None,
+                    || true,
+                    |client, _| {
+                        client
+                            .request_with_print_limit_for_owner(
+                                "-var-create local * value",
+                                128,
+                                None,
+                                || true,
+                                |client, _| {
+                                    client
+                                        .request_with_print_limit_for_owner(
+                                            "-var-update --all-values *",
+                                            128,
+                                            None,
+                                            || true,
+                                            |_, _| {},
+                                        )
+                                        .unwrap();
+                                },
+                            )
+                            .unwrap();
+                    },
+                )
+                .unwrap();
+
+            let assembly = client
+                .request_inner(
+                    "-data-disassemble -s 0x1000 -e 0x2000 -- 0",
+                    super::CommandClass::Background,
+                    None,
+                    None,
+                    Box::new(|_, _| {}),
+                )
+                .unwrap();
+
+            // The process snapshot can be ready before locals. A stack read
+            // must wait for their entire scoped continuation, yet still beat
+            // assembly even though assembly was queued first.
+            let stack = client
+                .request_inner(
+                    "-data-read-memory-bytes 0x1000 512",
+                    super::CommandClass::Enrichment,
+                    None,
+                    None,
+                    Box::new(|_, _| {}),
+                )
+                .unwrap();
+
+            for operation in ["-stack-list-variables", "-var-create", "-var-update"] {
+                let token = {
+                    let active = client.scoped_request.borrow();
+                    let active = active.as_ref().unwrap();
+                    assert_eq!(active.operation, operation);
+                    active.token
+                };
+
+                assert!(client.pending.borrow()[&assembly].started_at.is_none());
+                assert!(client.pending.borrow()[&stack].started_at.is_none());
+                client.process_line(r#"~"^done\n""#);
+                client.process_line(&format!("{token}^done"));
+            }
+
+            assert!(client.pending.borrow()[&stack].started_at.is_some());
+            assert!(client.pending.borrow()[&assembly].started_at.is_none());
+            client.process_line(&format!("{stack}^done"));
+            assert!(client.pending.borrow()[&assembly].started_at.is_some());
+        })
+        .unwrap();
+}
+
+#[test]
+fn active_pointer_hops_keep_background_work_behind_their_continuations() {
+    use std::{cell::Cell, rc::Rc};
+
+    let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+    let context = gtk::glib::MainContext::new();
+
+    context
+        .with_thread_default(|| {
+            let client = super::MiClient::open(|_, _| {}).unwrap();
+            client.ready.set(true);
+            let next = Rc::new(Cell::new(0));
+            let continuation = Rc::clone(&next);
+            let first = client
+                .request_for_stop(
+                    "-data-evaluate-expression --language c $sp",
+                    1,
+                    || true,
+                    move |client, _| {
+                        continuation.set(
+                            client
+                                .request_for_stop(
+                                    "-data-evaluate-expression --language c *(void**)$sp",
+                                    1,
+                                    || true,
+                                    |_, _| {},
+                                )
+                                .unwrap(),
+                        );
+                    },
+                )
+                .unwrap();
+
+            let background = client
+                .request_inner(
+                    "-data-disassemble -s 0x1000 -e 0x2000 -- 0",
+                    super::CommandClass::Background,
+                    None,
+                    None,
+                    Box::new(|_, _| {}),
+                )
+                .unwrap();
+
+            assert!(client.pending.borrow()[&background].started_at.is_none());
+            client.process_line(&format!("{first}^done,value=\"0x1000\""));
+            assert_ne!(next.get(), 0);
+            assert!(client.pending.borrow()[&background].started_at.is_none());
+            client.process_line(&format!("{}^done,value=\"0x2000\"", next.get()));
+            assert!(client.pending.borrow()[&background].started_at.is_some());
+        })
+        .unwrap();
+}
+
+#[test]
 fn request_admission_preserves_control_and_execution_capacity() {
     use std::{cell::RefCell, rc::Rc};
 

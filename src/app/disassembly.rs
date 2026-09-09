@@ -481,8 +481,14 @@ impl DisassemblyController {
             state.mixed
         };
 
-        let start = address.saturating_sub(FUNCTION_DISASSEMBLY_BEFORE_BYTES);
-        let end = address.saturating_add(FUNCTION_DISASSEMBLY_AFTER_BYTES);
+        let (start, end) = {
+            let state = self.state.borrow();
+            let previous = matches!(history, HistoryUpdate::Reset)
+                .then(|| state.range_start.zip(state.range_end))
+                .flatten();
+
+            function_window(address, previous)
+        };
 
         let command = if mixed {
             format!("-data-disassemble -s 0x{start:x} -e 0x{end:x} --source --opcodes bytes -- 0")
@@ -494,61 +500,69 @@ impl DisassemblyController {
         let requests_for_response = requests.clone();
         let guard = Rc::downgrade(self);
 
-        if requests
-            .frame(&command)
-            .when(move || {
-                guard
-                    .upgrade()
-                    .is_some_and(|controller| controller.generation.get() == generation)
-            })
-            .request(move |_, record| {
-                if record.class == "superseded" || controller.generation.get() != generation {
-                    return;
-                }
+        let request = requests.frame(&command).when(move || {
+            guard
+                .upgrade()
+                .is_some_and(|controller| controller.generation.get() == generation)
+        });
 
-                let Some(ui) = controller.ui.upgrade() else {
-                    return;
-                };
+        let response = move |_: &MiClient, record: MiRecord| {
+            if record.class == "superseded" || controller.generation.get() != generation {
+                return;
+            }
 
-                if !controller.model.stopped_inspection_available() {
-                    return;
-                }
+            let Some(ui) = controller.ui.upgrade() else {
+                return;
+            };
 
-                if !record.is_done() {
-                    drop(ui);
+            if !controller.model.stopped_inspection_available() {
+                return;
+            }
 
-                    controller.request_address_window(
-                        address,
-                        generation,
-                        requests_for_response.clone(),
-                        history,
-                        SYMBOLLESS_DISASSEMBLY_BYTES,
-                    );
+            if !record.is_done() {
+                drop(ui);
 
-                    return;
-                }
+                controller.request_address_window(
+                    address,
+                    generation,
+                    requests_for_response.clone(),
+                    history,
+                    SYMBOLLESS_DISASSEMBLY_BYTES,
+                );
 
-                let instructions =
-                    instructions_for_focus(crate::debugger::instructions(&record), address);
+                return;
+            }
 
-                if instructions.is_empty() {
-                    drop(ui);
+            let instructions =
+                instructions_for_focus(crate::debugger::instructions(&record), address);
 
-                    controller.request_address_window(
-                        address,
-                        generation,
-                        requests_for_response.clone(),
-                        history,
-                        SYMBOLLESS_DISASSEMBLY_BYTES,
-                    );
+            if instructions.is_empty() {
+                drop(ui);
 
-                    return;
-                }
+                controller.request_address_window(
+                    address,
+                    generation,
+                    requests_for_response.clone(),
+                    history,
+                    SYMBOLLESS_DISASSEMBLY_BYTES,
+                );
 
-                controller.present(address, history, instructions, mixed);
-            })
-            .is_err()
-        {
+                return;
+            }
+
+            controller.present(address, history, instructions, mixed);
+        };
+
+        // Automatic assembly is supplemental to this stop's values. In
+        // particular, do not put a large table rebuild ahead of the bounded
+        // chain of local varobj requests. Explicit navigation stays interactive.
+        let result = if matches!(history, HistoryUpdate::Reset) {
+            request.background(response)
+        } else {
+            request.request(response)
+        };
+
+        if result.is_err() {
             self.fail("The GDB/MI channel is unavailable");
         }
     }
@@ -570,48 +584,53 @@ impl DisassemblyController {
         let requests_for_response = requests.clone();
         let guard = Rc::downgrade(self);
 
-        if requests
-            .frame(&command)
-            .when(move || {
-                guard
-                    .upgrade()
-                    .is_some_and(|controller| controller.generation.get() == generation)
-            })
-            .request(move |_, record| {
-                if record.class == "superseded" || controller.generation.get() != generation {
-                    return;
-                }
+        let request = requests.frame(&command).when(move || {
+            guard
+                .upgrade()
+                .is_some_and(|controller| controller.generation.get() == generation)
+        });
 
-                let instructions = if record.is_done() {
-                    instructions_for_focus(crate::debugger::instructions(&record), address)
+        let response = move |_: &MiClient, record: MiRecord| {
+            if record.class == "superseded" || controller.generation.get() != generation {
+                return;
+            }
+
+            let instructions = if record.is_done() {
+                instructions_for_focus(crate::debugger::instructions(&record), address)
+            } else {
+                Vec::new()
+            };
+
+            if instructions.is_empty() {
+                if bytes > 1 {
+                    controller.request_address_window(
+                        address,
+                        generation,
+                        requests_for_response.clone(),
+                        history,
+                        bytes.div_ceil(2),
+                    );
                 } else {
-                    Vec::new()
-                };
-
-                if instructions.is_empty() {
-                    if bytes > 1 {
-                        controller.request_address_window(
-                            address,
-                            generation,
-                            requests_for_response.clone(),
-                            history,
-                            bytes.div_ceil(2),
-                        );
-                    } else {
-                        controller.fail(
-                            record
-                                .error_message()
-                                .unwrap_or("GDB cannot read an instruction at that address"),
-                        );
-                    }
-
-                    return;
+                    controller.fail(
+                        record
+                            .error_message()
+                            .unwrap_or("GDB cannot read an instruction at that address"),
+                    );
                 }
 
-                controller.present(address, history, instructions, false);
-            })
-            .is_err()
-        {
+                return;
+            }
+
+            controller.present(address, history, instructions, false);
+        };
+
+        let result = if matches!(history, HistoryUpdate::Reset) {
+            request.background(response)
+        } else {
+            request.request(response)
+        };
+
+        if result.is_err() {
             self.fail("The GDB/MI channel is unavailable");
         }
     }
@@ -788,6 +807,26 @@ fn address_evaluation_command(expression: &str) -> String {
     )
 }
 
+/// Keep nearby steps on the same instruction-aligned window. Bytes and symbols
+/// are still read from GDB at every stop, only the query bounds are retained.
+/// This avoids shifting hundreds of GTK rows for each instruction advanced.
+fn function_window(address: u64, previous: Option<(u64, u64)>) -> (u64, u64) {
+    if let Some((start, end)) = previous
+        && start <= address
+        && address < end
+        && end - start <= FUNCTION_DISASSEMBLY_BEFORE_BYTES + FUNCTION_DISASSEMBLY_AFTER_BYTES + 32
+        && address - start <= FUNCTION_DISASSEMBLY_AFTER_BYTES
+        && (end - address >= SYMBOLLESS_DISASSEMBLY_BYTES || end - start <= 512)
+    {
+        return (start, end);
+    }
+
+    (
+        address.saturating_sub(FUNCTION_DISASSEMBLY_BEFORE_BYTES),
+        address.saturating_add(FUNCTION_DISASSEMBLY_AFTER_BYTES),
+    )
+}
+
 fn validate_disassembly_expression(expression: &str) -> Result<(), &'static str> {
     if expression.is_empty() {
         return Err("Enter an address, expression, function, or symbol");
@@ -911,6 +950,33 @@ fn resolved_call_target_display(expression: &str, value: &str) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nearby_steps_reuse_bounds_but_edges_and_invalid_windows_recenter() {
+        assert_eq!(
+            function_window(0x2100, Some((0x2000, 0x3000))),
+            (0x2000, 0x3000)
+        );
+        assert_eq!(
+            function_window(0x2010, Some((0x2000, 0x2080))),
+            (0x2000, 0x2080)
+        );
+        for previous in [
+            None,
+            Some((0x3000, 0x4000)),
+            Some((0x2101, 0x2000)),
+            Some((0, u64::MAX)),
+        ] {
+            assert_eq!(function_window(0x2100, previous), (0x1d00, 0x2d00));
+        }
+
+        assert_eq!(
+            function_window(0x2ff0, Some((0x2000, 0x3000))),
+            (0x2bf0, 0x3bf0)
+        );
+        assert_eq!(function_window(0, None), (0, 3072));
+        assert_eq!(function_window(u64::MAX, None), (u64::MAX - 1024, u64::MAX));
+    }
 
     #[test]
     fn address_queries_scope_generated_casts_and_quote_expressions() {

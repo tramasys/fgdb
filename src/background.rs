@@ -243,6 +243,23 @@ fn worker_loop(shared: &SharedQueue) {
 
 static BACKGROUND_POOL: OnceLock<Option<WorkerPool>> = OnceLock::new();
 
+/// Run bounded worker-pool work and wake its consumer immediately on completion.
+/// Dropping the receiver cancels work that has not started. Panics or a closed
+/// pool drop the sender, so the consumer cannot wait forever for a lost reply.
+pub(crate) fn submit_result<T: Send + 'static>(
+    priority: Priority,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Result<futures_channel::oneshot::Receiver<T>, SubmitError> {
+    let (sender, receiver) = futures_channel::oneshot::channel();
+    submit_with_priority(priority, move || {
+        if !sender.is_canceled() {
+            let _ = sender.send(job());
+        }
+    })?;
+
+    Ok(receiver)
+}
+
 pub(crate) fn submit_with_priority(
     priority: Priority,
     job: impl FnOnce() + Send + 'static,
@@ -277,6 +294,29 @@ mod tests {
         },
         time::Duration,
     };
+
+    #[test]
+    fn result_jobs_wake_the_main_context_and_report_panics() {
+        let context = gtk::glib::MainContext::new();
+        context.block_on(async {
+            let receiver = super::submit_result(Priority::Critical, || 42).unwrap();
+            assert_eq!(
+                gtk::glib::future_with_timeout(Duration::from_secs(2), receiver)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                42
+            );
+            let receiver =
+                super::submit_result(Priority::Critical, || panic!("test lost reply")).unwrap();
+            assert!(
+                gtk::glib::future_with_timeout(Duration::from_secs(2), receiver)
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+        });
+    }
 
     #[test]
     fn bounded_pool_reserves_capacity_for_critical_work() {

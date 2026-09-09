@@ -18,7 +18,6 @@ const MIN_BLOCK_WIDTH: f64 = 340.0;
 const MIN_GRAPH_WIDTH: i32 = 520;
 const MIN_GRAPH_HEIGHT: i32 = 280;
 
-#[derive(Clone)]
 pub(super) struct CfgView {
     pub(super) root: gtk::Box,
     summary: gtk::Label,
@@ -39,6 +38,14 @@ pub(super) struct CfgView {
     text_palette: CfgTextPalette,
     palette: CfgPalette,
     scroll_generation: Rc<Cell<u64>>,
+    pending: RefCell<Option<CfgSnapshot>>,
+}
+
+struct CfgSnapshot {
+    instructions: Vec<Instruction>,
+    pc: String,
+    architecture: TargetArchitecture,
+    pointer_bits: u32,
 }
 
 struct CfgBlockWidgets {
@@ -194,7 +201,7 @@ enum RenderedInstruction {
     Omitted(usize),
 }
 
-pub(super) fn build_cfg_view(theme: &Theme) -> CfgView {
+pub(super) fn build_cfg_view(theme: &Theme) -> Rc<CfgView> {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_size_request(0, 0);
     root.set_vexpand(true);
@@ -334,6 +341,10 @@ pub(super) fn build_cfg_view(theme: &Theme) -> CfgView {
 
     let canvas = gtk::Fixed::new();
     canvas.add_css_class("cfg-canvas-layer");
+    // Let the viewport center the graph as a unit without changing the shared
+    // coordinate system of the edge drawing and selectable block overlays.
+    canvas.set_halign(gtk::Align::Center);
+    canvas.set_valign(gtk::Align::Center);
     canvas.put(&drawing, 0.0, 0.0);
     let block_widgets = Rc::new(RefCell::new(Vec::new()));
     let text_current_block = Rc::new(Cell::new(None));
@@ -387,7 +398,7 @@ pub(super) fn build_cfg_view(theme: &Theme) -> CfgView {
         }
     });
 
-    CfgView {
+    let view = Rc::new(CfgView {
         root,
         summary,
         block_count,
@@ -407,7 +418,25 @@ pub(super) fn build_cfg_view(theme: &Theme) -> CfgView {
         text_palette: CfgTextPalette::new(theme),
         palette,
         scroll_generation,
-    }
+        pending: RefCell::new(None),
+    });
+
+    let weak = Rc::downgrade(&view);
+    view.root.connect_map(move |_| {
+        if let Some(view) = weak.upgrade() {
+            let pending = view.pending.borrow_mut().take();
+            if let Some(snapshot) = pending {
+                view.show(
+                    &snapshot.instructions,
+                    &snapshot.pc,
+                    snapshot.architecture,
+                    snapshot.pointer_bits,
+                );
+            }
+        }
+    });
+
+    view
 }
 
 impl CfgView {
@@ -418,6 +447,18 @@ impl CfgView {
         architecture: TargetArchitecture,
         pointer_bits: u32,
     ) {
+        if !self.root.is_mapped() {
+            // Keep only the newest bounded disassembly snapshot. Building
+            // graphs and GTK block widgets must not delay visible inspectors.
+            self.pending.replace(Some(CfgSnapshot {
+                instructions: instructions.to_vec(),
+                pc: pc.to_owned(),
+                architecture,
+                pointer_bits,
+            }));
+            return;
+        }
+
         if instructions.is_empty() {
             self.clear();
             return;
@@ -568,6 +609,7 @@ impl CfgView {
     }
 
     pub(super) fn clear(&self) {
+        self.pending.borrow_mut().take();
         self.graph.replace(None);
         clear_cfg_blocks(&self.canvas, &self.block_widgets);
         self.text_current_block.set(None);
@@ -962,7 +1004,7 @@ fn graph_content_height(graph: &ControlFlowGraph) -> i32 {
             layout.y + layout.height + GRAPH_MARGIN
         });
 
-    (height.ceil() as i64).clamp(i64::from(MIN_GRAPH_HEIGHT), i64::from(i32::MAX)) as i32
+    (height.ceil() as i64).clamp(1, i64::from(i32::MAX)) as i32
 }
 
 fn graph_layout(graph: &ControlFlowGraph, width: f64) -> Vec<CfgBlockLayout> {
@@ -1501,6 +1543,141 @@ fn schedule_cfg_center(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a GTK display, run separately from other GTK tests"]
+    fn graph_stays_centered_on_resize_and_reparent_without_rebuilding() {
+        gtk::init().unwrap();
+        let theme = Theme::graphite();
+        theme.install();
+        let view = build_cfg_view(&theme);
+        let instructions = [instruction(0x1000, "nop"), instruction(0x1001, "ret")];
+        view.show(&instructions, "0x1000", TargetArchitecture::X86_64, 64);
+        let window = gtk::Window::builder()
+            .default_width(1100)
+            .default_height(750)
+            .child(&view.root)
+            .build();
+
+        let settle = || {
+            glib::MainContext::default().block_on(glib::timeout_future(Duration::from_millis(100)));
+        };
+
+        let check_centered = || {
+            let viewport = view.scrolled.child().unwrap();
+            let canvas = view.canvas.compute_bounds(&viewport).unwrap();
+            let right = viewport.width() as f32 - canvas.x() - canvas.width();
+            let bottom = viewport.height() as f32 - canvas.y() - canvas.height();
+            assert!(canvas.x() > 0.0 && canvas.y() > 0.0);
+            assert!((canvas.x() - right).abs() <= 1.0, "{canvas:?}");
+            assert!((canvas.y() - bottom).abs() <= 1.0, "{canvas:?}");
+
+            let widgets = view.block_widgets.borrow();
+            let first = widgets
+                .first()
+                .unwrap()
+                .root
+                .compute_bounds(&view.canvas)
+                .unwrap();
+            let last = widgets
+                .last()
+                .unwrap()
+                .root
+                .compute_bounds(&view.canvas)
+                .unwrap();
+            let bottom = canvas.height() - last.y() - last.height();
+            assert!((first.y() - bottom).abs() <= 1.0);
+        };
+
+        window.present();
+        settle();
+        check_centered();
+        let original_block = view.block_widgets.borrow()[0].root.clone();
+        window.set_default_size(900, 650);
+        settle();
+        check_centered();
+        window.set_child(None::<&gtk::Widget>);
+        let detached = gtk::Window::builder()
+            .default_width(1000)
+            .default_height(700)
+            .child(&view.root)
+            .build();
+        detached.present();
+        settle();
+        check_centered();
+        assert_eq!(view.block_widgets.borrow()[0].root, original_block);
+
+        // On overflow, centering must not put the leading blocks or edge rails
+        // outside the reachable scroll range.
+        view.follow.set_active(false);
+        let instructions = (0..40)
+            .map(|index| instruction(0x1000 + index * 2, "jne 0x1000 <worker>"))
+            .collect::<Vec<_>>();
+
+        view.show(&instructions, "0x1000", TargetArchitecture::X86_64, 64);
+        settle();
+        let viewport = view.scrolled.child().unwrap();
+        let bounds = view.canvas.compute_bounds(&viewport).unwrap();
+        let right = viewport.width() as f32 - bounds.x() - bounds.width();
+        assert!(bounds.x() > 0.0);
+        assert!((bounds.x() - right).abs() <= 1.0);
+        assert!(view.scrolled.vadjustment().upper() > view.scrolled.vadjustment().page_size());
+        detached.set_default_size(420, 500);
+        settle();
+        let viewport = view.scrolled.child().unwrap();
+        let bounds = view.canvas.compute_bounds(&viewport).unwrap();
+        assert!(bounds.x().abs() <= 1.0 && bounds.y().abs() <= 1.0);
+
+        for adjustment in [view.scrolled.hadjustment(), view.scrolled.vadjustment()] {
+            assert!(adjustment.upper() > adjustment.page_size());
+            adjustment.set_value(adjustment.upper() - adjustment.page_size());
+        }
+
+        settle();
+        let bounds = view.canvas.compute_bounds(&viewport).unwrap();
+        assert!((bounds.x() + bounds.width() - viewport.width() as f32).abs() <= 1.0);
+        assert!((bounds.y() + bounds.height() - viewport.height() as f32).abs() <= 1.0);
+        view.follow.set_active(true);
+        settle();
+        assert_eq!(view.scrolled.vadjustment().value(), 0.0);
+        detached.close();
+        window.close();
+    }
+
+    #[test]
+    #[ignore = "requires a GTK display, run separately from other GTK tests"]
+    fn hidden_graphs_coalesce_and_render_the_latest_snapshot_on_map() {
+        gtk::init().unwrap();
+        let view = build_cfg_view(&Theme::graphite());
+        let instructions = [instruction(0x1000, "nop"), instruction(0x1001, "ret")];
+        view.show(&instructions, "0x1000", TargetArchitecture::X86_64, 64);
+        view.show(&instructions, "0x1001", TargetArchitecture::X86_64, 64);
+        assert!(view.graph.borrow().is_none());
+        assert!(view.block_widgets.borrow().is_empty());
+        assert_eq!(view.pending.borrow().as_ref().unwrap().pc, "0x1001");
+        let window = gtk::Window::builder()
+            .default_width(900)
+            .default_height(650)
+            .child(&view.root)
+            .build();
+        window.present();
+        glib::MainContext::default().block_on(glib::timeout_future(Duration::from_millis(100)));
+        assert!(view.pending.borrow().is_none());
+        assert_eq!(
+            view.graph.borrow().as_ref().unwrap().current_address,
+            Some(0x1001)
+        );
+        assert!(!view.block_widgets.borrow().is_empty());
+        window.set_child(None::<&gtk::Widget>);
+        view.show(&instructions, "0x1000", TargetArchitecture::X86_64, 64);
+        view.clear();
+        assert!(view.pending.borrow().is_none());
+        assert!(view.graph.borrow().is_none());
+        let weak = Rc::downgrade(&view);
+        drop(view);
+        window.close();
+        assert!(weak.upgrade().is_none(), "the map signal retained its view");
+    }
 
     fn instruction(address: u64, text: &str) -> Instruction {
         Instruction {

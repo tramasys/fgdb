@@ -979,6 +979,133 @@ mod tests {
 
     #[test]
     #[ignore = "requires a GTK display, run separately from other GTK tests"]
+    fn mapping_cells_copy_full_values_and_preserve_mapping_selection() {
+        gtk::init().unwrap();
+        Theme::graphite().install();
+        let filter = components::delayed_search_entry("Filter mappings");
+        let (table, store) = build_memory_region_view(
+            &ColumnLayouts::default().table(TableId::MemoryMappings),
+            &Rc::new(Cell::new(64)),
+            &filter,
+        );
+
+        let path = "/tmp/a-long-mapping-path-with-unicode-λ-and-spaces/debug-target";
+        replace_boxed_store(
+            &store,
+            (0..4).map(|index| MemoryRegion {
+                start: 0x1000 + index * 0x1000,
+                end: 0x2000 + index * 0x1000,
+                permissions: "rw-p".into(),
+                path: Some(if index == 0 {
+                    path.into()
+                } else {
+                    format!("/tmp/mapping-{index}")
+                }),
+                kind: MemoryKind::Writable,
+                referenced_by: vec!["$rsp".into()],
+            }),
+        );
+
+        let root = components::panel();
+        root.append(&filter);
+        let scroll = gtk::ScrolledWindow::builder()
+            .child(&table)
+            .vexpand(true)
+            .build();
+
+        root.append(&scroll);
+        let window = gtk::Window::builder()
+            .default_width(1200)
+            .default_height(340)
+            .child(&root)
+            .build();
+
+        window.present();
+        let main = glib::MainContext::default();
+        let settle = || main.block_on(glib::timeout_future(Duration::from_millis(100)));
+        settle();
+        let selection = table.model().unwrap();
+        selection.select_item(0, true);
+        selection.select_item(2, false);
+
+        for text in [
+            "0x0000000000001000",
+            "0x0000000000002000",
+            "4.0 KiB",
+            "rw-p",
+            "$rsp",
+            path,
+        ] {
+            let label = find_result_label(table.upcast_ref(), text).unwrap();
+            assert!(label.is_selectable(), "{text}");
+            let click = label
+                .observe_controllers()
+                .iter::<glib::Object>()
+                .filter_map(Result::ok)
+                .filter_map(|controller| controller.downcast::<gtk::GestureClick>().ok())
+                .find(|click| click.propagation_phase() == gtk::PropagationPhase::Capture)
+                .unwrap();
+
+            assert_eq!(click.button(), gtk::gdk::BUTTON_PRIMARY);
+            click.emit_by_name::<()>("pressed", &[&1_i32, &0.0_f64, &0.0_f64]);
+            label.select_region(0, -1);
+            label.emit_by_name::<()>("copy-clipboard", &[]);
+            assert_eq!(
+                main.block_on(label.clipboard().read_text_future())
+                    .unwrap()
+                    .as_deref(),
+                Some(text)
+            );
+
+            assert_eq!(selection.selection().size(), 2);
+            assert!(selection.is_selected(0) && selection.is_selected(2));
+            clear_label_selection(&label);
+        }
+
+        let third = find_result_label(table.upcast_ref(), "/tmp/mapping-3").unwrap();
+        let click = third
+            .observe_controllers()
+            .iter::<glib::Object>()
+            .filter_map(Result::ok)
+            .filter_map(|controller| controller.downcast::<gtk::GestureClick>().ok())
+            .find(|click| click.propagation_phase() == gtk::PropagationPhase::Capture)
+            .unwrap();
+
+        click.emit_by_name::<()>("pressed", &[&1_i32, &0.0_f64, &0.0_f64]);
+        assert_eq!(selection.selection().size(), 1);
+        assert!(selection.is_selected(3));
+
+        // The same native action used by cell clicks retains GTK's range
+        // anchor and toggle semantics, including after filtering the model.
+        third
+            .activate_action("list.select-item", Some(&(1_u32, false, true).to_variant()))
+            .unwrap();
+
+        assert_eq!(selection.selection().size(), 3);
+        third
+            .activate_action("list.select-item", Some(&(2_u32, true, false).to_variant()))
+            .unwrap();
+
+        assert_eq!(selection.selection().size(), 2);
+        assert!(!selection.is_selected(2));
+
+        let first = find_result_label(table.upcast_ref(), path).unwrap();
+        first.select_region(0, -1);
+        filter.set_text("mapping-3");
+        filter.emit_by_name::<()>("search-changed", &[]);
+        settle();
+        assert_eq!(selection.n_items(), 1);
+        assert!(first.selection_bounds().is_none());
+        let filtered = find_result_label(table.upcast_ref(), "/tmp/mapping-3").unwrap();
+        filtered.select_region(0, -1);
+        store.remove_all();
+        settle();
+        assert!(filtered.selection_bounds().is_none());
+        window.close();
+    }
+
+    #[test]
+    #[ignore = "requires a GTK display, run separately from other GTK tests"]
     fn mapping_scope_shares_selection_and_stays_visible_in_search() {
         gtk::init().unwrap();
         Theme::graphite().install();
