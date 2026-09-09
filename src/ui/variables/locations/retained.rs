@@ -15,7 +15,13 @@ struct Identity {
 impl From<&Variable> for Identity {
     fn from(variable: &Variable) -> Self {
         Self {
-            varobj: variable.varobj.clone(),
+            // A local keeps its catalog identity when its MI object is created
+            // lazily or replaced. Descendants still need their exact object ID.
+            varobj: if variable.local_index.is_some() {
+                None
+            } else {
+                variable.varobj.clone()
+            },
             index: variable.local_index,
             name: variable.name.clone(),
             argument: variable.argument,
@@ -92,6 +98,8 @@ mod tests {
         };
         retained.context(context(1, "1".into(), 0), 0);
         let mut variable = super::super::tests::variable(0);
+        variable.local_index = None;
+
         let display = presentation::format(
             Some(&ValueLocation::Memory {
                 address: 0x1000,
@@ -124,6 +132,37 @@ mod tests {
         assert!(retained.get(&variable).is_none());
         retained.remember(&variable, &display);
         retained.context(context(5, "2".into(), 1), 1);
+        assert!(retained.get(&variable).is_none());
+    }
+
+    #[test]
+    fn local_retention_survives_object_replacement_without_aliasing_other_roots() {
+        let mut retained = Retained::default();
+        let mut variable = super::super::tests::variable(0);
+
+        let display = presentation::format(
+            Some(&ValueLocation::Memory {
+                address: 0x1000,
+                referenced: false,
+            }),
+            true,
+            64,
+            None,
+        );
+
+        retained.remember(&variable, &display);
+        variable.varobj = Some("created".into());
+        assert_eq!(retained.get(&variable).unwrap().text, display.text);
+        variable.varobj = Some("replacement".into());
+        variable.value = "changed".into();
+        assert_eq!(retained.get(&variable).unwrap().text, display.text);
+        variable.local_index = Some(1);
+        assert!(retained.get(&variable).is_none());
+        variable.local_index = Some(0);
+        variable.argument = true;
+        assert!(retained.get(&variable).is_none());
+        variable.argument = false;
+        variable.type_name = Some("long".into());
         assert!(retained.get(&variable).is_none());
     }
 }

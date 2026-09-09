@@ -22,7 +22,7 @@ impl Locations {
 
         menu.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         let summary = variable_menu_summary("LOCATION");
-        let label = gtk::Label::new(Some("…"));
+        let label = gtk::Label::new(None);
         label.add_css_class("local-variable-menu-value");
         label.set_xalign(0.0);
         label.set_ellipsize(gtk::pango::EllipsizeMode::Middle);

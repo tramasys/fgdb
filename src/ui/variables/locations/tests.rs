@@ -9,6 +9,8 @@ use crate::{
 };
 use std::{collections::VecDeque, time::Duration};
 
+mod refresh;
+
 pub(super) fn variable(index: usize) -> Variable {
     Variable {
         local_index: Some(index),
@@ -64,7 +66,8 @@ fn presentation_does_not_confuse_absent_addresses_with_registers_or_pointer_targ
 
     assert_eq!(display.text, "0x0000000000000010 (referent)");
     assert!(display.tooltip.contains("referenced object"));
-    assert_eq!(presentation::format(None, false, 64, None).text, "—");
+    assert!(presentation::format(None, true, 64, None).text.is_empty());
+    assert!(presentation::format(None, false, 64, None).text.is_empty());
 }
 
 fn mapping(kind: MemoryKind, path: &str) -> MemoryRegion {
@@ -131,7 +134,7 @@ fn unavailable_mappings_and_stale_locations_have_no_region_color() {
 
     let regions = [mapping(MemoryKind::Stack, "[stack]")];
     let stale = presentation::format(Some(&location), false, 64, Some(&regions));
-    assert_eq!(stale.text, "—");
+    assert!(stale.text.is_empty());
     assert_eq!(stale.kind, MemoryKind::None);
     assert!(!stale.tooltip.contains("[stack]"));
 

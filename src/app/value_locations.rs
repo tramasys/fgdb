@@ -28,6 +28,14 @@ pub(super) fn request(
             break;
         }
 
+        // Local roots already carry the expression from the current catalog.
+        // Their temporary MI objects add no path information; only descendants
+        // and watches need GDB to resolve an object path first.
+        if variable.local_index.is_some() {
+            batch.resolved(index, variable.name, None);
+            continue;
+        }
+
         let Some(varobj) = variable.varobj.as_deref() else {
             batch.resolved(index, variable.name, None);
             continue;
@@ -43,7 +51,7 @@ pub(super) fn request(
             .requests
             .unscoped(&command)
             .when(move || guard.is_current())
-            .background(move |_, record| {
+            .enrich(move |_, record| {
                 if record.class == "superseded" || !response.is_current() {
                     response.finish(None);
                     return;

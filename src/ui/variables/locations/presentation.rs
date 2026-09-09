@@ -71,8 +71,10 @@ pub(super) fn format(
             "GDB cannot access the target state needed to locate this value",
         ),
         Some(ValueLocation::Unknown(detail)) => ("Not resolved", detail.as_str()),
-        None if current => ("…", "Resolving storage at the current stop"),
-        None => ("—", "A current paused value is required"),
+        // The column already reserves space. Publish the first answer directly
+        // instead of flashing a placeholder during a short lookup.
+        None if current => ("", "Resolving storage at the current stop"),
+        None => ("", "A current paused value is required"),
     };
 
     Presentation {

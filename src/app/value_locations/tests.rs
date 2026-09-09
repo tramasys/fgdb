@@ -65,6 +65,46 @@ fn address(client: &MiClient, expression: &str) -> u64 {
 }
 
 #[test]
+#[ignore = "requires GDB and the built location fixture"]
+fn live_local_roots_resolve_in_one_request_without_variable_object_paths() {
+    let (_debugger, client) = open_debugger("c-variable-location-target", "location_checkpoint");
+    let requests = bound(&client, &Rc::new(Cell::new(true)));
+    let expressions = ["pointer", "record", "null_pointer"];
+
+    let variables: Vec<_> = expressions
+        .iter()
+        .enumerate()
+        .map(|(index, expression)| Variable {
+            local_index: Some(index),
+            ..variable(&client, expression)
+        })
+        .collect();
+
+    let expected: Vec<_> = expressions
+        .iter()
+        .map(|expression| Some(address(&client, &format!("&{expression}"))))
+        .collect();
+
+    let before = mi(&client, "-gdb-show language").token.unwrap();
+    let locations = locate(requests, variables);
+    let after = mi(&client, "-gdb-show language").token.unwrap();
+
+    assert_eq!(
+        locations
+            .iter()
+            .map(ValueLocation::address)
+            .collect::<Vec<_>>(),
+        expected
+    );
+
+    assert_eq!(
+        after - before,
+        2,
+        "local roots needed extra MI path requests"
+    );
+}
+
+#[test]
 #[ignore = "requires GDB and built location/C++ fixtures"]
 fn live_storage_is_not_the_pointer_target_and_queries_cannot_mutate_the_target() {
     let (_debugger, client) = open_debugger("c-variable-location-target", "location_checkpoint");
@@ -170,14 +210,21 @@ fn live_storage_is_not_the_pointer_target_and_queries_cannot_mutate_the_target()
 
     let (_debugger, client) =
         open_debugger("cpp-variable-viewer-target", "variable_viewer_checkpoint");
+
     let requests = bound(&client, &Rc::new(Cell::new(true)));
-    let locations = locate(
-        requests,
-        vec![
-            variable(&client, "native_values"),
-            variable(&client, "words"),
-        ],
-    );
+
+    let mut variables = vec![
+        variable(&client, "native_values"),
+        variable(&client, "words"),
+    ];
+
+    let locations = locate(requests.clone(), variables.clone());
+
+    for (index, variable) in variables.iter_mut().enumerate() {
+        variable.local_index = Some(index);
+    }
+
+    assert_eq!(locate(requests, variables), locations);
 
     assert!(locations.iter().all(|value| matches!(
         value,
@@ -230,7 +277,10 @@ fn live_primary_language_storage_uses_debugger_types() {
         }
 
         let requests = bound(&client, &Rc::new(Cell::new(true)));
-        let locations = locate(requests, vec![variable(&client, expression)]);
+        let mut root = variable(&client, expression);
+        let locations = locate(requests.clone(), vec![root.clone()]);
         assert!(locations[0].address().is_some(), "{fixture}: {locations:?}");
+        root.local_index = Some(0);
+        assert_eq!(locate(requests, vec![root]), locations, "{fixture}");
     }
 }
