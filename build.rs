@@ -4,6 +4,11 @@ fn main() {
     println!("cargo:rerun-if-changed=src/syscalls/count.bpf.c");
     println!("cargo:rerun-if-env-changed=BPF_CLANG");
     println!("cargo:rustc-check-cfg=cfg(syscall_bpf)");
+
+    if std::env::var_os("CARGO_FEATURE_EBPF").is_none() {
+        return;
+    }
+
     let architecture = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
 
     if !matches!(architecture.as_str(), "x86_64" | "aarch64") {

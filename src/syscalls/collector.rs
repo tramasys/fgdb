@@ -15,7 +15,9 @@ pub(crate) struct Target {
 }
 
 pub(crate) enum Phase {
+    #[cfg(syscall_bpf)]
     Collecting,
+    #[cfg(syscall_bpf)]
     Stopped(String),
     Unavailable(String),
 }
@@ -137,7 +139,11 @@ impl Drop for Collector {
 
 #[cfg(not(syscall_bpf))]
 fn collect(_target: Target, _shared: &Shared) -> Result<(), String> {
-    Err("Syscall collection currently supports local x86_64 and aarch64 Linux hosts".into())
+    if cfg!(feature = "ebpf") {
+        Err("Syscall collection currently supports local x86_64 and aarch64 Linux hosts".into())
+    } else {
+        Err("This build does not include eBPF syscall collection".into())
+    }
 }
 
 #[cfg(syscall_bpf)]
@@ -359,6 +365,22 @@ fn collect(target: Target, shared: &Shared) -> Result<(), String> {
 mod tests {
     use super::*;
     use crate::syscalls::Abi;
+
+    #[cfg(not(feature = "ebpf"))]
+    #[test]
+    fn disabled_collector_reports_the_build_configuration() {
+        let target = Target {
+            pid: 0,
+            debugger_pid: 0,
+        };
+
+        let result = collect(target, &Shared::default());
+
+        assert_eq!(
+            result,
+            Err("This build does not include eBPF syscall collection".into())
+        );
+    }
 
     #[test]
     fn reset_is_abi_scoped_and_does_not_delete_live_counters() {

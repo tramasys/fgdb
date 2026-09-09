@@ -1,0 +1,62 @@
+# Maintainer builds from the upstream development branch.
+pkgname=fgdb-git
+pkgver=0.1.0.r81.g8d1b38e
+pkgrel=1
+pkgdesc='A native, terminal-friendly GDB frontend'
+arch=('x86_64' 'aarch64')
+url='https://github.com/tramasys/fgdb'
+license=('MIT')
+depends=('gdb' 'gtk4>=4.22' 'gtksourceview5>=5.18' 'vte4>=0.84' 'glib2' 'glibc' 'libgcc')
+makedepends=('cargo' 'git' 'glib2-devel' 'pkgconf')
+optdepends=('rr: record and replay debugging')
+provides=('fgdb')
+conflicts=('fgdb')
+source=("fgdb::git+$url.git#branch=main")
+sha256sums=('SKIP')
+options=('!lto')
+
+_cargo_features=(--no-default-features)
+
+case ${FGDB_EBPF:-1} in
+  1)
+    depends+=('libelf' 'zlib')
+    makedepends+=('clang')
+    _cargo_features+=(--features ebpf)
+    ;;
+  0) pkgname=fgdb-no-ebpf-git ;;
+  *) error 'FGDB_EBPF must be 0 or 1'; exit 1 ;;
+esac
+
+pkgver() {
+  cd "$srcdir/fgdb" || return
+  local version
+  version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)
+  printf '%s.r%s.g%s' "$version" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "$srcdir/fgdb" || return
+  cargo fetch --locked
+}
+
+build() {
+  cd "$srcdir/fgdb" || return
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --frozen "${_cargo_features[@]}"
+}
+
+check() {
+  cd "$srcdir/fgdb" || return
+  export CARGO_TARGET_DIR="$srcdir/target"
+  # ELF inspection tests read debug sections from their own executable.
+  cargo test --frozen "${_cargo_features[@]}"
+}
+
+package() {
+  cd "$srcdir/fgdb" || return
+  install -Dm755 "$srcdir/target/release/fgdb" "$pkgdir/usr/bin/fgdb"
+  install -Dm644 assets/dev.fgdb.Fgdb.desktop "$pkgdir/usr/share/applications/dev.fgdb.Fgdb.desktop"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+  mkdir -p "$pkgdir/usr/share/icons"
+  cp -a assets/icons/hicolor "$pkgdir/usr/share/icons/"
+}

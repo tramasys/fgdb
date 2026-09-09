@@ -162,10 +162,12 @@ impl SyscallController {
                 }
 
                 run.status = match snapshot.phase {
+                    #[cfg(syscall_bpf)]
                     Phase::Collecting => format!(
                         "Collecting PID {}   All threads   Child processes excluded",
                         run.target.pid
                     ),
+                    #[cfg(syscall_bpf)]
                     Phase::Stopped(message) => {
                         format!("{message}. Counts retained for PID {}", run.target.pid)
                     }

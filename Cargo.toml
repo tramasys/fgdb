@@ -8,13 +8,17 @@ repository = "https://github.com/tramasys/fgdb"
 license = "MIT"
 autoexamples = false
 
+[features]
+default = ["ebpf"]
+ebpf = ["dep:libbpf-rs"]
+
 [dependencies]
 clap = { version = "4.5", default-features = false, features = ["derive", "error-context", "help", "std", "suggestions", "usage"] }
 futures-channel = "0.3.32"
 goblin = { version = "0.10.7", default-features = false, features = ["std", "elf32", "elf64", "endian_fd"] }
 gtk = { package = "gtk4", version = "0.11.4", features = ["v4_22"] }
 glib-unix = "0.22.8"
-libbpf-rs = "0.27.1"
+libbpf-rs = { version = "0.27.1", optional = true }
 memchr = { version = "2.8.3", features = ["std"] }
 nix = { version = "0.31.3", default-features = false, features = ["fs", "process", "signal", "term"] }
 rustix = { version = "1.1.4", features = ["fs", "param", "process"] }

@@ -1,0 +1,5 @@
+/fgdb/
+/src/
+/pkg/
+/*.pkg.tar.*
+/*.src.tar.*
