@@ -200,6 +200,7 @@ fn debugger_table_dividers_resize_with_optional_instruction_columns() {
         crate::ui::variables::locations::Locations::new(false, Rc::clone(&pointer_bits));
 
     let (locals, _, _) = views::build_locals_view(
+        &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::Locals),
         &Rc::new(RefCell::new(None)),
         &Rc::new(RefCell::new(None)),
         &Rc::new(VariableViewerRegistry::with_builtins()),
@@ -208,11 +209,24 @@ fn debugger_table_dividers_resize_with_optional_instruction_columns() {
         None,
     );
 
-    let (instructions, _, _, optional) = views::build_instruction_view();
-    let (stack, _, _) = views::build_stack_view();
-    let (registers, _) = views::build_register_group_table();
+    let (instructions, _, _, optional) = views::build_instruction_view(
+        &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::Instructions),
+    );
+
+    let (stack, _, _) = views::build_stack_view(
+        &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::Stack),
+    );
+
+    let (registers, _) = views::build_register_group_table(
+        &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::GeneralRegisters),
+    );
+
     let search = gtk::SearchEntry::new();
-    let (mappings, _) = views::build_memory_region_view(&pointer_bits, &search);
+    let (mappings, _) = views::build_memory_region_view(
+        &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::MemoryMappings),
+        &pointer_bits,
+        &search,
+    );
 
     for view in [&locals, &instructions, &stack, &registers, &mappings] {
         let (window, _) = present(view, 1800);

@@ -289,8 +289,11 @@ impl Ui {
             .hexpand(true)
             .build();
 
-        let process_picker =
-            process_picker::ProcessPicker::new(&attach_pid, self.model.debugger_pid());
+        let process_picker = process_picker::ProcessPicker::new(
+            &attach_pid,
+            self.model.debugger_pid(),
+            &self.column_layouts.table(TableId::AttachProcesses),
+        );
 
         attach_page.append(&process_picker.root);
 

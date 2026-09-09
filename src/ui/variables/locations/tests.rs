@@ -170,6 +170,7 @@ fn locations_are_lazy_visible_bounded_and_invalidated_with_their_stop() {
     locations.set_context(Some((1, 0)));
 
     let (view, store, _) = views::build_locals_view(
+        &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::Locals),
         &Rc::new(RefCell::new(None)),
         &Rc::new(RefCell::new(None)),
         &Rc::new(VariableViewerRegistry::with_builtins()),

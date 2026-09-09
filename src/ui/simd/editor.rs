@@ -458,7 +458,7 @@ mod tests {
         main.block_on(glib::timeout_future(Duration::from_millis(50)));
         editor.controls.interpretation.set_selected(4);
         main.block_on(glib::timeout_future(Duration::from_millis(50)));
-        let (content, groups) = build_register_view();
+        let (content, groups) = build_register_view(&crate::ui::ColumnLayouts::default());
         let group = groups
             .iter()
             .find(|group| group.kind == RegisterGroupKind::Vector)

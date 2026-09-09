@@ -30,7 +30,11 @@ pub(super) struct ProcessPicker {
 }
 
 impl ProcessPicker {
-    pub(super) fn new(pid: &gtk::Entry, debugger_pid: Option<u32>) -> Rc<Self> {
+    pub(super) fn new(
+        pid: &gtk::Entry,
+        debugger_pid: Option<u32>,
+        layout: &TableLayout,
+    ) -> Rc<Self> {
         let root = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
         root.set_vexpand(true);
         let controls = components::control_row();
@@ -79,7 +83,14 @@ impl ProcessPicker {
 
         for column in Column::ALL {
             let widget = column.build();
-            table.append_column(&widget);
+            let key = match column {
+                Column::Pid => "pid",
+                Column::Executable => "executable",
+                Column::Owner => "owner",
+                Column::Command => "command",
+            };
+
+            layout.append(&table, key, &widget);
 
             if matches!(column, Column::Pid) {
                 table.sort_by_column(Some(&widget), gtk::SortType::Ascending);

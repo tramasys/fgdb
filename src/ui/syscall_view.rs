@@ -105,7 +105,7 @@ pub(super) struct SyscallView {
 }
 
 impl SyscallView {
-    pub(super) fn new() -> Self {
+    pub(super) fn new(layout: &TableLayout) -> Self {
         let root = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
         root.set_size_request(0, 0);
         components::inset(&root, components::CONTENT_INSET);
@@ -187,7 +187,17 @@ impl SyscallView {
 
         for column in Column::ALL {
             let widget = column.build();
-            view.append_column(&widget);
+            let key = match column {
+                Column::Name => "name",
+                Column::Count => "count",
+                Column::Share => "share",
+                Column::Number => "number",
+                Column::Abi => "abi",
+                Column::Category => "category",
+                Column::Arguments => "arguments",
+            };
+
+            layout.append(&view, key, &widget);
 
             if matches!(column, Column::Count) {
                 view.sort_by_column(Some(&widget), gtk::SortType::Descending);
@@ -540,7 +550,10 @@ mod tests {
     fn counts_keep_row_identity_and_filter_without_rebuilding_unchanged_cells() {
         gtk::init().unwrap();
         Theme::graphite().install();
-        let view = SyscallView::new();
+        let view = SyscallView::new(
+            &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::Syscalls),
+        );
+
         assert_eq!(view.store.n_items(), 0);
         let abi = Abi::host_abis()[0];
         let key = crate::syscalls::catalog()

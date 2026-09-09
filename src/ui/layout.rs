@@ -12,7 +12,9 @@ use gtk::{glib, prelude::*};
 use super::workspace::console::Selection as ConsoleView;
 use super::{KernelSectionHandler, PanelId, workspace::Panels};
 
+mod columns;
 mod writer;
+pub(super) use columns::{ColumnLayouts, TableId, TableLayout};
 
 const SAVE_DELAY: Duration = Duration::from_millis(350);
 const FINAL_SAVE_GRACE: Duration = Duration::from_secs(2);
@@ -73,16 +75,21 @@ impl Pane {
 pub(super) struct Persistence(Rc<State>);
 
 impl Persistence {
-    pub(super) fn install(window: &gtk::ApplicationWindow, panes: Vec<Pane>) -> Self {
-        Self::install_at(window, panes, layout_path())
+    pub(super) fn install(
+        window: &gtk::ApplicationWindow,
+        panes: Vec<Pane>,
+        columns: &ColumnLayouts,
+    ) -> Self {
+        Self::install_at(window, panes, layout_path(), columns)
     }
 
     pub(super) fn install_at(
         window: &gtk::ApplicationWindow,
         panes: Vec<Pane>,
         path: PathBuf,
+        columns: &ColumnLayouts,
     ) -> Self {
-        let remembered = crate::bounded::read_string(&path, MAX_LAYOUT_BYTES)
+        let mut remembered = crate::bounded::read_string(&path, MAX_LAYOUT_BYTES)
             .map(|contents| parse_layout(&contents))
             .unwrap_or_default();
 
@@ -90,7 +97,10 @@ impl Persistence {
             geometry.apply(window);
         }
 
+        columns.restore(std::mem::take(&mut remembered.column_widths));
+
         let state = Rc::new(State {
+            columns: columns.clone(),
             writer: std::sync::Arc::new(writer::Writer::new(path)),
             window: window.clone(),
             panes,
@@ -110,6 +120,15 @@ impl Persistence {
             restore_started: Cell::new(false),
             restoring_position: Cell::new(false),
             ready_to_save: Cell::new(false),
+        });
+
+        let weak = Rc::downgrade(&state);
+        columns.on_changed(move || {
+            if let Some(state) = weak.upgrade()
+                && state.ready_to_save.get()
+            {
+                state.schedule_save();
+            }
         });
 
         for pane in &state.panes {
@@ -204,6 +223,7 @@ impl Persistence {
         }
 
         self.0.cancel_save();
+        self.0.columns.finish();
         self.0.pending_write.borrow_mut().take();
         let contents = self.0.snapshot();
 
@@ -431,6 +451,7 @@ type ReadyHandler = Box<dyn FnOnce()>;
 type ErrorHandler = Rc<dyn Fn(&str)>;
 
 struct State {
+    columns: ColumnLayouts,
     writer: std::sync::Arc<writer::Writer>,
     window: gtk::ApplicationWindow,
     panes: Vec<Pane>,
@@ -727,7 +748,9 @@ impl State {
             }
         }
 
-        serialize_layout(&self.panes, &remembered)
+        let mut contents = serialize_layout(&self.panes, &remembered);
+        self.columns.write(&mut contents);
+        contents
     }
 }
 
@@ -796,6 +819,7 @@ pub(super) struct PanelPlacement {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct RememberedLayout {
+    column_widths: columns::Widths,
     window: Option<WindowGeometry>,
     terminal_visible: Option<bool>,
     console_view: Option<ConsoleView>,
@@ -865,6 +889,10 @@ fn parse_layout(contents: &str) -> RememberedLayout {
         let Some((key, geometry)) = line.split_once('=') else {
             continue;
         };
+
+        if remembered.column_widths.parse(key.trim(), geometry) {
+            continue;
+        }
 
         if key.trim() == "window" {
             if let Some(geometry) = WindowGeometry::parse(geometry) {
@@ -966,7 +994,8 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 fn serialize_layout(panes: &[Pane], remembered: &RememberedLayout) -> String {
-    let mut contents = String::from("# fgdb layout v8\n");
+    let mut contents = String::from("# fgdb layout v9\n");
+    remembered.column_widths.write(&mut contents);
 
     if let Some(window) = remembered.window {
         writeln!(

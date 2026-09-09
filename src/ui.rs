@@ -125,6 +125,7 @@ use dialogs::*;
 use editor::*;
 use formatting::*;
 use kernel_view::*;
+use layout::{ColumnLayouts, TableId, TableLayout};
 use memory_view::*;
 use misc_view::*;
 use modules::ModuleControls;
@@ -330,6 +331,7 @@ type UntilAbortHandler = Rc<dyn Fn()>;
 type UntilStopHandler = Rc<dyn Fn(Option<&str>, Option<&str>, Option<&str>) -> bool>;
 
 struct KernelViewBindings<'a> {
+    columns: &'a ColumnLayouts,
     refresh_handler: &'a Rc<RefCell<Option<KernelRefreshHandler>>>,
     remembered_disclosures: &'a HashMap<String, bool>,
     section_handler: &'a Rc<RefCell<Option<KernelSectionHandler>>>,
@@ -340,6 +342,7 @@ struct MiscViewBindings<'a> {
 }
 
 struct InspectorBindings<'a> {
+    columns: &'a ColumnLayouts,
     theme: &'a Theme,
     variable_children_handler: &'a Rc<RefCell<Option<VariableChildrenHandler>>>,
     variable_viewer_handler: &'a Rc<RefCell<Option<VariableViewerHandler>>>,
@@ -858,6 +861,7 @@ struct MemoryWatchView {
 
 #[derive(Clone)]
 struct MemoryWatchContainer {
+    columns: ColumnLayouts,
     notebook: gtk::Notebook,
     empty: gtk::Label,
     refresh_all: gtk::Button,
@@ -1256,6 +1260,7 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 
 #[derive(Clone)]
 pub struct Ui {
+    column_layouts: ColumnLayouts,
     investigation: Rc<investigation::Workspace>,
     replay_controls: replay::ReplayControls,
     pub(crate) model: Rc<crate::model::DebuggerModel>,

@@ -75,6 +75,7 @@ struct VariableMenuContext {
 }
 
 pub(super) fn build_locals_view(
+    layout: &TableLayout,
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
     viewer_handler: &Rc<RefCell<Option<VariableViewerHandler>>>,
     viewers: &Rc<VariableViewerRegistry>,
@@ -148,25 +149,42 @@ pub(super) fn build_locals_view(
         locations: Rc::clone(locations),
     };
 
-    view.append_column(&local_name_column(children_handler, &variable_menu));
+    layout.append(
+        &view,
+        "name",
+        &local_name_column(children_handler, &variable_menu),
+    );
 
-    view.append_column(&local_text_column(
-        "VALUE",
-        360,
-        LocalColumn::Value,
-        Rc::clone(presentation),
-        &variable_menu,
-    ));
+    layout.append(
+        &view,
+        "value",
+        &local_text_column(
+            "VALUE",
+            360,
+            LocalColumn::Value,
+            Rc::clone(presentation),
+            &variable_menu,
+        ),
+    );
 
-    view.append_column(&local_text_column(
-        "TYPE",
-        260,
-        LocalColumn::Type,
-        Rc::clone(presentation),
-        &variable_menu,
-    ));
+    layout.append(
+        &view,
+        "type",
+        &local_text_column(
+            "TYPE",
+            260,
+            LocalColumn::Type,
+            Rc::clone(presentation),
+            &variable_menu,
+        ),
+    );
 
-    view.append_column(&local_location_column(locations, &variable_menu));
+    layout.append(
+        &view,
+        "location",
+        &local_location_column(locations, &variable_menu),
+    );
+
     locations.watch_scrolling(&view);
 
     (view, store, selection)
@@ -242,6 +260,7 @@ pub(super) fn insight_label(placeholder: &str) -> gtk::Label {
 }
 
 pub(super) fn build_memory_region_view(
+    layout: &TableLayout,
     target_pointer_bits: &Rc<Cell<u32>>,
     search: &gtk::SearchEntry,
 ) -> (gtk::ColumnView, gio::ListStore) {
@@ -265,20 +284,19 @@ pub(super) fn build_memory_region_view(
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, column) in [
-        ("START", 175, MemoryColumn::Start),
-        ("END", 175, MemoryColumn::End),
-        ("SIZE", 90, MemoryColumn::Size),
-        ("PERM", 65, MemoryColumn::Permissions),
-        ("REGS", 110, MemoryColumn::Registers),
-        ("PATH", 280, MemoryColumn::Path),
+    for (key, title, width, column) in [
+        ("start", "START", 175, MemoryColumn::Start),
+        ("end", "END", 175, MemoryColumn::End),
+        ("size", "SIZE", 90, MemoryColumn::Size),
+        ("permissions", "PERM", 65, MemoryColumn::Permissions),
+        ("registers", "REGS", 110, MemoryColumn::Registers),
+        ("path", "PATH", 280, MemoryColumn::Path),
     ] {
-        view.append_column(&memory_region_column(
-            title,
-            width,
-            column,
-            Rc::clone(target_pointer_bits),
-        ));
+        layout.append(
+            &view,
+            key,
+            &memory_region_column(title, width, column, Rc::clone(target_pointer_bits)),
+        );
     }
 
     search.connect_search_changed(move |search| {
@@ -1380,7 +1398,9 @@ pub(super) fn variable_tooltip(variable: &Variable) -> String {
     )
 }
 
-pub(super) fn build_instruction_view() -> (
+pub(super) fn build_instruction_view(
+    layout: &TableLayout,
+) -> (
     gtk::ColumnView,
     gio::ListStore,
     gtk::SingleSelection,
@@ -1400,22 +1420,31 @@ pub(super) fn build_instruction_view() -> (
         "Double-click an instruction to toggle an address breakpoint",
     ));
 
-    for column in [
-        instruction_column("ADDRESS", 170, "instruction-address", &selection, |row| {
-            let marker = if row.current { "›" } else { " " };
-            Cow::Owned(format!(
-                "{marker} {}",
-                full_address(&row.instruction.address, row.pointer_bits)
-            ))
-        }),
-        instruction_column("OPCODE", 72, "instruction-mnemonic", &selection, |row| {
-            Cow::Borrowed(split_instruction(&row.instruction.text).0)
-        }),
-        instruction_column("OPERANDS", 360, "instruction-operands", &selection, |row| {
-            Cow::Borrowed(split_instruction(&row.instruction.text).1)
-        }),
+    for (key, column) in [
+        (
+            "address",
+            instruction_column("ADDRESS", 170, "instruction-address", &selection, |row| {
+                let marker = if row.current { "›" } else { " " };
+                Cow::Owned(format!(
+                    "{marker} {}",
+                    full_address(&row.instruction.address, row.pointer_bits)
+                ))
+            }),
+        ),
+        (
+            "opcode",
+            instruction_column("OPCODE", 72, "instruction-mnemonic", &selection, |row| {
+                Cow::Borrowed(split_instruction(&row.instruction.text).0)
+            }),
+        ),
+        (
+            "operands",
+            instruction_column("OPERANDS", 360, "instruction-operands", &selection, |row| {
+                Cow::Borrowed(split_instruction(&row.instruction.text).1)
+            }),
+        ),
     ] {
-        view.append_column(&column);
+        layout.append(&view, key, &column);
     }
 
     let bytes = instruction_column("BYTES", 130, "instruction-opcodes", &selection, |row| {
@@ -1429,8 +1458,8 @@ pub(super) fn build_instruction_view() -> (
         Cow::Owned(instruction_symbol(&row.instruction))
     });
 
-    view.append_column(&bytes);
-    view.append_column(&symbols);
+    layout.append(&view, "bytes", &bytes);
+    layout.append(&view, "symbol", &symbols);
 
     let source_column =
         instruction_column("SOURCE", 280, "instruction-source", &selection, |row| {
@@ -1447,7 +1476,7 @@ pub(super) fn build_instruction_view() -> (
             ))
         });
     source_column.set_visible(false);
-    view.append_column(&source_column);
+    layout.append(&view, "source", &source_column);
     (
         view,
         store,
@@ -1460,7 +1489,7 @@ pub(super) fn build_instruction_view() -> (
     )
 }
 
-pub(super) fn build_register_view() -> (gtk::Box, Vec<RegisterGroupView>) {
+pub(super) fn build_register_view(columns: &ColumnLayouts) -> (gtk::Box, Vec<RegisterGroupView>) {
     let content = gtk::Box::new(gtk::Orientation::Vertical, 4);
     content.add_css_class("register-groups");
     content.set_hexpand(true);
@@ -1481,7 +1510,17 @@ pub(super) fn build_register_view() -> (gtk::Box, Vec<RegisterGroupView>) {
             continue;
         }
 
-        let (view, store) = build_register_group_table();
+        let id = match kind {
+            RegisterGroupKind::General => TableId::GeneralRegisters,
+            RegisterGroupKind::Bases => TableId::BaseRegisters,
+            RegisterGroupKind::Flags => TableId::FlagRegisters,
+            RegisterGroupKind::Segments => TableId::SegmentRegisters,
+            RegisterGroupKind::FloatingPoint => TableId::FloatRegisters,
+            RegisterGroupKind::Other => TableId::OtherRegisters,
+            RegisterGroupKind::Vector => unreachable!("vector registers use a lane view"),
+        };
+
+        let (view, store) = build_register_group_table(&columns.table(id));
         let expanded = matches!(
             kind,
             RegisterGroupKind::General
@@ -1506,7 +1545,9 @@ pub(super) fn build_register_view() -> (gtk::Box, Vec<RegisterGroupView>) {
     (content, groups)
 }
 
-pub(super) fn build_register_group_table() -> (gtk::ColumnView, gio::ListStore) {
+pub(super) fn build_register_group_table(
+    layout: &TableLayout,
+) -> (gtk::ColumnView, gio::ListStore) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
@@ -1518,12 +1559,17 @@ pub(super) fn build_register_group_table() -> (gtk::ColumnView, gio::ListStore) 
     view.set_reorderable(true);
     view.set_single_click_activate(false);
 
-    for (title, width, column) in [
-        ("REGISTER", 90, RegisterColumn::Name),
-        ("VALUE", 185, RegisterColumn::Value),
-        ("POINTER CHAIN / FLAGS", 330, RegisterColumn::Details),
+    for (key, title, width, column) in [
+        ("name", "REGISTER", 90, RegisterColumn::Name),
+        ("value", "VALUE", 185, RegisterColumn::Value),
+        (
+            "details",
+            "POINTER CHAIN / FLAGS",
+            330,
+            RegisterColumn::Details,
+        ),
     ] {
-        view.append_column(&register_column(title, width, column));
+        layout.append(&view, key, &register_column(title, width, column));
     }
 
     (view, store)
@@ -1634,7 +1680,9 @@ pub(super) fn register_column(
     components::table_column(title, width, factory)
 }
 
-pub(super) fn build_stack_view() -> (gtk::ColumnView, gio::ListStore, StackWordInspector) {
+pub(super) fn build_stack_view(
+    layout: &TableLayout,
+) -> (gtk::ColumnView, gio::ListStore, StackWordInspector) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(true);
@@ -1645,16 +1693,16 @@ pub(super) fn build_stack_view() -> (gtk::ColumnView, gio::ListStore, StackWordI
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, column) in [
-        ("ANCHOR", 80, StackColumn::Anchor),
-        ("ADDRESS", 175, StackColumn::Address),
-        ("VALUE / POINTER CHAIN", 285, StackColumn::Value),
-        ("OFFSET", 82, StackColumn::Offset),
-        ("INDEX", 62, StackColumn::Index),
-        ("REFERENCES", 155, StackColumn::References),
-        ("REGION", 210, StackColumn::Region),
+    for (key, title, width, column) in [
+        ("anchor", "ANCHOR", 80, StackColumn::Anchor),
+        ("address", "ADDRESS", 175, StackColumn::Address),
+        ("value", "VALUE / POINTER CHAIN", 285, StackColumn::Value),
+        ("offset", "OFFSET", 82, StackColumn::Offset),
+        ("index", "INDEX", 62, StackColumn::Index),
+        ("references", "REFERENCES", 155, StackColumn::References),
+        ("region", "REGION", 210, StackColumn::Region),
     ] {
-        view.append_column(&stack_column(title, width, column, &selection));
+        layout.append(&view, key, &stack_column(title, width, column, &selection));
     }
 
     let inspector = build_stack_word_inspector();

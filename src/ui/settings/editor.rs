@@ -209,7 +209,7 @@ impl Editor {
                     "Changes to the active configuration apply immediately to source views"
                 }
                 "Layout" => {
-                    "Panel placement, window sizes, and selected tabs are saved automatically. Workspace controls below apply immediately across config profiles. Window positions are managed by your desktop"
+                    "Panel placement, window sizes, selected tabs, and column widths are saved automatically. Workspace controls below apply immediately across config profiles. Window positions are managed by your desktop"
                 }
                 "Instructions" => {
                     "Column preferences apply live. Source annotations refresh when inspection is available. Assembly syntax is a default for new debugger backends"
@@ -311,6 +311,21 @@ impl Editor {
 
             if page == "Layout" {
                 content.append(&rows);
+                let columns = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
+                columns.add_css_class("settings-row");
+                let controls = components::control_row();
+                let title = text("Table columns", "settings-name");
+                title.set_hexpand(true);
+                controls.append(&title);
+                let reset = gtk::Button::with_label("Reset column widths");
+                reset.add_css_class("inline-action");
+                reset.set_tooltip_text(Some("Restore built-in column widths in all tables and clear saved widths, including closed viewers"));
+                controls.append(&reset);
+                let layouts = ui.column_layouts.clone();
+                reset.connect_clicked(move |_| layouts.reset());
+                columns.append(&controls);
+                columns.append(&text("Dragging a column divider saves its width. Tables remember their own widths, including hidden columns. Viewer windows of the same kind share widths", "muted"));
+                content.append(&columns);
                 content.append(&ui.panel_hosts.settings_controls());
                 stack.add_titled(&content, Some(page), page);
             } else if page == "Keybindings" {

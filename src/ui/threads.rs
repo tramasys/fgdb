@@ -902,12 +902,18 @@ impl Ui {
         notebook.set_vexpand(true);
 
         notebook.append_page(
-            &comparison_table(comparison.frames),
+            &comparison_table(
+                comparison.frames,
+                &self.column_layouts.table(TableId::ThreadFrames),
+            ),
             Some(&gtk::Label::new(Some("Frames"))),
         );
 
         notebook.append_page(
-            &comparison_table(comparison.registers),
+            &comparison_table(
+                comparison.registers,
+                &self.column_layouts.table(TableId::ThreadRegisters),
+            ),
             Some(&gtk::Label::new(Some("Registers"))),
         );
 
@@ -1123,7 +1129,7 @@ fn string_list_matches(model: &gtk::StringList, values: &[String]) -> bool {
             .all(|(index, value)| model.string(index as u32).as_deref() == Some(value.as_str()))
 }
 
-fn comparison_table(rows: Vec<ThreadComparisonRow>) -> gtk::ScrolledWindow {
+fn comparison_table(rows: Vec<ThreadComparisonRow>, layout: &TableLayout) -> gtk::ScrolledWindow {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     replace_boxed_store(&store, rows);
     let selection = gtk::NoSelection::new(Some(store));
@@ -1131,10 +1137,10 @@ fn comparison_table(rows: Vec<ThreadComparisonRow>) -> gtk::ScrolledWindow {
     view.add_css_class("debug-table");
     view.set_vexpand(true);
 
-    for (title, width, field) in [
-        ("ITEM", 190, 0_u8),
-        ("LEFT THREAD", 330, 1),
-        ("RIGHT THREAD", 330, 2),
+    for (key, title, width, field) in [
+        ("item", "ITEM", 190, 0_u8),
+        ("left", "LEFT THREAD", 330, 1),
+        ("right", "RIGHT THREAD", 330, 2),
     ] {
         let factory = gtk::SignalListItemFactory::new();
 
@@ -1180,7 +1186,7 @@ fn comparison_table(rows: Vec<ThreadComparisonRow>) -> gtk::ScrolledWindow {
         });
 
         let column = components::table_column(title, width, factory);
-        view.append_column(&column);
+        layout.append(&view, key, &column);
     }
 
     gtk::ScrolledWindow::builder()

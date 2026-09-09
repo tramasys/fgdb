@@ -840,6 +840,7 @@ pub(super) fn build_inspector(
     locals_changed.set_tooltip_text(Some("Show only values changed since the previous stop"));
 
     let (locals_view, locals_store, locals_selection) = build_locals_view(
+        &bindings.columns.table(TableId::Locals),
         bindings.variable_children_handler,
         bindings.variable_viewer_handler,
         bindings.variable_viewers,
@@ -850,6 +851,7 @@ pub(super) fn build_inspector(
 
     let (expression_watches_view, expression_watches_store, expression_watches_selection) =
         build_locals_view(
+            &bindings.columns.table(TableId::Watches),
             bindings.variable_children_handler,
             bindings.variable_viewer_handler,
             bindings.variable_viewers,
@@ -867,7 +869,7 @@ pub(super) fn build_inspector(
         .build();
 
     let (instructions_view, instructions_store, instructions_selection, instruction_columns) =
-        build_instruction_view();
+        build_instruction_view(&bindings.columns.table(TableId::Instructions));
 
     let instructions_empty = empty_label("Paused target required");
 
@@ -1132,7 +1134,7 @@ pub(super) fn build_inspector(
 
     expression_watches_page.append(&expression_watches_scrolled);
     let registers_page = components::panel();
-    let (registers_view, register_groups) = build_register_view();
+    let (registers_view, register_groups) = build_register_view(bindings.columns);
     let registers_empty = empty_label("Values appear when the target is paused");
 
     let registers_scrolled = gtk::ScrolledWindow::builder()
@@ -1146,7 +1148,8 @@ pub(super) fn build_inspector(
     registers_page.append(&registers_scrolled);
     let stack_page = components::panel();
     stack_page.append(&build_context_legend());
-    let (stack_view, stack_store, stack_word_inspector) = build_stack_view();
+    let (stack_view, stack_store, stack_word_inspector) =
+        build_stack_view(&bindings.columns.table(TableId::Stack));
     let stack_empty = empty_label("Stack values appear when the target is paused");
 
     let stack_scrolled = gtk::ScrolledWindow::builder()
@@ -1258,6 +1261,7 @@ pub(super) fn build_inspector(
     memory_watch_section.append(&memory_watch_notebook);
 
     let memory_watch_container = MemoryWatchContainer {
+        columns: bindings.columns.clone(),
         notebook: memory_watch_notebook,
         empty: memory_watches_empty,
         refresh_all: memory_refresh_all,
@@ -1289,8 +1293,11 @@ pub(super) fn build_inspector(
     components::inset(&memory_map_search, components::CONTROL_GAP);
     memory_map_body.append(&memory_map_search);
 
-    let (memory_regions_view, memory_region_store) =
-        build_memory_region_view(bindings.target_pointer_bits, &memory_map_search);
+    let (memory_regions_view, memory_region_store) = build_memory_region_view(
+        &bindings.columns.table(TableId::MemoryMappings),
+        bindings.target_pointer_bits,
+        &memory_map_search,
+    );
 
     let memory_regions_empty = empty_label("Mappings appear when the target is paused");
 
@@ -1331,6 +1338,7 @@ pub(super) fn build_inspector(
     });
 
     let memory_search = memory_search::MemorySearchView::new(
+        &bindings.columns.table(TableId::MemorySearch),
         &memory_page,
         &memory_split,
         &memory_map_section,
@@ -1629,7 +1637,7 @@ pub(super) fn build_inspector(
         .build();
 
     let kernel_view = build_kernel_view(&bindings.kernel);
-    let misc_view = build_misc_view(bindings.theme);
+    let misc_view = build_misc_view(bindings.theme, bindings.columns);
     for (id, child) in [
         (PanelId::Context, state.upcast::<gtk::Widget>()),
         (PanelId::Watches, expression_watches_page.upcast()),

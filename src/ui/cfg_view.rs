@@ -1538,7 +1538,8 @@ mod tests {
         gtk::init().unwrap();
         let theme = Theme::graphite();
         theme.install();
-        let misc = super::super::misc_view::build_misc_view(&theme);
+        let misc =
+            super::super::misc_view::build_misc_view(&theme, &crate::ui::ColumnLayouts::default());
         misc.pages.set_visible_child_name("cfg");
         let view = &misc.cfg;
         view.follow.set_active(false);

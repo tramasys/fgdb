@@ -162,7 +162,7 @@ struct CoreWidgets {
     split: gtk::Paned,
 }
 
-pub(super) fn build_misc_view(theme: &Theme) -> MiscView {
+pub(super) fn build_misc_view(theme: &Theme, columns: &ColumnLayouts) -> MiscView {
     let active = Rc::new(Cell::new(false));
     let in_flight = Rc::new(Cell::new(false));
     let needs_refresh = Rc::new(Cell::new(true));
@@ -197,21 +197,21 @@ pub(super) fn build_misc_view(theme: &Theme) -> MiscView {
     root.append(&navigation.root);
     root.append(&navigation.compact_root);
     root.bind_navigation(&navigation.root, &navigation.compact_root);
-    let startup = build_startup_page();
+    let startup = build_startup_page(columns);
     pages.add_titled(&startup.root, Some("startup-vectors"), "Args / Env");
-    let auxv = build_auxv_page();
+    let auxv = build_auxv_page(columns);
     pages.add_titled(&auxv.root, Some("auxv"), "Auxv");
-    let call_abi = build_call_abi_page();
+    let call_abi = build_call_abi_page(columns);
     pages.add_titled(&call_abi.root, Some("call-abi"), "Call ABI");
     let cfg = build_cfg_view(theme);
     pages.add_titled(&cfg.root, Some("cfg"), "CFG");
-    let allocator = build_allocator_page();
+    let allocator = build_allocator_page(columns);
     pages.add_titled(&allocator.root, Some("allocator"), "Allocator");
-    let locks = build_locks_page();
+    let locks = build_locks_page(columns);
     pages.add_titled(&locks.root, Some("locks"), "Locks");
-    let syscalls = syscall_view::SyscallView::new();
+    let syscalls = syscall_view::SyscallView::new(&columns.table(TableId::Syscalls));
     pages.add_titled(&syscalls.root, Some("syscalls"), "Syscalls");
-    let core = build_core_page();
+    let core = build_core_page(columns);
     pages.add_titled(&core.root, Some("core-dump"), "Core dump");
     root.append(&pages);
 
@@ -283,7 +283,7 @@ pub(super) fn build_misc_view(theme: &Theme) -> MiscView {
     }
 }
 
-fn build_startup_page() -> StartupWidgets {
+fn build_startup_page(columns: &ColumnLayouts) -> StartupWidgets {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_vexpand(true);
     let controls = gtk::Box::new(gtk::Orientation::Vertical, 3);
@@ -310,10 +310,10 @@ fn build_startup_page() -> StartupWidgets {
     let query = Rc::new(RefCell::new(String::new()));
 
     let (arguments, arguments_store, arguments_empty, arguments_filter) =
-        build_arguments_section(Rc::clone(&query));
+        build_arguments_section(columns, Rc::clone(&query));
 
     let (environment, environment_store, environment_empty, environment_filter) =
-        build_environment_section(Rc::clone(&query));
+        build_environment_section(columns, Rc::clone(&query));
 
     search.connect_search_changed(move |search| {
         let text = search.text().trim().to_lowercase();
@@ -350,37 +350,43 @@ fn build_startup_page() -> StartupWidgets {
     }
 }
 
-fn build_auxv_page() -> MiscTablePage {
+fn build_auxv_page(columns: &ColumnLayouts) -> MiscTablePage {
     let page = build_misc_table_page("Auxiliary vector data is unavailable");
 
     page.note.set_text(
         "Kernel-supplied process-entry values. Pointer interpretations are limited to known mappings.",
     );
 
-    page.view
-        .append_column(&misc_column::<AuxvEntry>("ENTRY", 170, |row| {
-            row.name.clone()
-        }));
+    let layout = columns.table(TableId::Auxv);
 
-    page.view
-        .append_column(&misc_column::<AuxvEntry>("TYPE", 72, |row| {
-            row.kind.to_string()
-        }));
+    layout.append(
+        &page.view,
+        "entry",
+        &misc_column::<AuxvEntry>("ENTRY", 170, |row| row.name.clone()),
+    );
 
-    page.view
-        .append_column(&misc_column::<AuxvEntry>("RAW VALUE", 190, |row| {
-            format!("0x{:016x}", row.value)
-        }));
+    layout.append(
+        &page.view,
+        "type",
+        &misc_column::<AuxvEntry>("TYPE", 72, |row| row.kind.to_string()),
+    );
 
-    page.view
-        .append_column(&misc_column::<AuxvEntry>("INTERPRETATION", 420, |row| {
-            row.interpretation.clone()
-        }));
+    layout.append(
+        &page.view,
+        "raw-value",
+        &misc_column::<AuxvEntry>("RAW VALUE", 190, |row| format!("0x{:016x}", row.value)),
+    );
+
+    layout.append(
+        &page.view,
+        "interpretation",
+        &misc_column::<AuxvEntry>("INTERPRETATION", 420, |row| row.interpretation.clone()),
+    );
 
     page
 }
 
-fn build_call_abi_page() -> CallAbiWidgets {
+fn build_call_abi_page(columns: &ColumnLayouts) -> CallAbiWidgets {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
     root.set_vexpand(true);
     let summary = misc_summary_label();
@@ -394,30 +400,44 @@ fn build_call_abi_page() -> CallAbiWidgets {
 
     registers.prepend(&section_title("LIVE ABI TRANSFER"));
 
-    register_view.append_column(&misc_column::<CallAbiRegister>("ROLE", 250, |row| {
-        row.role.clone()
-    }));
+    let layout = columns.table(TableId::CallArguments);
 
-    register_view.append_column(&misc_column::<CallAbiRegister>("REGISTER", 120, |row| {
-        row.name.clone()
-    }));
+    layout.append(
+        &register_view,
+        "role",
+        &misc_column::<CallAbiRegister>("ROLE", 250, |row| row.role.clone()),
+    );
 
-    register_view.append_column(&misc_column::<CallAbiRegister>("VALUE", 420, |row| {
-        row.value.clone()
-    }));
+    layout.append(
+        &register_view,
+        "register",
+        &misc_column::<CallAbiRegister>("REGISTER", 120, |row| row.name.clone()),
+    );
+
+    layout.append(
+        &register_view,
+        "value",
+        &misc_column::<CallAbiRegister>("VALUE", 420, |row| row.value.clone()),
+    );
 
     let (contract, contract_store, _, contract_view) =
         build_misc_table("Call ABI metadata is unavailable for this target");
 
     contract.prepend(&section_title("ABI CONTRACT"));
 
-    contract_view.append_column(&misc_column::<CallAbiFact>("ASPECT", 260, |row| {
-        row.aspect.clone()
-    }));
+    let layout = columns.table(TableId::CallAbi);
 
-    contract_view.append_column(&misc_column::<CallAbiFact>("CONVENTION", 620, |row| {
-        row.value.clone()
-    }));
+    layout.append(
+        &contract_view,
+        "aspect",
+        &misc_column::<CallAbiFact>("ASPECT", 260, |row| row.aspect.clone()),
+    );
+
+    layout.append(
+        &contract_view,
+        "convention",
+        &misc_column::<CallAbiFact>("CONVENTION", 620, |row| row.value.clone()),
+    );
 
     let split = gtk::Paned::new(gtk::Orientation::Vertical);
     split.add_css_class("misc-data-split");
@@ -443,7 +463,7 @@ fn build_call_abi_page() -> CallAbiWidgets {
     }
 }
 
-fn build_allocator_page() -> AllocatorWidgets {
+fn build_allocator_page(columns: &ColumnLayouts) -> AllocatorWidgets {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_vexpand(true);
     let views = gtk::Stack::new();
@@ -522,31 +542,43 @@ fn build_allocator_page() -> AllocatorWidgets {
 
     mappings.prepend(&section_title("ALLOCATOR-RELATED MAPPINGS"));
 
-    view.append_column(&misc_column::<AllocatorRegion>(
-        "ADDRESS RANGE",
-        270,
-        |row| format!("0x{:x}-0x{:x}", row.start, row.end),
-    ));
+    let layout = columns.table(TableId::AllocatorMappings);
 
-    view.append_column(&misc_column::<AllocatorRegion>("SIZE", 95, |row| {
-        crate::kernel::format_bytes(row.size())
-    }));
+    layout.append(
+        &view,
+        "address-range",
+        &misc_column::<AllocatorRegion>("ADDRESS RANGE", 270, |row| {
+            format!("0x{:x}-0x{:x}", row.start, row.end)
+        }),
+    );
 
-    view.append_column(&misc_column::<AllocatorRegion>("PERM", 65, |row| {
-        row.permissions.clone()
-    }));
+    layout.append(
+        &view,
+        "size",
+        &misc_column::<AllocatorRegion>("SIZE", 95, |row| crate::kernel::format_bytes(row.size())),
+    );
 
-    view.append_column(&misc_column::<AllocatorRegion>("ROLE", 150, |row| {
-        row.role.clone()
-    }));
+    layout.append(
+        &view,
+        "perm",
+        &misc_column::<AllocatorRegion>("PERM", 65, |row| row.permissions.clone()),
+    );
 
-    view.append_column(&misc_column::<AllocatorRegion>("BACKING", 180, |row| {
-        row.path.clone()
-    }));
+    layout.append(
+        &view,
+        "role",
+        &misc_column::<AllocatorRegion>("ROLE", 150, |row| row.role.clone()),
+    );
+
+    layout.append(
+        &view,
+        "backing",
+        &misc_column::<AllocatorRegion>("BACKING", 180, |row| row.path.clone()),
+    );
 
     summary.append(&mappings);
     views.add_titled(&summary, Some("detection"), "Detection");
-    let inspector = build_heap_inspector();
+    let inspector = build_heap_inspector(columns);
     views.add_titled(&inspector.root, Some("structures"), "Heap structures");
     root.append(&views);
 
@@ -568,7 +600,7 @@ fn build_allocator_page() -> AllocatorWidgets {
     }
 }
 
-fn build_heap_inspector() -> HeapInspectorWidgets {
+fn build_heap_inspector(columns: &ColumnLayouts) -> HeapInspectorWidgets {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.set_vexpand(true);
     let controls = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
@@ -708,40 +740,43 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
     root.append(&result_header);
     let table = build_heap_inspection_table();
 
-    table.view.append_column(&heap_inspection_column(
-        "STRUCTURE",
-        100,
-        HeapCellKind::Structure,
-        |row| &row.kind,
-    ));
+    let layout = columns.table(TableId::Heap);
 
-    table.view.append_column(&heap_inspection_column(
-        "ADDRESS / INDEX",
-        160,
-        HeapCellKind::Location,
-        |row| &row.location,
-    ));
+    layout.append(
+        &table.view,
+        "structure",
+        &heap_inspection_column("STRUCTURE", 100, HeapCellKind::Structure, |row| &row.kind),
+    );
 
-    table.view.append_column(&heap_inspection_column(
-        "SIZE / COUNT",
-        135,
-        HeapCellKind::Metric,
-        |row| &row.metric,
-    ));
+    layout.append(
+        &table.view,
+        "address-index",
+        &heap_inspection_column("ADDRESS / INDEX", 160, HeapCellKind::Location, |row| {
+            &row.location
+        }),
+    );
 
-    table.view.append_column(&heap_inspection_column(
-        "STATE / MEANING",
-        150,
-        HeapCellKind::State,
-        |row| &row.state,
-    ));
+    layout.append(
+        &table.view,
+        "size-count",
+        &heap_inspection_column("SIZE / COUNT", 135, HeapCellKind::Metric, |row| &row.metric),
+    );
 
-    table.view.append_column(&heap_inspection_column(
-        "DETAILS / LINKS",
-        180,
-        HeapCellKind::Details,
-        |row| &row.details,
-    ));
+    layout.append(
+        &table.view,
+        "state-meaning",
+        &heap_inspection_column("STATE / MEANING", 150, HeapCellKind::State, |row| {
+            &row.state
+        }),
+    );
+
+    layout.append(
+        &table.view,
+        "details-links",
+        &heap_inspection_column("DETAILS / LINKS", 180, HeapCellKind::Details, |row| {
+            &row.details
+        }),
+    );
 
     connect_heap_table_interactions(&table, &expression, &chunk);
     root.append(&table.root);
@@ -1220,46 +1255,59 @@ fn set_allocator_class(label: &gtk::Label, class: &str, enabled: bool) {
     }
 }
 
-fn build_locks_page() -> LocksWidgets {
+fn build_locks_page(columns: &ColumnLayouts) -> LocksWidgets {
     let page = build_misc_table_page("Open this tab to inspect kernel-visible futex waits");
     page.note.set_text(LOCKS_NOTE);
 
-    page.view
-        .append_column(&misc_column::<LockWait>("TID", 90, |row| {
-            row.tid.to_string()
-        }));
+    let layout = columns.table(TableId::LockWaits);
 
-    page.view
-        .append_column(&misc_column::<LockWait>("THREAD", 180, |row| {
-            row.thread.clone()
-        }));
+    layout.append(
+        &page.view,
+        "tid",
+        &misc_column::<LockWait>("TID", 90, |row| row.tid.to_string()),
+    );
 
-    page.view
-        .append_column(&misc_column::<LockWait>("STATE", 150, |row| {
-            row.state.clone()
-        }));
+    layout.append(
+        &page.view,
+        "thread",
+        &misc_column::<LockWait>("THREAD", 180, |row| row.thread.clone()),
+    );
 
-    page.view
-        .append_column(&misc_column::<LockWait>("WAIT ADDRESS", 190, |row| {
+    layout.append(
+        &page.view,
+        "state",
+        &misc_column::<LockWait>("STATE", 150, |row| row.state.clone()),
+    );
+
+    layout.append(
+        &page.view,
+        "wait-address",
+        &misc_column::<LockWait>("WAIT ADDRESS", 190, |row| {
             row.address
                 .map_or_else(|| String::from("-"), |value| format!("0x{value:016x}"))
-        }));
+        }),
+    );
 
-    page.view
-        .append_column(&misc_column::<LockWait>("OPERATION", 190, |row| {
-            row.operation.clone()
-        }));
+    layout.append(
+        &page.view,
+        "operation",
+        &misc_column::<LockWait>("OPERATION", 190, |row| row.operation.clone()),
+    );
 
-    page.view
-        .append_column(&misc_column::<LockWait>("EXPECTED / COUNT", 140, |row| {
+    layout.append(
+        &page.view,
+        "expected-count",
+        &misc_column::<LockWait>("EXPECTED / COUNT", 140, |row| {
             row.expected
                 .map_or_else(|| String::from("-"), |value| format!("0x{value:x}"))
-        }));
+        }),
+    );
 
-    page.view
-        .append_column(&misc_column::<LockWait>("DETAILS", 360, |row| {
-            row.details.clone()
-        }));
+    layout.append(
+        &page.view,
+        "details",
+        &misc_column::<LockWait>("DETAILS", 360, |row| row.details.clone()),
+    );
 
     let graph = gtk::Box::new(gtk::Orientation::Vertical, 4);
     graph.add_css_class("lock-graph");
@@ -1277,25 +1325,43 @@ fn build_locks_page() -> LocksWidgets {
     dependency_view.set_vexpand(true);
     dependency_view.set_reorderable(true);
 
-    dependency_view.append_column(&misc_column::<LockDependency>("WAITER", 200, |row| {
-        format!("{}  {}", row.waiter_tid, row.waiter)
-    }));
+    let layout = columns.table(TableId::LockDependencies);
 
-    dependency_view.append_column(&misc_column::<LockDependency>("RELATION", 110, |_| {
-        String::from("waits for")
-    }));
+    layout.append(
+        &dependency_view,
+        "waiter",
+        &misc_column::<LockDependency>("WAITER", 200, |row| {
+            format!("{}  {}", row.waiter_tid, row.waiter)
+        }),
+    );
 
-    dependency_view.append_column(&misc_column::<LockDependency>("OWNER", 200, |row| {
-        format!("{}  {}", row.owner_tid, row.owner)
-    }));
+    layout.append(
+        &dependency_view,
+        "relation",
+        &misc_column::<LockDependency>("RELATION", 110, |_| String::from("waits for")),
+    );
 
-    dependency_view.append_column(&misc_column::<LockDependency>("ADDRESS", 190, |row| {
-        format!("0x{:016x}", row.address)
-    }));
+    layout.append(
+        &dependency_view,
+        "owner",
+        &misc_column::<LockDependency>("OWNER", 200, |row| {
+            format!("{}  {}", row.owner_tid, row.owner)
+        }),
+    );
 
-    dependency_view.append_column(&misc_column::<LockDependency>("FUTEX WORD", 130, |row| {
-        format!("0x{:08x}", row.futex_value)
-    }));
+    layout.append(
+        &dependency_view,
+        "address",
+        &misc_column::<LockDependency>("ADDRESS", 190, |row| format!("0x{:016x}", row.address)),
+    );
+
+    layout.append(
+        &dependency_view,
+        "futex-word",
+        &misc_column::<LockDependency>("FUTEX WORD", 130, |row| {
+            format!("0x{:08x}", row.futex_value)
+        }),
+    );
 
     let graph_empty = empty_label("No reliable thread-owner edges were found");
     graph.append(&graph_empty);
@@ -1330,7 +1396,7 @@ fn build_locks_page() -> LocksWidgets {
     }
 }
 
-fn build_core_page() -> CoreWidgets {
+fn build_core_page(columns: &ColumnLayouts) -> CoreWidgets {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
     root.set_vexpand(true);
     let summary = misc_summary_label();
@@ -1347,17 +1413,25 @@ fn build_core_page() -> CoreWidgets {
     let (notes, note_store, _, note_view) = build_misc_table("No recognized ELF notes are present");
     notes.prepend(&section_title("ELF NOTES"));
 
-    note_view.append_column(&misc_column::<CoreNote>("OWNER", 150, |row| {
-        row.owner.clone()
-    }));
+    let layout = columns.table(TableId::CoreNotes);
 
-    note_view.append_column(&misc_column::<CoreNote>("TYPE", 210, |row| {
-        row.kind.clone()
-    }));
+    layout.append(
+        &note_view,
+        "owner",
+        &misc_column::<CoreNote>("OWNER", 150, |row| row.owner.clone()),
+    );
 
-    note_view.append_column(&misc_column::<CoreNote>("BYTES", 110, |row| {
-        row.bytes.to_string()
-    }));
+    layout.append(
+        &note_view,
+        "type",
+        &misc_column::<CoreNote>("TYPE", 210, |row| row.kind.clone()),
+    );
+
+    layout.append(
+        &note_view,
+        "bytes",
+        &misc_column::<CoreNote>("BYTES", 110, |row| row.bytes.to_string()),
+    );
 
     let (files, file_store, _, file_view) = build_searchable_misc_table::<CoreMappedFile>(
         "No NT_FILE mappings match the filter",
@@ -1373,19 +1447,29 @@ fn build_core_page() -> CoreWidgets {
 
     files.prepend(&section_title("FILE-BACKED MAPPINGS AT CAPTURE"));
 
-    file_view.append_column(&misc_column::<CoreMappedFile>(
-        "ADDRESS RANGE",
-        330,
-        |row| format!("0x{:016x}-0x{:016x}", row.start, row.end),
-    ));
+    let layout = columns.table(TableId::CoreMappings);
 
-    file_view.append_column(&misc_column::<CoreMappedFile>("FILE OFFSET", 160, |row| {
-        format!("0x{:x}", row.file_offset)
-    }));
+    layout.append(
+        &file_view,
+        "address-range",
+        &misc_column::<CoreMappedFile>("ADDRESS RANGE", 330, |row| {
+            format!("0x{:016x}-0x{:016x}", row.start, row.end)
+        }),
+    );
 
-    file_view.append_column(&misc_column::<CoreMappedFile>("PATH", 520, |row| {
-        row.path.clone()
-    }));
+    layout.append(
+        &file_view,
+        "file-offset",
+        &misc_column::<CoreMappedFile>("FILE OFFSET", 160, |row| {
+            format!("0x{:x}", row.file_offset)
+        }),
+    );
+
+    layout.append(
+        &file_view,
+        "path",
+        &misc_column::<CoreMappedFile>("PATH", 520, |row| row.path.clone()),
+    );
 
     let split = gtk::Paned::new(gtk::Orientation::Vertical);
     split.add_css_class("misc-data-split");
@@ -1648,6 +1732,7 @@ fn set_startup_summary_value(label: &gtk::Label, value: &str) {
 }
 
 fn build_arguments_section(
+    columns: &ColumnLayouts,
     query: Rc<RefCell<String>>,
 ) -> (gtk::Box, gio::ListStore, gtk::Label, gtk::CustomFilter) {
     let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1673,23 +1758,41 @@ fn build_arguments_section(
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    view.append_column(&argument_column("ENTRY", 100, |row, label| {
-        label.set_text(&argument_label(row.index));
-        label.add_css_class("misc-vector-name");
-    }));
+    let layout = columns.table(TableId::Arguments);
 
-    view.append_column(&argument_column("ADDRESS", 180, |row, label| {
-        label.set_text(&format_address(row.address));
-        label.add_css_class("kernel-numeric");
-    }));
+    layout.append(
+        &view,
+        "entry",
+        &argument_column("ENTRY", 100, |row, label| {
+            label.set_text(&argument_label(row.index));
+            label.add_css_class("misc-vector-name");
+        }),
+    );
 
-    view.append_column(&argument_column("BYTES", 70, |row, label| {
-        label.set_text(&row.byte_len.to_string());
-    }));
+    layout.append(
+        &view,
+        "address",
+        &argument_column("ADDRESS", 180, |row, label| {
+            label.set_text(&format_address(row.address));
+            label.add_css_class("kernel-numeric");
+        }),
+    );
 
-    view.append_column(&argument_column("VALUE", 420, |row, label| {
-        label.set_text(&row.value);
-    }));
+    layout.append(
+        &view,
+        "bytes",
+        &argument_column("BYTES", 70, |row, label| {
+            label.set_text(&row.byte_len.to_string());
+        }),
+    );
+
+    layout.append(
+        &view,
+        "value",
+        &argument_column("VALUE", 420, |row, label| {
+            label.set_text(&row.value);
+        }),
+    );
 
     let empty = empty_label("No argument entries are available");
     let empty_for_filter = empty.clone();
@@ -1713,6 +1816,7 @@ fn build_arguments_section(
 }
 
 fn build_environment_section(
+    columns: &ColumnLayouts,
     query: Rc<RefCell<String>>,
 ) -> (gtk::Box, gio::ListStore, gtk::Label, gtk::CustomFilter) {
     let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1738,27 +1842,49 @@ fn build_environment_section(
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    view.append_column(&environment_column("ENTRY", 100, |row, label| {
-        label.set_text(&format!("envp[{}]", row.index));
-    }));
+    let layout = columns.table(TableId::Environment);
 
-    view.append_column(&environment_column("ADDRESS", 180, |row, label| {
-        label.set_text(&format_address(row.address));
-        label.add_css_class("kernel-numeric");
-    }));
+    layout.append(
+        &view,
+        "entry",
+        &environment_column("ENTRY", 100, |row, label| {
+            label.set_text(&format!("envp[{}]", row.index));
+        }),
+    );
 
-    view.append_column(&environment_column("BYTES", 70, |row, label| {
-        label.set_text(&row.byte_len.to_string());
-    }));
+    layout.append(
+        &view,
+        "address",
+        &environment_column("ADDRESS", 180, |row, label| {
+            label.set_text(&format_address(row.address));
+            label.add_css_class("kernel-numeric");
+        }),
+    );
 
-    view.append_column(&environment_column("NAME", 210, |row, label| {
-        label.set_text(&row.name);
-        label.add_css_class("misc-vector-name");
-    }));
+    layout.append(
+        &view,
+        "bytes",
+        &environment_column("BYTES", 70, |row, label| {
+            label.set_text(&row.byte_len.to_string());
+        }),
+    );
 
-    view.append_column(&environment_column("VALUE", 420, |row, label| {
-        label.set_text(&row.value);
-    }));
+    layout.append(
+        &view,
+        "name",
+        &environment_column("NAME", 210, |row, label| {
+            label.set_text(&row.name);
+            label.add_css_class("misc-vector-name");
+        }),
+    );
+
+    layout.append(
+        &view,
+        "value",
+        &environment_column("VALUE", 420, |row, label| {
+            label.set_text(&row.value);
+        }),
+    );
 
     let empty = empty_label("No env entries are available");
     let empty_for_filter = empty.clone();

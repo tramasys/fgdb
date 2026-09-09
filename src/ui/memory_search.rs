@@ -48,6 +48,7 @@ pub(super) struct MemorySearchView {
 
 impl MemorySearchView {
     pub(super) fn new(
+        layout: &TableLayout,
         inspector: &gtk::Box,
         split: &gtk::Paned,
         mappings: &gtk::Box,
@@ -213,13 +214,17 @@ impl MemorySearchView {
         results.add_css_class("debug-table");
         results.set_single_click_activate(false);
 
-        for (index, title, width) in [
-            (0, "ADDRESS", 175),
-            (1, "MATCHED BYTES", 220),
-            (2, "TEXT", 180),
-            (3, "MAPPING", 220),
+        for (key, index, title, width) in [
+            ("address", 0, "ADDRESS", 175),
+            ("bytes", 1, "MATCHED BYTES", 220),
+            ("text", 2, "TEXT", 180),
+            ("mapping", 3, "MAPPING", 220),
         ] {
-            results.append_column(&result_column(index, title, width, &selection));
+            layout.append(
+                &results,
+                key,
+                &result_column(index, title, width, &selection),
+            );
         }
 
         let scroll = gtk::ScrolledWindow::builder()
@@ -978,7 +983,11 @@ mod tests {
         gtk::init().unwrap();
         Theme::graphite().install();
         let filter = components::delayed_search_entry("Filter mappings");
-        let (table, store) = build_memory_region_view(&Rc::new(Cell::new(64)), &filter);
+        let (table, store) = build_memory_region_view(
+            &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::MemoryMappings),
+            &Rc::new(Cell::new(64)),
+            &filter,
+        );
 
         replace_boxed_store(
             &store,
@@ -1014,6 +1023,7 @@ mod tests {
         split.set_end_child(Some(&mappings));
         split.set_shrink_start_child(false);
         let view = MemorySearchView::new(
+            &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::MemorySearch),
             &components::panel(),
             &split,
             &mappings,

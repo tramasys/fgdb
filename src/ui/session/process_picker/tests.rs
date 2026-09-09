@@ -29,7 +29,12 @@ fn filtering_and_refresh_never_silently_replace_the_selected_identity() {
     gtk::init().unwrap();
     Theme::graphite().install();
     let pid = gtk::Entry::new();
-    let picker = ProcessPicker::new(&pid, None);
+    let picker = ProcessPicker::new(
+        &pid,
+        None,
+        &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::AttachProcesses),
+    );
+
     picker.finish_refresh(Ok(snapshot(100)));
     assert_eq!(picker.filtered.n_items(), 1);
     assert_eq!(picker.store.n_items(), 2);

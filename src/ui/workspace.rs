@@ -333,6 +333,7 @@ mod tests {
                 &window,
                 vec![layout::Pane::new("test_split", &split)],
                 path.clone(),
+                &ColumnLayouts::default(),
             );
             layout.bind_notebook("inspector", &notebook, &panels);
             layout.bind_stack("details", &details);
@@ -521,7 +522,7 @@ mod tests {
         registers.append(&draft);
         let stack = gtk::Box::new(gtk::Orientation::Vertical, 0);
         stack.append(&gtk::Label::new(Some("Stack contents")));
-        let misc = build_misc_view(&Theme::graphite());
+        let misc = build_misc_view(&Theme::graphite(), &ColumnLayouts::default());
         panels.append(&notebook, PanelId::Registers, &registers);
         panels.append(&notebook, PanelId::Stack, &stack);
         panels.append(&notebook, PanelId::Misc, &misc.root);

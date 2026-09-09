@@ -339,7 +339,12 @@ impl VariableViewerSession {
         components::inset(&root, components::DIALOG_INSET);
         root.append(&linked.root);
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-        let table = variable_viewer_table(gtk::NoSelection::new(Some(store.clone())), false);
+        let table = variable_viewer_table(
+            gtk::NoSelection::new(Some(store.clone())),
+            false,
+            &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::LinkedListViewer),
+        );
+
         root.append(
             &gtk::ScrolledWindow::builder()
                 .vexpand(true)
@@ -642,7 +647,13 @@ impl Ui {
             VariableViewerPlan::LinkedList { .. }
         );
 
-        let view = variable_viewer_table(selection, array_viewer);
+        let id = if array_viewer {
+            TableId::ArrayViewer
+        } else {
+            TableId::LinkedListViewer
+        };
+
+        let view = variable_viewer_table(selection, array_viewer, &self.column_layouts.table(id));
 
         let scrolled = gtk::ScrolledWindow::builder()
             .child(&view)
@@ -717,24 +728,28 @@ impl Ui {
     }
 }
 
-fn variable_viewer_table(selection: gtk::NoSelection, array_viewer: bool) -> gtk::ColumnView {
+fn variable_viewer_table(
+    selection: gtk::NoSelection,
+    array_viewer: bool,
+    layout: &TableLayout,
+) -> gtk::ColumnView {
     let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.add_css_class("variable-viewer-table");
     view.set_vexpand(true);
 
-    for (title, width, field) in [
-        ("INDEX", if array_viewer { 160 } else { 75 }, 0_u8),
-        ("NODE / OWNER", 180, 1),
-        ("LINK", 230, 4),
-        ("VALUE / FIELDS", 360, 2),
-        ("TYPE", 240, 3),
+    for (key, title, width, field) in [
+        ("index", "INDEX", if array_viewer { 160 } else { 75 }, 0_u8),
+        ("owner", "NODE / OWNER", 180, 1),
+        ("link", "LINK", 230, 4),
+        ("value", "VALUE / FIELDS", 360, 2),
+        ("type", "TYPE", 240, 3),
     ] {
         if array_viewer && matches!(field, 1 | 4) {
             continue;
         }
 
-        view.append_column(&variable_viewer_column(title, width, field));
+        layout.append(&view, key, &variable_viewer_column(title, width, field));
     }
 
     view
@@ -830,7 +845,16 @@ mod tests {
                 link: String::new(),
             }));
 
-            let view = variable_viewer_table(gtk::NoSelection::new(Some(store)), array_viewer);
+            let view = variable_viewer_table(
+                gtk::NoSelection::new(Some(store)),
+                array_viewer,
+                &ColumnLayouts::default().table(if array_viewer {
+                    TableId::ArrayViewer
+                } else {
+                    TableId::LinkedListViewer
+                }),
+            );
+
             let scroll = gtk::ScrolledWindow::builder()
                 .child(&view)
                 .overlay_scrolling(false)

@@ -28,6 +28,7 @@ impl Ui {
         let variable_children_handler = Rc::new(RefCell::new(None));
         let variable_viewer_handler = Rc::new(RefCell::new(None));
         let variable_viewers = Rc::new(VariableViewerRegistry::with_builtins());
+        let column_layouts = ColumnLayouts::default();
         let kernel_refresh_handler = Rc::new(RefCell::new(None));
         let misc_refresh_handler = Rc::new(RefCell::new(None));
         let kernel_section_handler = Rc::new(RefCell::new(None));
@@ -45,6 +46,7 @@ impl Ui {
         );
 
         let inspector_bindings = InspectorBindings {
+            columns: &column_layouts,
             theme,
             variable_children_handler: &variable_children_handler,
             variable_viewer_handler: &variable_viewer_handler,
@@ -53,6 +55,7 @@ impl Ui {
             variable_presentation: &variable_presentation,
             variable_locations: &variable_locations,
             kernel: KernelViewBindings {
+                columns: &column_layouts,
                 refresh_handler: &kernel_refresh_handler,
                 remembered_disclosures: &remembered_disclosures,
                 section_handler: &kernel_section_handler,
@@ -83,7 +86,8 @@ impl Ui {
         panel_hosts.set_restore_on_startup(config.preferences.restore_panel_windows);
         workspace_footer.append(&panel_hosts.menu_button());
         root.append(&workspace_footer);
-        let layout = layout::Persistence::install(&window, workspace.layout_panes.clone());
+        let layout =
+            layout::Persistence::install(&window, workspace.layout_panes.clone(), &column_layouts);
         layout.bind_notebook("left_sidebar", &workspace.left_navigation, &panels);
         layout.bind_notebook("inspector", &workspace.inspector_navigation, &panels);
         layout.bind_stack("kernel", &workspace.kernel_view.pages);
@@ -105,6 +109,7 @@ impl Ui {
         let source_tree_base_roots = source::search_roots(config);
 
         let ui = Self {
+            column_layouts,
             investigation: Rc::new(investigation::Workspace::default()),
             replay_controls: topbar.replay_controls,
             model,

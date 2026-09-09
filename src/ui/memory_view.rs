@@ -156,7 +156,8 @@ fn create_memory_watch(
     summary.append(&status);
     summary.append(&range);
     page.append(&summary);
-    let (view, store, selection) = build_memory_watch_table();
+    let (view, store, selection) =
+        build_memory_watch_table(&container.columns.table(TableId::MemoryBytes));
 
     let scrolled = gtk::ScrolledWindow::builder()
         .child(&view)
@@ -260,6 +261,7 @@ fn connect_memory_follow(
     watches: &Rc<RefCell<Vec<MemoryWatchView>>>,
     handler: &Rc<RefCell<Option<MemoryWatchHandler>>>,
 ) {
+    let columns = container.columns.clone();
     let weak_notebook = container.notebook.downgrade();
     let weak_empty = container.empty.downgrade();
     let weak_refresh_all = container.refresh_all.downgrade();
@@ -291,6 +293,7 @@ fn connect_memory_follow(
         };
 
         let container = MemoryWatchContainer {
+            columns: columns.clone(),
             notebook,
             empty,
             refresh_all,
@@ -316,6 +319,7 @@ fn connect_memory_remove(
     container: &MemoryWatchContainer,
     watches: &Rc<RefCell<Vec<MemoryWatchView>>>,
 ) {
+    let columns = container.columns.clone();
     let weak_notebook = container.notebook.downgrade();
     let weak_empty = container.empty.downgrade();
     let weak_refresh_all = container.refresh_all.downgrade();
@@ -352,6 +356,7 @@ fn connect_memory_remove(
 
         update_memory_container_state(
             &MemoryWatchContainer {
+                columns: columns.clone(),
                 notebook,
                 empty,
                 refresh_all,
@@ -516,7 +521,9 @@ fn selected_memory_pointer(selection: &gtk::SingleSelection) -> Option<u64> {
         .filter(|pointer| *pointer != 0)
 }
 
-fn build_memory_watch_table() -> (gtk::ColumnView, gio::ListStore, gtk::SingleSelection) {
+fn build_memory_watch_table(
+    layout: &TableLayout,
+) -> (gtk::ColumnView, gio::ListStore, gtk::SingleSelection) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
@@ -527,18 +534,23 @@ fn build_memory_watch_table() -> (gtk::ColumnView, gio::ListStore, gtk::SingleSe
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, column) in [
-        ("ADDRESS", 180, MemoryRowColumn::Address),
-        ("OFFSET", 75, MemoryRowColumn::Offset),
-        ("VALUE", 300, MemoryRowColumn::Value),
-        ("DECODED", 170, MemoryRowColumn::Decoded),
+    for (key, title, width, column) in [
+        ("address", "ADDRESS", 180, MemoryRowColumn::Address),
+        ("offset", "OFFSET", 75, MemoryRowColumn::Offset),
+        ("value", "VALUE", 300, MemoryRowColumn::Value),
+        ("decoded", "DECODED", 170, MemoryRowColumn::Decoded),
         (
+            "target",
             "INTERPRETATION / TARGET",
             290,
             MemoryRowColumn::Interpretation,
         ),
     ] {
-        view.append_column(&memory_watch_column(title, width, column, &selection));
+        layout.append(
+            &view,
+            key,
+            &memory_watch_column(title, width, column, &selection),
+        );
     }
 
     (view, store, selection)
@@ -827,6 +839,7 @@ mod tests {
         notebook.set_show_border(false);
 
         let container = MemoryWatchContainer {
+            columns: ColumnLayouts::default(),
             notebook: notebook.clone(),
             empty: gtk::Label::new(None),
             refresh_all: gtk::Button::new(),
