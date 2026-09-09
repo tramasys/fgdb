@@ -236,9 +236,19 @@ pub(super) fn synthetic_error_record(class: &str, message: &str) -> MiRecord {
     }
 }
 
-pub(super) fn scoped_mi_command(command: &str, elements: usize) -> String {
+pub(super) fn scoped_mi_command(command: &str, elements: usize, read_only: bool) -> String {
+    let call_scope = if read_only {
+        concat!(
+            "with may-call-functions off -- ",
+            "with may-write-memory off -- ",
+            "with may-write-registers off -- "
+        )
+    } else {
+        ""
+    };
+
     let console_command = format!(
-        "with print elements {elements} -- interpreter-exec mi {}",
+        "{call_scope}with print elements {elements} -- interpreter-exec mi {}",
         quote(command)
     );
 

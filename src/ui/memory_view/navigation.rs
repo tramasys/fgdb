@@ -51,10 +51,14 @@ impl Controls {
         let root = components::action_flow();
         root.set_max_children_per_line(4);
         root.set_halign(gtk::Align::Start);
-        let previous = arrow_button("go-previous-symbolic", "Read the preceding inspector page");
+        let previous = components::navigation_button(
+            "go-previous-symbolic",
+            "Read the preceding inspector page",
+        );
         let base = memory_toolbar_button("Base", "Return to the original expression");
         base.set_sensitive(false);
-        let next = arrow_button("go-next-symbolic", "Read the following inspector page");
+        let next =
+            components::navigation_button("go-next-symbolic", "Read the following inspector page");
 
         let pages = components::control_group(
             "PAGE",
@@ -82,12 +86,12 @@ impl Controls {
             "One inspector page is {byte_count} bytes, not the operating system's page size"
         )));
 
-        let backward = arrow_button(
+        let backward = components::navigation_button(
             "go-previous-symbolic",
             "Jump backward by the configured distance",
         );
 
-        let forward = arrow_button(
+        let forward = components::navigation_button(
             "go-next-symbolic",
             "Jump forward by the configured distance",
         );
@@ -162,15 +166,6 @@ impl Controls {
     pub(super) fn update_offset(&self, offset: i64) {
         self.base.set_sensitive(offset != 0);
     }
-}
-
-fn arrow_button(icon: &str, tooltip: &str) -> gtk::Button {
-    let button = gtk::Button::from_icon_name(icon);
-    button.add_css_class("memory-navigation-button");
-    button.set_tooltip_text(Some(tooltip));
-    button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
-
-    button
 }
 
 fn connect(

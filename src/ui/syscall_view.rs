@@ -180,7 +180,7 @@ impl SyscallView {
         root.connect_map(move |_| ensure_catalog(&catalog_store, &catalog_rows));
         let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
         let sorted = gtk::SortListModel::new(Some(filtered.clone()), None::<gtk::Sorter>);
-        let view = gtk::ColumnView::new(Some(gtk::NoSelection::new(Some(sorted.clone()))));
+        let view = components::column_view(gtk::NoSelection::new(Some(sorted.clone())));
         view.add_css_class("debug-table");
         view.add_css_class("misc-data-table");
         view.set_reorderable(true);
@@ -454,10 +454,7 @@ impl Column {
             });
         });
 
-        let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-        column.set_fixed_width(width);
-        column.set_resizable(true);
-        column.set_expand(matches!(self, Self::Name | Self::Arguments));
+        let column = components::table_column(title, width, factory);
 
         column.set_sorter(Some(&gtk::CustomSorter::new(move |left, right| {
             let left = left.downcast_ref::<Row>().unwrap().data();

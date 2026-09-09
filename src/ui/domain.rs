@@ -269,12 +269,18 @@ impl VariableNodeIndex {
         }
     }
 
-    pub(super) fn remove_node(&mut self, node: &VariableNode) {
-        if let Some(varobj) = node.variable.varobj.as_ref() {
+    pub(super) fn replace(&mut self, previous: &VariableNode, updated: &VariableNode) {
+        if previous.variable.varobj != updated.variable.varobj
+            && let Some(varobj) = previous.variable.varobj.as_ref()
+        {
             self.nodes.remove(varobj);
         }
 
-        self.remove_store(&node.children);
+        if previous.children != updated.children {
+            self.remove_store(&previous.children);
+        }
+
+        self.insert(updated.clone());
     }
 
     pub(super) fn index_store(&mut self, store: &gio::ListStore) {
@@ -418,7 +424,7 @@ mod tests {
         index.insert(first.clone());
         index.index_store(&first.children);
         index.insert(second);
-        index.remove_node(&first);
+        index.replace(&first, &VariableNode::placeholder("unavailable", ""));
         assert!(!index.contains("var1"));
         assert!(!index.contains("var1.child"));
         assert!(index.contains("var2"));

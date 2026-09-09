@@ -180,6 +180,25 @@ impl StopRequest<'_> {
         )
     }
 
+    /// Read-only inspection restores settings within GDB's command scope.
+    /// Re-evaluating a viewer path must not call functions or write target state.
+    pub(crate) fn inspect(
+        mut self,
+        elements: usize,
+        handler: impl FnOnce(&MiClient, MiRecord) + 'static,
+    ) -> io::Result<u64> {
+        let client = self.client()?;
+        let guard = self.guard();
+        client.request_scoped_inspection(
+            &self.encoded_command(),
+            elements,
+            true,
+            Some(CommandOwner::Stop(self.requests.generation())),
+            guard,
+            handler,
+        )
+    }
+
     /// Capture the console output of an encoded MI interpreter command.
     pub(crate) fn capture(
         mut self,

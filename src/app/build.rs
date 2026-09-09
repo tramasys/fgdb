@@ -781,6 +781,15 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
 
         drop(current_ui);
         let weak_ui = weak_ui.clone();
+        let weak_ui_for_guard = weak_ui.clone();
+        let variable_for_guard = variable.clone();
+
+        let assignment_request = assignment_request.when(move || {
+            weak_ui_for_guard
+                .upgrade()
+                .is_some_and(|ui| ui.variable_action_is_current(&variable_for_guard))
+        });
+
         let name = variable.name;
         let weak_ui_for_response = weak_ui.clone();
 
@@ -859,6 +868,30 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         };
 
         request_variable_children(weak_ui, client, variable, from);
+    });
+
+    let weak_ui = Rc::downgrade(&ui);
+    let weak_client = Rc::downgrade(&mi_client);
+
+    ui.connect_variable_locations(move |variables, current, reply| {
+        let Some(client) = weak_client.upgrade() else {
+            reply(None);
+            return;
+        };
+        let Some(ui) = weak_ui.upgrade() else {
+            reply(None);
+            return;
+        };
+        let Some(requests) = stop_requests(
+            &weak_ui,
+            &client,
+            ui.model.current_stop_refresh_generation(),
+        ) else {
+            reply(None);
+            return;
+        };
+
+        super::value_locations::request(requests, variables, current, reply);
     });
 
     let weak_ui = Rc::downgrade(&ui);

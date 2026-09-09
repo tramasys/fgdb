@@ -56,6 +56,13 @@ pub extern "C" fn rust_types_ready() {
     black_box(());
 }
 
+// Compare a node opened directly with the same node reached through Rc/RefCell.
+#[unsafe(no_mangle)]
+#[inline(never)]
+pub extern "C" fn rust_linked_cycle_checkpoint(node: &Node, shared: &Rc<RefCell<Node>>) {
+    black_box((node, shared));
+}
+
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub extern "C" fn rust_variable_viewer_checkpoint(
@@ -269,7 +276,7 @@ fn main() {
         previous: Rc::downgrade(&first),
     }));
 
-    first.borrow_mut().next = Some(second);
+    first.borrow_mut().next = Some(Rc::clone(&second));
 
     rust_variable_viewer_checkpoint(
         &vector,
@@ -283,4 +290,8 @@ fn main() {
         &slice_storage[1..8],
         &first,
     );
+
+    second.borrow_mut().next = Some(Rc::clone(&first));
+    rust_linked_cycle_checkpoint(&first.borrow(), &first);
+    second.borrow_mut().next = None;
 }

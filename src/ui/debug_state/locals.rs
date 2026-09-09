@@ -254,19 +254,16 @@ impl Ui {
             return;
         }
 
-        let locals_updated = apply_variable_updates(&self.locals_store, updates);
-        let watches_updated = apply_variable_updates(&self.expression_watches_store, updates);
+        // Update only affected index entries. Value-only changes can retire a
+        // pointer subtree even when GDB keeps the same type and child count.
+        let reindex = |previous: &VariableNode, updated: &VariableNode| {
+            self.variable_node_index
+                .borrow_mut()
+                .replace(previous, updated);
+        };
 
-        if (locals_updated > 0 || watches_updated > 0)
-            && updates.iter().any(|update| {
-                update.type_changed
-                    || update.new_num_children.is_some()
-                    || update.in_scope == Some(false)
-                    || update.dynamic.is_some()
-            })
-        {
-            self.rebuild_variable_node_index();
-        }
+        let locals_updated = apply_variable_updates(&self.locals_store, updates, reindex);
+        apply_variable_updates(&self.expression_watches_store, updates, reindex);
 
         if locals_updated > 0 {
             refresh_changed_variable_roots(&self.locals_store);
@@ -298,6 +295,10 @@ impl Ui {
             return false;
         };
 
+        if !node.accepts_child_page(parent, from) {
+            return false;
+        }
+
         if from == 0 {
             self.variable_node_index
                 .borrow_mut()
@@ -308,17 +309,13 @@ impl Ui {
             remove_load_more_rows(&node.children);
         }
 
-        let new_nodes = variables
-            .iter()
-            .cloned()
-            .map(VariableNode::new)
-            .collect::<Vec<_>>();
+        let mut additions = Vec::with_capacity(variables.len() + usize::from(has_more));
 
-        let mut additions = new_nodes
-            .iter()
-            .cloned()
-            .map(glib::BoxedAnyObject::new)
-            .collect::<Vec<_>>();
+        for variable in variables {
+            let child = node.child(variable.clone());
+            self.variable_node_index.borrow_mut().insert(child.clone());
+            additions.push(glib::BoxedAnyObject::new(child));
+        }
 
         if has_more {
             additions.push(glib::BoxedAnyObject::new(VariableNode::load_more(
@@ -335,44 +332,53 @@ impl Ui {
 
         node.children_loading.set(false);
         node.children_loaded.set(true);
-        let mut index = self.variable_node_index.borrow_mut();
 
-        for child in new_nodes {
-            index.insert(child);
+        true
+    }
+
+    pub(crate) fn variable_children_target_is_current(
+        &self,
+        parent: &Variable,
+        from: usize,
+    ) -> bool {
+        self.variable_action_is_current(parent)
+            && parent
+                .varobj
+                .as_deref()
+                .and_then(|varobj| self.find_variable_node(varobj))
+                .is_some_and(|node| node.accepts_child_page(parent, from))
+    }
+
+    pub(crate) fn begin_variable_children_loading(&self, parent: &Variable, from: usize) -> bool {
+        let Some(node) = parent
+            .varobj
+            .as_deref()
+            .and_then(|varobj| self.find_variable_node(varobj))
+        else {
+            return false;
+        };
+
+        if !node.accepts_child_page(parent, from) {
+            return false;
+        }
+
+        node.children_loading.set(true);
+
+        // Lazy varobj attachment replaces the root before GTK binds its row.
+        // Claim loading now so that rebinding cannot enqueue a duplicate read.
+        if from == 0 && node.children.n_items() == 0 {
+            node.children
+                .append(&glib::BoxedAnyObject::new(VariableNode::placeholder(
+                    "loading…",
+                    "waiting for GDB",
+                )));
         }
 
         true
     }
 
-    pub fn show_variable_children(&self, parent: &str, variables: &[Variable]) -> bool {
-        let Some(node) = self.find_variable_node(parent) else {
-            return false;
-        };
-
-        let parent = node.variable;
-
-        self.show_variable_children_page(&parent, 0, variables, false)
-    }
-
     pub fn has_variable_object(&self, varobj: &str) -> bool {
         self.variable_node_index.borrow().contains(varobj)
-    }
-
-    pub fn show_variable_children_error(&self, parent: &str, error: &str) {
-        let Some(node) = self.find_variable_node(parent) else {
-            return;
-        };
-
-        self.variable_node_index
-            .borrow_mut()
-            .remove_store(&node.children);
-
-        apply_variable_children_page_error(&node, &node.variable, 0, error);
-        self.application_log.record(
-            LogLevel::Error,
-            &format!("Expand {}", node.variable.name),
-            error,
-        );
     }
 
     pub fn show_variable_children_page_error(&self, parent: &Variable, from: usize, error: &str) {
@@ -383,6 +389,10 @@ impl Ui {
         let Some(node) = self.find_variable_node(parent_name) else {
             return;
         };
+
+        if !node.accepts_child_page(parent, from) {
+            return;
+        }
 
         if from == 0 {
             self.variable_node_index
@@ -423,9 +433,7 @@ impl Ui {
 
         if variable.local_index.is_some() {
             return self.locals_inspection_available()
-                && self
-                    .local_variable_node(variable)
-                    .is_some_and(|(_, node)| node.variable.type_name == variable.type_name);
+                && self.local_variable_node(variable).is_some();
         }
 
         let Some(varobj) = variable.varobj.as_deref() else {
@@ -436,15 +444,8 @@ impl Ui {
             return false;
         };
 
-        let root = varobj.split('.').next().unwrap_or(varobj);
-        let local = self
-            .find_variable_node(root)
-            .is_some_and(|node| node.variable.local_index.is_some());
-
-        (!local || self.locals_inspection_available())
-            && node.variable.name == variable.name
-            && node.variable.argument == variable.argument
-            && node.variable.type_name == variable.type_name
+        (!node.local || self.locals_inspection_available())
+            && node.variable.has_same_children(variable)
     }
 
     pub(crate) fn cancel_variable_children_request(&self, variable: &Variable) {
@@ -454,8 +455,29 @@ impl Ui {
             .and_then(|varobj| self.find_variable_node(varobj))
             .or_else(|| self.local_variable_node(variable).map(|(_, node)| node));
 
-        if let Some(node) = node {
-            node.children_loading.set(false);
+        if let Some(node) = node
+            && node.variable.has_same_children(variable)
+        {
+            let loading = node.children_loading.replace(false);
+
+            if loading && !node.children_loaded.get() {
+                apply_variable_children_page_error(
+                    &node,
+                    variable,
+                    0,
+                    "Expansion cancelled. Retry while the target is paused",
+                );
+            }
+
+            if let Some(item) = node
+                .children
+                .n_items()
+                .checked_sub(1)
+                .and_then(|index| node.children.item(index))
+                .and_downcast::<glib::BoxedAnyObject>()
+            {
+                item.borrow::<VariableNode>().children_loading.set(false);
+            }
         }
     }
 
@@ -578,12 +600,6 @@ impl Ui {
         position: usize,
         previous: Option<&VariableNode>,
     ) {
-        let mut index = self.variable_node_index.borrow_mut();
-
-        if let Some(previous) = previous {
-            index.remove_node(previous);
-        }
-
         let Ok(position) = u32::try_from(position) else {
             return;
         };
@@ -593,8 +609,18 @@ impl Ui {
         };
 
         let node = item.borrow::<VariableNode>().clone();
-        index.insert(node.clone());
-        index.index_store(&node.children);
+        let mut index = self.variable_node_index.borrow_mut();
+
+        if let Some(previous) = previous {
+            index.replace(previous, &node);
+
+            if previous.children != node.children {
+                index.index_store(&node.children);
+            }
+        } else {
+            index.insert(node.clone());
+            index.index_store(&node.children);
+        }
     }
 
     pub(super) fn local_variable_node(&self, variable: &Variable) -> Option<(u32, VariableNode)> {
@@ -604,14 +630,10 @@ impl Ui {
                 .item(position)
                 .and_downcast::<glib::BoxedAnyObject>()?;
 
-            let node = item.borrow::<VariableNode>().clone();
+            let node = item.borrow::<VariableNode>();
 
-            (!node.placeholder
-                && node.variable.local_index == variable.local_index
-                && node.variable.name == variable.name
-                && node.variable.argument == variable.argument
-                && node.variable.varobj == variable.varobj)
-                .then_some((position, node))
+            (!node.placeholder && node.variable.has_same_children(variable))
+                .then(|| (position, node.clone()))
         })
     }
 

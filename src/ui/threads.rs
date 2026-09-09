@@ -1127,14 +1127,14 @@ fn comparison_table(rows: Vec<ThreadComparisonRow>) -> gtk::ScrolledWindow {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     replace_boxed_store(&store, rows);
     let selection = gtk::NoSelection::new(Some(store));
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.set_vexpand(true);
 
-    for (title, width, expand, field) in [
-        ("ITEM", 190, false, 0_u8),
-        ("LEFT THREAD", 330, true, 1),
-        ("RIGHT THREAD", 330, true, 2),
+    for (title, width, field) in [
+        ("ITEM", 190, 0_u8),
+        ("LEFT THREAD", 330, 1),
+        ("RIGHT THREAD", 330, 2),
     ] {
         let factory = gtk::SignalListItemFactory::new();
 
@@ -1179,10 +1179,7 @@ fn comparison_table(rows: Vec<ThreadComparisonRow>) -> gtk::ScrolledWindow {
             }
         });
 
-        let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-        column.set_fixed_width(width);
-        column.set_expand(expand);
-        column.set_resizable(true);
+        let column = components::table_column(title, width, factory);
         view.append_column(&column);
     }
 

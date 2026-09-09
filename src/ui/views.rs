@@ -71,6 +71,7 @@ struct VariableMenuContext {
     handler: Rc<RefCell<Option<VariableViewerHandler>>>,
     viewers: Rc<VariableViewerRegistry>,
     active_popover: Rc<RefCell<Option<gtk::Popover>>>,
+    locations: Rc<variables::locations::Locations>,
 }
 
 pub(super) fn build_locals_view(
@@ -78,6 +79,7 @@ pub(super) fn build_locals_view(
     viewer_handler: &Rc<RefCell<Option<VariableViewerHandler>>>,
     viewers: &Rc<VariableViewerRegistry>,
     presentation: &Rc<variable_presentation::VariablePresentation>,
+    locations: &Rc<variables::locations::Locations>,
     filter_controls: Option<(&gtk::Entry, &gtk::ToggleButton)>,
 ) -> (gtk::ColumnView, gio::ListStore, gtk::SingleSelection) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -131,7 +133,7 @@ pub(super) fn build_locals_view(
     let selection = gtk::SingleSelection::new(Some(tree));
     selection.set_autoselect(true);
     selection.set_can_unselect(false);
-    let view = gtk::ColumnView::new(Some(selection.clone()));
+    let view = components::column_view(selection.clone());
     view.add_css_class("debug-table");
     view.add_css_class("locals-table");
     view.set_vexpand(true);
@@ -143,6 +145,7 @@ pub(super) fn build_locals_view(
         handler: Rc::clone(viewer_handler),
         viewers: Rc::clone(viewers),
         active_popover: Rc::new(RefCell::new(None)),
+        locations: Rc::clone(locations),
     };
 
     view.append_column(&local_name_column(children_handler, &variable_menu));
@@ -150,7 +153,6 @@ pub(super) fn build_locals_view(
     view.append_column(&local_text_column(
         "VALUE",
         360,
-        true,
         LocalColumn::Value,
         Rc::clone(presentation),
         &variable_menu,
@@ -159,11 +161,13 @@ pub(super) fn build_locals_view(
     view.append_column(&local_text_column(
         "TYPE",
         260,
-        false,
         LocalColumn::Type,
         Rc::clone(presentation),
         &variable_menu,
     ));
+
+    view.append_column(&local_location_column(locations, &variable_menu));
+    locations.watch_scrolling(&view);
 
     (view, store, selection)
 }
@@ -187,21 +191,33 @@ pub(super) fn variable_search_text(variable: &Variable) -> String {
 }
 
 pub(super) fn variable_node_matches_filter(node: &VariableNode, query: &str) -> bool {
+    if query.trim().is_empty() {
+        return true;
+    }
+
     let terms = query.split_whitespace().collect::<Vec<_>>();
-    let mut pending = vec![node.clone()];
 
-    while let Some(node) = pending.pop() {
-        if terms.iter().all(|term| node.search_text.contains(term)) {
-            return true;
-        }
+    if terms.iter().all(|term| node.search_text.contains(term)) {
+        return true;
+    }
 
-        for position in 0..node.children.n_items() {
-            if let Some(item) = node
-                .children
+    let mut pending = vec![node.children.clone()];
+
+    while let Some(children) = pending.pop() {
+        for position in 0..children.n_items() {
+            if let Some(item) = children
                 .item(position)
                 .and_downcast::<glib::BoxedAnyObject>()
             {
-                pending.push(item.borrow::<VariableNode>().clone());
+                let node = item.borrow::<VariableNode>();
+
+                if terms.iter().all(|term| node.search_text.contains(term)) {
+                    return true;
+                }
+
+                if node.children.n_items() > 0 {
+                    pending.push(node.children.clone());
+                }
             }
         }
     }
@@ -243,24 +259,23 @@ pub(super) fn build_memory_region_view(
 
     let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
     let selection = gtk::MultiSelection::new(Some(filtered));
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.add_css_class("memory-map-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("START", 175, false, MemoryColumn::Start),
-        ("END", 175, false, MemoryColumn::End),
-        ("SIZE", 90, false, MemoryColumn::Size),
-        ("PERM", 65, false, MemoryColumn::Permissions),
-        ("REGS", 110, false, MemoryColumn::Registers),
-        ("PATH", 280, true, MemoryColumn::Path),
+    for (title, width, column) in [
+        ("START", 175, MemoryColumn::Start),
+        ("END", 175, MemoryColumn::End),
+        ("SIZE", 90, MemoryColumn::Size),
+        ("PERM", 65, MemoryColumn::Permissions),
+        ("REGS", 110, MemoryColumn::Registers),
+        ("PATH", 280, MemoryColumn::Path),
     ] {
         view.append_column(&memory_region_column(
             title,
             width,
-            expand,
             column,
             Rc::clone(target_pointer_bits),
         ));
@@ -299,7 +314,6 @@ pub(super) fn memory_region_matches_filter(region: &MemoryRegion, query: &str) -
 pub(super) fn memory_region_column(
     title: &str,
     width: i32,
-    expand: bool,
     column: MemoryColumn,
     target_pointer_bits: Rc<Cell<u32>>,
 ) -> gtk::ColumnViewColumn {
@@ -360,12 +374,7 @@ pub(super) fn memory_region_column(
         )));
     });
 
-    let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-    column.set_fixed_width(width);
-    column.set_resizable(true);
-    column.set_expand(expand);
-
-    column
+    components::table_column(title, width, factory)
 }
 
 pub(super) fn format_memory_size(bytes: u64) -> String {
@@ -587,11 +596,7 @@ fn local_name_column(
         }
     });
 
-    let column = gtk::ColumnViewColumn::new(Some("NAME / EXPRESSION"), Some(factory));
-    column.set_fixed_width(230);
-    column.set_resizable(true);
-
-    column
+    components::table_column("NAME / EXPRESSION", 230, factory)
 }
 
 fn connect_variable_expansion(
@@ -721,15 +726,7 @@ fn connect_current_variable_context_menu(
         gesture.set_state(gtk::EventSequenceState::Claimed);
         variable_menu.selection.set_selected(position);
 
-        show_variable_context_menu(
-            &row_widget_for_click,
-            &variable,
-            &variable_menu.handler,
-            &variable_menu.viewers,
-            &variable_menu.active_popover,
-            x,
-            y,
-        );
+        show_variable_context_menu(&row_widget_for_click, &variable, &variable_menu, x, y);
     });
 
     row_widget.add_controller(click);
@@ -760,12 +757,17 @@ fn dismiss_variable_popover_for(
 fn show_variable_context_menu(
     row_widget: &gtk::Widget,
     variable: &Variable,
-    viewer_handler: &Rc<RefCell<Option<VariableViewerHandler>>>,
-    viewers: &VariableViewerRegistry,
-    active_popover: &Rc<RefCell<Option<gtk::Popover>>>,
+    context: &VariableMenuContext,
     x: f64,
     y: f64,
 ) {
+    let VariableMenuContext {
+        handler: viewer_handler,
+        viewers,
+        active_popover,
+        locations,
+        ..
+    } = context;
     let previous_popover = active_popover.borrow_mut().take();
 
     if let Some(popover) = previous_popover {
@@ -783,17 +785,12 @@ fn show_variable_context_menu(
         1,
     )));
 
-    let summary = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    summary.add_css_class("local-variable-menu-summary");
-
-    let caption = gtk::Label::new(Some(if variable.argument {
+    let summary = variable_menu_summary(if variable.argument {
         "ARGUMENT"
     } else {
         "VARIABLE"
-    }));
+    });
 
-    caption.add_css_class("local-variable-menu-caption");
-    caption.set_halign(gtk::Align::Start);
     let name = gtk::Label::new(Some(&variable.name));
     name.add_css_class("local-variable-menu-name");
     name.set_halign(gtk::Align::Start);
@@ -816,11 +813,11 @@ fn show_variable_context_menu(
     value.set_ellipsize(pango::EllipsizeMode::Middle);
     value.set_max_width_chars(40);
     value.set_tooltip_text(Some(&variable.value));
-    summary.append(&caption);
     summary.append(&name);
     summary.append(&type_label);
     summary.append(&value);
     menu.append(&summary);
+    locations.append_menu(&menu, &popover, variable);
     let matching_viewers = viewers.matching(variable);
 
     if !matching_viewers.is_empty() {
@@ -909,6 +906,18 @@ fn show_variable_context_menu(
     popover.popup();
 }
 
+/// Descriptive menu blocks share the same inset and caption-to-value spacing.
+pub(super) fn variable_menu_summary(text: &str) -> gtk::Box {
+    let summary = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    summary.add_css_class("local-variable-menu-summary");
+    let caption = gtk::Label::new(Some(text));
+    caption.add_css_class("local-variable-menu-caption");
+    caption.set_halign(gtk::Align::Start);
+    summary.append(&caption);
+
+    summary
+}
+
 fn variable_menu_section(text: &str) -> gtk::Label {
     let label = gtk::Label::new(Some(text));
     label.add_css_class("local-variable-menu-section");
@@ -928,15 +937,21 @@ pub(super) fn request_variable_children_if_needed(
     node: &VariableNode,
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
 ) {
-    if node.children_loaded.get() || node.children_loading.replace(true) {
+    if !node.variable.can_expand()
+        || node.children_loaded.get()
+        || node.children_loading.replace(true)
+    {
         return;
     }
 
-    node.children
-        .append(&glib::BoxedAnyObject::new(VariableNode::placeholder(
+    node.children.splice(
+        0,
+        node.children.n_items(),
+        &[glib::BoxedAnyObject::new(VariableNode::placeholder(
             "loading…",
             "waiting for GDB",
-        )));
+        ))],
+    );
 
     let handler = children_handler.borrow().clone();
 
@@ -1025,10 +1040,65 @@ pub(super) fn defer_next_variable_page(
     });
 }
 
+fn local_location_column(
+    locations: &Rc<variables::locations::Locations>,
+    variable_menu: &VariableMenuContext,
+) -> gtk::ColumnViewColumn {
+    let factory = gtk::SignalListItemFactory::new();
+    let for_setup = Rc::clone(locations);
+    let for_bind = Rc::clone(locations);
+    let for_unbind = Rc::clone(locations);
+    let active_popover = Rc::clone(&variable_menu.active_popover);
+    let variable_menu = variable_menu.clone();
+
+    factory.connect_setup(move |_, object| {
+        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+        let label = gtk::Label::new(None);
+        label.add_css_class("debug-table-cell");
+        label.add_css_class("stack-address");
+        label.set_halign(gtk::Align::Start);
+        label.set_ellipsize(pango::EllipsizeMode::Middle);
+        enable_recycled_text_selection(&label);
+        connect_current_variable_context_menu(&label, item, &variable_menu);
+        for_setup.register(item, &label);
+        item.set_child(Some(&label));
+    });
+
+    factory.connect_bind(move |_, object| {
+        if let Some(label) = object
+            .downcast_ref::<gtk::ListItem>()
+            .and_then(gtk::ListItem::child)
+            .and_downcast::<gtk::Label>()
+        {
+            clear_label_selection(&label);
+            label.set_text("");
+            label.set_tooltip_text(None);
+        }
+
+        for_bind.schedule();
+    });
+
+    factory.connect_unbind(move |_, object| {
+        if let Some(label) = object
+            .downcast_ref::<gtk::ListItem>()
+            .and_then(gtk::ListItem::child)
+        {
+            dismiss_variable_popover_for(&label, &active_popover);
+        }
+
+        for_unbind.schedule();
+    });
+
+    let column = components::table_column("LOCATION", 190, factory);
+    locations.register_column(&column);
+    column
+}
+
 fn local_text_column(
     title: &str,
     width: i32,
-    expand: bool,
     column: LocalColumn,
     presentation: Rc<variable_presentation::VariablePresentation>,
     variable_menu: &VariableMenuContext,
@@ -1130,12 +1200,7 @@ fn local_text_column(
         dismiss_variable_popover_for(&label, &active_popover_for_unbind);
     });
 
-    let column_view = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-    column_view.set_fixed_width(width);
-    column_view.set_resizable(true);
-    column_view.set_expand(expand);
-
-    column_view
+    components::table_column(title, width, factory)
 }
 
 pub(super) fn variable_display_value(
@@ -1325,7 +1390,7 @@ pub(super) fn build_instruction_view() -> (
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection.clone()));
+    let view = components::column_view(selection.clone());
     view.add_css_class("instruction-table");
     view.add_css_class("debug-table");
     view.set_vexpand(true);
@@ -1336,73 +1401,39 @@ pub(super) fn build_instruction_view() -> (
     ));
 
     for column in [
-        instruction_column(
-            "ADDRESS",
-            170,
-            false,
-            "instruction-address",
-            &selection,
-            |row| {
-                let marker = if row.current { "›" } else { " " };
-                Cow::Owned(format!(
-                    "{marker} {}",
-                    full_address(&row.instruction.address, row.pointer_bits)
-                ))
-            },
-        ),
-        instruction_column(
-            "OPCODE",
-            72,
-            false,
-            "instruction-mnemonic",
-            &selection,
-            |row| Cow::Borrowed(split_instruction(&row.instruction.text).0),
-        ),
-        instruction_column(
-            "OPERANDS",
-            180,
-            true,
-            "instruction-operands",
-            &selection,
-            |row| Cow::Borrowed(split_instruction(&row.instruction.text).1),
-        ),
+        instruction_column("ADDRESS", 170, "instruction-address", &selection, |row| {
+            let marker = if row.current { "›" } else { " " };
+            Cow::Owned(format!(
+                "{marker} {}",
+                full_address(&row.instruction.address, row.pointer_bits)
+            ))
+        }),
+        instruction_column("OPCODE", 72, "instruction-mnemonic", &selection, |row| {
+            Cow::Borrowed(split_instruction(&row.instruction.text).0)
+        }),
+        instruction_column("OPERANDS", 360, "instruction-operands", &selection, |row| {
+            Cow::Borrowed(split_instruction(&row.instruction.text).1)
+        }),
     ] {
         view.append_column(&column);
     }
 
-    let bytes = instruction_column(
-        "BYTES",
-        130,
-        false,
-        "instruction-opcodes",
-        &selection,
-        |row| {
-            row.instruction
-                .opcodes
-                .as_deref()
-                .map_or(Cow::Borrowed("unavailable"), Cow::Borrowed)
-        },
-    );
+    let bytes = instruction_column("BYTES", 130, "instruction-opcodes", &selection, |row| {
+        row.instruction
+            .opcodes
+            .as_deref()
+            .map_or(Cow::Borrowed("unavailable"), Cow::Borrowed)
+    });
 
-    let symbols = instruction_column(
-        "SYMBOL",
-        140,
-        false,
-        "instruction-symbol",
-        &selection,
-        |row| Cow::Owned(instruction_symbol(&row.instruction)),
-    );
+    let symbols = instruction_column("SYMBOL", 140, "instruction-symbol", &selection, |row| {
+        Cow::Owned(instruction_symbol(&row.instruction))
+    });
 
     view.append_column(&bytes);
     view.append_column(&symbols);
 
-    let source_column = instruction_column(
-        "SOURCE",
-        280,
-        true,
-        "instruction-source",
-        &selection,
-        |row| {
+    let source_column =
+        instruction_column("SOURCE", 280, "instruction-source", &selection, |row| {
             let Some(source) = row.instruction.source.as_ref() else {
                 return Cow::Borrowed("");
             };
@@ -1414,8 +1445,7 @@ pub(super) fn build_instruction_view() -> (
                 || format!("{file}:{}", source.line),
                 |text| format!("{file}:{}  {}", source.line, text.trim()),
             ))
-        },
-    );
+        });
     source_column.set_visible(false);
     view.append_column(&source_column);
     (
@@ -1481,19 +1511,19 @@ pub(super) fn build_register_group_table() -> (gtk::ColumnView, gio::ListStore) 
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.add_css_class("register-table");
     view.set_hexpand(true);
     view.set_reorderable(true);
     view.set_single_click_activate(false);
 
-    for (title, width, expand, column) in [
-        ("REGISTER", 90, false, RegisterColumn::Name),
-        ("VALUE", 185, false, RegisterColumn::Value),
-        ("POINTER CHAIN / FLAGS", 330, true, RegisterColumn::Details),
+    for (title, width, column) in [
+        ("REGISTER", 90, RegisterColumn::Name),
+        ("VALUE", 185, RegisterColumn::Value),
+        ("POINTER CHAIN / FLAGS", 330, RegisterColumn::Details),
     ] {
-        view.append_column(&register_column(title, width, expand, column));
+        view.append_column(&register_column(title, width, column));
     }
 
     (view, store)
@@ -1502,7 +1532,6 @@ pub(super) fn build_register_group_table() -> (gtk::ColumnView, gio::ListStore) 
 pub(super) fn register_column(
     title: &str,
     width: i32,
-    expand: bool,
     column: RegisterColumn,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
@@ -1601,11 +1630,8 @@ pub(super) fn register_column(
             }
         }
     });
-    let column_view = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-    column_view.set_fixed_width(width);
-    column_view.set_resizable(true);
-    column_view.set_expand(expand);
-    column_view
+
+    components::table_column(title, width, factory)
 }
 
 pub(super) fn build_stack_view() -> (gtk::ColumnView, gio::ListStore, StackWordInspector) {
@@ -1613,22 +1639,22 @@ pub(super) fn build_stack_view() -> (gtk::ColumnView, gio::ListStore, StackWordI
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(true);
     selection.set_can_unselect(false);
-    let view = gtk::ColumnView::new(Some(selection.clone()));
+    let view = components::column_view(selection.clone());
     view.add_css_class("debug-table");
     view.add_css_class("stack-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("ANCHOR", 80, false, StackColumn::Anchor),
-        ("ADDRESS", 175, false, StackColumn::Address),
-        ("VALUE / POINTER CHAIN", 285, true, StackColumn::Value),
-        ("OFFSET", 82, false, StackColumn::Offset),
-        ("INDEX", 62, false, StackColumn::Index),
-        ("REFERENCES", 155, false, StackColumn::References),
-        ("REGION", 210, false, StackColumn::Region),
+    for (title, width, column) in [
+        ("ANCHOR", 80, StackColumn::Anchor),
+        ("ADDRESS", 175, StackColumn::Address),
+        ("VALUE / POINTER CHAIN", 285, StackColumn::Value),
+        ("OFFSET", 82, StackColumn::Offset),
+        ("INDEX", 62, StackColumn::Index),
+        ("REFERENCES", 155, StackColumn::References),
+        ("REGION", 210, StackColumn::Region),
     ] {
-        view.append_column(&stack_column(title, width, expand, column, &selection));
+        view.append_column(&stack_column(title, width, column, &selection));
     }
 
     let inspector = build_stack_word_inspector();
@@ -1738,7 +1764,6 @@ impl StackWordInspector {
 pub(super) fn stack_column(
     title: &str,
     width: i32,
-    expand: bool,
     column: StackColumn,
     selection: &gtk::SingleSelection,
 ) -> gtk::ColumnViewColumn {
@@ -1802,11 +1827,8 @@ pub(super) fn stack_column(
         label.set_text(&text);
         label.set_tooltip_text(Some(&stack_tooltip(&entry)));
     });
-    let column_view = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-    column_view.set_fixed_width(width);
-    column_view.set_resizable(true);
-    column_view.set_expand(expand);
-    column_view
+
+    components::table_column(title, width, factory)
 }
 
 pub(super) fn register_column_css(column: RegisterColumn) -> &'static str {
@@ -1848,7 +1870,6 @@ pub(super) fn reset_semantic_css(label: &gtk::Label) {
 pub(super) fn instruction_column(
     title: &str,
     width: i32,
-    expand: bool,
     class: &'static str,
     selection: &gtk::SingleSelection,
     text: for<'a> fn(&'a InstructionRowData) -> Cow<'a, str>,
@@ -1905,11 +1926,8 @@ pub(super) fn instruction_column(
             instruction_symbol_full(&data.instruction),
         )));
     });
-    let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-    column.set_fixed_width(width);
-    column.set_resizable(true);
-    column.set_expand(expand);
-    column
+
+    components::table_column(title, width, factory)
 }
 
 pub(super) fn build_editor_panel(notebook: &gtk::Notebook) -> SourceEditorPanel {

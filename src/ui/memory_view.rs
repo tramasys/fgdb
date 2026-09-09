@@ -521,27 +521,24 @@ fn build_memory_watch_table() -> (gtk::ColumnView, gio::ListStore, gtk::SingleSe
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection.clone()));
+    let view = components::column_view(selection.clone());
     view.add_css_class("debug-table");
     view.add_css_class("memory-watch-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("ADDRESS", 180, false, MemoryRowColumn::Address),
-        ("OFFSET", 75, false, MemoryRowColumn::Offset),
-        ("VALUE", 300, true, MemoryRowColumn::Value),
-        ("DECODED", 170, false, MemoryRowColumn::Decoded),
+    for (title, width, column) in [
+        ("ADDRESS", 180, MemoryRowColumn::Address),
+        ("OFFSET", 75, MemoryRowColumn::Offset),
+        ("VALUE", 300, MemoryRowColumn::Value),
+        ("DECODED", 170, MemoryRowColumn::Decoded),
         (
             "INTERPRETATION / TARGET",
             290,
-            true,
             MemoryRowColumn::Interpretation,
         ),
     ] {
-        view.append_column(&memory_watch_column(
-            title, width, expand, column, &selection,
-        ));
+        view.append_column(&memory_watch_column(title, width, column, &selection));
     }
 
     (view, store, selection)
@@ -550,7 +547,6 @@ fn build_memory_watch_table() -> (gtk::ColumnView, gio::ListStore, gtk::SingleSe
 fn memory_watch_column(
     title: &str,
     width: i32,
-    expand: bool,
     column: MemoryRowColumn,
     selection: &gtk::SingleSelection,
 ) -> gtk::ColumnViewColumn {
@@ -620,12 +616,7 @@ fn memory_watch_column(
         label.set_tooltip_text(Some(&text));
     });
 
-    let view_column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-    view_column.set_fixed_width(width);
-    view_column.set_resizable(true);
-    view_column.set_expand(expand);
-
-    view_column
+    components::table_column(title, width, factory)
 }
 
 fn format_memory_rows(

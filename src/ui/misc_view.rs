@@ -358,26 +358,24 @@ fn build_auxv_page() -> MiscTablePage {
     );
 
     page.view
-        .append_column(&misc_column::<AuxvEntry>("ENTRY", 170, false, |row| {
+        .append_column(&misc_column::<AuxvEntry>("ENTRY", 170, |row| {
             row.name.clone()
         }));
 
     page.view
-        .append_column(&misc_column::<AuxvEntry>("TYPE", 72, false, |row| {
+        .append_column(&misc_column::<AuxvEntry>("TYPE", 72, |row| {
             row.kind.to_string()
         }));
 
     page.view
-        .append_column(&misc_column::<AuxvEntry>("RAW VALUE", 190, false, |row| {
+        .append_column(&misc_column::<AuxvEntry>("RAW VALUE", 190, |row| {
             format!("0x{:016x}", row.value)
         }));
 
-    page.view.append_column(&misc_column::<AuxvEntry>(
-        "INTERPRETATION",
-        420,
-        true,
-        |row| row.interpretation.clone(),
-    ));
+    page.view
+        .append_column(&misc_column::<AuxvEntry>("INTERPRETATION", 420, |row| {
+            row.interpretation.clone()
+        }));
 
     page
 }
@@ -396,18 +394,15 @@ fn build_call_abi_page() -> CallAbiWidgets {
 
     registers.prepend(&section_title("LIVE ABI TRANSFER"));
 
-    register_view.append_column(&misc_column::<CallAbiRegister>("ROLE", 250, false, |row| {
+    register_view.append_column(&misc_column::<CallAbiRegister>("ROLE", 250, |row| {
         row.role.clone()
     }));
 
-    register_view.append_column(&misc_column::<CallAbiRegister>(
-        "REGISTER",
-        120,
-        false,
-        |row| row.name.clone(),
-    ));
+    register_view.append_column(&misc_column::<CallAbiRegister>("REGISTER", 120, |row| {
+        row.name.clone()
+    }));
 
-    register_view.append_column(&misc_column::<CallAbiRegister>("VALUE", 420, true, |row| {
+    register_view.append_column(&misc_column::<CallAbiRegister>("VALUE", 420, |row| {
         row.value.clone()
     }));
 
@@ -416,16 +411,13 @@ fn build_call_abi_page() -> CallAbiWidgets {
 
     contract.prepend(&section_title("ABI CONTRACT"));
 
-    contract_view.append_column(&misc_column::<CallAbiFact>("ASPECT", 260, false, |row| {
+    contract_view.append_column(&misc_column::<CallAbiFact>("ASPECT", 260, |row| {
         row.aspect.clone()
     }));
 
-    contract_view.append_column(&misc_column::<CallAbiFact>(
-        "CONVENTION",
-        620,
-        true,
-        |row| row.value.clone(),
-    ));
+    contract_view.append_column(&misc_column::<CallAbiFact>("CONVENTION", 620, |row| {
+        row.value.clone()
+    }));
 
     let split = gtk::Paned::new(gtk::Orientation::Vertical);
     split.add_css_class("misc-data-split");
@@ -533,28 +525,24 @@ fn build_allocator_page() -> AllocatorWidgets {
     view.append_column(&misc_column::<AllocatorRegion>(
         "ADDRESS RANGE",
         270,
-        false,
         |row| format!("0x{:x}-0x{:x}", row.start, row.end),
     ));
 
-    view.append_column(&misc_column::<AllocatorRegion>("SIZE", 95, false, |row| {
+    view.append_column(&misc_column::<AllocatorRegion>("SIZE", 95, |row| {
         crate::kernel::format_bytes(row.size())
     }));
 
-    view.append_column(&misc_column::<AllocatorRegion>("PERM", 65, false, |row| {
+    view.append_column(&misc_column::<AllocatorRegion>("PERM", 65, |row| {
         row.permissions.clone()
     }));
 
-    view.append_column(&misc_column::<AllocatorRegion>("ROLE", 150, false, |row| {
+    view.append_column(&misc_column::<AllocatorRegion>("ROLE", 150, |row| {
         row.role.clone()
     }));
 
-    view.append_column(&misc_column::<AllocatorRegion>(
-        "BACKING",
-        180,
-        true,
-        |row| row.path.clone(),
-    ));
+    view.append_column(&misc_column::<AllocatorRegion>("BACKING", 180, |row| {
+        row.path.clone()
+    }));
 
     summary.append(&mappings);
     views.add_titled(&summary, Some("detection"), "Detection");
@@ -723,7 +711,6 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
     table.view.append_column(&heap_inspection_column(
         "STRUCTURE",
         100,
-        false,
         HeapCellKind::Structure,
         |row| &row.kind,
     ));
@@ -731,7 +718,6 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
     table.view.append_column(&heap_inspection_column(
         "ADDRESS / INDEX",
         160,
-        false,
         HeapCellKind::Location,
         |row| &row.location,
     ));
@@ -739,7 +725,6 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
     table.view.append_column(&heap_inspection_column(
         "SIZE / COUNT",
         135,
-        false,
         HeapCellKind::Metric,
         |row| &row.metric,
     ));
@@ -747,7 +732,6 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
     table.view.append_column(&heap_inspection_column(
         "STATE / MEANING",
         150,
-        false,
         HeapCellKind::State,
         |row| &row.state,
     ));
@@ -755,7 +739,6 @@ fn build_heap_inspector() -> HeapInspectorWidgets {
     table.view.append_column(&heap_inspection_column(
         "DETAILS / LINKS",
         180,
-        true,
         HeapCellKind::Details,
         |row| &row.details,
     ));
@@ -824,7 +807,7 @@ fn build_heap_inspection_table() -> HeapTableWidgets {
     let selection = gtk::SingleSelection::new(Some(filtered.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection.clone()));
+    let view = components::column_view(selection.clone());
     view.add_css_class("debug-table");
     view.add_css_class("misc-data-table");
     view.add_css_class("heap-inspector-table");
@@ -1025,7 +1008,6 @@ enum HeapCellKind {
 fn heap_inspection_column(
     title: &str,
     width: i32,
-    expand: bool,
     cell_kind: HeapCellKind,
     value: impl Fn(&HeapInspectionRow) -> &str + Copy + 'static,
 ) -> gtk::ColumnViewColumn {
@@ -1115,12 +1097,7 @@ fn heap_inspection_column(
         }
     });
 
-    let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-    column.set_fixed_width(width);
-    column.set_resizable(true);
-    column.set_expand(expand);
-
-    column
+    components::table_column(title, width, factory)
 }
 
 fn heap_action_group(
@@ -1248,47 +1225,39 @@ fn build_locks_page() -> LocksWidgets {
     page.note.set_text(LOCKS_NOTE);
 
     page.view
-        .append_column(&misc_column::<LockWait>("TID", 90, false, |row| {
+        .append_column(&misc_column::<LockWait>("TID", 90, |row| {
             row.tid.to_string()
         }));
 
     page.view
-        .append_column(&misc_column::<LockWait>("THREAD", 180, false, |row| {
+        .append_column(&misc_column::<LockWait>("THREAD", 180, |row| {
             row.thread.clone()
         }));
 
     page.view
-        .append_column(&misc_column::<LockWait>("STATE", 150, false, |row| {
+        .append_column(&misc_column::<LockWait>("STATE", 150, |row| {
             row.state.clone()
         }));
 
-    page.view.append_column(&misc_column::<LockWait>(
-        "WAIT ADDRESS",
-        190,
-        false,
-        |row| {
+    page.view
+        .append_column(&misc_column::<LockWait>("WAIT ADDRESS", 190, |row| {
             row.address
                 .map_or_else(|| String::from("-"), |value| format!("0x{value:016x}"))
-        },
-    ));
+        }));
 
     page.view
-        .append_column(&misc_column::<LockWait>("OPERATION", 190, false, |row| {
+        .append_column(&misc_column::<LockWait>("OPERATION", 190, |row| {
             row.operation.clone()
         }));
 
-    page.view.append_column(&misc_column::<LockWait>(
-        "EXPECTED / COUNT",
-        140,
-        false,
-        |row| {
+    page.view
+        .append_column(&misc_column::<LockWait>("EXPECTED / COUNT", 140, |row| {
             row.expected
                 .map_or_else(|| String::from("-"), |value| format!("0x{value:x}"))
-        },
-    ));
+        }));
 
     page.view
-        .append_column(&misc_column::<LockWait>("DETAILS", 360, true, |row| {
+        .append_column(&misc_column::<LockWait>("DETAILS", 360, |row| {
             row.details.clone()
         }));
 
@@ -1303,42 +1272,30 @@ fn build_locks_page() -> LocksWidgets {
     graph.append(&graph_summary);
     let dependency_store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let dependency_selection = gtk::NoSelection::new(Some(dependency_store.clone()));
-    let dependency_view = gtk::ColumnView::new(Some(dependency_selection));
+    let dependency_view = components::column_view(dependency_selection);
     dependency_view.add_css_class("debug-table");
     dependency_view.set_vexpand(true);
     dependency_view.set_reorderable(true);
 
-    dependency_view.append_column(&misc_column::<LockDependency>(
-        "WAITER",
-        200,
-        false,
-        |row| format!("{}  {}", row.waiter_tid, row.waiter),
-    ));
+    dependency_view.append_column(&misc_column::<LockDependency>("WAITER", 200, |row| {
+        format!("{}  {}", row.waiter_tid, row.waiter)
+    }));
 
-    dependency_view.append_column(&misc_column::<LockDependency>(
-        "RELATION",
-        110,
-        false,
-        |_| String::from("waits for"),
-    ));
+    dependency_view.append_column(&misc_column::<LockDependency>("RELATION", 110, |_| {
+        String::from("waits for")
+    }));
 
-    dependency_view.append_column(&misc_column::<LockDependency>("OWNER", 200, false, |row| {
+    dependency_view.append_column(&misc_column::<LockDependency>("OWNER", 200, |row| {
         format!("{}  {}", row.owner_tid, row.owner)
     }));
 
-    dependency_view.append_column(&misc_column::<LockDependency>(
-        "ADDRESS",
-        190,
-        false,
-        |row| format!("0x{:016x}", row.address),
-    ));
+    dependency_view.append_column(&misc_column::<LockDependency>("ADDRESS", 190, |row| {
+        format!("0x{:016x}", row.address)
+    }));
 
-    dependency_view.append_column(&misc_column::<LockDependency>(
-        "FUTEX WORD",
-        130,
-        true,
-        |row| format!("0x{:08x}", row.futex_value),
-    ));
+    dependency_view.append_column(&misc_column::<LockDependency>("FUTEX WORD", 130, |row| {
+        format!("0x{:08x}", row.futex_value)
+    }));
 
     let graph_empty = empty_label("No reliable thread-owner edges were found");
     graph.append(&graph_empty);
@@ -1390,15 +1347,15 @@ fn build_core_page() -> CoreWidgets {
     let (notes, note_store, _, note_view) = build_misc_table("No recognized ELF notes are present");
     notes.prepend(&section_title("ELF NOTES"));
 
-    note_view.append_column(&misc_column::<CoreNote>("OWNER", 150, false, |row| {
+    note_view.append_column(&misc_column::<CoreNote>("OWNER", 150, |row| {
         row.owner.clone()
     }));
 
-    note_view.append_column(&misc_column::<CoreNote>("TYPE", 210, false, |row| {
+    note_view.append_column(&misc_column::<CoreNote>("TYPE", 210, |row| {
         row.kind.clone()
     }));
 
-    note_view.append_column(&misc_column::<CoreNote>("BYTES", 110, true, |row| {
+    note_view.append_column(&misc_column::<CoreNote>("BYTES", 110, |row| {
         row.bytes.to_string()
     }));
 
@@ -1419,18 +1376,14 @@ fn build_core_page() -> CoreWidgets {
     file_view.append_column(&misc_column::<CoreMappedFile>(
         "ADDRESS RANGE",
         330,
-        false,
         |row| format!("0x{:016x}-0x{:016x}", row.start, row.end),
     ));
 
-    file_view.append_column(&misc_column::<CoreMappedFile>(
-        "FILE OFFSET",
-        160,
-        false,
-        |row| format!("0x{:x}", row.file_offset),
-    ));
+    file_view.append_column(&misc_column::<CoreMappedFile>("FILE OFFSET", 160, |row| {
+        format!("0x{:x}", row.file_offset)
+    }));
 
-    file_view.append_column(&misc_column::<CoreMappedFile>("PATH", 520, true, |row| {
+    file_view.append_column(&misc_column::<CoreMappedFile>("PATH", 520, |row| {
         row.path.clone()
     }));
 
@@ -1485,7 +1438,7 @@ fn build_misc_table(empty_text: &str) -> (gtk::Box, gio::ListStore, gtk::Label, 
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.add_css_class("misc-data-table");
     view.set_vexpand(true);
@@ -1537,7 +1490,7 @@ fn build_searchable_misc_table<T: 'static>(
     let selection = gtk::SingleSelection::new(Some(filtered.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.add_css_class("misc-data-table");
     view.set_vexpand(true);
@@ -1598,7 +1551,6 @@ fn misc_note_label() -> gtk::Label {
 fn misc_column<T: 'static>(
     title: &str,
     width: i32,
-    expand: bool,
     value: impl Fn(&T) -> String + Copy + 'static,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
@@ -1634,12 +1586,7 @@ fn misc_column<T: 'static>(
         label.set_tooltip_text(Some(&text));
     });
 
-    let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-    column.set_fixed_width(width);
-    column.set_resizable(true);
-    column.set_expand(expand);
-
-    column
+    components::table_column(title, width, factory)
 }
 
 fn build_startup_summary() -> (gtk::Grid, MiscStartupSummary) {
@@ -1720,27 +1667,27 @@ fn build_arguments_section(
     let selection = gtk::SingleSelection::new(Some(filtered.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.add_css_class("misc-vector-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    view.append_column(&argument_column("ENTRY", 100, false, |row, label| {
+    view.append_column(&argument_column("ENTRY", 100, |row, label| {
         label.set_text(&argument_label(row.index));
         label.add_css_class("misc-vector-name");
     }));
 
-    view.append_column(&argument_column("ADDRESS", 180, false, |row, label| {
+    view.append_column(&argument_column("ADDRESS", 180, |row, label| {
         label.set_text(&format_address(row.address));
         label.add_css_class("kernel-numeric");
     }));
 
-    view.append_column(&argument_column("BYTES", 70, false, |row, label| {
+    view.append_column(&argument_column("BYTES", 70, |row, label| {
         label.set_text(&row.byte_len.to_string());
     }));
 
-    view.append_column(&argument_column("VALUE", 420, true, |row, label| {
+    view.append_column(&argument_column("VALUE", 420, |row, label| {
         label.set_text(&row.value);
     }));
 
@@ -1785,31 +1732,31 @@ fn build_environment_section(
     let selection = gtk::SingleSelection::new(Some(filtered.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.add_css_class("misc-vector-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    view.append_column(&environment_column("ENTRY", 100, false, |row, label| {
+    view.append_column(&environment_column("ENTRY", 100, |row, label| {
         label.set_text(&format!("envp[{}]", row.index));
     }));
 
-    view.append_column(&environment_column("ADDRESS", 180, false, |row, label| {
+    view.append_column(&environment_column("ADDRESS", 180, |row, label| {
         label.set_text(&format_address(row.address));
         label.add_css_class("kernel-numeric");
     }));
 
-    view.append_column(&environment_column("BYTES", 70, false, |row, label| {
+    view.append_column(&environment_column("BYTES", 70, |row, label| {
         label.set_text(&row.byte_len.to_string());
     }));
 
-    view.append_column(&environment_column("NAME", 210, false, |row, label| {
+    view.append_column(&environment_column("NAME", 210, |row, label| {
         label.set_text(&row.name);
         label.add_css_class("misc-vector-name");
     }));
 
-    view.append_column(&environment_column("VALUE", 420, true, |row, label| {
+    view.append_column(&environment_column("VALUE", 420, |row, label| {
         label.set_text(&row.value);
     }));
 
@@ -1866,10 +1813,9 @@ fn environment_matches(entry: &ProcessEnvironment, query: &str) -> bool {
 fn argument_column(
     title: &str,
     width: i32,
-    expand: bool,
     bind: impl Fn(&ProcessArgument, &gtk::Label) + Copy + 'static,
 ) -> gtk::ColumnViewColumn {
-    vector_column(title, width, expand, move |data, label| {
+    vector_column(title, width, move |data, label| {
         bind(&data.borrow::<ProcessArgument>(), label);
     })
 }
@@ -1877,10 +1823,9 @@ fn argument_column(
 fn environment_column(
     title: &str,
     width: i32,
-    expand: bool,
     bind: impl Fn(&ProcessEnvironment, &gtk::Label) + Copy + 'static,
 ) -> gtk::ColumnViewColumn {
-    vector_column(title, width, expand, move |data, label| {
+    vector_column(title, width, move |data, label| {
         bind(&data.borrow::<ProcessEnvironment>(), label);
     })
 }
@@ -1888,7 +1833,6 @@ fn environment_column(
 fn vector_column(
     title: &str,
     width: i32,
-    expand: bool,
     bind: impl Fn(&glib::BoxedAnyObject, &gtk::Label) + Copy + 'static,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
@@ -1925,12 +1869,7 @@ fn vector_column(
         label.set_tooltip_text(Some(&label.text()));
     });
 
-    let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-    column.set_fixed_width(width);
-    column.set_resizable(true);
-    column.set_expand(expand);
-
-    column
+    components::table_column(title, width, factory)
 }
 
 fn argument_label(index: usize) -> String {

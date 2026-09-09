@@ -1,3 +1,4 @@
+use super::value_path::{value_python, variable_path_root};
 use super::*;
 use crate::debugger::{EnumVariant, ValueTypeKind, ValueTypeMetadata};
 use crate::ui::VariableEditorRequest;
@@ -274,30 +275,6 @@ fn present_editor(
 ) {
     if let Some(ui) = ui.upgrade() {
         ui.present_variable_editor(request, variable, metadata);
-    }
-}
-
-fn variable_path_root<'a>(variable: &Variable, varobj: &'a str) -> (&'a str, Option<&'a str>) {
-    if variable
-        .type_name
-        .as_deref()
-        .is_some_and(crate::language::is_fortran_type)
-    {
-        let (root, members) = varobj.split_once('.').unwrap_or((varobj, ""));
-
-        (root, Some(members))
-    } else {
-        (varobj, None)
-    }
-}
-
-fn value_python(expression: &str, members: Option<&str>) -> String {
-    if let Some(members) = members {
-        crate::language::python::fortran_value_expression(expression, members)
-    } else {
-        let expression = hex(expression.as_bytes());
-
-        format!("gdb.parse_and_eval(bytes.fromhex(\"{expression}\").decode())")
     }
 }
 

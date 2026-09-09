@@ -93,6 +93,12 @@ flowbox.ui-action-flow > flowboxchild {
     color: @app_muted;
 }
 
+button.navigation-button {
+    min-width: 22px;
+    padding: 2px;
+    -gtk-icon-size: 16px;
+}
+
 button.debug-control,
 menubutton.debug-control > button,
 button.toolbar-action,

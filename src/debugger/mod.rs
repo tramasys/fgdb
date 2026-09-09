@@ -1,6 +1,9 @@
+pub(crate) mod array;
 mod command;
 pub(crate) mod context;
 pub(crate) mod instruction;
+pub(crate) mod linked;
+pub(crate) mod location;
 mod mi;
 mod model;
 mod session;

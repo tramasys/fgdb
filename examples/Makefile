@@ -24,6 +24,9 @@ MIMALLOC_LIBS ?= -lmimalloc
 
 TARGET_DIR := ../target/debug-fixtures
 C_TARGETS := \
+	$(TARGET_DIR)/c-variable-location-target \
+	$(TARGET_DIR)/c-linked-list-viewer-target \
+	$(TARGET_DIR)/c-array-viewer-target \
 	$(TARGET_DIR)/c-simd-target \
 	$(TARGET_DIR)/c-allocation-target \
 	$(TARGET_DIR)/c-memory-target \
@@ -38,10 +41,12 @@ C_TARGETS := \
 	$(TARGET_DIR)/c-thread-target \
 	$(TARGET_DIR)/c-process-target
 CXX_TARGETS := \
+	$(TARGET_DIR)/cpp-array-viewer-target \
 	$(TARGET_DIR)/cpp-debug-target \
 	$(TARGET_DIR)/cpp-object-target \
 	$(TARGET_DIR)/cpp-variable-viewer-target
 RUST_TARGETS := \
+	$(TARGET_DIR)/rust-array-viewer-target \
 	$(TARGET_DIR)/rust-debug-target \
 	$(TARGET_DIR)/rust-variable-viewer-target
 OPTIMIZED_TARGETS := \
@@ -49,6 +54,7 @@ OPTIMIZED_TARGETS := \
 	$(TARGET_DIR)/rust-debug-target-o2
 TARGETS := $(C_TARGETS) $(CXX_TARGETS) $(RUST_TARGETS) $(OPTIMIZED_TARGETS)
 LANGUAGE_TARGETS := \
+	$(TARGET_DIR)/fortran-array-viewer-target \
 	$(TARGET_DIR)/fortran-variable-viewer-target \
 	$(TARGET_DIR)/zig-variable-viewer-target \
 	$(TARGET_DIR)/odin-variable-viewer-target
@@ -93,6 +99,25 @@ $(TARGET_DIR)/c-mimalloc-allocator-target: c_allocator_target.c | $(TARGET_DIR)
 
 $(TARGET_DIR)/fortran-variable-viewer-target: fortran_variable_viewer_target.f90 | $(TARGET_DIR)
 	$(FORTRAN) -g3 -O0 -fcheck=all $< -o $@
+
+$(TARGET_DIR)/fortran-array-viewer-target: fortran_array_viewer_target.f90 | $(TARGET_DIR)
+	$(FORTRAN) -g3 -O0 -fcheck=all $< -o $@
+
+$(TARGET_DIR)/c-array-viewer-target: c_array_viewer_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@
+
+$(TARGET_DIR)/c-linked-list-viewer-target: c_linked_list_viewer_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@
+
+$(TARGET_DIR)/c-variable-location-target: c_variable_location_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@
+
+# Exercise identical native arrays with C++ debug information too.
+$(TARGET_DIR)/cpp-array-viewer-target: c_array_viewer_target.c | $(TARGET_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -x c++ $< $(LDFLAGS) -o $@
+
+$(TARGET_DIR)/rust-array-viewer-target: rust_array_viewer_target.rs | $(TARGET_DIR)
+	$(RUSTC) $(RUSTFLAGS) $< -o $@
 
 $(TARGET_DIR)/zig-variable-viewer-target: zig_variable_viewer_target.zig | $(TARGET_DIR)
 	$(ZIG) build-exe $< -O Debug -fllvm -femit-bin=$@

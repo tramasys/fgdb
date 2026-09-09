@@ -76,13 +76,16 @@ impl RustToolchain {
             return Vec::new();
         };
 
+        // This GDB command consumes a path list verbatim, including quotes.
+        // Reject separators and patterns so trust stays within this directory.
+        if printer_directory.contains(['\0', '\n', '\r', ':', '*', '?', '[', ']', '$', '\\']) {
+            return Vec::new();
+        }
+
         let mut arguments = vec![
             format!("--directory={printer_directory}"),
             String::from("-iex"),
-            format!(
-                "add-auto-load-safe-path {}",
-                gdb_cli_string(printer_directory)
-            ),
+            format!("add-auto-load-safe-path {printer_directory}"),
         ];
 
         if let Some(commit_hash) = self.commit_hash.as_deref() {
@@ -204,5 +207,27 @@ mod tests {
         };
 
         assert!(toolchain.gdb_printer_arguments().is_empty());
+    }
+
+    #[test]
+    fn safe_path_arguments_are_literal_and_do_not_broaden_trust() {
+        let toolchain =
+            RustToolchain::with_printer_directory("/opt/rust", "/opt/rust toolchain/etc");
+        assert!(toolchain.gdb_printer_arguments().contains(&String::from(
+            "add-auto-load-safe-path /opt/rust toolchain/etc"
+        )));
+
+        for directory in [
+            "/opt/rust\nrun",
+            "/opt/rust:/tmp",
+            "/opt/rust*",
+            "/opt/rust[12]",
+        ] {
+            assert!(
+                RustToolchain::with_printer_directory("/opt/rust", directory)
+                    .gdb_printer_arguments()
+                    .is_empty()
+            );
+        }
     }
 }

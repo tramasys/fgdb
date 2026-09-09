@@ -91,6 +91,7 @@ pub(crate) struct Preferences {
     pub terminal_font: String,
     pub terminal_scrollback: u32,
     pub integer_display: IntegerDisplay,
+    pub variable_locations: bool,
     pub instruction_bytes: bool,
     pub instruction_symbols: bool,
     pub instruction_source: bool,
@@ -137,6 +138,7 @@ impl Preferences {
             ("terminal_font", self.terminal_font.clone()),
             ("terminal_scrollback", self.terminal_scrollback.to_string()),
             ("integer_display", self.integer_display.as_str().into()),
+            ("variable_locations", self.variable_locations.to_string()),
             ("instruction_bytes", self.instruction_bytes.to_string()),
             ("instruction_symbols", self.instruction_symbols.to_string()),
             ("instruction_source", self.instruction_source.to_string()),
@@ -196,6 +198,7 @@ impl Preferences {
                 .unwrap_or_else(|| "Monospace 9.5".into()),
             terminal_scrollback: layer.terminal_scrollback.unwrap_or(20_000),
             integer_display: layer.integer_display.unwrap_or(IntegerDisplay::Automatic),
+            variable_locations: layer.variable_locations.unwrap_or(false),
             instruction_bytes: layer.instruction_bytes.unwrap_or(true),
             instruction_symbols: layer.instruction_symbols.unwrap_or(true),
             instruction_source: layer.instruction_source.unwrap_or(false),
@@ -340,6 +343,13 @@ pub(crate) const SETTINGS: &[Setting] = &[
         title: "Show instruction bytes",
         help: "Show the bytes column without changing the disassembly requests",
         page: "Instructions",
+        control: Control::Toggle,
+    },
+    Setting {
+        key: "variable_locations",
+        title: "Show variable locations",
+        help: "Show storage addresses in locals, arguments, and watches. Resolves visible rows only while paused. Pointer storage is distinct from its target. Locations are also available in the right-click menu",
+        page: "Debugging",
         control: Control::Toggle,
     },
     Setting {
@@ -798,6 +808,7 @@ mod tests {
             ("source_font", "Monospace 49"),
             ("source_wrap", "maybe"),
             ("restore_panel_windows", "maybe"),
+            ("variable_locations", "maybe"),
             ("integer_display", "binary"),
             ("assembly_syntax", "unknown"),
             ("terminal_cursor_shape", "circle"),
@@ -870,6 +881,45 @@ mod tests {
             resolver
                 .resolve(&document("[profile local]\nsource_tab_width=0"))
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn variable_locations_round_trip_and_follow_live_profile_changes() {
+        let config = document(
+            "# Preserve this\nvariable_locations=false\n[profile numerical]\nvariable_locations=true\n",
+        );
+
+        let resolver = LiveSettings::new(Some("numerical".into()), ConfigLayer::default());
+        assert!(resolver.resolve(&config).unwrap().0.variable_locations);
+        assert!(
+            !LiveSettings::new(None, ConfigLayer::default())
+                .resolve(&config)
+                .unwrap()
+                .0
+                .variable_locations
+        );
+
+        let edited = config
+            .patch(
+                Some("numerical"),
+                &Values::from([("variable_locations", "false".into())]),
+            )
+            .unwrap();
+
+        assert!(edited.starts_with("# Preserve this\n"));
+        assert!(
+            !resolver
+                .resolve(&document(&edited))
+                .unwrap()
+                .0
+                .variable_locations
+        );
+
+        assert!(
+            !document("").values(None).unwrap()["variable_locations"]
+                .parse::<bool>()
+                .unwrap()
         );
     }
 

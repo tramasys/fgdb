@@ -90,7 +90,7 @@ fn request_indexed_level(
     let ui_for_response = ui.clone();
     let owned_for_response = owned_root.clone();
 
-    if let Err(error) = requests.unscoped(&command).when(move || session_for_guard.is_open()).with_print_limit(limit.max(AUTOMATIC_PRINT_ELEMENTS),
+    if let Err(error) = requests.unscoped(&command).when(move || session_for_guard.is_open()).inspect(limit.max(AUTOMATIC_PRINT_ELEMENTS),
         move |_, record| {
             if !session_for_response.is_open() {
                 finish_indexed(
@@ -184,6 +184,7 @@ fn request_indexed_level(
                 .into_iter()
                 .take(limit)
                 .map(|(index, child)| VariableViewerRow {
+                    link: String::new(),
                     ordinal: index.to_string(),
                     name: child.name.clone(),
                     value: compact_viewer_text(&child.value, 320),
@@ -240,7 +241,9 @@ fn finish_indexed(
         if failed {
             session.fail(&message);
         } else {
-            session.finish(&message);
+            session.finish(&format!(
+                "{message} · Slice navigation is unavailable for this representation"
+            ));
         }
     }
 

@@ -73,7 +73,7 @@ impl ProcessPicker {
         let selection = gtk::SingleSelection::new(Some(sorted.clone()));
         selection.set_autoselect(false);
         selection.set_can_unselect(true);
-        let table = gtk::ColumnView::new(Some(selection.clone()));
+        let table = components::column_view(selection.clone());
         table.add_css_class("debug-table");
         table.set_vexpand(true);
 
@@ -397,10 +397,7 @@ impl Column {
             Self::Command => ("COMMAND LINE", 280),
         };
 
-        let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-        column.set_fixed_width(width);
-        column.set_resizable(true);
-        column.set_expand(matches!(self, Self::Command));
+        let column = components::table_column(title, width, factory);
 
         column.set_sorter(Some(&gtk::CustomSorter::new(move |left, right| {
             let left = left

@@ -1,4 +1,15 @@
+//! Persistent root refresh and shared locals/watch MI update batching.
+
 use super::*;
+
+mod children;
+pub(in crate::app) use children::request_variable_children;
+#[cfg(test)]
+use children::variable_child_page_end;
+
+mod ownership;
+pub(in crate::app) use ownership::delete_variable_object;
+use ownership::{register_owned_variable_object, variable_object_owned_root};
 
 const VARIABLE_CHILD_PAGE_SIZE: usize = 128;
 const MAX_VARIABLE_CHILDREN: usize = 4096;
@@ -6,7 +17,7 @@ const MAX_VARIABLE_CHILDREN: usize = 4096;
 // Keep stop refresh responsive even in generated or macro-heavy frames.
 // Remaining aggregate roots stay visible and create their varobj lazily when
 // the user expands them.
-const MAX_AUTOMATIC_VARIABLE_OBJECTS: usize = 32;
+const MAX_AUTOMATIC_LOCAL_OBJECTS: usize = 32;
 
 pub(in crate::app) struct VariableRefresh {
     ui: Weak<Ui>,
@@ -268,16 +279,18 @@ fn reuse_variable_objects(
                 fallback.local_index,
             );
 
-            let Some(mut variable) = reusable.get(&key).and_then(|&index| buckets[index].pop())
-            else {
+            let Some(variable) = reusable.get(&key).and_then(|&index| buckets[index].pop()) else {
                 return (fallback.clone(), false);
             };
 
-            if fallback.type_name.is_some() {
-                variable.type_name.clone_from(&fallback.type_name);
+            if fallback.type_name.is_some() && variable.type_name != fallback.type_name {
+                stale.extend(variable.varobj);
+                return (fallback.clone(), false);
             }
 
-            (variable, true)
+            let needs_update = variable.varobj.is_some();
+
+            (variable, needs_update)
         })
         .unzip();
 
@@ -303,7 +316,7 @@ pub(in crate::app) fn request_next_variable_object(
     let next = {
         let mut state = state.borrow_mut();
 
-        if state.created >= MAX_AUTOMATIC_VARIABLE_OBJECTS {
+        if state.created >= state.target.creation_budget() {
             state.next_index = state.variables.len();
         }
 
@@ -556,13 +569,16 @@ fn apply_bulk_variable_updates(
         .cloned()
         .collect::<Vec<_>>();
 
-    if let Some(state) = states.first()
-        && let Some(ui) = state.borrow().ui.upgrade()
+    let target = states.first().map(|state| {
+        let state = state.borrow();
+
+        (state.ui.clone(), state.requests.generation())
+    });
+
+    if let Some((ui, generation)) = target
+        && let Some(ui) = ui.upgrade()
     {
-        ui.show_variable_descendant_updates_for_refresh(
-            state.borrow().requests.generation(),
-            &descendants,
-        );
+        ui.show_variable_descendant_updates_for_refresh(generation, &descendants);
     }
 
     let updates = updates
@@ -571,9 +587,10 @@ fn apply_bulk_variable_updates(
         .collect::<HashMap<_, _>>();
 
     for state in states {
-        let recreate = {
+        let (recreate, retired) = {
             let mut state = state.borrow_mut();
             let mut recreate = false;
+            let mut retired = Vec::new();
 
             for index in 0..state.variables.len() {
                 let Some(varobj) = state.variables[index].varobj.clone() else {
@@ -596,15 +613,15 @@ fn apply_bulk_variable_updates(
                     });
 
                 if invalid {
-                    delete_variable_object(client, &varobj);
                     state.created_varobjs.remove(&varobj);
+                    retired.push(varobj);
                     state.variables[index] = state.fallbacks[index].clone();
 
                     recreate |= state
                         .target
                         .creates_missing_variable_object(&state.fallbacks[index]);
                 } else if let Some(update) = update {
-                    apply_variable_update(&mut state.variables[index], update);
+                    state.variables[index].apply_update(update);
                 }
 
                 state.needs_update[index] = false;
@@ -612,8 +629,12 @@ fn apply_bulk_variable_updates(
 
             state.bulk_completed = true;
 
-            recreate
+            (recreate, retired)
         };
+
+        for varobj in retired {
+            delete_variable_object(client, &varobj);
+        }
 
         if recreate {
             let mut refresh = state.borrow_mut();
@@ -636,48 +657,7 @@ fn variable_object_owns_update(root: &str, candidate: &str) -> bool {
 }
 
 fn variable_object_has_owned_ancestor(roots: &HashSet<String>, candidate: &str) -> bool {
-    candidate
-        .rsplit_once('.')
-        .is_some_and(|(parent, _)| variable_object_owned_root(roots, parent).is_some())
-}
-
-fn variable_object_owned_root<'a>(
-    roots: &'a HashSet<String>,
-    mut candidate: &str,
-) -> Option<&'a String> {
-    loop {
-        if let Some(root) = roots.get(candidate) {
-            return Some(root);
-        }
-
-        candidate = candidate.rsplit_once('.')?.0;
-    }
-}
-
-fn apply_variable_update(variable: &mut Variable, update: &crate::debugger::VariableUpdate) {
-    if let Some(value) = update.value.as_ref() {
-        variable.value.clone_from(value);
-    }
-
-    if let Some(new_type) = update.new_type.as_ref() {
-        variable.type_name = Some(new_type.clone());
-    }
-
-    if let Some(children) = update.new_num_children {
-        variable.num_children = children;
-    }
-
-    if let Some(has_more) = update.has_more {
-        variable.has_more = has_more;
-    }
-
-    if let Some(display_hint) = update.display_hint.as_ref() {
-        variable.display_hint = Some(display_hint.clone());
-    }
-
-    if let Some(dynamic) = update.dynamic {
-        variable.dynamic = dynamic;
-    }
+    !roots.contains(candidate) && variable_object_owned_root(roots, candidate).is_some()
 }
 
 fn finish_variable_refresh(client: &MiClient, state: Rc<RefCell<VariableRefresh>>) {
@@ -703,6 +683,15 @@ fn finish_variable_refresh(client: &MiClient, state: Rc<RefCell<VariableRefresh>
 }
 
 impl VariableRefreshTarget {
+    fn creation_budget(&self) -> usize {
+        match self {
+            Self::Locals => MAX_AUTOMATIC_LOCAL_OBJECTS,
+            // Explicit watches are already bounded by the watch list. Unlike
+            // local aggregates, they have no lazy root-creation path.
+            Self::ExpressionWatches(expressions) => expressions.len(),
+        }
+    }
+
     fn creates_missing_variable_object(&self, variable: &Variable) -> bool {
         match self {
             Self::Locals => variable.needs_eager_local_variable_object(),
@@ -735,63 +724,6 @@ fn show_variable_root_refresh(
     }
 }
 
-thread_local! {
-    static OWNED_VARIABLE_OBJECTS: RefCell<HashMap<String, HashSet<String>>> =
-        RefCell::new(HashMap::new());
-}
-
-fn register_owned_variable_object(owner: &str, child: &str) {
-    if owner == child {
-        return;
-    }
-
-    OWNED_VARIABLE_OBJECTS.with(|owned| {
-        owned
-            .borrow_mut()
-            .entry(owner.to_owned())
-            .or_default()
-            .insert(child.to_owned());
-    });
-}
-
-pub(in crate::app) fn delete_variable_object(client: &MiClient, varobj: &str) {
-    let objects = OWNED_VARIABLE_OBJECTS
-        .with(|owned| take_owned_variable_objects(&mut owned.borrow_mut(), varobj));
-
-    for object in objects.into_iter().rev() {
-        client.delete_variable_object(object);
-    }
-}
-
-fn take_owned_variable_objects(
-    owned: &mut HashMap<String, HashSet<String>>,
-    root: &str,
-) -> Vec<String> {
-    let mut objects = vec![root.to_owned()];
-    let mut visited = HashSet::from([root.to_owned()]);
-    let mut index = 0;
-
-    while index < objects.len() {
-        if let Some(children) = owned.remove(&objects[index]) {
-            for child in children {
-                if visited.insert(child.clone()) {
-                    objects.push(child);
-                }
-            }
-        }
-
-        index += 1;
-    }
-
-    owned.retain(|_, children| {
-        children.retain(|child| !visited.contains(child));
-
-        !children.is_empty()
-    });
-
-    objects
-}
-
 pub(in crate::app) fn discard_variable_refresh(
     client: &MiClient,
     state: &Rc<RefCell<VariableRefresh>>,
@@ -814,591 +746,5 @@ pub(in crate::app) fn discard_variable_refresh(
     }
 }
 
-pub(in crate::app) fn request_variable_children(
-    ui: Weak<Ui>,
-    client: Rc<MiClient>,
-    variable: Variable,
-    from: usize,
-) {
-    if let Some(ui) = ui.upgrade()
-        && !ui.variable_action_is_current(&variable)
-    {
-        ui.cancel_variable_children_request(&variable);
-        return;
-    }
-
-    let Some(varobj) = variable.varobj.clone() else {
-        request_lazy_local_variable_children(ui, client, variable, from);
-        return;
-    };
-
-    let Some(generation) = ui.upgrade().and_then(|current_ui| {
-        let generation = current_ui.model.current_stop_refresh_generation();
-
-        current_ui
-            .model
-            .stop_context(generation)
-            .map(|_| generation)
-    }) else {
-        return;
-    };
-
-    let Some(requests) = stop_requests(&ui, &client, generation) else {
-        return;
-    };
-
-    // Dynamic varobjs may advertise available pretty-printed children only
-    // through `has_more`. GDB documents `numchild` as unreliable for them.
-    if variable.num_children > 0 || variable.has_more || variable.dynamic {
-        let Some(to) = variable_child_page_end(from) else {
-            if let Some(ui) = ui.upgrade() {
-                ui.show_variable_children_page(&variable, from, &[], false);
-            }
-
-            return;
-        };
-
-        let command = format!(
-            "-var-list-children --all-values {} {from} {to}",
-            crate::debugger::quote(&varobj),
-        );
-
-        let ui_for_response = ui.clone();
-        let ui_for_guard = ui.clone();
-        let varobj_for_guard = varobj.clone();
-        let variable_for_response = variable.clone();
-
-        if let Err(error) = requests
-            .unscoped(&command)
-            .when(move || {
-                ui_for_guard
-                    .upgrade()
-                    .is_some_and(|ui| ui.has_variable_object(&varobj_for_guard))
-            })
-            .with_print_limit(to, move |client, record| {
-                // Cancellation must also resolve the loading row. A retained
-                // varobj needs a retry entry when its request is superseded.
-                if let Some(ui) = ui_for_response.upgrade() {
-                    if record.is_done() {
-                        let children = crate::debugger::variable_children(&record);
-                        let next = from.saturating_add(children.len());
-
-                        let has_more = next < MAX_VARIABLE_CHILDREN
-                            && !children.is_empty()
-                            && (crate::debugger::variable_children_have_more(&record)
-                                || next < variable_for_response.num_children);
-
-                        ui.show_variable_children_page(
-                            &variable_for_response,
-                            from,
-                            &children,
-                            has_more,
-                        );
-
-                        set_variable_update_range(
-                            client,
-                            &ui_for_response,
-                            generation,
-                            &varobj,
-                            next,
-                        );
-                    } else {
-                        ui.show_variable_children_page_error(
-                            &variable_for_response,
-                            from,
-                            record
-                                .error_message()
-                                .unwrap_or("GDB could not expand this value"),
-                        );
-                    }
-                }
-            })
-            && let Some(ui) = ui.upgrade()
-        {
-            ui.show_variable_children_page_error(&variable, from, &error.to_string());
-        }
-
-        return;
-    }
-
-    if !variable.is_pointer() {
-        if let Some(ui) = ui.upgrade() {
-            ui.show_variable_children(&varobj, &[]);
-        }
-
-        return;
-    }
-
-    let command = format!(
-        "-var-info-path-expression {}",
-        crate::debugger::quote(&varobj)
-    );
-
-    let ui_for_path = ui.clone();
-    let requests_for_path = requests.clone();
-    let varobj_for_path = varobj.clone();
-    let display_name = variable.name;
-    let ui_for_path_guard = ui.clone();
-    let varobj_for_path_guard = varobj.clone();
-
-    if requests
-        .unscoped(&command)
-        .when(move || {
-            ui_for_path_guard
-                .upgrade()
-                .is_some_and(|ui| ui.has_variable_object(&varobj_for_path_guard))
-        })
-        .request(move |_, record| {
-            let Some(path) = crate::debugger::variable_path_expression(&record) else {
-                if let Some(ui) = ui_for_path.upgrade() {
-                    ui.show_variable_children_error(
-                        &varobj_for_path,
-                        record
-                            .error_message()
-                            .unwrap_or("GDB cannot dereference this pointer type"),
-                    );
-                }
-
-                return;
-            };
-
-            let dereference_varobj = next_variable_object_name();
-
-            let command = format!(
-                "-var-create {dereference_varobj} * {}",
-                crate::debugger::quote(&format!("*({path})"))
-            );
-
-            let requests = requests_for_path;
-
-            if !ui_for_path
-                .upgrade()
-                .is_some_and(|ui| ui.has_variable_object(&varobj_for_path))
-            {
-                return;
-            }
-
-            let ui_for_dereference = ui_for_path.clone();
-            let ui_for_guard = ui_for_path.clone();
-            let varobj_for_dereference = varobj_for_path.clone();
-            let varobj_for_guard = varobj_for_path.clone();
-            let ui_for_request_error = ui_for_path.clone();
-            let varobj_for_request_error = varobj_for_path.clone();
-            let dereference_varobj_for_response = dereference_varobj;
-
-            if requests
-                .frame(&command)
-                .when(move || {
-                    ui_for_guard
-                        .upgrade()
-                        .is_some_and(|ui| ui.has_variable_object(&varobj_for_guard))
-                })
-                .with_print_limit(AUTOMATIC_PRINT_ELEMENTS, move |client, record| {
-                    let child = record
-                        .is_done()
-                        .then(|| {
-                            crate::debugger::variable_object(&record, &format!("*{display_name}"))
-                        })
-                        .flatten();
-
-                    if let Some(child) = child {
-                        let attached = ui_for_dereference.upgrade().is_some_and(|ui| {
-                            ui.show_variable_children(
-                                &varobj_for_dereference,
-                                std::slice::from_ref(&child),
-                            )
-                        });
-
-                        if attached {
-                            register_owned_variable_object(
-                                &varobj_for_dereference,
-                                &dereference_varobj_for_response,
-                            );
-                        } else {
-                            delete_variable_object(client, &dereference_varobj_for_response);
-                        }
-                    } else if let Some(ui) = ui_for_dereference.upgrade() {
-                        delete_variable_object(client, &dereference_varobj_for_response);
-
-                        ui.show_variable_children_error(
-                            &varobj_for_dereference,
-                            record
-                                .error_message()
-                                .unwrap_or("GDB cannot dereference this pointer"),
-                        );
-                    } else {
-                        delete_variable_object(client, &dereference_varobj_for_response);
-                    }
-                })
-                .is_err()
-                && let Some(ui) = ui_for_request_error.upgrade()
-            {
-                ui.show_variable_children_error(
-                    &varobj_for_request_error,
-                    "The MI channel is unavailable",
-                );
-            }
-        })
-        .is_err()
-        && let Some(ui) = ui.upgrade()
-    {
-        ui.show_variable_children_error(&varobj, "The MI channel is unavailable");
-    }
-}
-
-fn set_variable_update_range(
-    client: &MiClient,
-    ui: &Weak<Ui>,
-    generation: u64,
-    varobj: &str,
-    loaded_children: usize,
-) {
-    if loaded_children == 0 {
-        return;
-    }
-
-    let command = format!(
-        "-var-set-update-range {} 0 {loaded_children}",
-        crate::debugger::quote(varobj)
-    );
-
-    let Some(requests) = stop_requests(ui, client, generation) else {
-        return;
-    };
-
-    let ui_for_guard = ui.clone();
-    let varobj_for_guard = varobj.to_owned();
-
-    let _ = requests
-        .unscoped(&command)
-        .when(move || {
-            ui_for_guard
-                .upgrade()
-                .is_some_and(|ui| ui.has_variable_object(&varobj_for_guard))
-        })
-        .request(|_, _| {});
-}
-
-fn variable_child_page_end(from: usize) -> Option<usize> {
-    (from < MAX_VARIABLE_CHILDREN).then(|| {
-        from.saturating_add(VARIABLE_CHILD_PAGE_SIZE)
-            .min(MAX_VARIABLE_CHILDREN)
-    })
-}
-
-fn request_lazy_local_variable_children(
-    ui: Weak<Ui>,
-    client: Rc<MiClient>,
-    variable: Variable,
-    from: usize,
-) {
-    let Some(current_ui) = ui.upgrade() else {
-        return;
-    };
-
-    let generation = current_ui.model.current_stop_refresh_generation();
-
-    if from != 0 || !current_ui.claim_local_variable_object(generation, &variable) {
-        return;
-    }
-
-    drop(current_ui);
-    let varobj = next_variable_object_name();
-
-    let command = format!(
-        "-var-create {varobj} * {}",
-        crate::debugger::quote(&variable.name)
-    );
-
-    let Some(requests) = stop_requests(&ui, &client, generation) else {
-        if let Some(ui) = ui.upgrade() {
-            ui.finish_local_variable_object(generation, &variable);
-        }
-
-        return;
-    };
-
-    let ui_for_guard = ui.clone();
-    let variable_for_guard = variable.clone();
-    let ui_for_response = ui.clone();
-    let variable_for_response = variable.clone();
-    let client_for_response = Rc::clone(&client);
-    let varobj_for_response = varobj.clone();
-
-    if requests
-        .frame(&command)
-        .when(move || {
-            ui_for_guard
-                .upgrade()
-                .is_some_and(|ui| ui.has_local_variable_identity(&variable_for_guard))
-        })
-        .with_print_limit(AUTOMATIC_PRINT_ELEMENTS, move |client, record| {
-            if let Some(ui) = ui_for_response.upgrade() {
-                ui.finish_local_variable_object(generation, &variable_for_response);
-            }
-
-            let created = record
-                .is_done()
-                .then(|| crate::debugger::variable_object(&record, &variable_for_response.name))
-                .flatten()
-                .map(|mut created| {
-                    created.argument = variable_for_response.argument;
-                    created.local_index = variable_for_response.local_index;
-
-                    created
-                });
-
-            let Some(created) = created else {
-                delete_variable_object(client, &varobj_for_response);
-
-                if let Some(ui) = ui_for_response.upgrade()
-                    && ui.model.is_stop_refresh_current(generation)
-                {
-                    ui.show_lazy_variable_children_error(
-                        &variable_for_response,
-                        record
-                            .error_message()
-                            .unwrap_or("GDB could not inspect this pointer"),
-                    );
-                }
-
-                return;
-            };
-
-            let attached = ui_for_response.upgrade().is_some_and(|ui| {
-                ui.attach_local_variable_object(generation, &variable_for_response, &created)
-            });
-
-            if attached {
-                request_variable_children(
-                    ui_for_response.clone(),
-                    Rc::clone(&client_for_response),
-                    created,
-                    0,
-                );
-            } else {
-                delete_variable_object(client, &varobj_for_response);
-            }
-        })
-        .is_err()
-        && let Some(ui) = ui.upgrade()
-    {
-        ui.finish_local_variable_object(generation, &variable);
-
-        if ui.has_local_variable_identity(&variable) {
-            ui.show_lazy_variable_children_error(&variable, "The MI channel is unavailable");
-        }
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use std::collections::{HashMap, HashSet};
-
-    use super::{
-        Variable, VariableRefreshTarget, apply_variable_update, has_persistent_variable_objects,
-        reuse_variable_objects, take_owned_variable_objects, variable_child_page_end,
-        variable_object_has_owned_ancestor, variable_object_owned_root,
-        variable_object_owns_update,
-    };
-
-    fn variable(
-        name: &str,
-        value: &str,
-        type_name: Option<&str>,
-        varobj: Option<&str>,
-    ) -> Variable {
-        Variable {
-            local_index: None,
-            name: name.to_owned(),
-            value: value.to_owned(),
-            type_name: type_name.map(str::to_owned),
-            argument: false,
-            varobj: varobj.map(str::to_owned),
-            num_children: usize::from(varobj.is_some()),
-            has_more: false,
-            display_hint: None,
-            dynamic: false,
-        }
-    }
-
-    #[test]
-    fn reuses_live_roots_and_discards_only_stale_variable_objects() {
-        let fallbacks = vec![
-            variable("pointer", "0x20", Some("Node *"), None),
-            variable("count", "7", Some("int"), None),
-        ];
-
-        let existing = vec![
-            variable("pointer", "0x10", Some("Node *"), Some("var1")),
-            variable("removed", "0x30", Some("Node *"), Some("var2")),
-            variable("count", "0x40", Some("Node *"), Some("var3")),
-        ];
-
-        let (reused, needs_update, mut stale) = reuse_variable_objects(&fallbacks, existing);
-        assert_eq!(reused[0].varobj.as_deref(), Some("var1"));
-        assert_eq!(reused[0].value, "0x10");
-        assert_eq!(reused[1], fallbacks[1]);
-        assert_eq!(needs_update, [true, false]);
-        stale.sort_unstable();
-        assert_eq!(stale, [String::from("var2"), String::from("var3")]);
-    }
-
-    #[test]
-    fn duplicate_local_names_reuse_their_own_occurrence() {
-        let mut first = variable("value", "{...}", Some("Value"), Some("var1"));
-        first.local_index = Some(0);
-        let mut second = first.clone();
-        second.local_index = Some(1);
-        second.varobj = Some("var2".into());
-        let mut fallbacks = vec![first.clone(), second.clone()];
-
-        for variable in &mut fallbacks {
-            variable.varobj = None;
-            variable.value = "<not available>".into();
-        }
-
-        let (reused, _, stale) = reuse_variable_objects(&fallbacks, vec![second, first]);
-        assert!(stale.is_empty());
-        assert_eq!(reused[0].varobj.as_deref(), Some("var1"));
-        assert_eq!(reused[1].varobj.as_deref(), Some("var2"));
-
-        let first = variable("pointer", "0x10", Some("Node *"), Some("first"));
-        let mut second = first.clone();
-        second.varobj = Some(String::from("second"));
-        let mut argument = first.clone();
-        argument.argument = true;
-        argument.varobj = Some(String::from("argument"));
-        let fallback = variable("pointer", "0x20", Some("Node *"), None);
-        let (reused, needs_update, stale) =
-            reuse_variable_objects(&[fallback.clone(), fallback], vec![first, second, argument]);
-        assert_eq!(reused[0].varobj.as_deref(), Some("second"));
-        assert_eq!(reused[1].varobj.as_deref(), Some("first"));
-        assert_eq!(needs_update, [true, true]);
-        assert_eq!(stale, [String::from("argument")]);
-    }
-
-    #[test]
-    fn creates_local_pointer_objects_only_after_they_are_requested() {
-        let pointer = variable("pointer", "0x20", Some("Node *"), None);
-        let aggregate = variable("fixture", "<not available>", Some("struct Fixture"), None);
-        assert!(!VariableRefreshTarget::Locals.creates_missing_variable_object(&pointer));
-        assert!(VariableRefreshTarget::Locals.creates_missing_variable_object(&aggregate));
-
-        assert!(
-            VariableRefreshTarget::ExpressionWatches(Vec::new())
-                .creates_missing_variable_object(&pointer)
-        );
-    }
-
-    #[test]
-    fn bounds_dynamic_variable_pages_while_allowing_later_pages() {
-        assert_eq!(variable_child_page_end(0), Some(128));
-        assert_eq!(variable_child_page_end(128), Some(256));
-        assert_eq!(variable_child_page_end(4_000), Some(4_096));
-        assert_eq!(variable_child_page_end(4_096), None);
-        assert_eq!(variable_child_page_end(usize::MAX), None);
-    }
-
-    #[test]
-    fn refreshes_existing_lazy_local_objects_without_creating_new_ones() {
-        let pointer = variable("pointer", "0x20", Some("Node *"), None);
-        let target = VariableRefreshTarget::Locals;
-        assert!(!target.requires_refresh(std::slice::from_ref(&pointer), &[false]));
-        assert!(target.requires_refresh(std::slice::from_ref(&pointer), &[true]));
-    }
-
-    #[test]
-    fn bulk_updates_route_only_to_owned_roots_and_descendants() {
-        assert!(variable_object_owns_update("fgdb_var_1", "fgdb_var_1"));
-
-        assert!(variable_object_owns_update(
-            "fgdb_var_1",
-            "fgdb_var_1.public.next"
-        ));
-
-        assert!(!variable_object_owns_update(
-            "fgdb_var_1",
-            "fgdb_var_10.public"
-        ));
-
-        assert!(!variable_object_owns_update("fgdb_var_1", "temporary"));
-        let roots = HashSet::from([String::from("fgdb_var_1"), String::from("fgdb_var_20")]);
-
-        assert_eq!(
-            variable_object_owned_root(&roots, "fgdb_var_1.choice.value").map(String::as_str),
-            Some("fgdb_var_1"),
-        );
-
-        assert_eq!(
-            variable_object_owned_root(&roots, "fgdb_var_20").map(String::as_str),
-            Some("fgdb_var_20"),
-        );
-
-        assert!(variable_object_has_owned_ancestor(
-            &roots,
-            "fgdb_var_1.public.next.value"
-        ));
-
-        assert!(!variable_object_has_owned_ancestor(
-            &roots,
-            "fgdb_var_10.public"
-        ));
-    }
-
-    #[test]
-    fn newly_created_persistent_roots_participate_in_the_bulk_update() {
-        let created = variable("items", "{...}", Some("Vec<int>"), Some("fgdb_var_1"));
-        let scalar = variable("count", "4", Some("int"), None);
-        assert!(has_persistent_variable_objects(&[created]));
-        assert!(!has_persistent_variable_objects(&[scalar]));
-    }
-
-    #[test]
-    fn bulk_root_updates_preserve_the_existing_update_semantics() {
-        let mut root = variable("value", "old", Some("Old"), Some("fgdb_var_1"));
-
-        let update = crate::debugger::VariableUpdate {
-            varobj: String::from("fgdb_var_1"),
-            value: Some(String::from("new")),
-            in_scope: Some(true),
-            type_changed: false,
-            new_type: Some(String::from("New")),
-            new_num_children: Some(4),
-            has_more: Some(true),
-            display_hint: Some(String::from("array")),
-            dynamic: Some(true),
-        };
-
-        apply_variable_update(&mut root, &update);
-        assert_eq!(root.value, "new");
-        assert_eq!(root.type_name.as_deref(), Some("New"));
-        assert_eq!(root.num_children, 4);
-        assert!(root.has_more);
-        assert_eq!(root.display_hint.as_deref(), Some("array"));
-        assert!(root.dynamic);
-    }
-
-    #[test]
-    fn deletes_independent_dereference_objects_with_their_owner() {
-        let mut owned = HashMap::from([
-            (
-                String::from("root"),
-                HashSet::from([String::from("child"), String::from("sibling")]),
-            ),
-            (
-                String::from("child"),
-                HashSet::from([String::from("grandchild")]),
-            ),
-            (
-                String::from("other"),
-                HashSet::from([String::from("sibling")]),
-            ),
-        ]);
-
-        let removed = take_owned_variable_objects(&mut owned, "root");
-        assert_eq!(removed.first().map(String::as_str), Some("root"));
-        assert_eq!(removed.iter().collect::<HashSet<_>>().len(), 4);
-        assert!(owned.is_empty());
-    }
-}
+mod tests;

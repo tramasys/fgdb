@@ -1,15 +1,15 @@
 use super::*;
 
+mod array;
 mod heuristics;
 mod indexed;
 mod lifecycle;
 mod linked;
-mod native_array;
 
 use heuristics::{
     compact_variable_type_name, compact_viewer_text, indexed_child_ordinal, is_cpp_access_group,
-    normalize_member_name, transparent_index_wrapper, transparent_link_wrapper,
-    viewer_value_is_null,
+    linked_value_is_end, normalize_member_name, transparent_index_wrapper,
+    transparent_link_wrapper,
 };
 use indexed::request_indexed_children;
 use lifecycle::cleanup_viewer_variable_objects;
@@ -80,7 +80,7 @@ fn create_viewer_root(
     if let Err(error) = requests
         .frame(&command)
         .when(move || session_for_guard.is_open())
-        .with_print_limit(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
+        .inspect(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
             if record.class == "superseded" {
                 cleanup_viewer_variable_objects(
                     &ui_for_response,
@@ -168,16 +168,8 @@ fn start_variable_viewer_plan(
     }
 
     match request.descriptor.plan.clone() {
-        VariableViewerPlan::NativeArray { limit } => native_array::request_array(
-            ui,
-            client,
-            requests,
-            session,
-            request.variable,
-            limit.min(MAX_VIEWER_ITEMS),
-            owned_root,
-        ),
-        VariableViewerPlan::IndexedChildren { limit } => request_indexed_children(
+        VariableViewerPlan::NativeArray { limit }
+        | VariableViewerPlan::IndexedChildren { limit } => array::request_array(
             ui,
             client,
             requests,
@@ -220,10 +212,40 @@ mod tests {
         assert!(is_cpp_access_group("public"));
         assert!(is_cpp_access_group("private"));
         assert!(!is_cpp_access_group("next"));
-        assert!(viewer_value_is_null("(Node *) 0x0"));
-        assert!(viewer_value_is_null("nullptr"));
-        assert!(viewer_value_is_null("None"));
-        assert!(!viewer_value_is_null("(Node *) 0x1"));
+    }
+
+    #[test]
+    fn linked_end_markers_require_a_pointer_or_optional_type() {
+        let variable = |type_name: &str, value: &str| Variable {
+            local_index: None,
+            name: String::from("next"),
+            value: value.into(),
+            type_name: Some(type_name.into()),
+            argument: false,
+            varobj: Some(String::from("test.next")),
+            num_children: 2,
+            has_more: false,
+            display_hint: None,
+            dynamic: false,
+        };
+
+        for (type_name, value) in [
+            ("Node *", "(Node *) 0x0"),
+            ("Node *", "nullptr"),
+            ("core::option::Option<Node>", "None"),
+        ] {
+            assert!(linked_value_is_end(&variable(type_name, value)));
+        }
+
+        for (type_name, value) in [
+            ("int", "0"),
+            ("Rc<Node>", "Rc(value = 0x0)"),
+            ("Node<Option<T>>", "None"),
+            ("Option<Node>", "Some(0x0)"),
+            ("Node *", "0x1"),
+        ] {
+            assert!(!linked_value_is_end(&variable(type_name, value)));
+        }
     }
 
     #[test]

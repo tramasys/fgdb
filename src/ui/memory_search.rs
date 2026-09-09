@@ -209,7 +209,7 @@ impl MemorySearchView {
         let selection = gtk::SingleSelection::new(Some(filtered));
         selection.set_autoselect(false);
         selection.set_can_unselect(true);
-        let results = gtk::ColumnView::new(Some(selection.clone()));
+        let results = components::column_view(selection.clone());
         results.add_css_class("debug-table");
         results.set_single_click_activate(false);
 
@@ -965,13 +965,7 @@ fn result_column(
         }
     });
 
-    gtk::ColumnViewColumn::builder()
-        .title(title)
-        .factory(&factory)
-        .fixed_width(width)
-        .resizable(true)
-        .expand(index == 3)
-        .build()
+    components::table_column(title, width, factory)
 }
 
 #[cfg(test)]

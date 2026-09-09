@@ -531,6 +531,7 @@ struct ConfigLayer {
     terminal_font: Option<String>,
     terminal_scrollback: Option<u32>,
     integer_display: Option<settings::IntegerDisplay>,
+    variable_locations: Option<bool>,
     instruction_bytes: Option<bool>,
     instruction_symbols: Option<bool>,
     instruction_source: Option<bool>,
@@ -598,6 +599,7 @@ impl ConfigLayer {
             terminal_font,
             terminal_scrollback,
             integer_display,
+            variable_locations,
             instruction_bytes,
             instruction_symbols,
             instruction_source,
@@ -860,6 +862,7 @@ fn canonical_config_key(key: &str) -> Option<&'static str> {
         "terminal_font" => Some("terminal_font"),
         "terminal_scrollback" => Some("terminal_scrollback"),
         "integer_display" => Some("integer_display"),
+        "variable_locations" => Some("variable_locations"),
         "instruction_bytes" => Some("instruction_bytes"),
         "instruction_symbols" => Some("instruction_symbols"),
         "instruction_source" => Some("instruction_source"),
@@ -992,6 +995,7 @@ fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> 
         | "source_auto_reload"
         | "source_wrap"
         | "source_highlight_line"
+        | "variable_locations"
         | "instruction_bytes"
         | "instruction_symbols"
         | "instruction_source"
@@ -1010,6 +1014,7 @@ fn set_config_value(layer: &mut ConfigLayer, key: &'static str, value: &str) -> 
                 "source_wrap" => &mut layer.source_wrap,
                 "source_highlight_line" => &mut layer.source_highlight_line,
                 "source_auto_reload" => &mut layer.source_auto_reload,
+                "variable_locations" => &mut layer.variable_locations,
                 "instruction_bytes" => &mut layer.instruction_bytes,
                 "instruction_symbols" => &mut layer.instruction_symbols,
                 "instruction_source" => &mut layer.instruction_source,

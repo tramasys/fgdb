@@ -844,6 +844,7 @@ pub(super) fn build_inspector(
         bindings.variable_viewer_handler,
         bindings.variable_viewers,
         bindings.variable_presentation,
+        bindings.variable_locations,
         Some((&locals_filter, &locals_changed)),
     );
 
@@ -853,6 +854,7 @@ pub(super) fn build_inspector(
             bindings.variable_viewer_handler,
             bindings.variable_viewers,
             bindings.variable_presentation,
+            bindings.variable_locations,
             None,
         );
 

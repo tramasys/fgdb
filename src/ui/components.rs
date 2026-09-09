@@ -6,8 +6,10 @@ use gtk::gdk;
 
 mod models;
 mod subtabs;
+mod tables;
 pub(super) use models::{replace_boxed_store, replace_boxed_store_if_changed};
 pub(super) use subtabs::{build_subtab_navigation, update_subtab_arrows};
+pub(super) use tables::{column_view, table_column};
 
 pub(super) const CONTROL_GAP: i32 = 6;
 pub(super) const CONTENT_INSET: i32 = 8;
@@ -229,6 +231,25 @@ pub(super) fn icon_button(icon: &str, tooltip: &str) -> gtk::Button {
         .tooltip_text(tooltip)
         .css_classes(["icon-action"])
         .build()
+}
+
+pub(super) fn navigation_button(icon: &str, tooltip: &str) -> gtk::Button {
+    let image = gtk::Image::builder()
+        .icon_name(icon)
+        .halign(gtk::Align::Center)
+        .valign(gtk::Align::Center)
+        .build();
+
+    let button = gtk::Button::builder()
+        .child(&image)
+        .tooltip_text(tooltip)
+        .valign(gtk::Align::Center)
+        .css_classes(["navigation-button"])
+        .build();
+
+    button.update_property(&[gtk::accessible::Property::Label(tooltip)]);
+
+    button
 }
 
 pub(super) fn workspace_toggle(text: &str, tooltip: &str) -> gtk::ToggleButton {

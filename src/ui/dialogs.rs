@@ -313,37 +313,70 @@ pub(super) fn changed_variable_roots(store: &gio::ListStore) -> usize {
         .count()
 }
 
-pub(super) fn apply_variable_updates(store: &gio::ListStore, updates: &[VariableUpdate]) -> usize {
+pub(super) fn apply_variable_updates(
+    store: &gio::ListStore,
+    updates: &[VariableUpdate],
+    mut on_updated: impl FnMut(&VariableNode, &VariableNode),
+) -> usize {
     let updates = updates
         .iter()
         .map(|update| (update.varobj.as_str(), update))
         .collect::<HashMap<_, _>>();
 
-    apply_variable_updates_to_store(store, &updates)
+    apply_variable_updates_to_store(store, &updates, &mut on_updated)
 }
 
-pub(super) fn clear_variable_change_markers(store: &gio::ListStore) {
-    let mut pending = vec![store.clone()];
+pub(super) fn clear_variable_change_markers(roots: &gio::ListStore) {
+    let mut changed_roots = vec![false; roots.n_items() as usize];
+    let mut pending = Vec::new();
 
-    while let Some(store) = pending.pop() {
+    for position in 0..roots.n_items() {
+        let Some(item) = roots.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+            continue;
+        };
+
+        let node = item.borrow::<VariableNode>();
+        changed_roots[position as usize] = node.changed;
+
+        if node.children.n_items() > 0 {
+            pending.push((node.children.clone(), position));
+        }
+    }
+
+    while let Some((store, root)) = pending.pop() {
         for position in 0..store.n_items() {
             let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
                 continue;
             };
 
-            let node = item.borrow::<VariableNode>().clone();
+            let node = item.borrow::<VariableNode>();
 
             if node.children.n_items() > 0 {
-                pending.push(node.children.clone());
+                pending.push((node.children.clone(), root));
             }
 
-            if node.changed {
-                store.splice(
-                    position,
-                    1,
-                    &[glib::BoxedAnyObject::new(node.without_change_marker())],
-                );
+            let replacement = node.changed.then(|| node.without_change_marker());
+            drop(node);
+
+            if let Some(replacement) = replacement {
+                changed_roots[root as usize] = true;
+                store.splice(position, 1, &[glib::BoxedAnyObject::new(replacement)]);
             }
+        }
+    }
+
+    // Root filters do not observe descendant-store changes. Notify them only
+    // after every child marker is cleared, and only for affected roots.
+    for (position, changed) in changed_roots.into_iter().enumerate() {
+        if !changed {
+            continue;
+        }
+
+        let position = position as u32;
+
+        if let Some(item) = roots.item(position).and_downcast::<glib::BoxedAnyObject>() {
+            let replacement = item.borrow::<VariableNode>().without_change_marker();
+            roots.splice(position, 1, &[glib::BoxedAnyObject::new(replacement)]);
         }
     }
 }
@@ -354,10 +387,12 @@ pub(super) fn refresh_changed_variable_roots(store: &gio::ListStore) {
             continue;
         };
 
-        let node = item.borrow::<VariableNode>().clone();
+        let node = item.borrow::<VariableNode>();
 
         if !node.changed && node.has_changes() {
-            store.splice(position, 1, &[glib::BoxedAnyObject::new(node.rebound())]);
+            let replacement = node.rebound();
+            drop(node);
+            store.splice(position, 1, &[glib::BoxedAnyObject::new(replacement)]);
         }
     }
 }
@@ -365,6 +400,7 @@ pub(super) fn refresh_changed_variable_roots(store: &gio::ListStore) {
 fn apply_variable_updates_to_store(
     store: &gio::ListStore,
     updates: &HashMap<&str, &VariableUpdate>,
+    on_updated: &mut impl FnMut(&VariableNode, &VariableNode),
 ) -> usize {
     let mut applied = 0;
     let mut pending = vec![store.clone()];
@@ -375,7 +411,7 @@ fn apply_variable_updates_to_store(
                 continue;
             };
 
-            let node = item.borrow::<VariableNode>().clone();
+            let node = item.borrow::<VariableNode>();
 
             let update = node
                 .variable
@@ -384,51 +420,16 @@ fn apply_variable_updates_to_store(
                 .and_then(|varobj| updates.get(varobj).copied());
 
             let children = if let Some(update) = update {
-                let mut variable = node.variable.clone();
-
-                if let Some(value) = update.value.as_ref() {
-                    variable.value.clone_from(value);
-                }
-
-                if let Some(type_name) = update.new_type.as_ref() {
-                    variable.type_name = Some(type_name.clone());
-                }
-
-                if let Some(num_children) = update.new_num_children {
-                    variable.num_children = num_children;
-                }
-
-                if let Some(has_more) = update.has_more {
-                    variable.has_more = has_more;
-                }
-
-                if let Some(display_hint) = update.display_hint.as_ref() {
-                    variable.display_hint = Some(display_hint.clone());
-                }
-
-                if let Some(dynamic) = update.dynamic {
-                    variable.dynamic = dynamic;
-                }
-
-                if update.in_scope == Some(false) {
-                    variable.value = String::from("<out of scope>");
-                    variable.num_children = 0;
-                    variable.has_more = false;
-                } else if update.type_changed {
-                    variable.value = update
-                        .value
-                        .clone()
-                        .unwrap_or_else(|| String::from("<type changed>"));
-                }
-
-                let updated = node.updated(variable, true);
+                let updated = node.apply_update(update);
                 let children = updated.children.clone();
+                on_updated(&node, &updated);
+                drop(node);
                 store.splice(position, 1, &[glib::BoxedAnyObject::new(updated)]);
                 applied += 1;
 
                 children
             } else {
-                node.children
+                node.children.clone()
             };
 
             if children.n_items() > 0 {
@@ -510,6 +511,7 @@ pub(super) fn open_variable_editor(
         string,
         ..handlers
     };
+
     let editor = build_variable_editor(
         parent,
         variable,
@@ -519,6 +521,7 @@ pub(super) fn open_variable_editor(
         metadata,
         handlers,
     );
+
     let weak_editor = editor.downgrade();
 
     glib::timeout_add_local(Duration::from_millis(100), move || {
@@ -2296,6 +2299,7 @@ mod variable_tree_tests {
             count.set(count.get() + 1);
             slot.borrow_mut().take();
         }));
+
         let guard = Rc::clone(&current);
         let guarded = guard_assignment_handler(&original, Rc::new(move || guard.get()));
         let callback = guarded.borrow().clone().unwrap();
@@ -2340,6 +2344,9 @@ mod variable_tree_tests {
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         store.append(&glib::BoxedAnyObject::new(root));
 
+        let mut index = super::domain::VariableNodeIndex::default();
+        index.index_store(&store);
+
         let applied = apply_variable_updates(
             &store,
             &[VariableUpdate {
@@ -2353,9 +2360,11 @@ mod variable_tree_tests {
                 display_hint: None,
                 dynamic: None,
             }],
+            |previous, updated| index.replace(previous, updated),
         );
 
         assert_eq!(applied, 1);
+        assert_eq!(index.get("var1.field").unwrap().variable.value, "2");
 
         let root = store
             .item(0)

@@ -2,8 +2,11 @@
 //! call its helpers, without resending implementations or touching sys.path.
 
 const PACKAGE: &str = "_fgdb_languages_v1";
+#[cfg(test)]
+mod tests;
 const MODULES: &[(&str, &str)] = &[
     ("common", include_str!("printers/common.py")),
+    ("values", include_str!("printers/values.py")),
     ("fortran", include_str!("printers/fortran.py")),
     ("zig", include_str!("printers/zig.py")),
     ("odin", include_str!("printers/odin.py")),
@@ -12,6 +15,10 @@ const MODULES: &[(&str, &str)] = &[
 ];
 
 pub(crate) fn install_command() -> String {
+    crate::debugger::console_command(&installation_script())
+}
+
+fn installation_script() -> String {
     let mut command = format!(
         "python exec({}, {{'_sources': [",
         crate::debugger::quote(include_str!("printers/runtime.py")),
@@ -26,7 +33,7 @@ pub(crate) fn install_command() -> String {
     }
 
     command.push_str("]})");
-    crate::debugger::console_command(&command)
+    command
 }
 
 pub(crate) fn fortran_value_expression(expression: &str, members: &str) -> String {
@@ -38,9 +45,65 @@ pub(crate) fn fortran_value_expression(expression: &str, members: &str) -> Strin
     )
 }
 
-pub(crate) fn array_inspection_command(expression: &str, members: &str, limit: usize) -> String {
+pub(crate) fn array_description_command(expression: &str, members: &str) -> String {
     crate::debugger::console_command(&format!(
-        "python {}.inspect_array({}, {limit}, {})",
+        "python {}.request_array('describe', {}, {})",
+        module("array"),
+        crate::debugger::quote(expression),
+        crate::debugger::quote(members),
+    ))
+}
+
+pub(crate) fn member_address_command(address: u64, type_name: &str, members: &[String]) -> String {
+    let members = members
+        .iter()
+        .map(|member| crate::debugger::quote(member))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    crate::debugger::console_command(&format!(
+        "python {}.member_address({address}, {}, [{members}])",
+        module("values"),
+        crate::debugger::quote(type_name),
+    ))
+}
+
+pub(crate) fn value_locations_command(paths: &[(String, Option<String>)]) -> String {
+    let paths = paths
+        .iter()
+        .map(|(expression, members)| {
+            format!(
+                "({}, {})",
+                crate::debugger::quote(expression),
+                members
+                    .as_deref()
+                    .map(crate::debugger::quote)
+                    .unwrap_or_else(|| "None".into())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    crate::debugger::console_command(&format!("python {}.locations([{paths}])", module("values"),))
+}
+
+pub(crate) fn array_inspection_command(
+    expression: &str,
+    members: &str,
+    page: &crate::debugger::array::ArrayPage,
+    offset: u64,
+    count: usize,
+) -> String {
+    let axes = page
+        .slice
+        .axes
+        .iter()
+        .map(|axis| format!("({},{},{})", axis.start, axis.count, axis.stride))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    crate::debugger::console_command(&format!(
+        "python {}.request_array('page', {}, {}, [{axes}], {offset}, {count})",
         module("array"),
         crate::debugger::quote(expression),
         crate::debugger::quote(members),

@@ -31,6 +31,7 @@ mod threads;
 mod value;
 mod variable_presentation;
 mod variable_viewers;
+mod variables;
 mod views;
 mod watches;
 mod workspace;
@@ -65,6 +66,7 @@ use domain::{
 };
 use log_view::{ApplicationLog, LogLevel};
 pub(crate) use syscall_view::SyscallAction;
+use variables::VariableNode;
 pub(crate) use workspace::PanelId;
 
 use crate::model::DebuggerStateDelta;
@@ -344,6 +346,7 @@ struct InspectorBindings<'a> {
     variable_viewers: &'a Rc<VariableViewerRegistry>,
     target_pointer_bits: &'a Rc<Cell<u32>>,
     variable_presentation: &'a Rc<variable_presentation::VariablePresentation>,
+    variable_locations: &'a Rc<variables::locations::Locations>,
     kernel: KernelViewBindings<'a>,
     misc: MiscViewBindings<'a>,
 }
@@ -610,198 +613,6 @@ struct RegisterRowData {
     endian: Option<TargetEndian>,
     pointer_bits: u32,
     vector_display: VectorDisplay,
-}
-
-#[derive(Clone)]
-struct VariableNode {
-    variable: Variable,
-    search_text: Rc<str>,
-    children: gio::ListStore,
-    children_loaded: Rc<Cell<bool>>,
-    children_loading: Rc<Cell<bool>>,
-    expanded: Rc<Cell<bool>>,
-    changed: bool,
-    load_more: Option<(Variable, usize)>,
-    placeholder: bool,
-}
-
-impl VariableNode {
-    fn new(variable: Variable) -> Self {
-        let search_text = variable_search_text(&variable).into();
-
-        Self {
-            variable,
-            search_text,
-            children: gio::ListStore::new::<glib::BoxedAnyObject>(),
-            children_loaded: Rc::new(Cell::new(false)),
-            children_loading: Rc::new(Cell::new(false)),
-            expanded: Rc::new(Cell::new(false)),
-            changed: false,
-            load_more: None,
-            placeholder: false,
-        }
-    }
-
-    fn placeholder(name: &str, value: &str) -> Self {
-        let variable = Variable {
-            local_index: None,
-            name: name.to_owned(),
-            value: value.to_owned(),
-            type_name: None,
-            argument: false,
-            varobj: None,
-            num_children: 0,
-            has_more: false,
-            display_hint: None,
-            dynamic: false,
-        };
-
-        Self {
-            search_text: variable_search_text(&variable).into(),
-            variable,
-            children: gio::ListStore::new::<glib::BoxedAnyObject>(),
-            children_loaded: Rc::new(Cell::new(true)),
-            children_loading: Rc::new(Cell::new(false)),
-            expanded: Rc::new(Cell::new(false)),
-            changed: false,
-            load_more: None,
-            placeholder: true,
-        }
-    }
-
-    fn load_more(parent: Variable, next: usize) -> Self {
-        let remaining = parent.num_children.saturating_sub(next);
-
-        let detail = if remaining == 0 {
-            String::from("more children are available")
-        } else {
-            format!(
-                "{remaining} child{} remaining",
-                if remaining == 1 { "" } else { "ren" }
-            )
-        };
-
-        let variable = Variable {
-            local_index: None,
-            name: String::from("Load more…"),
-            value: detail,
-            type_name: None,
-            argument: false,
-            varobj: None,
-            num_children: 0,
-            has_more: false,
-            display_hint: None,
-            dynamic: false,
-        };
-
-        Self {
-            search_text: variable_search_text(&variable).into(),
-            variable,
-            children: gio::ListStore::new::<glib::BoxedAnyObject>(),
-            children_loaded: Rc::new(Cell::new(true)),
-            children_loading: Rc::new(Cell::new(false)),
-            expanded: Rc::new(Cell::new(false)),
-            changed: false,
-            load_more: Some((parent, next)),
-            placeholder: true,
-        }
-    }
-
-    fn load_more_error(parent: Variable, next: usize, error: &str) -> Self {
-        let mut node = Self::load_more(parent, next);
-        node.variable.name = String::from("Retry loading more…");
-        node.variable.value = error.to_owned();
-
-        node
-    }
-
-    fn retry_expansion(parent: Variable, error: &str) -> Self {
-        let mut node = Self::load_more(parent, 0);
-        node.variable.name = String::from("Retry expansion…");
-        node.variable.value = error.to_owned();
-
-        node
-    }
-
-    fn updated(&self, variable: Variable, mark_changed: bool) -> Self {
-        let structure_unchanged = self.variable.varobj == variable.varobj
-            && self.variable.type_name == variable.type_name
-            && self.variable.num_children == variable.num_children
-            && self.variable.has_more == variable.has_more
-            && self.variable.dynamic == variable.dynamic;
-
-        Self {
-            changed: if mark_changed {
-                self.variable.value != variable.value
-            } else {
-                self.changed
-            },
-            search_text: variable_search_text(&variable).into(),
-            variable,
-            children: if structure_unchanged {
-                self.children.clone()
-            } else {
-                gio::ListStore::new::<glib::BoxedAnyObject>()
-            },
-            children_loaded: if structure_unchanged {
-                Rc::clone(&self.children_loaded)
-            } else {
-                Rc::new(Cell::new(false))
-            },
-            children_loading: if structure_unchanged {
-                Rc::clone(&self.children_loading)
-            } else {
-                Rc::new(Cell::new(false))
-            },
-            expanded: Rc::clone(&self.expanded),
-            load_more: None,
-            placeholder: false,
-        }
-    }
-
-    fn has_changes(&self) -> bool {
-        if self.changed {
-            return true;
-        }
-
-        let mut pending = vec![self.children.clone()];
-
-        while let Some(store) = pending.pop() {
-            for position in 0..store.n_items() {
-                let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
-                    continue;
-                };
-
-                let node = item.borrow::<VariableNode>();
-
-                if node.changed {
-                    return true;
-                }
-
-                pending.push(node.children.clone());
-            }
-        }
-
-        false
-    }
-
-    fn without_change_marker(&self) -> Self {
-        Self {
-            variable: self.variable.clone(),
-            search_text: Rc::clone(&self.search_text),
-            children: self.children.clone(),
-            children_loaded: Rc::clone(&self.children_loaded),
-            children_loading: Rc::clone(&self.children_loading),
-            expanded: Rc::clone(&self.expanded),
-            changed: false,
-            load_more: self.load_more.clone(),
-            placeholder: self.placeholder,
-        }
-    }
-
-    fn rebound(&self) -> Self {
-        self.clone()
-    }
 }
 
 #[derive(Clone)]
@@ -1646,6 +1457,7 @@ pub struct Ui {
     configuration_report: ConfigurationReport,
     settings: Rc<settings::Settings>,
     variable_presentation: Rc<variable_presentation::VariablePresentation>,
+    variable_locations: Rc<variables::locations::Locations>,
     debug_data_view: Rc<RefCell<Option<debug_data::DebugDataView>>>,
     debug_data_state: Rc<RefCell<debug_data::DebugDataState>>,
     performance_notice_times: Rc<RefCell<HashMap<String, Instant>>>,

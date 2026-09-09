@@ -3,6 +3,8 @@ use std::sync::Arc;
 use super::mi::{MiListItem, MiRecord, MiResult, MiValue, result_field};
 use super::target::{TargetArchitecture, TargetEndian};
 
+mod pointer;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MemoryFormat {
     Bytes,
@@ -31,7 +33,7 @@ impl StackFrame {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Variable {
     /// Full locals-catalog occurrence, valid only within its stop generation.
     /// Child values and expression watches have no local root identity.
@@ -100,33 +102,101 @@ impl VariableUpdate {
 }
 
 impl Variable {
+    /// Apply the same MI update semantics to roots and expanded descendants.
+    pub fn apply_update(&mut self, update: &VariableUpdate) {
+        if update.type_changed {
+            self.num_children = 0;
+            self.has_more = false;
+            self.display_hint = None;
+            self.dynamic = false;
+        }
+
+        if let Some(value) = &update.value {
+            self.value.clone_from(value);
+        }
+
+        if let Some(type_name) = &update.new_type {
+            self.type_name = Some(type_name.clone());
+        }
+
+        if let Some(count) = update.new_num_children {
+            self.num_children = count;
+        }
+
+        if let Some(has_more) = update.has_more {
+            self.has_more = has_more;
+        }
+
+        if let Some(hint) = &update.display_hint {
+            self.display_hint = Some(hint.clone());
+        }
+
+        if let Some(dynamic) = update.dynamic {
+            self.dynamic = dynamic;
+        }
+
+        if update.in_scope == Some(false) {
+            self.value = String::from("<out of scope>");
+            self.num_children = 0;
+            self.has_more = false;
+        } else if update.type_changed && update.value.is_none() {
+            self.value = String::from("<type changed>");
+        }
+    }
+
+    /// Child requests must retain their owning object and its representation.
+    /// Scalar/aggregate summary changes alone need not discard loaded children.
+    pub fn has_same_children(&self, other: &Self) -> bool {
+        self.varobj == other.varobj
+            && self.local_index == other.local_index
+            && self.name == other.name
+            && self.argument == other.argument
+            && self.type_name == other.type_name
+            && self.num_children == other.num_children
+            && self.has_more == other.has_more
+            && self.dynamic == other.dynamic
+            && self.display_hint == other.display_hint
+            && self.can_expand() == other.can_expand()
+            && ((!self.is_pointer() && self.display_hint.as_deref() != Some("fgdb-variant"))
+                || self.value == other.value)
+    }
+
     pub fn is_available(&self) -> bool {
         let value = self.value.trim();
+
+        if value.is_empty() && !self.dynamic && self.is_pointer() {
+            return false;
+        }
 
         ![
             "<optimized out",
             "<out of scope",
             "<not available",
+            "<unavailable",
             "<not allocated",
             "<not associated",
             "<type changed",
             "<error:",
+            "<error reading",
+            "<Cannot access memory",
+            "<cannot access memory",
         ]
         .iter()
         .any(|prefix| value.starts_with(prefix))
     }
 
     pub fn is_pointer(&self) -> bool {
-        self.type_name.as_deref().is_some_and(|type_name| {
-            let type_name = type_name.trim();
+        self.type_name
+            .as_deref()
+            .is_some_and(pointer::is_pointer_type)
+    }
 
-            (type_name.contains('*')
-                || type_name.starts_with(['&', '^'])
-                || type_name.starts_with("[^]")
-                || type_name.ends_with('&'))
-                && !crate::language::is_fortran_array(type_name)
-                && !crate::language::uses_fortran_kind_star(type_name)
-        })
+    /// Unlike register summaries, variable addresses must not be extracted
+    /// from arbitrary hexadecimal text inside a container's payload.
+    pub fn pointer_address(&self) -> Option<u64> {
+        self.is_pointer()
+            .then(|| pointer::address(&self.value))
+            .flatten()
     }
 
     pub fn can_expand(&self) -> bool {
@@ -134,10 +204,11 @@ impl Variable {
 
         (self.varobj.is_none() && value.starts_with("<not available"))
             || (self.is_available()
+                && !self.is_null_pointer()
                 && (self.num_children > 0
                     || self.has_more
                     || self.dynamic
-                    || (self.is_pointer() && !self.is_null_pointer() && !value.starts_with('<'))))
+                    || (self.is_pointer() && !value.starts_with('<'))))
     }
 
     pub fn is_null_pointer(&self) -> bool {
@@ -145,14 +216,13 @@ impl Variable {
             return false;
         }
 
-        if super::context::pointer_address(&self.value) == Some(0) {
+        if pointer::address(&self.value) == Some(0) {
             return true;
         }
 
-        matches!(
-            self.value.trim().to_ascii_lowercase().as_str(),
-            "0" | "null" | "nullptr" | "none" | "nil" | "<null>"
-        )
+        ["0", "null", "nullptr", "none", "nil", "<null>"]
+            .iter()
+            .any(|null| self.value.trim().eq_ignore_ascii_case(null))
     }
 
     /// Scalar values returned by `-stack-list-variables --simple-values` are
@@ -1657,13 +1727,47 @@ mod tests {
             type_name: Some(String::from("Demo *")),
             argument: false,
             varobj: Some(String::from("var2")),
-            num_children: 0,
-            has_more: false,
+            num_children: 2,
+            has_more: true,
             display_hint: None,
-            dynamic: false,
+            dynamic: true,
         };
 
         assert!(!null_pointer.can_expand());
+
+        let unreadable_pointer = super::Variable {
+            value: String::new(),
+            dynamic: false,
+            ..null_pointer.clone()
+        };
+
+        assert!(!unreadable_pointer.is_available());
+        assert!(!unreadable_pointer.can_expand());
+
+        for value in [
+            "<error reading variable>",
+            "<unavailable: invalid address>",
+            "<Cannot access memory at address 0x1>",
+        ] {
+            let unavailable = super::Variable {
+                value: value.into(),
+                ..null_pointer.clone()
+            };
+
+            assert!(!unavailable.is_available());
+            assert!(!unavailable.can_expand());
+        }
+
+        for type_name in ["std::vector<Demo *>", "Option<*mut Demo>", "Demo *[4]"] {
+            let aggregate = super::Variable {
+                type_name: Some(type_name.into()),
+                value: String::from("{value = 0x0}"),
+                ..null_pointer.clone()
+            };
+
+            assert!(!aggregate.is_pointer());
+            assert!(aggregate.can_expand());
+        }
 
         let unavailable = super::Variable {
             value: String::from("<optimized out>"),

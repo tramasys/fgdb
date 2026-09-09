@@ -53,7 +53,7 @@ fn assembles_special_gef_startup_before_launch_target() {
             "--quiet",
             "--directory=/opt/rust/lib/rustlib/etc",
             "-iex",
-            "add-auto-load-safe-path \"/opt/rust/lib/rustlib/etc\"",
+            "add-auto-load-safe-path /opt/rust/lib/rustlib/etc",
             "-ex",
             "init-gef-special",
             "--args",

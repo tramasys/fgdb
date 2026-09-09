@@ -991,12 +991,6 @@ list.simd-register-list {
     color: @app_accent_hover;
 }
 
-button.memory-navigation-button {
-    min-width: 22px;
-    padding: 2px;
-    -gtk-icon-size: 16px;
-}
-
 .memory-watch-offset {
     min-width: 54px;
     padding: 0 5px;

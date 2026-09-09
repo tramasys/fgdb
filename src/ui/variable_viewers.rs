@@ -1,6 +1,13 @@
 use super::*;
 
-const ARRAY_VIEWER_LIMIT: usize = 512;
+mod array_controls;
+mod linked_controls;
+use crate::debugger::array::{ArrayPage, ArrayShape};
+use crate::debugger::linked::{LinkedListAction, LinkedListProgress};
+use array_controls::ArrayControls;
+use linked_controls::LinkedControls;
+
+const ARRAY_VIEWER_LIMIT: usize = crate::debugger::array::PAGE_LIMIT;
 const LINKED_LIST_VIEWER_LIMIT: usize = 128;
 const MAX_OPEN_VARIABLE_VIEWERS: usize = 16;
 
@@ -100,7 +107,7 @@ impl VariableViewerProvider for FortranArrayProvider {
         VariableViewerDescriptor {
             id: String::from("native-array"),
             title: String::from("Array / sequence"),
-            detail: String::from("Browse array coordinates with native bounds and storage order"),
+            detail: String::from("Page through native dimensions, bounds, and strided slices"),
             plan: VariableViewerPlan::NativeArray {
                 limit: ARRAY_VIEWER_LIMIT,
             },
@@ -121,7 +128,7 @@ impl VariableViewerProvider for ArrayViewerProvider {
         VariableViewerDescriptor {
             id: String::from("indexed-children"),
             title: String::from("Array / sequence"),
-            detail: String::from("Browse indexed elements in a compact table"),
+            detail: String::from("Browse bounded array ranges and sequence pages"),
             plan: VariableViewerPlan::IndexedChildren {
                 limit: ARRAY_VIEWER_LIMIT,
             },
@@ -142,7 +149,9 @@ impl VariableViewerProvider for LinkedListViewerProvider {
         VariableViewerDescriptor {
             id: String::from("linked-list"),
             title: String::from("Linked list"),
-            detail: String::from("Follow next links with cycle detection"),
+            detail: String::from(
+                "Page through node links with cached navigation and cycle detection",
+            ),
             plan: VariableViewerPlan::LinkedList {
                 next_members: [
                     "next",
@@ -309,18 +318,165 @@ pub(crate) struct VariableViewerRow {
     pub(crate) value: String,
     pub(crate) type_name: String,
     pub(crate) details: String,
+    pub(crate) link: String,
 }
 
 pub(crate) struct VariableViewerSession {
-    window: gtk::Window,
+    window: glib::WeakRef<gtk::Window>,
     store: gio::ListStore,
     status: gtk::Label,
     shown: Cell<usize>,
+    revision: Cell<u64>,
+    array: Option<Rc<ArrayControls>>,
+    linked: Option<Rc<LinkedControls>>,
 }
 
 impl VariableViewerSession {
+    #[cfg(test)]
+    pub(crate) fn linked_test_session(limit: usize) -> (Rc<Self>, gtk::Window) {
+        let linked = LinkedControls::new(limit);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
+        components::inset(&root, components::DIALOG_INSET);
+        root.append(&linked.root);
+        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let table = variable_viewer_table(gtk::NoSelection::new(Some(store.clone())), false);
+        root.append(
+            &gtk::ScrolledWindow::builder()
+                .vexpand(true)
+                .child(&table)
+                .build(),
+        );
+        let status = gtk::Label::new(None);
+        root.append(&status);
+        let window = gtk::Window::builder()
+            .default_width(1150)
+            .default_height(600)
+            .child(&root)
+            .build();
+        let session = Rc::new(Self {
+            window: window.downgrade(),
+            store,
+            status,
+            shown: Cell::new(0),
+            revision: Cell::new(0),
+            array: None,
+            linked: Some(linked),
+        });
+
+        session.bind_window_lifetime(&window);
+        window.present();
+        (session, window)
+    }
+
+    fn bind_window_lifetime(self: &Rc<Self>, window: &gtk::Window) {
+        let lifetime = Cell::new(Some(Rc::clone(self)));
+
+        let release = Rc::new(move || {
+            if let Some(session) = lifetime.take() {
+                session.revision.set(session.revision.get().wrapping_add(1));
+            }
+        });
+
+        let on_hide = Rc::clone(&release);
+        window.connect_hide(move |_| on_hide());
+        let on_close = Rc::clone(&release);
+
+        window.connect_close_request(move |_| {
+            on_close();
+            glib::Propagation::Proceed
+        });
+
+        window.connect_destroy(move |_| release());
+    }
+
     pub(crate) fn is_open(&self) -> bool {
-        self.window.is_visible()
+        self.window
+            .upgrade()
+            .is_some_and(|window| window.is_visible())
+    }
+
+    pub(crate) fn configure_array(&self, shape: ArrayShape) -> Result<(), &'static str> {
+        self.array
+            .as_ref()
+            .ok_or("This viewer is not an array")?
+            .configure(shape)
+    }
+
+    pub(crate) fn connect_linked(&self, handler: impl Fn(LinkedListAction) + 'static) {
+        if let Some(linked) = &self.linked {
+            linked.connect(handler);
+        }
+    }
+
+    pub(crate) fn begin_linked(&self) -> u64 {
+        self.revision.set(self.revision.get().wrapping_add(1));
+        self.store.remove_all();
+        self.shown.set(0);
+        self.finish("Following bounded linked-list page…");
+
+        if let Some(linked) = &self.linked {
+            linked.begin();
+        }
+
+        self.revision.get()
+    }
+
+    pub(crate) fn show_linked_page(
+        &self,
+        rows: impl IntoIterator<Item = VariableViewerRow>,
+        progress: LinkedListProgress,
+        message: &str,
+    ) {
+        self.store.remove_all();
+        self.shown.set(0);
+        self.append(rows);
+        self.update_linked_progress(progress, message);
+    }
+
+    pub(crate) fn update_linked_progress(&self, progress: LinkedListProgress, message: &str) {
+        if let Some(linked) = &self.linked {
+            linked.update(progress);
+        }
+
+        self.finish(message);
+    }
+
+    pub(crate) fn connect_array_query(&self, handler: impl Fn(ArrayPage) + 'static) {
+        if let Some(array) = &self.array {
+            array.connect_query(handler);
+            array.submit(0);
+        }
+    }
+
+    pub(crate) fn begin_page(&self, page: &ArrayPage) -> u64 {
+        self.revision.set(self.revision.get().wrapping_add(1));
+        self.store.remove_all();
+        self.shown.set(0);
+        self.status.remove_css_class("status-error");
+        self.status.set_text("Loading bounded array page…");
+
+        if let Some(array) = &self.array {
+            array.begin(page);
+        }
+
+        self.revision.get()
+    }
+
+    pub(crate) fn page_is_current(&self, revision: u64) -> bool {
+        self.is_open() && self.revision.get() == revision
+    }
+
+    fn cancel_page(&self) {
+        self.revision.set(self.revision.get().wrapping_add(1));
+        self.finish_page("Cancelled · Partial page retained", false);
+    }
+
+    pub(crate) fn finish_page(&self, message: &str, ended: bool) {
+        if let Some(array) = &self.array {
+            array.complete(self.shown.get(), ended);
+        }
+
+        self.finish(message);
     }
 
     pub(crate) fn append(&self, rows: impl IntoIterator<Item = VariableViewerRow>) {
@@ -349,6 +505,10 @@ impl VariableViewerSession {
     }
 
     pub(crate) fn fail(&self, message: &str) {
+        if let Some(array) = &self.array {
+            array.complete(self.shown.get(), true);
+        }
+
         self.status.add_css_class("status-error");
         self.status.set_text(message);
     }
@@ -369,7 +529,16 @@ impl Ui {
             ))
             .transient_for(&parent)
             .destroy_with_parent(true)
-            .default_width(900)
+            .default_width(
+                if matches!(
+                    request.descriptor.plan,
+                    VariableViewerPlan::LinkedList { .. }
+                ) {
+                    1150
+                } else {
+                    900
+                },
+            )
             .default_height(620)
             .build();
 
@@ -403,6 +572,25 @@ impl Ui {
         identity.append(&name);
         identity.append(&detail);
         root.append(&identity);
+        let array = match request.descriptor.plan {
+            VariableViewerPlan::NativeArray { limit }
+            | VariableViewerPlan::IndexedChildren { limit } => Some(ArrayControls::new(limit)),
+            VariableViewerPlan::LinkedList { .. } => None,
+        };
+
+        if let Some(array) = &array {
+            root.append(&array.root);
+        }
+
+        let linked = match request.descriptor.plan {
+            VariableViewerPlan::LinkedList { limit, .. } => Some(LinkedControls::new(limit)),
+            _ => None,
+        };
+
+        if let Some(linked) = &linked {
+            root.append(&linked.root);
+        }
+
         let query = Rc::new(RefCell::new(String::new()));
         let query_for_filter = Rc::clone(&query);
 
@@ -425,6 +613,7 @@ impl Ui {
                     &row.value,
                     &row.type_name,
                     &row.details,
+                    &row.link,
                 ]
                 .iter()
                 .any(|field| {
@@ -448,32 +637,17 @@ impl Ui {
 
         root.append(&search);
         let selection = gtk::NoSelection::new(Some(filtered));
-        let view = gtk::ColumnView::new(Some(selection));
-        view.add_css_class("debug-table");
-        view.add_css_class("variable-viewer-table");
-        view.set_vexpand(true);
-
-        let native_array = matches!(
+        let array_viewer = !matches!(
             request.descriptor.plan,
-            VariableViewerPlan::NativeArray { .. }
+            VariableViewerPlan::LinkedList { .. }
         );
 
-        for (title, width, expand, field) in [
-            ("INDEX", if native_array { 160 } else { 75 }, false, 0_u8),
-            ("NAME / ADDRESS", 180, false, 1),
-            ("VALUE / FIELDS", 360, true, 2),
-            ("TYPE", 240, false, 3),
-        ] {
-            if native_array && field == 1 {
-                continue;
-            }
-
-            view.append_column(&variable_viewer_column(title, width, expand, field));
-        }
+        let view = variable_viewer_table(selection, array_viewer);
 
         let scrolled = gtk::ScrolledWindow::builder()
             .child(&view)
             .vexpand(true)
+            .overlay_scrolling(false)
             .hscrollbar_policy(gtk::PolicyType::Automatic)
             .build();
 
@@ -518,21 +692,55 @@ impl Ui {
 
         window.present();
 
-        Some(Rc::new(VariableViewerSession {
-            window,
+        let session = Rc::new(VariableViewerSession {
+            window: window.downgrade(),
             store,
             status,
             shown: Cell::new(0),
-        }))
+            revision: Cell::new(0),
+            array,
+            linked,
+        });
+
+        if let Some(array) = &session.array {
+            let weak = Rc::downgrade(&session);
+
+            array.connect_cancel(move || {
+                if let Some(session) = weak.upgrade() {
+                    session.cancel_page();
+                }
+            });
+        }
+
+        session.bind_window_lifetime(&window);
+        Some(session)
     }
 }
 
-fn variable_viewer_column(
-    title: &str,
-    width: i32,
-    expand: bool,
-    field: u8,
-) -> gtk::ColumnViewColumn {
+fn variable_viewer_table(selection: gtk::NoSelection, array_viewer: bool) -> gtk::ColumnView {
+    let view = components::column_view(selection);
+    view.add_css_class("debug-table");
+    view.add_css_class("variable-viewer-table");
+    view.set_vexpand(true);
+
+    for (title, width, field) in [
+        ("INDEX", if array_viewer { 160 } else { 75 }, 0_u8),
+        ("NODE / OWNER", 180, 1),
+        ("LINK", 230, 4),
+        ("VALUE / FIELDS", 360, 2),
+        ("TYPE", 240, 3),
+    ] {
+        if array_viewer && matches!(field, 1 | 4) {
+            continue;
+        }
+
+        view.append_column(&variable_viewer_column(title, width, field));
+    }
+
+    view
+}
+
+fn variable_viewer_column(title: &str, width: i32, field: u8) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
 
     factory.connect_setup(|_, object| {
@@ -570,6 +778,7 @@ fn variable_viewer_column(
             1 => &row.name,
             2 if !row.details.is_empty() => &row.details,
             2 => &row.value,
+            4 => &row.link,
             _ => &row.type_name,
         };
 
@@ -581,23 +790,87 @@ fn variable_viewer_column(
             &row.name
         };
 
-        label.set_tooltip_text(Some(&format!(
-            "{identity}\n{}\n{}",
-            row.value, row.type_name
-        )));
+        let mut tooltip = format!("{identity}\n{}\n{}", row.value, row.type_name);
+
+        for detail in [&row.link, &row.details] {
+            if !detail.is_empty() {
+                tooltip.push('\n');
+                tooltip.push_str(detail);
+            }
+        }
+
+        label.set_tooltip_text(Some(&tooltip));
     });
 
-    let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-    column.set_fixed_width(width);
-    column.set_expand(expand);
-    column.set_resizable(true);
-
-    column
+    components::table_column(title, width, factory)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a GTK display, run separately from other GTK tests"]
+    fn type_column_grows_when_its_left_divider_moves_left() {
+        gtk::init().unwrap();
+        Theme::graphite().install();
+        let main = glib::MainContext::default();
+
+        for array_viewer in [true, false] {
+            let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+
+            store.append(&glib::BoxedAnyObject::new(VariableViewerRow {
+                ordinal: String::from("[0]"),
+                name: String::from("item"),
+                value: String::from("\"two words\""),
+                type_name: String::from(
+                    "std::basic_string<char, std::char_traits<char>, std::allocator<char>>",
+                ),
+                details: String::new(),
+                link: String::new(),
+            }));
+
+            let view = variable_viewer_table(gtk::NoSelection::new(Some(store)), array_viewer);
+            let scroll = gtk::ScrolledWindow::builder()
+                .child(&view)
+                .overlay_scrolling(false)
+                .build();
+
+            let window = gtk::Window::builder()
+                .default_width(1200)
+                .default_height(300)
+                .child(&scroll)
+                .build();
+
+            window.present();
+            main.block_on(glib::timeout_future(Duration::from_millis(80)));
+            let header = view.first_child().unwrap();
+            assert_eq!(header.css_name(), "header");
+            let type_header = header.last_child().unwrap();
+            let before = type_header.compute_bounds(&view).unwrap();
+            let columns = view.columns();
+
+            let value = columns
+                .item(columns.n_items() - 2)
+                .and_downcast::<gtk::ColumnViewColumn>()
+                .unwrap();
+
+            assert!(value.is_resizable());
+            let original_width = value.fixed_width();
+
+            // GTK's header drag adjusts the preceding column's fixed width.
+            for distance in [120, 40, 0] {
+                value.set_fixed_width(original_width - distance);
+                main.block_on(glib::timeout_future(Duration::from_millis(50)));
+                let after = type_header.compute_bounds(&view).unwrap();
+                assert!((before.x() - after.x() - distance as f32).abs() <= 1.0);
+                assert!((after.width() - before.width() - distance as f32).abs() <= 1.0);
+                assert!(scroll.hadjustment().upper() <= scroll.hadjustment().page_size());
+            }
+
+            window.close();
+        }
+    }
 
     fn variable(type_name: &str) -> Variable {
         Variable {

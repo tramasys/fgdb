@@ -824,9 +824,21 @@ impl MiClient {
         is_current: impl Fn() -> bool + 'static,
         handler: impl FnOnce(&MiClient, MiRecord) + 'static,
     ) -> io::Result<u64> {
+        self.request_scoped_inspection(command, elements, false, owner, is_current, handler)
+    }
+
+    fn request_scoped_inspection(
+        &self,
+        command: &str,
+        elements: usize,
+        read_only: bool,
+        owner: Option<CommandOwner>,
+        is_current: impl Fn() -> bool + 'static,
+        handler: impl FnOnce(&MiClient, MiRecord) + 'static,
+    ) -> io::Result<u64> {
         validate_mi_command(command)?;
         let operation = command_operation(command);
-        let command = scoped_mi_command(command, elements);
+        let command = scoped_mi_command(command, elements, read_only);
         validate_mi_command(&command)?;
         let token = self.allocate_token();
         let class = CommandClass::Inspection;

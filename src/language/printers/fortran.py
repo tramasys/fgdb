@@ -6,7 +6,7 @@ import re
 
 import gdb
 
-from .common import MAX_ARRAY_BYTES, MAX_CHILDREN
+from .common import MAX_ARRAY_BYTES, MAX_CHILDREN, read_only
 
 try:
     gdb.Value(0).format_string(max_characters=128)
@@ -47,7 +47,7 @@ def is_fortran_array(value_type):
 
 
 class Array(gdb.ValuePrinter):
-    def __init__(self, value):
+    def __init__(self, value, normalization_expression=None):
         self._value = value
         self._bounds, self._element_type = array_bounds(value.type.strip_typedefs())
 
@@ -57,6 +57,7 @@ class Array(gdb.ValuePrinter):
         self._lengths = [max(0, upper - lower + 1) for lower, upper in self._bounds]
         self._total = math.prod(self._lengths)
         self._packed = None
+        self._normalization_expression = normalization_expression
 
         if self._total and value.address is not None and int(value.address) == 0:
             raise ValueError("Array storage is not allocated or associated")
@@ -87,29 +88,36 @@ class Array(gdb.ValuePrinter):
         if configured_limit and configured_limit > 0:
             byte_limit = min(configured_limit, byte_limit)
 
-        if value.type.dynamic:
-            if value.type.sizeof > byte_limit:
-                raise ValueError("Dynamic array exceeds the bounded repacking limit")
-        elif value.address is not None:
-            # A pointer to a static type retains its strides and avoids copying
-            # large contiguous arrays. Dynamic descriptor types must use a value.
-            value = value.address
+        # Evaluating a full slice by name keeps large contiguous dynamic arrays
+        # lazy. Assigning their value to a convenience variable would copy them.
+        if self._normalization_expression is None:
+            if value.type.dynamic:
+                if value.type.sizeof > byte_limit:
+                    raise ValueError("Dynamic array exceeds the bounded repacking limit")
+            elif value.address is not None:
+                # Static pointers retain strides without copying the array.
+                value = value.address
 
         name = "_fgdb_fortran_array"
-        previous = gdb.convenience_variable(name)
 
         with contextlib.ExitStack() as settings:
             settings.enter_context(gdb.with_parameter("language", "fortran"))
-            settings.enter_context(gdb.with_parameter("may-call-functions", False))
+            settings.enter_context(read_only())
             settings.enter_context(gdb.with_parameter("fortran repack-array-slices", True))
             settings.enter_context(gdb.with_parameter("max-value-size", byte_limit))
 
-            try:
-                gdb.set_convenience_variable(name, value)
-                expression = "$" + name + "(" + ",".join(":" for _ in self._bounds) + ")"
-                packed = gdb.parse_and_eval(expression)
-            finally:
-                gdb.set_convenience_variable(name, previous)
+            suffix = "(" + ",".join(":" for _ in self._bounds) + ")"
+
+            if self._normalization_expression is not None:
+                packed = gdb.parse_and_eval("(" + self._normalization_expression + ")" + suffix)
+            else:
+                previous = gdb.convenience_variable(name)
+
+                try:
+                    gdb.set_convenience_variable(name, value)
+                    packed = gdb.parse_and_eval("$" + name + suffix)
+                finally:
+                    gdb.set_convenience_variable(name, previous)
 
         bounds, _ = array_bounds(packed.type.strip_typedefs())
 
@@ -214,7 +222,7 @@ def resolve_path(expression):
 
         return root, steps
 
-    with gdb.with_parameter("may-call-functions", False):
+    with read_only():
         try:
             root, steps = path()
 
@@ -227,7 +235,14 @@ def resolve_path(expression):
         value = gdb.parse_and_eval(root)
 
         for step in steps:
-            value = Array(value)._element(step) if isinstance(step, list) else value[step]
+            if isinstance(step, list):
+                if is_fortran_array(value.type.strip_typedefs()):
+                    value = Array(value)._element(step)
+                else:
+                    for index in step:
+                        value = value[index]
+            else:
+                value = value[step]
 
         return value
 
@@ -240,13 +255,18 @@ def preview(value, depth=0):
             return "{...}"
 
         if value_type.code == gdb.TYPE_CODE_ARRAY:
-            array = Array(value)
-            entries = [
-                preview(array.child(index)[1], depth + 1)
-                for index in range(min(array.num_children(), 4))
-            ]
+            if is_fortran_array(value_type):
+                array = Array(value)
+                entries = [
+                    preview(array.child(index)[1], depth + 1)
+                    for index in range(min(array.num_children(), 4))
+                ]
 
-            more = array._total > 4
+                more = array._total > 4
+            else:
+                lower, upper = value_type.range()
+                entries = [preview(value[index], depth + 1) for index in range(lower, min(upper + 1, lower + 4))]
+                more = upper - lower + 1 > 4
         else:
             fields = value_type.fields()
 

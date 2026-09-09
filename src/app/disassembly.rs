@@ -422,10 +422,7 @@ impl DisassemblyController {
             return;
         }
 
-        let command = format!(
-            "-data-evaluate-expression {}",
-            crate::debugger::quote(&format!("(void*)({expression})"))
-        );
+        let command = address_evaluation_command(expression);
 
         let controller = Rc::clone(self);
         let requests_for_response = requests.clone();
@@ -670,10 +667,7 @@ impl DisassemblyController {
             return;
         }
 
-        let command = format!(
-            "-data-evaluate-expression {}",
-            crate::debugger::quote(&format!("(void*)({})", request.expression))
-        );
+        let command = address_evaluation_command(&request.expression);
 
         let weak_ui_for_response = self.ui.clone();
         let generation = request.generation;
@@ -783,6 +777,15 @@ impl DisassemblyController {
             self.update_history_buttons(&ui);
         }
     }
+}
+
+fn address_evaluation_command(expression: &str) -> String {
+    // C++ accepts the generated C-style cast and C++ navigation expressions.
+    // Scope it to this MI command, independent of the stopped frame's language.
+    format!(
+        "-data-evaluate-expression --language c++ {}",
+        crate::debugger::quote(&format!("(void*)({expression})"))
+    )
 }
 
 fn validate_disassembly_expression(expression: &str) -> Result<(), &'static str> {
@@ -908,6 +911,93 @@ fn resolved_call_target_display(expression: &str, value: &str) -> Option<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn address_queries_scope_generated_casts_and_quote_expressions() {
+        assert_eq!(
+            address_evaluation_command("$pc"),
+            "-data-evaluate-expression --language c++ \"(void*)($pc)\""
+        );
+
+        assert_eq!(
+            address_evaluation_command("'module::function'"),
+            "-data-evaluate-expression --language c++ \"(void*)('module::function')\""
+        );
+
+        let context = crate::debugger::StopContext::new(1, 2, None, String::from("3"), 4).unwrap();
+
+        assert_eq!(
+            context.scope_frame(&address_evaluation_command("$pc")),
+            "-data-evaluate-expression --thread 3 --frame 4 --language c++ \"(void*)($pc)\""
+        );
+    }
+
+    #[test]
+    #[ignore = "requires Python-enabled GDB and the Rust and C++ variable viewer fixtures"]
+    fn live_show_pc_resolves_and_disassembles_without_changing_language() {
+        use std::{process::Command, time::Duration};
+
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let evaluations = ["$pc", "reinterpret_cast<unsigned long>($pc)"]
+            .map(|expression| {
+                crate::debugger::quote(&format!(
+                    "interpreter-exec mi {}",
+                    crate::debugger::quote(&address_evaluation_command(expression))
+                ))
+            })
+            .join(", ");
+
+        let invalid = format!(
+            "interpreter-exec mi {}",
+            crate::debugger::quote(&address_evaluation_command(
+                "fgdb_missing_disassembly_symbol"
+            ))
+        );
+
+        let script = format!(
+            r#"import re
+gdb.execute('start', to_string=True)
+pc = int(gdb.parse_and_eval('$pc'))
+for language in ['auto', 'rust', 'fortran', 'c++', 'c']:
+    gdb.execute('set language ' + language, to_string=True)
+    before = gdb.execute('show language', to_string=True)
+    for command in [{evaluations}]:
+        reply = gdb.execute(command, to_string=True)
+        assert '^done,value=' in reply, reply
+        match = re.search(r'value="(0x[0-9a-fA-F]+)', reply)
+        assert match and int(match[1], 16) == pc, reply
+    disassembly = gdb.execute('interpreter-exec mi "-data-disassemble -s ' + hex(pc) + ' -e ' + hex(pc + 64) + ' --opcodes bytes -- 0"', to_string=True)
+    assert '^done' in disassembly, disassembly
+    addresses = re.findall(r'address="(0x[0-9a-fA-F]+)', disassembly)
+    assert addresses and int(addresses[0], 16) == pc, disassembly
+    assert gdb.execute('show language', to_string=True) == before
+    reply = gdb.execute({}, to_string=True)
+    assert '^error' in reply, reply
+    assert gdb.execute('show language', to_string=True) == before
+    assert int(gdb.parse_and_eval('$pc')) == pc
+    assert not gdb.selected_thread().is_running()
+gdb.write('FGDB_SHOW_PC_OK\n')
+"#,
+            crate::debugger::quote(&invalid),
+        );
+
+        for fixture in ["rust-variable-viewer-target", "cpp-variable-viewer-target"] {
+            let mut command = Command::new("gdb");
+
+            command
+                .args(["--nx", "--quiet", "--batch"])
+                .arg(root.join("target/debug-fixtures").join(fixture))
+                .args(["-ex", "set debuginfod enabled off", "-ex"])
+                .arg(format!("python exec({})", crate::debugger::quote(&script)));
+
+            let output =
+                crate::language::toolchain::probe::output(&mut command, Duration::from_secs(15))
+                    .expect("live Show PC check failed or timed out");
+
+            let output = String::from_utf8(output).unwrap();
+            assert!(output.contains("FGDB_SHOW_PC_OK"), "{fixture}: {output}");
+        }
+    }
 
     fn instruction(address: &str, function: &str) -> crate::debugger::Instruction {
         crate::debugger::Instruction {

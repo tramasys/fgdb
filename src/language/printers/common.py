@@ -1,6 +1,7 @@
 """Bundled, read-only GDB printers. No inferior calls or compiler-layout offsets."""
 
 import codecs
+import contextlib
 
 import gdb
 
@@ -8,6 +9,15 @@ MAX_CHILDREN = 4096
 MAX_STRING_BYTES = 256
 MAX_ARRAY_BYTES = 256 * 1024
 MAX_ARRAY_OUTPUT_BYTES = 256 * 1024
+
+
+@contextlib.contextmanager
+def read_only():
+    """Prevent target calls and writes, restoring the caller's GDB settings."""
+    with contextlib.ExitStack() as settings:
+        for parameter in ("may-call-functions", "may-write-memory", "may-write-registers"):
+            settings.enter_context(gdb.with_parameter(parameter, False))
+        yield
 
 
 class Sequence(gdb.ValuePrinter):
@@ -53,6 +63,15 @@ class Sequence(gdb.ValuePrinter):
 
     def num_children(self):
         return min(self._length, MAX_CHILDREN)
+
+    def fgdb_array_length(self):
+        return self._length
+
+    def fgdb_array_element(self, index):
+        if not 0 <= index < self._length:
+            raise IndexError(index)
+
+        return self._pointer[index]
 
     def child(self, index):
         if not 0 <= index < self.num_children():

@@ -329,6 +329,9 @@ impl Settings {
 
         ui.variable_presentation
             .set_format(preferences.integer_display);
+
+        ui.variable_locations
+            .set_enabled(preferences.variable_locations);
         ui.application_log
             .apply_preferences(&previous, preferences, initial);
         ui.apply_instruction_preferences(&previous, preferences, initial);

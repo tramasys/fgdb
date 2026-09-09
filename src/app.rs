@@ -23,8 +23,13 @@ mod syscalls;
 mod threads;
 mod type_metadata;
 mod until;
+mod value_locations;
+mod value_path;
 mod variable_viewers;
 mod watches;
+
+#[cfg(test)]
+mod test_support;
 
 use std::{
     cell::{Cell, RefCell},

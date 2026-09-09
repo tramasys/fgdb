@@ -300,6 +300,69 @@ fn filters_variables_across_scope_type_and_pretty_value() {
 }
 
 #[test]
+fn pointer_updates_retire_children_when_the_object_is_no_longer_readable() {
+    use gtk::prelude::*;
+
+    let pointer = VariableNode::new(Variable {
+        local_index: None,
+        name: String::from("tailward"),
+        value: String::from("0x1234"),
+        type_name: Some(String::from("struct CustomNode *")),
+        argument: false,
+        varobj: Some(String::from("var1.tailward")),
+        num_children: 2,
+        has_more: false,
+        display_hint: None,
+        dynamic: false,
+    });
+
+    pointer
+        .children
+        .append(&gtk::glib::BoxedAnyObject::new(VariableNode::new(
+            Variable {
+                name: String::from("value"),
+                value: String::from("2004"),
+                type_name: Some(String::from("int")),
+                varobj: Some(String::from("var1.tailward.value")),
+                num_children: 0,
+                ..pointer.variable.clone()
+            },
+        )));
+    pointer.children_loaded.set(true);
+    pointer.expanded.set(true);
+
+    let mut index = super::domain::VariableNodeIndex::default();
+    index.insert(pointer.clone());
+    index.index_store(&pointer.children);
+    assert!(index.contains("var1.tailward.value"));
+
+    let unchanged = pointer.updated(pointer.variable.clone(), true);
+    assert_eq!(unchanged.children.n_items(), 1);
+    assert!(unchanged.children_loaded.get());
+    assert!(unchanged.expanded.get());
+
+    for value in ["0x0", "", "<not available>", "0x5678"] {
+        let updated = pointer.updated(
+            Variable {
+                value: value.into(),
+                ..pointer.variable.clone()
+            },
+            true,
+        );
+
+        assert_eq!(updated.children.n_items(), 0, "{value}");
+        assert!(!updated.children_loaded.get());
+        assert!(!updated.children_loading.get());
+        assert_eq!(updated.expanded.get(), value == "0x5678");
+        index.replace(&pointer, &updated);
+        let indexed = index.get("var1.tailward").unwrap();
+        assert_eq!(indexed.variable.value, value);
+        assert_eq!(indexed.children.n_items(), 0);
+        assert!(!index.contains("var1.tailward.value"));
+    }
+}
+
+#[test]
 fn decodes_rust_c_and_cpp_integer_types() {
     let decimal = |type_name: &str, value: &str, pointer_bits| {
         let variable = Variable {

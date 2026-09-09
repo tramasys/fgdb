@@ -1403,9 +1403,19 @@ fn quotes_mi_arguments() {
 #[test]
 fn wraps_mi_commands_in_scoped_print_limits() {
     assert_eq!(
-        scoped_mi_command("-stack-list-variables --simple-values", 128),
+        scoped_mi_command("-stack-list-variables --simple-values", 128, false),
         r#"-interpreter-exec console "with print elements 128 -- interpreter-exec mi \"-stack-list-variables --simple-values\"""#
     );
+
+    let inspection = scoped_mi_command("-var-create root * head", 128, true);
+
+    for setting in [
+        "may-call-functions",
+        "may-write-memory",
+        "may-write-registers",
+    ] {
+        assert!(inspection.contains(&format!("with {setting} off -- ")));
+    }
 
     let nested = parse_stream_output(r#"~"^done,value=\"bounded\"\n""#).unwrap();
     let record = parse_record(nested.trim()).unwrap();

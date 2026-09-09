@@ -27,15 +27,10 @@ pub(super) fn compact_viewer_text(text: &str, max_chars: usize) -> String {
     }
 }
 
-pub(super) fn viewer_value_is_null(value: &str) -> bool {
-    if pointer_address(value) == Some(0) {
-        return true;
-    }
-
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "0" | "null" | "nullptr" | "none" | "nil" | "<null>"
-    )
+pub(super) fn linked_value_is_end(variable: &Variable) -> bool {
+    variable.is_null_pointer()
+        || (link_wrapper(variable) == Some(LinkWrapper::Optional)
+            && variable.value.trim().rsplit("::").next() == Some("None"))
 }
 
 pub(super) fn indexed_child_ordinal(name: &str) -> Option<i64> {
@@ -46,6 +41,14 @@ pub(super) fn indexed_child_ordinal(name: &str) -> Option<i64> {
         .unwrap_or(name);
 
     index.parse().ok()
+}
+
+pub(super) fn linked_children_are_end(current: &Variable, children: &[Variable]) -> bool {
+    // Raw Rust MI represents only the active variant as a named child.
+    // Absence of a readable Some is not, by itself, proof of an empty Option.
+    link_wrapper(current) == Some(LinkWrapper::Optional)
+        && children.iter().any(|child| child.name == "None")
+        && !children.iter().any(|child| child.name == "Some")
 }
 
 pub(super) fn transparent_index_wrapper(children: &[Variable]) -> Option<Variable> {
@@ -74,37 +77,53 @@ pub(super) fn transparent_link_wrapper(
     current: &Variable,
     children: &[Variable],
 ) -> Option<Variable> {
+    link_wrapper_members(current)?.iter().find_map(|preferred| {
+        children
+            .iter()
+            .find(|child| normalize_member_name(&child.name) == *preferred && child.can_expand())
+            .cloned()
+    })
+}
+
+pub(super) fn link_wrapper_members(current: &Variable) -> Option<&'static [&'static str]> {
+    Some(match link_wrapper(current)? {
+        LinkWrapper::Optional => &["some", "__0", "0"],
+        LinkWrapper::Owner => &["ptr", "pointer", "__0", "0", "value"],
+        LinkWrapper::Pointer => &["pointer", "ptr", "__0", "0"],
+        LinkWrapper::Cell => &["value"],
+    })
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LinkWrapper {
+    Optional,
+    Owner,
+    Pointer,
+    Cell,
+}
+
+fn link_wrapper(current: &Variable) -> Option<LinkWrapper> {
     let type_name = current
         .type_name
         .as_deref()
         .unwrap_or_default()
         .to_ascii_lowercase();
 
-    let preferred: &[&str] = if type_name.contains("option<") {
-        &["some", "__0", "0"]
-    } else if type_name.contains("rc<")
-        || type_name.contains("arc<")
-        || type_name.contains("weak<")
-        || type_name.contains("box<")
-    {
-        &["ptr", "pointer", "__0", "0"]
-    } else if type_name.contains("nonnull<") {
-        &["pointer", "ptr", "__0", "0"]
-    } else if ["rcinner<", "arcinner<", "refcell<", "unsafecell<"]
-        .iter()
-        .any(|wrapper| type_name.contains(wrapper))
-    {
-        &["value"]
-    } else {
-        return None;
-    };
+    let outer = type_name.split('<').next()?.rsplit("::").next()?;
+    let outer = outer
+        .trim()
+        .trim_start_matches("&mut ")
+        .trim_start_matches('&')
+        .trim_start_matches("*mut ")
+        .trim_start_matches("*const ");
 
-    preferred.iter().find_map(|preferred| {
-        children
-            .iter()
-            .find(|child| normalize_member_name(&child.name) == *preferred && child.can_expand())
-            .cloned()
-    })
+    match outer {
+        "option" => Some(LinkWrapper::Optional),
+        "rc" | "arc" | "weak" | "box" => Some(LinkWrapper::Owner),
+        "nonnull" => Some(LinkWrapper::Pointer),
+        "rcinner" | "arcinner" | "refcell" | "unsafecell" => Some(LinkWrapper::Cell),
+        _ => None,
+    }
 }
 
 pub(super) fn is_cpp_access_group(name: &str) -> bool {

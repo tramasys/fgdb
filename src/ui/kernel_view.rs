@@ -741,23 +741,23 @@ fn build_tls() -> (
     let module_selection = gtk::SingleSelection::new(Some(module_store.clone()));
     module_selection.set_autoselect(false);
     module_selection.set_can_unselect(true);
-    let module_view = gtk::ColumnView::new(Some(module_selection));
+    let module_view = components::column_view(module_selection);
     module_view.add_css_class("debug-table");
     module_view.add_css_class("kernel-tls-table");
     module_view.set_vexpand(true);
     module_view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("ROLE", 125, false, TlsModuleColumn::Role),
-        ("MODULE", 190, false, TlsModuleColumn::Module),
-        ("TEMPLATE VADDR", 175, false, TlsModuleColumn::Template),
-        ("INITIALIZED", 110, false, TlsModuleColumn::Initialized),
-        ("TOTAL", 110, false, TlsModuleColumn::Total),
-        ("ALIGN", 85, false, TlsModuleColumn::Alignment),
-        ("TLS SYMBOLS", 110, false, TlsModuleColumn::Symbols),
-        ("PATH", 420, true, TlsModuleColumn::Path),
+    for (title, width, column) in [
+        ("ROLE", 125, TlsModuleColumn::Role),
+        ("MODULE", 190, TlsModuleColumn::Module),
+        ("TEMPLATE VADDR", 175, TlsModuleColumn::Template),
+        ("INITIALIZED", 110, TlsModuleColumn::Initialized),
+        ("TOTAL", 110, TlsModuleColumn::Total),
+        ("ALIGN", 85, TlsModuleColumn::Alignment),
+        ("TLS SYMBOLS", 110, TlsModuleColumn::Symbols),
+        ("PATH", 420, TlsModuleColumn::Path),
     ] {
-        module_view.append_column(&tls_module_column(title, width, expand, column));
+        module_view.append_column(&tls_module_column(title, width, column));
     }
 
     let modules_empty = empty_label("No loaded ELF module declares a PT_TLS template");
@@ -799,21 +799,21 @@ fn build_tls() -> (
     let symbol_selection = gtk::SingleSelection::new(Some(filtered));
     symbol_selection.set_autoselect(false);
     symbol_selection.set_can_unselect(true);
-    let symbol_view = gtk::ColumnView::new(Some(symbol_selection));
+    let symbol_view = components::column_view(symbol_selection);
     symbol_view.add_css_class("debug-table");
     symbol_view.add_css_class("kernel-tls-table");
     symbol_view.set_vexpand(true);
     symbol_view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("MODULE", 190, false, TlsSymbolColumn::Module),
-        ("SYMBOL", 260, false, TlsSymbolColumn::Name),
-        ("TEMPLATE OFFSET", 175, false, TlsSymbolColumn::Offset),
-        ("SIZE", 100, false, TlsSymbolColumn::Size),
-        ("BINDING", 90, false, TlsSymbolColumn::Binding),
-        ("PATH", 420, true, TlsSymbolColumn::Path),
+    for (title, width, column) in [
+        ("MODULE", 190, TlsSymbolColumn::Module),
+        ("SYMBOL", 260, TlsSymbolColumn::Name),
+        ("TEMPLATE OFFSET", 175, TlsSymbolColumn::Offset),
+        ("SIZE", 100, TlsSymbolColumn::Size),
+        ("BINDING", 90, TlsSymbolColumn::Binding),
+        ("PATH", 420, TlsSymbolColumn::Path),
     ] {
-        symbol_view.append_column(&tls_symbol_column(title, width, expand, column));
+        symbol_view.append_column(&tls_symbol_column(title, width, column));
     }
 
     let symbols_empty = empty_label("No named TLS symbols are available");
@@ -945,33 +945,28 @@ fn build_changes() -> (
     let selection = gtk::SingleSelection::new(Some(filtered));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.add_css_class("kernel-change-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("STATUS", 115, false, MappingChangeColumn::Status),
-        ("ADDRESS", 285, false, MappingChangeColumn::Address),
-        ("PERM", 65, false, MappingChangeColumn::Permissions),
-        ("Δ VSS", 95, false, MappingChangeColumn::Size),
-        ("Δ RSS", 95, false, MappingChangeColumn::Rss),
-        ("Δ PSS", 95, false, MappingChangeColumn::Pss),
-        ("Δ USS", 95, false, MappingChangeColumn::Private),
-        ("Δ DIRTY", 95, false, MappingChangeColumn::Dirty),
-        ("Δ REFERENCED", 120, false, MappingChangeColumn::Referenced),
-        ("Δ HUGE", 95, false, MappingChangeColumn::Huge),
-        ("Δ SWAP", 95, false, MappingChangeColumn::Swap),
-        ("BACKING", 420, true, MappingChangeColumn::Path),
-        (
-            "DEVICE / INODE",
-            170,
-            false,
-            MappingChangeColumn::FileIdentity,
-        ),
+    for (title, width, column) in [
+        ("STATUS", 115, MappingChangeColumn::Status),
+        ("ADDRESS", 285, MappingChangeColumn::Address),
+        ("PERM", 65, MappingChangeColumn::Permissions),
+        ("Δ VSS", 95, MappingChangeColumn::Size),
+        ("Δ RSS", 95, MappingChangeColumn::Rss),
+        ("Δ PSS", 95, MappingChangeColumn::Pss),
+        ("Δ USS", 95, MappingChangeColumn::Private),
+        ("Δ DIRTY", 95, MappingChangeColumn::Dirty),
+        ("Δ REFERENCED", 120, MappingChangeColumn::Referenced),
+        ("Δ HUGE", 95, MappingChangeColumn::Huge),
+        ("Δ SWAP", 95, MappingChangeColumn::Swap),
+        ("BACKING", 420, MappingChangeColumn::Path),
+        ("DEVICE / INODE", 170, MappingChangeColumn::FileIdentity),
     ] {
-        view.append_column(&mapping_change_column(title, width, expand, column));
+        view.append_column(&mapping_change_column(title, width, column));
     }
 
     let empty = empty_label("Capture another snapshot to compare mappings");
@@ -1039,32 +1034,27 @@ fn build_threads() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("TID", 80, false, ThreadColumn::Tid),
-        ("NAME", 220, false, ThreadColumn::Name),
-        ("STATE", 150, false, ThreadColumn::State),
-        ("CPU", 50, false, ThreadColumn::Cpu),
-        ("CPU TIME", 110, false, ThreadColumn::Runtime),
-        ("RUN-QUEUE WAIT", 125, false, ThreadColumn::RunqueueWait),
-        ("SLICES", 75, false, ThreadColumn::Timeslices),
-        (
-            "ACTIVE SYSCALL / ARGUMENTS",
-            360,
-            true,
-            ThreadColumn::Syscall,
-        ),
-        ("WAIT CHANNEL", 160, false, ThreadColumn::Wait),
-        ("POLICY", 115, false, ThreadColumn::Policy),
-        ("PRIORITY", 105, false, ThreadColumn::Priority),
-        ("AFFINITY", 100, false, ThreadColumn::Affinity),
-        ("CONTEXT SWITCHES", 220, false, ThreadColumn::Switches),
+    for (title, width, column) in [
+        ("TID", 80, ThreadColumn::Tid),
+        ("NAME", 220, ThreadColumn::Name),
+        ("STATE", 150, ThreadColumn::State),
+        ("CPU", 50, ThreadColumn::Cpu),
+        ("CPU TIME", 110, ThreadColumn::Runtime),
+        ("RUN-QUEUE WAIT", 125, ThreadColumn::RunqueueWait),
+        ("SLICES", 75, ThreadColumn::Timeslices),
+        ("ACTIVE SYSCALL / ARGUMENTS", 360, ThreadColumn::Syscall),
+        ("WAIT CHANNEL", 160, ThreadColumn::Wait),
+        ("POLICY", 115, ThreadColumn::Policy),
+        ("PRIORITY", 105, ThreadColumn::Priority),
+        ("AFFINITY", 100, ThreadColumn::Affinity),
+        ("CONTEXT SWITCHES", 220, ThreadColumn::Switches),
     ] {
-        view.append_column(&thread_column(title, width, expand, column));
+        view.append_column(&thread_column(title, width, column));
     }
 
     let empty = empty_label("No kernel thread information available");
@@ -1117,22 +1107,22 @@ fn build_signals() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     let selection = gtk::SingleSelection::new(Some(filtered));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.add_css_class("kernel-signals-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("#", 50, false, SignalColumn::Number),
-        ("SIGNAL", 170, true, SignalColumn::Name),
-        ("PROCESS PENDING", 145, false, SignalColumn::ProcessPending),
-        ("THREAD PENDING", 145, false, SignalColumn::ThreadPending),
-        ("BLOCKED THREADS", 145, false, SignalColumn::Blocked),
-        ("IGNORED", 90, false, SignalColumn::Ignored),
-        ("CAUGHT", 90, false, SignalColumn::Caught),
+    for (title, width, column) in [
+        ("#", 50, SignalColumn::Number),
+        ("SIGNAL", 170, SignalColumn::Name),
+        ("PROCESS PENDING", 145, SignalColumn::ProcessPending),
+        ("THREAD PENDING", 145, SignalColumn::ThreadPending),
+        ("BLOCKED THREADS", 145, SignalColumn::Blocked),
+        ("IGNORED", 90, SignalColumn::Ignored),
+        ("CAUGHT", 90, SignalColumn::Caught),
     ] {
-        view.append_column(&signal_column(title, width, expand, column));
+        view.append_column(&signal_column(title, width, column));
     }
 
     let active_for_toggle = Rc::clone(&filter_active);
@@ -1155,21 +1145,21 @@ fn build_processes() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.add_css_class("kernel-process-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("PID", 90, false, ProcessColumn::Pid),
-        ("PPID", 90, false, ProcessColumn::Parent),
-        ("RELATION", 110, false, ProcessColumn::Relation),
-        ("PROCESS", 260, true, ProcessColumn::Name),
-        ("STATE", 190, false, ProcessColumn::State),
-        ("THREADS", 85, false, ProcessColumn::Threads),
+    for (title, width, column) in [
+        ("PID", 90, ProcessColumn::Pid),
+        ("PPID", 90, ProcessColumn::Parent),
+        ("RELATION", 110, ProcessColumn::Relation),
+        ("PROCESS", 260, ProcessColumn::Name),
+        ("STATE", 190, ProcessColumn::State),
+        ("THREADS", 85, ProcessColumn::Threads),
     ] {
-        view.append_column(&process_column(title, width, expand, column));
+        view.append_column(&process_column(title, width, column));
     }
 
     let empty = empty_label("No process hierarchy available");
@@ -1273,23 +1263,23 @@ fn build_memory() -> (
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.add_css_class("kernel-memory-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("TYPE", 190, false, MemoryColumn::Category),
-        ("VMAs", 60, false, MemoryColumn::Mappings),
-        ("PRIVATE / PAGES", 185, false, MemoryColumn::Unique),
-        ("% USS", 75, false, MemoryColumn::UniquePercent),
-        ("CLEAN", 95, false, MemoryColumn::PrivateClean),
-        ("DIRTY", 95, false, MemoryColumn::PrivateDirty),
-        ("RSS / PAGES", 175, false, MemoryColumn::Rss),
-        ("VSS / PAGES", 175, true, MemoryColumn::Virtual),
+    for (title, width, column) in [
+        ("TYPE", 190, MemoryColumn::Category),
+        ("VMAs", 60, MemoryColumn::Mappings),
+        ("PRIVATE / PAGES", 185, MemoryColumn::Unique),
+        ("% USS", 75, MemoryColumn::UniquePercent),
+        ("CLEAN", 95, MemoryColumn::PrivateClean),
+        ("DIRTY", 95, MemoryColumn::PrivateDirty),
+        ("RSS / PAGES", 175, MemoryColumn::Rss),
+        ("VSS / PAGES", 175, MemoryColumn::Virtual),
     ] {
-        view.append_column(&memory_column(title, width, expand, column));
+        view.append_column(&memory_column(title, width, column));
     }
 
     let empty = empty_label("No process-private mapping types are available");
@@ -1343,28 +1333,28 @@ fn build_memory() -> (
     let private_mapping_selection = gtk::SingleSelection::new(Some(filtered));
     private_mapping_selection.set_autoselect(false);
     private_mapping_selection.set_can_unselect(true);
-    let private_mapping_view = gtk::ColumnView::new(Some(private_mapping_selection));
+    let private_mapping_view = components::column_view(private_mapping_selection);
     private_mapping_view.add_css_class("debug-table");
     private_mapping_view.add_css_class("kernel-memory-table");
     private_mapping_view.set_vexpand(true);
     private_mapping_view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("ADDRESS", 285, false, PrivateMappingColumn::Address),
-        ("PERM", 65, false, PrivateMappingColumn::Permissions),
-        ("PRIVATE / PAGES", 185, false, PrivateMappingColumn::Unique),
-        ("% USS", 75, false, PrivateMappingColumn::UniquePercent),
-        ("CLEAN", 95, false, PrivateMappingColumn::PrivateClean),
-        ("DIRTY", 95, false, PrivateMappingColumn::PrivateDirty),
-        ("RSS / PAGES", 175, false, PrivateMappingColumn::Rss),
-        ("VSS / PAGES", 175, false, PrivateMappingColumn::Virtual),
-        ("ANON", 95, false, PrivateMappingColumn::Anonymous),
-        ("REFERENCED", 105, false, PrivateMappingColumn::Referenced),
-        ("LAZY FREE", 95, false, PrivateMappingColumn::LazyFree),
-        ("HUGE / PMD", 105, false, PrivateMappingColumn::Huge),
-        ("BACKING", 420, true, PrivateMappingColumn::Path),
+    for (title, width, column) in [
+        ("ADDRESS", 285, PrivateMappingColumn::Address),
+        ("PERM", 65, PrivateMappingColumn::Permissions),
+        ("PRIVATE / PAGES", 185, PrivateMappingColumn::Unique),
+        ("% USS", 75, PrivateMappingColumn::UniquePercent),
+        ("CLEAN", 95, PrivateMappingColumn::PrivateClean),
+        ("DIRTY", 95, PrivateMappingColumn::PrivateDirty),
+        ("RSS / PAGES", 175, PrivateMappingColumn::Rss),
+        ("VSS / PAGES", 175, PrivateMappingColumn::Virtual),
+        ("ANON", 95, PrivateMappingColumn::Anonymous),
+        ("REFERENCED", 105, PrivateMappingColumn::Referenced),
+        ("LAZY FREE", 95, PrivateMappingColumn::LazyFree),
+        ("HUGE / PMD", 105, PrivateMappingColumn::Huge),
+        ("BACKING", 420, PrivateMappingColumn::Path),
     ] {
-        private_mapping_view.append_column(&private_mapping_column(title, width, expand, column));
+        private_mapping_view.append_column(&private_mapping_column(title, width, column));
     }
 
     let private_mapping_empty = empty_label("No process-private mappings are available");
@@ -1479,39 +1469,34 @@ fn build_mappings() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     let selection = gtk::SingleSelection::new(Some(filtered));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.add_css_class("kernel-mappings-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("ADDRESS RANGE", 420, false, MappingColumn::Address),
-        ("PERM", 65, false, MappingColumn::Permissions),
-        ("SIZE / PAGES", 180, false, MappingColumn::Size),
-        ("RSS / PAGES", 180, false, MappingColumn::Rss),
-        ("PSS", 90, false, MappingColumn::Pss),
-        (
-            "PRIVATE RSS (USS) / PAGES",
-            210,
-            false,
-            MappingColumn::Private,
-        ),
-        ("PRIVATE DIRTY", 115, false, MappingColumn::PrivateDirty),
-        ("SHARED / PAGES", 180, false, MappingColumn::Shared),
-        ("SWAP", 90, false, MappingColumn::Swap),
-        ("HUGE / PMD", 105, false, MappingColumn::Huge),
-        ("ANON", 95, false, MappingColumn::Anonymous),
-        ("REFERENCED", 105, false, MappingColumn::Referenced),
-        ("LAZY FREE", 95, false, MappingColumn::LazyFree),
-        ("LOCKED", 90, false, MappingColumn::Locked),
-        ("PATH", 320, true, MappingColumn::Path),
-        ("DEVICE / INODE", 170, false, MappingColumn::FileIdentity),
-        ("NUMA", 250, false, MappingColumn::Numa),
-        ("PAGE SAMPLE", 360, false, MappingColumn::Page),
-        ("VM FLAGS", 260, false, MappingColumn::Flags),
+    for (title, width, column) in [
+        ("ADDRESS RANGE", 420, MappingColumn::Address),
+        ("PERM", 65, MappingColumn::Permissions),
+        ("SIZE / PAGES", 180, MappingColumn::Size),
+        ("RSS / PAGES", 180, MappingColumn::Rss),
+        ("PSS", 90, MappingColumn::Pss),
+        ("PRIVATE RSS (USS) / PAGES", 210, MappingColumn::Private),
+        ("PRIVATE DIRTY", 115, MappingColumn::PrivateDirty),
+        ("SHARED / PAGES", 180, MappingColumn::Shared),
+        ("SWAP", 90, MappingColumn::Swap),
+        ("HUGE / PMD", 105, MappingColumn::Huge),
+        ("ANON", 95, MappingColumn::Anonymous),
+        ("REFERENCED", 105, MappingColumn::Referenced),
+        ("LAZY FREE", 95, MappingColumn::LazyFree),
+        ("LOCKED", 90, MappingColumn::Locked),
+        ("PATH", 320, MappingColumn::Path),
+        ("DEVICE / INODE", 170, MappingColumn::FileIdentity),
+        ("NUMA", 250, MappingColumn::Numa),
+        ("PAGE SAMPLE", 360, MappingColumn::Page),
+        ("VM FLAGS", 260, MappingColumn::Flags),
     ] {
-        view.append_column(&mapping_column(title, width, expand, column));
+        view.append_column(&mapping_column(title, width, column));
     }
 
     let empty = empty_label("No detailed mappings available");
@@ -1547,21 +1532,21 @@ fn build_descriptors() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("FD", 55, false, DescriptorColumn::Number),
-        ("KIND", 90, false, DescriptorColumn::Kind),
-        ("ACCESS", 100, false, DescriptorColumn::Access),
-        ("FLAGS", 220, false, DescriptorColumn::Flags),
-        ("POSITION", 110, false, DescriptorColumn::Position),
-        ("TARGET", 360, true, DescriptorColumn::Target),
-        ("FDINFO", 280, false, DescriptorColumn::Details),
+    for (title, width, column) in [
+        ("FD", 55, DescriptorColumn::Number),
+        ("KIND", 90, DescriptorColumn::Kind),
+        ("ACCESS", 100, DescriptorColumn::Access),
+        ("FLAGS", 220, DescriptorColumn::Flags),
+        ("POSITION", 110, DescriptorColumn::Position),
+        ("TARGET", 360, DescriptorColumn::Target),
+        ("FDINFO", 280, DescriptorColumn::Details),
     ] {
-        view.append_column(&descriptor_column(title, width, expand, column));
+        view.append_column(&descriptor_column(title, width, column));
     }
 
     let empty = empty_label("No open file descriptors available");
@@ -1591,18 +1576,18 @@ fn build_limits() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
-    let view = gtk::ColumnView::new(Some(selection));
+    let view = components::column_view(selection);
     view.add_css_class("debug-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
 
-    for (title, width, expand, column) in [
-        ("RESOURCE", 260, true, LimitColumn::Resource),
-        ("SOFT", 160, false, LimitColumn::Soft),
-        ("HARD", 160, false, LimitColumn::Hard),
-        ("UNITS", 120, false, LimitColumn::Units),
+    for (title, width, column) in [
+        ("RESOURCE", 260, LimitColumn::Resource),
+        ("SOFT", 160, LimitColumn::Soft),
+        ("HARD", 160, LimitColumn::Hard),
+        ("UNITS", 120, LimitColumn::Units),
     ] {
-        view.append_column(&limit_column(title, width, expand, column));
+        view.append_column(&limit_column(title, width, column));
     }
 
     let empty = empty_label("No resource limits available");
@@ -1620,13 +1605,8 @@ fn build_limits() -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     (page, store, count, empty)
 }
 
-fn memory_column(
-    title: &str,
-    width: i32,
-    expand: bool,
-    column: MemoryColumn,
-) -> gtk::ColumnViewColumn {
-    table_column(title, width, expand, move |object, label| {
+fn memory_column(title: &str, width: i32, column: MemoryColumn) -> gtk::ColumnViewColumn {
+    table_column(title, width, move |object, label| {
         let row = object.borrow::<KernelMemoryRow>();
         let category = &row.category;
 
@@ -1679,10 +1659,9 @@ fn memory_column(
 fn private_mapping_column(
     title: &str,
     width: i32,
-    expand: bool,
     column: PrivateMappingColumn,
 ) -> gtk::ColumnViewColumn {
-    table_column(title, width, expand, move |object, label| {
+    table_column(title, width, move |object, label| {
         let row = object.borrow::<KernelPrivateMappingRow>();
         let mapping = &row.mapping;
         reset_semantic_css(label);
@@ -1823,13 +1802,8 @@ fn format_grouped_count(value: u64) -> String {
     grouped
 }
 
-fn mapping_column(
-    title: &str,
-    width: i32,
-    expand: bool,
-    column: MappingColumn,
-) -> gtk::ColumnViewColumn {
-    table_column(title, width, expand, move |object, label| {
+fn mapping_column(title: &str, width: i32, column: MappingColumn) -> gtk::ColumnViewColumn {
+    table_column(title, width, move |object, label| {
         let mapping = object.borrow::<Rc<KernelMapping>>();
         reset_semantic_css(label);
         label.add_css_class(mapping_css(&mapping));
@@ -1926,10 +1900,9 @@ fn mapping_column(
 fn mapping_change_column(
     title: &str,
     width: i32,
-    expand: bool,
     column: MappingChangeColumn,
 ) -> gtk::ColumnViewColumn {
-    table_column(title, width, expand, move |object, label| {
+    table_column(title, width, move |object, label| {
         let change = object.borrow::<KernelMappingChange>();
         reset_mapping_change_css(label);
 
@@ -2046,13 +2019,8 @@ fn format_signed_bytes(delta: i128) -> String {
     }
 }
 
-fn descriptor_column(
-    title: &str,
-    width: i32,
-    expand: bool,
-    column: DescriptorColumn,
-) -> gtk::ColumnViewColumn {
-    table_column(title, width, expand, move |object, label| {
+fn descriptor_column(title: &str, width: i32, column: DescriptorColumn) -> gtk::ColumnViewColumn {
+    table_column(title, width, move |object, label| {
         let descriptor = object.borrow::<KernelFileDescriptor>();
 
         label.set_text(&match column {
@@ -2085,13 +2053,8 @@ fn descriptor_column(
     })
 }
 
-fn limit_column(
-    title: &str,
-    width: i32,
-    expand: bool,
-    column: LimitColumn,
-) -> gtk::ColumnViewColumn {
-    table_column(title, width, expand, move |object, label| {
+fn limit_column(title: &str, width: i32, column: LimitColumn) -> gtk::ColumnViewColumn {
+    table_column(title, width, move |object, label| {
         let limit = object.borrow::<KernelLimit>();
 
         label.set_text(match column {
@@ -2109,13 +2072,8 @@ fn limit_column(
     })
 }
 
-fn thread_column(
-    title: &str,
-    width: i32,
-    expand: bool,
-    column: ThreadColumn,
-) -> gtk::ColumnViewColumn {
-    table_column(title, width, expand, move |object, label| {
+fn thread_column(title: &str, width: i32, column: ThreadColumn) -> gtk::ColumnViewColumn {
+    table_column(title, width, move |object, label| {
         let thread = object.borrow::<KernelThread>();
         reset_kernel_css(label);
 
@@ -2186,13 +2144,8 @@ fn thread_column(
     })
 }
 
-fn signal_column(
-    title: &str,
-    width: i32,
-    expand: bool,
-    column: SignalColumn,
-) -> gtk::ColumnViewColumn {
-    table_column(title, width, expand, move |object, label| {
+fn signal_column(title: &str, width: i32, column: SignalColumn) -> gtk::ColumnViewColumn {
+    table_column(title, width, move |object, label| {
         let signal = object.borrow::<KernelSignal>();
         reset_kernel_css(label);
 
@@ -2243,13 +2196,8 @@ fn signal_column(
     })
 }
 
-fn process_column(
-    title: &str,
-    width: i32,
-    expand: bool,
-    column: ProcessColumn,
-) -> gtk::ColumnViewColumn {
-    table_column(title, width, expand, move |object, label| {
+fn process_column(title: &str, width: i32, column: ProcessColumn) -> gtk::ColumnViewColumn {
+    table_column(title, width, move |object, label| {
         let process = object.borrow::<KernelProcess>();
         reset_kernel_css(label);
 
@@ -2289,13 +2237,8 @@ fn process_column(
     })
 }
 
-fn tls_module_column(
-    title: &str,
-    width: i32,
-    expand: bool,
-    column: TlsModuleColumn,
-) -> gtk::ColumnViewColumn {
-    table_column(title, width, expand, move |object, label| {
+fn tls_module_column(title: &str, width: i32, column: TlsModuleColumn) -> gtk::ColumnViewColumn {
+    table_column(title, width, move |object, label| {
         let module = object.borrow::<KernelTlsModule>();
         reset_kernel_css(label);
 
@@ -2342,13 +2285,8 @@ fn tls_module_column(
     })
 }
 
-fn tls_symbol_column(
-    title: &str,
-    width: i32,
-    expand: bool,
-    column: TlsSymbolColumn,
-) -> gtk::ColumnViewColumn {
-    table_column(title, width, expand, move |object, label| {
+fn tls_symbol_column(title: &str, width: i32, column: TlsSymbolColumn) -> gtk::ColumnViewColumn {
+    table_column(title, width, move |object, label| {
         let row = object.borrow::<KernelTlsSymbolRow>();
         reset_kernel_css(label);
 
@@ -2401,7 +2339,6 @@ fn reset_kernel_css(label: &gtk::Label) {
 fn table_column(
     title: &str,
     width: i32,
-    expand: bool,
     bind: impl Fn(&glib::BoxedAnyObject, &gtk::Label) + Copy + 'static,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
@@ -2435,12 +2372,7 @@ fn table_column(
         bind(&data, &label);
     });
 
-    let column = gtk::ColumnViewColumn::new(Some(title), Some(factory));
-    column.set_fixed_width(width);
-    column.set_resizable(true);
-    column.set_expand(expand);
-
-    column
+    components::table_column(title, width, factory)
 }
 
 fn mapping_search_text(mapping: &KernelMapping) -> String {

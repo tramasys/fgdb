@@ -1,4 +1,29 @@
 use super::*;
+use crate::debugger::linked::{
+    FIELD_BUDGET, LinkedListAction, LinkedListProgress, LinkedListQuery, NODE_LIMIT, REQUEST_BUDGET,
+};
+
+mod navigation;
+mod objects;
+use navigation::render_linked;
+pub(super) use navigation::{LinkedListSettings, start_linked_list};
+use objects::{prepare_linked_root, request_linked_dereference, request_linked_raw_wrapper};
+
+struct NodeAddress {
+    base: u64,
+    type_name: String,
+    members: Vec<String>,
+}
+
+impl NodeAddress {
+    fn from_pointer(variable: &Variable) -> Option<Self> {
+        Some(Self {
+            base: variable.pointer_address()?,
+            type_name: variable.type_name.clone()?,
+            members: Vec::new(),
+        })
+    }
+}
 
 const LINKED_NODE_FIELD_LIMIT: usize = 256;
 const MAX_LINK_WRAPPER_DEPTH: usize = 16;
@@ -7,330 +32,149 @@ struct LinkedTraversal {
     ui: Weak<Ui>,
     client: Rc<MiClient>,
     requests: StopRequests,
-    session: Rc<VariableViewerSession>,
+    session: Weak<VariableViewerSession>,
+    revision: u64,
     current: Variable,
     current_address: Option<u64>,
+    pending_node: Option<(Variable, Vec<Variable>)>,
+    address_source: Option<NodeAddress>,
+    member: String,
     next_members: HashSet<String>,
     seen_addresses: HashSet<u64>,
     seen_objects: HashSet<String>,
     owned_variable_objects: HashSet<String>,
     wrapper_depth: usize,
-    shown: usize,
-    limit: usize,
+    page_size: usize,
+    offset: usize,
+    rows: Vec<VariableViewerRow>,
+    message: String,
+    paused: bool,
+    fields_read: usize,
+    requests_sent: usize,
+    fields_truncated: bool,
     finished: bool,
 }
 
-pub(super) struct LinkedListSettings {
-    pub(super) next_members: Vec<String>,
-    pub(super) limit: usize,
-    pub(super) owned_root: Option<String>,
-}
-
-pub(super) fn start_linked_list(
-    ui: Weak<Ui>,
-    client: Rc<MiClient>,
-    requests: StopRequests,
-    session: Rc<VariableViewerSession>,
-    variable: Variable,
-    settings: LinkedListSettings,
-) {
-    let LinkedListSettings {
-        next_members,
-        limit,
-        owned_root,
-    } = settings;
-
-    if limit == 0 {
-        session.finish("This viewer is configured with a zero node limit");
-        cleanup_viewer_variable_objects(&ui, &client, owned_root);
-        return;
+impl Drop for LinkedTraversal {
+    fn drop(&mut self) {
+        cleanup_viewer_variable_objects(
+            &self.ui,
+            &self.client,
+            self.owned_variable_objects.drain(),
+        );
     }
-
-    let address = pointer_address(&variable.value).filter(|address| *address != 0);
-    let mut seen_addresses = HashSet::new();
-
-    if let Some(address) = address {
-        seen_addresses.insert(address);
-    }
-
-    let mut seen_objects = HashSet::new();
-
-    if let Some(varobj) = variable.varobj.as_ref() {
-        seen_objects.insert(varobj.clone());
-    }
-
-    let mut owned_variable_objects = HashSet::new();
-    owned_variable_objects.extend(owned_root);
-
-    let traversal = Rc::new(RefCell::new(LinkedTraversal {
-        ui,
-        client,
-        requests,
-        session,
-        current: variable,
-        current_address: address,
-        next_members: next_members
-            .into_iter()
-            .map(|member| normalize_member_name(&member))
-            .collect(),
-        seen_addresses,
-        seen_objects,
-        owned_variable_objects,
-        wrapper_depth: 0,
-        shown: 0,
-        limit,
-        finished: false,
-    }));
-
-    seed_linked_root_address(traversal);
 }
 
 fn linked_is_current(traversal: &Rc<RefCell<LinkedTraversal>>) -> bool {
     let traversal = traversal.borrow();
 
-    !traversal.finished && viewer_is_current(&traversal.requests, &traversal.session)
+    !traversal.finished
+        && !traversal.paused
+        && traversal.requests.is_current()
+        && traversal
+            .session
+            .upgrade()
+            .is_some_and(|session| session.page_is_current(traversal.revision))
 }
 
-fn seed_linked_root_address(traversal: Rc<RefCell<LinkedTraversal>>) {
-    let (varobj, should_query, requests) = {
-        let traversal = traversal.borrow();
-
-        (
-            traversal.current.varobj.clone(),
-            traversal.current_address.is_none() && !traversal.current.is_pointer(),
-            traversal.requests.clone(),
-        )
-    };
-
-    let Some(varobj) = varobj.filter(|_| should_query) else {
-        request_linked_node(traversal);
-        return;
-    };
-
-    let command = format!(
-        "-var-info-path-expression {}",
-        crate::debugger::quote(&varobj)
-    );
-
-    let traversal_for_guard = Rc::clone(&traversal);
-    let traversal_for_response = Rc::clone(&traversal);
-
-    if requests
-        .unscoped(&command)
-        .when(move || linked_is_current(&traversal_for_guard))
-        .request(move |_, record| {
-            if record.class == "superseded" {
-                finish_linked(
-                    &traversal_for_response,
-                    Some(String::from(STALE_VIEWER_MESSAGE)),
-                );
-
-                return;
-            }
-
-            let Some(path) = crate::debugger::variable_path_expression(&record) else {
-                request_linked_node(traversal_for_response);
-                return;
-            };
-
-            let command = format!(
-                "-data-evaluate-expression {}",
-                crate::debugger::quote(&format!("&({path})"))
-            );
-
-            let requests = traversal_for_response.borrow().requests.clone();
-
-            let traversal_for_guard = Rc::clone(&traversal_for_response);
-            let traversal_for_address = Rc::clone(&traversal_for_response);
-
-            if requests
-                .frame(&command)
-                .when(move || linked_is_current(&traversal_for_guard))
-                .request(move |_, record| {
-                    if record.class == "superseded" {
-                        finish_linked(
-                            &traversal_for_address,
-                            Some(String::from(STALE_VIEWER_MESSAGE)),
-                        );
-
-                        return;
-                    }
-
-                    if let Some(address) = crate::debugger::evaluated_value(&record)
-                        .as_deref()
-                        .and_then(pointer_address)
-                        .filter(|address| *address != 0)
-                    {
-                        let mut traversal = traversal_for_address.borrow_mut();
-                        traversal.current_address = Some(address);
-                        traversal.seen_addresses.insert(address);
-                    }
-
-                    request_linked_node(traversal_for_address);
-                })
-                .is_err()
-            {
-                request_linked_node(traversal_for_response);
-            }
-        })
-        .is_err()
-    {
-        request_linked_node(traversal);
+fn begin_linked_request(traversal: &Rc<RefCell<LinkedTraversal>>) -> bool {
+    if !linked_is_current(traversal) {
+        finish_linked(traversal, Some(String::from(STALE_VIEWER_MESSAGE)));
+        return false;
     }
+
+    let allowed = {
+        let mut traversal = traversal.borrow_mut();
+        traversal.requests_sent += 1;
+        traversal.requests_sent <= REQUEST_BUDGET
+    };
+
+    if !allowed {
+        finish_linked(
+            traversal,
+            Some(String::from(
+                "Traversal request budget reached · Cached nodes retained",
+            )),
+        );
+    }
+
+    allowed
 }
 
 fn request_linked_node(traversal: Rc<RefCell<LinkedTraversal>>) {
     if !linked_is_current(&traversal) {
-        finish_linked(&traversal, None);
+        finish_linked(&traversal, Some(String::from(STALE_VIEWER_MESSAGE)));
         return;
     }
 
-    let (current, shown, limit) = {
+    let (current, shown, page_end) = {
         let traversal = traversal.borrow();
 
-        (traversal.current.clone(), traversal.shown, traversal.limit)
+        (
+            traversal.current.clone(),
+            traversal.rows.len(),
+            traversal.offset.saturating_add(traversal.page_size),
+        )
     };
 
-    if shown >= limit {
+    if shown >= NODE_LIMIT {
         finish_linked(
             &traversal,
-            Some(format!(
-                "Showing the first {shown} nodes - traversal limit reached"
-            )),
+            Some(format!("{shown} nodes cached · Node safety limit reached")),
         );
 
         return;
     }
 
-    if current.is_pointer() && viewer_value_is_null(&current.value) {
+    if shown >= page_end {
+        {
+            let mut traversal = traversal.borrow_mut();
+            traversal.paused = true;
+            traversal.message = String::from(
+                "Page ready · More links available · Previous pages use cached values",
+            );
+        }
+
+        render_linked(&traversal, false);
+        return;
+    }
+
+    if linked_value_is_end(&current) {
         finish_linked(&traversal, Some(format!("{shown} nodes - reached null")));
+        return;
+    }
+
+    if !current.is_available() {
+        finish_linked(
+            &traversal,
+            Some(String::from(
+                "Node memory is unreadable or unavailable · Cached nodes retained",
+            )),
+        );
         return;
     }
 
     if current.num_children == 0 && !current.has_more && current.is_pointer() {
         request_linked_dereference(traversal, current);
+    } else if current.dynamic
+        && super::heuristics::link_wrapper_members(&current).is_some()
+        && current.varobj.as_deref().is_some_and(|name| {
+            traversal
+                .borrow()
+                .owned_variable_objects
+                .contains(name.split('.').next().unwrap_or(name))
+        })
+    {
+        request_linked_raw_wrapper(traversal, current);
     } else {
         request_linked_children(traversal, current);
     }
 }
 
-fn request_linked_dereference(traversal: Rc<RefCell<LinkedTraversal>>, current: Variable) {
-    let Some(varobj) = current.varobj.as_deref() else {
-        finish_linked(
-            &traversal,
-            Some(String::from(
-                "The next pointer has no inspectable GDB object",
-            )),
-        );
-
-        return;
-    };
-
-    let requests = traversal.borrow().requests.clone();
-
-    let command = format!(
-        "-var-info-path-expression {}",
-        crate::debugger::quote(varobj)
-    );
-
-    let traversal_for_guard = Rc::clone(&traversal);
-    let traversal_for_response = Rc::clone(&traversal);
-
-    if let Err(error) = requests
-        .unscoped(&command)
-        .when(move || linked_is_current(&traversal_for_guard))
-        .request(move |_client, record| {
-            if record.class == "superseded" {
-                finish_linked(
-                    &traversal_for_response,
-                    Some(String::from(STALE_VIEWER_MESSAGE)),
-                );
-
-                return;
-            }
-
-            let Some(path) = crate::debugger::variable_path_expression(&record) else {
-                finish_linked(
-                    &traversal_for_response,
-                    Some(String::from("GDB could not dereference the next pointer")),
-                );
-
-                return;
-            };
-
-            let dereference_varobj = next_variable_object_name();
-
-            traversal_for_response
-                .borrow_mut()
-                .owned_variable_objects
-                .insert(dereference_varobj.clone());
-
-            let command = format!(
-                "-var-create {dereference_varobj} * {}",
-                crate::debugger::quote(&format!("*({path})"))
-            );
-
-            let requests = traversal_for_response.borrow().requests.clone();
-
-            let traversal_for_guard = Rc::clone(&traversal_for_response);
-            let traversal_for_dereference = Rc::clone(&traversal_for_response);
-
-            if let Err(error) = requests
-                .frame(&command)
-                .when(move || linked_is_current(&traversal_for_guard))
-                .with_print_limit(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
-                    if record.class == "superseded" {
-                        finish_linked(
-                            &traversal_for_dereference,
-                            Some(String::from(STALE_VIEWER_MESSAGE)),
-                        );
-
-                        return;
-                    }
-
-                    let name = traversal_for_dereference.borrow().current.name.clone();
-
-                    let Some(child) = record
-                        .is_done()
-                        .then(|| crate::debugger::variable_object(&record, &format!("*{name}")))
-                        .flatten()
-                    else {
-                        finish_linked(
-                            &traversal_for_dereference,
-                            Some(String::from("GDB could not inspect the pointed-to node")),
-                        );
-
-                        return;
-                    };
-
-                    {
-                        let mut traversal = traversal_for_dereference.borrow_mut();
-
-                        if let Some(varobj) = child.varobj.clone() {
-                            traversal.owned_variable_objects.insert(varobj);
-                        }
-
-                        traversal.current = child;
-                    }
-
-                    request_linked_node(traversal_for_dereference);
-                })
-            {
-                finish_linked(
-                    &traversal_for_response,
-                    Some(format!("Could not queue pointer inspection: {error}")),
-                );
-            }
-        })
-    {
-        finish_linked(
-            &traversal,
-            Some(format!("Could not queue pointer resolution: {error}")),
-        );
-    }
-}
-
 fn request_linked_children(traversal: Rc<RefCell<LinkedTraversal>>, current: Variable) {
+    if !begin_linked_request(&traversal) {
+        return;
+    }
     let Some(varobj) = current.varobj.as_deref() else {
         finish_linked(
             &traversal,
@@ -353,8 +197,8 @@ fn request_linked_children(traversal: Rc<RefCell<LinkedTraversal>>, current: Var
     if let Err(error) = requests
         .unscoped(&command)
         .when(move || linked_is_current(&traversal_for_guard))
-        .with_print_limit(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
-            if record.class == "superseded" {
+        .inspect(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
+            if record.class == "superseded" || !linked_is_current(&traversal_for_response) {
                 finish_linked(
                     &traversal_for_response,
                     Some(String::from(STALE_VIEWER_MESSAGE)),
@@ -373,7 +217,9 @@ fn request_linked_children(traversal: Rc<RefCell<LinkedTraversal>>, current: Var
                 return;
             }
 
-            let children = crate::debugger::variable_children(&record);
+            let Some(children) = linked_fields(&traversal_for_response, &record) else {
+                return;
+            };
             complete_linked_node(&traversal_for_response, current, children);
         })
     {
@@ -419,6 +265,10 @@ fn request_linked_access_groups(
         return;
     };
 
+    if !begin_linked_request(&traversal) {
+        return;
+    }
+
     let Some(varobj) = group.varobj.as_deref() else {
         request_linked_access_groups(traversal, current, groups, fields);
         return;
@@ -437,8 +287,8 @@ fn request_linked_access_groups(
     if let Err(error) = requests
         .unscoped(&command)
         .when(move || linked_is_current(&traversal_for_guard))
-        .with_print_limit(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
-            if record.class == "superseded" {
+        .inspect(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
+            if record.class == "superseded" || !linked_is_current(&traversal_for_response) {
                 finish_linked(
                     &traversal_for_response,
                     Some(String::from(STALE_VIEWER_MESSAGE)),
@@ -448,7 +298,10 @@ fn request_linked_access_groups(
             }
 
             if record.is_done() {
-                fields.extend(crate::debugger::variable_children(&record));
+                let Some(children) = linked_fields(&traversal_for_response, &record) else {
+                    return;
+                };
+                fields.extend(children);
                 request_linked_access_groups(traversal_for_response, current, groups, fields);
             } else {
                 let message = record
@@ -472,25 +325,58 @@ fn finish_linked_node(
     current: Variable,
     children: Vec<Variable>,
 ) {
-    let has_next = {
+    let matches = {
         let traversal = traversal.borrow();
 
-        children.iter().any(|child| {
-            traversal
-                .next_members
-                .contains(&normalize_member_name(&child.name))
-        })
+        children
+            .iter()
+            .enumerate()
+            .filter(|(_, child)| link_matches(&traversal, &child.name))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>()
     };
 
+    if matches.len() > 1 {
+        finish_linked(
+            traversal,
+            Some(String::from(
+                "Multiple possible link fields found · Specify the link member and restart",
+            )),
+        );
+        return;
+    }
+
+    let has_next = !matches.is_empty();
+
+    if !children.is_empty()
+        && children
+            .iter()
+            .all(|child| child.value.is_empty() || !child.is_available())
+    {
+        finish_linked(
+            traversal,
+            Some(String::from(
+                "Node memory is unreadable or unavailable · Cached nodes retained",
+            )),
+        );
+        return;
+    }
+
+    if !has_next && super::heuristics::linked_children_are_end(&current, &children) {
+        let shown = traversal.borrow().rows.len();
+        finish_linked(traversal, Some(format!("{shown} nodes - reached the end")));
+        return;
+    }
+
     if !has_next && let Some(wrapper) = transparent_link_wrapper(&current, &children) {
-        let address = pointer_address(&wrapper.value).filter(|address| *address != 0);
+        let address = wrapper.pointer_address().filter(|address| *address != 0);
 
         let (cycle, depth_exceeded, shown) = {
             let mut traversal = traversal.borrow_mut();
 
-            let cycle = if let Some(address) = address {
-                !traversal.seen_addresses.insert(address)
-            } else if let Some(varobj) = wrapper.varobj.as_ref() {
+            // Ownership wrappers can legitimately share one allocation address.
+            // Detect node-address cycles only after unwrapping a complete node.
+            let cycle = if let Some(varobj) = wrapper.varobj.as_ref() {
                 !traversal.seen_objects.insert(varobj.clone())
             } else {
                 false
@@ -500,6 +386,18 @@ fn finish_linked_node(
             let depth_exceeded = traversal.wrapper_depth > MAX_LINK_WRAPPER_DEPTH;
 
             if !cycle && !depth_exceeded {
+                if let Some(source) = NodeAddress::from_pointer(&wrapper) {
+                    traversal.address_source = Some(source);
+                } else {
+                    if traversal.address_source.is_none() {
+                        traversal.address_source = NodeAddress::from_pointer(&current);
+                    }
+
+                    if let Some(source) = traversal.address_source.as_mut() {
+                        source.members.push(wrapper.name.clone());
+                    }
+                }
+
                 traversal.current = wrapper;
 
                 if address.is_some() {
@@ -507,7 +405,7 @@ fn finish_linked_node(
                 }
             }
 
-            (cycle, depth_exceeded, traversal.shown)
+            (cycle, depth_exceeded, traversal.rows.len())
         };
 
         if cycle {
@@ -533,14 +431,142 @@ fn finish_linked_node(
         return;
     }
 
-    if !has_next
-        && current
-            .type_name
-            .as_deref()
-            .is_some_and(|type_name| type_name.to_ascii_lowercase().contains("option<"))
-    {
-        let shown = traversal.borrow().shown;
+    if !has_next && super::heuristics::link_wrapper_members(&current).is_some() {
+        finish_linked(
+            traversal,
+            Some(String::from(
+                "Ownership wrapper has no readable node · Cached nodes retained",
+            )),
+        );
+        return;
+    }
 
+    if traversal.borrow().wrapper_depth > 0 && !current.is_pointer() {
+        {
+            let mut traversal = traversal.borrow_mut();
+            // Allocation headers and their payloads have different addresses.
+            // Record the actual node, including when the root was opened by value.
+            traversal.current_address = None;
+            traversal.pending_node = Some((current, children));
+        }
+
+        objects::resolve_linked_node_address(Rc::clone(traversal));
+    } else {
+        append_linked_node(traversal, current, children);
+    }
+}
+
+fn append_linked_node(
+    traversal: &Rc<RefCell<LinkedTraversal>>,
+    current: Variable,
+    children: Vec<Variable>,
+) {
+    let repeated = {
+        let traversal = traversal.borrow();
+        traversal
+            .current_address
+            .is_some_and(|address| traversal.seen_addresses.contains(&address))
+    };
+
+    if repeated {
+        finish_linked(
+            traversal,
+            Some(String::from("Cycle detected · Cached nodes retained")),
+        );
+        return;
+    }
+
+    let (next, row, session, shown) = {
+        let mut traversal = traversal.borrow_mut();
+        traversal.wrapper_depth = 0;
+        traversal.seen_objects.clear();
+
+        if let Some(address) = traversal.current_address {
+            traversal.seen_addresses.insert(address);
+        }
+
+        let next = children
+            .iter()
+            .find(|child| link_matches(&traversal, &child.name))
+            .cloned();
+
+        let details = children
+            .iter()
+            .filter(|child| !link_matches(&traversal, &child.name))
+            .take(6)
+            .map(|child| {
+                format!(
+                    "{} = {}",
+                    compact_viewer_text(&child.name, 72),
+                    compact_viewer_text(&child.value, 72)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("  ");
+
+        let row = VariableViewerRow {
+            ordinal: traversal.rows.len().to_string(),
+            name: traversal
+                .current_address
+                .map(|address| format!("0x{address:x}"))
+                .unwrap_or_else(|| compact_viewer_text(&current.name, 160)),
+            value: compact_viewer_text(&current.value, 320),
+            type_name: compact_viewer_text(
+                &compact_variable_type_name(current.type_name.as_deref()),
+                1024,
+            ),
+            details,
+            link: next
+                .as_ref()
+                .map(|next| {
+                    format!(
+                        "{} → {}",
+                        compact_viewer_text(&next.name, 72),
+                        compact_viewer_text(&next.value, 160)
+                    )
+                })
+                .unwrap_or_else(|| String::from("No link found")),
+        };
+
+        traversal.rows.push(row.clone());
+
+        (next, row, traversal.session.upgrade(), traversal.rows.len())
+    };
+
+    if let Some(session) = session {
+        session.append([row]);
+    }
+
+    let Some(next) = next else {
+        let reason = if traversal.borrow().fields_truncated {
+            "Link not found within the bounded field preview"
+        } else {
+            "No matching link member found · Specify a field and restart"
+        };
+
+        finish_linked(
+            traversal,
+            Some(format!("{shown} nodes cached · {}", reason)),
+        );
+
+        return;
+    };
+
+    let next_address = next.pointer_address();
+
+    if !next.is_available()
+        || (next.is_pointer() && next_address.is_none() && !next.is_null_pointer())
+    {
+        finish_linked(
+            traversal,
+            Some(String::from(
+                "Link field is unreadable or unavailable · Cached nodes retained",
+            )),
+        );
+        return;
+    }
+
+    if linked_value_is_end(&next) {
         finish_linked(
             traversal,
             Some(format!(
@@ -552,72 +578,13 @@ fn finish_linked_node(
         return;
     }
 
-    let (next, row, shown) = {
-        let mut traversal = traversal.borrow_mut();
-        traversal.wrapper_depth = 0;
-
-        let next = children
-            .iter()
-            .find(|child| {
-                traversal
-                    .next_members
-                    .contains(&normalize_member_name(&child.name))
-            })
-            .cloned();
-
-        let details = children
-            .iter()
-            .filter(|child| {
-                !traversal
-                    .next_members
-                    .contains(&normalize_member_name(&child.name))
-            })
-            .take(6)
-            .map(|child| format!("{} = {}", child.name, compact_viewer_text(&child.value, 72)))
-            .collect::<Vec<_>>()
-            .join("  ");
-
-        let row = VariableViewerRow {
-            ordinal: traversal.shown.to_string(),
-            name: traversal
-                .current_address
-                .map(|address| format!("0x{address:x}"))
-                .unwrap_or_else(|| current.name.clone()),
-            value: compact_viewer_text(&current.value, 320),
-            type_name: compact_variable_type_name(current.type_name.as_deref()),
-            details,
-        };
-
-        traversal.shown = traversal.shown.saturating_add(1);
-
-        (next, row, traversal.shown)
-    };
-
-    traversal.borrow().session.append([row]);
-
-    let Some(next) = next else {
+    if !next.can_expand() {
         finish_linked(
             traversal,
-            Some(format!(
-                "{shown} node{} - no next-like member found",
-                if shown == 1 { "" } else { "s" }
+            Some(String::from(
+                "Link member is not a pointer or an inspectable node · Specify a link field and restart",
             )),
         );
-
-        return;
-    };
-
-    let next_address = pointer_address(&next.value);
-
-    if viewer_value_is_null(&next.value) {
-        finish_linked(
-            traversal,
-            Some(format!(
-                "{shown} node{} - reached the end",
-                if shown == 1 { "" } else { "s" }
-            )),
-        );
-
         return;
     }
 
@@ -625,16 +592,16 @@ fn finish_linked_node(
         let mut traversal = traversal.borrow_mut();
 
         let cycle = if let Some(address) = next_address {
-            !traversal.seen_addresses.insert(address)
-        } else if let Some(varobj) = next.varobj.as_ref() {
-            !traversal.seen_objects.insert(varobj.clone())
+            traversal.seen_addresses.contains(&address)
         } else {
             false
         };
 
         if !cycle {
+            traversal.address_source = None;
             traversal.current = next;
             traversal.current_address = next_address;
+            traversal.fields_truncated = false;
         }
 
         cycle
@@ -654,7 +621,7 @@ fn finish_linked_node(
 }
 
 fn finish_linked(traversal: &Rc<RefCell<LinkedTraversal>>, message: Option<String>) {
-    let (client, ui, session, owned) = {
+    let (client, ui, owned) = {
         let mut traversal = traversal.borrow_mut();
 
         if traversal.finished {
@@ -662,20 +629,55 @@ fn finish_linked(traversal: &Rc<RefCell<LinkedTraversal>>, message: Option<Strin
         }
 
         traversal.finished = true;
+        traversal.paused = false;
+        traversal.pending_node = None;
+
+        if let Some(message) = message {
+            traversal.message = message;
+        }
 
         (
             Rc::clone(&traversal.client),
             traversal.ui.clone(),
-            Rc::clone(&traversal.session),
             traversal.owned_variable_objects.drain().collect::<Vec<_>>(),
         )
     };
 
-    if let Some(message) = message
-        && session.is_open()
-    {
-        session.finish(&message);
-    }
-
     cleanup_viewer_variable_objects(&ui, &client, owned);
+    render_linked(traversal, false);
+}
+
+fn link_matches(traversal: &LinkedTraversal, name: &str) -> bool {
+    if traversal.member.is_empty() {
+        traversal
+            .next_members
+            .contains(&normalize_member_name(name))
+    } else {
+        name.rsplit("::").next().unwrap_or(name) == traversal.member
+    }
+}
+
+fn linked_fields(
+    traversal: &Rc<RefCell<LinkedTraversal>>,
+    record: &MiRecord,
+) -> Option<Vec<Variable>> {
+    let children = crate::debugger::variable_children(record);
+    let allowed = {
+        let mut traversal = traversal.borrow_mut();
+        traversal.fields_read = traversal.fields_read.saturating_add(children.len());
+        traversal.fields_truncated |= crate::debugger::variable_children_have_more(record);
+        traversal.fields_read <= FIELD_BUDGET
+    };
+
+    if allowed {
+        Some(children)
+    } else {
+        finish_linked(
+            traversal,
+            Some(String::from(
+                "Field inspection budget reached · Cached nodes retained",
+            )),
+        );
+        None
+    }
 }

@@ -39,6 +39,11 @@ impl Ui {
             Rc::clone(&target_pointer_bits),
         );
 
+        let variable_locations = variables::locations::Locations::new(
+            config.preferences.variable_locations,
+            Rc::clone(&target_pointer_bits),
+        );
+
         let inspector_bindings = InspectorBindings {
             theme,
             variable_children_handler: &variable_children_handler,
@@ -46,6 +51,7 @@ impl Ui {
             variable_viewers: &variable_viewers,
             target_pointer_bits: &target_pointer_bits,
             variable_presentation: &variable_presentation,
+            variable_locations: &variable_locations,
             kernel: KernelViewBindings {
                 refresh_handler: &kernel_refresh_handler,
                 remembered_disclosures: &remembered_disclosures,
@@ -306,6 +312,7 @@ impl Ui {
             configuration_report: config.configuration_report().clone(),
             settings: settings::Settings::new(config),
             variable_presentation,
+            variable_locations,
             debug_data_view: Rc::new(RefCell::new(None)),
             debug_data_state: Rc::new(RefCell::new(
                 debug_data::DebugDataState::from_launch_config(config),
@@ -1220,6 +1227,14 @@ impl Ui {
     }
 
     pub(super) fn update_control_sensitivity(&self) {
+        self.variable_locations
+            .set_context(self.model.stopped_inspection_available().then(|| {
+                (
+                    self.model.current_stop_refresh_generation(),
+                    self.model.symbols.revision(),
+                )
+            }));
+
         self.memory_search.update_state(self);
         self.update_module_control_sensitivity();
         let ready = self.model.execution().ready;
