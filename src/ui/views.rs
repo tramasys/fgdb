@@ -1446,7 +1446,7 @@ pub(super) fn build_instruction_view(
     gtk::SingleSelection,
     InstructionColumns,
 ) {
-    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let store = gio::ListStore::new::<components::SnapshotRow>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
@@ -1588,7 +1588,7 @@ pub(super) fn build_register_view(columns: &ColumnLayouts) -> (gtk::Box, Vec<Reg
 pub(super) fn build_register_group_table(
     layout: &TableLayout,
 ) -> (gtk::ColumnView, gio::ListStore) {
-    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let store = gio::ListStore::new::<components::SnapshotRow>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
@@ -1631,90 +1631,84 @@ pub(super) fn register_column(
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
         if !matches!(column, RegisterColumn::Name) {
-            enable_stable_text_selection(&label);
+            enable_recycled_text_selection(&label);
         }
+
+        label.set_has_tooltip(true);
+        let tooltip_item = item.downgrade();
+        label.connect_query_tooltip(move |_, _, _, _, tooltip| {
+            let Some(row) = tooltip_item
+                .upgrade()
+                .and_then(|item| item.item())
+                .and_downcast::<components::SnapshotRow>()
+            else {
+                return false;
+            };
+            let data = row.borrow::<RegisterRowData>();
+            let text = if matches!(column, RegisterColumn::Name) {
+                data.register.name.clone()
+            } else {
+                register_text(
+                    &data.register,
+                    data.architecture,
+                    data.endian,
+                    data.pointer_bits,
+                )
+            };
+            tooltip.set_text(Some(&format!(
+                "{text}\nDouble-click or press Enter to edit"
+            )));
+            true
+        });
 
         item.set_child(Some(&label));
-    });
-    factory.connect_bind(move |_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        let (Some(label), Some(data)) = (
-            item.child().and_downcast::<gtk::Label>(),
-            item.item().and_downcast::<glib::BoxedAnyObject>(),
-        ) else {
-            return;
-        };
-        clear_label_selection(&label);
-        let data = data.borrow::<RegisterRowData>();
-        reset_semantic_css(&label);
-        if data.changed && matches!(column, RegisterColumn::Name) {
-            label.add_css_class("modified-register");
-        }
-
-        match column {
-            RegisterColumn::Name => {
-                label.set_text(&format!("${}", data.register.name));
-                label.set_tooltip_text(Some(&format!(
-                    "{}\nDouble-click or press Enter to edit",
-                    data.register.name
-                )));
-            }
-            RegisterColumn::Value => {
-                let semantic_class = register_value_css(
-                    &data.register,
-                    data.architecture,
-                    data.endian,
-                    data.pointer_bits,
-                );
-                label.add_css_class(semantic_class);
-                let text = register_primary_value(&data.register, data.architecture);
-                label.set_text(&text);
-                label.set_tooltip_text(Some(&format!(
-                    "{}\nDouble-click or press Enter to edit",
-                    register_text(
-                        &data.register,
-                        data.architecture,
-                        data.endian,
-                        data.pointer_bits,
-                    )
-                )));
-            }
-            RegisterColumn::Details => {
-                let semantic_class = register_value_css(
-                    &data.register,
-                    data.architecture,
-                    data.endian,
-                    data.pointer_bits,
-                );
-                label.add_css_class(semantic_class);
-                if is_flags_register(&data.register.name) {
-                    label.set_markup(&flags_details_markup(
-                        &data.register.name,
-                        &data.register.value,
-                        data.ring,
-                    ));
+        let label = label.downgrade();
+        super::lifecycle::connect_snapshot_cell(item, move |data| {
+            let Some(label) = label.upgrade() else {
+                return;
+            };
+            clear_label_selection(&label);
+            let data = data.borrow::<RegisterRowData>();
+            set_semantic_css(
+                &label,
+                if matches!(column, RegisterColumn::Name) {
+                    data.changed.then_some("modified-register")
                 } else {
-                    label.set_text(&register_details(
+                    Some(register_value_css(
                         &data.register,
                         data.architecture,
                         data.endian,
                         data.pointer_bits,
-                    ));
-                }
+                    ))
+                },
+            );
 
-                label.set_tooltip_text(Some(&format!(
-                    "{}\nDouble-click or press Enter to edit",
-                    register_text(
-                        &data.register,
-                        data.architecture,
-                        data.endian,
-                        data.pointer_bits,
-                    )
-                )));
+            match column {
+                RegisterColumn::Name => {
+                    label.set_text(&format!("${}", data.register.name));
+                }
+                RegisterColumn::Value => {
+                    let text = register_primary_value(&data.register, data.architecture);
+                    label.set_text(&text);
+                }
+                RegisterColumn::Details => {
+                    if is_flags_register(&data.register.name) {
+                        label.set_markup(&flags_details_markup(
+                            &data.register.name,
+                            &data.register.value,
+                            data.ring,
+                        ));
+                    } else {
+                        label.set_text(&register_details(
+                            &data.register,
+                            data.architecture,
+                            data.endian,
+                            data.pointer_bits,
+                        ));
+                    }
+                }
             }
-        }
+        });
     });
 
     components::table_column(title, width, factory)
@@ -1723,7 +1717,7 @@ pub(super) fn register_column(
 pub(super) fn build_stack_view(
     layout: &TableLayout,
 ) -> (gtk::ColumnView, gio::ListStore, StackWordInspector) {
-    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let store = gio::ListStore::new::<components::SnapshotRow>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(true);
     selection.set_can_unselect(false);
@@ -1747,15 +1741,22 @@ pub(super) fn build_stack_view(
 
     let inspector = build_stack_word_inspector();
     let inspector_for_selection = inspector.clone();
+    let subscription = RefCell::new(None::<super::lifecycle::SignalSubscription>);
     selection.connect_selected_item_notify(move |selection| {
+        drop(subscription.borrow_mut().take());
         let Some(data) = selection
             .selected_item()
-            .and_downcast::<glib::BoxedAnyObject>()
+            .and_downcast::<components::SnapshotRow>()
         else {
             inspector_for_selection.clear();
             return;
         };
         inspector_for_selection.show(&data.borrow::<StackEntry>());
+        let inspector = inspector_for_selection.clone();
+        let handler = data.connect_updated(move |row| inspector.show(&row.borrow::<StackEntry>()));
+        subscription.replace(Some(super::lifecycle::SignalSubscription::new(
+            &data, handler,
+        )));
     });
     (view, store, inspector)
 }
@@ -1866,54 +1867,67 @@ pub(super) fn stack_column(
         label.add_css_class(stack_column_css(column));
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::End);
-        enable_stable_text_selection(&label);
+        enable_recycled_text_selection(&label);
+        label.set_has_tooltip(true);
+        let tooltip_item = item.downgrade();
+        label.connect_query_tooltip(move |_, _, _, _, tooltip| {
+            let Some(row) = tooltip_item
+                .upgrade()
+                .and_then(|item| item.item())
+                .and_downcast::<components::SnapshotRow>()
+            else {
+                return false;
+            };
+            tooltip.set_text(Some(&stack_tooltip(&row.borrow::<StackEntry>())));
+            true
+        });
         let click = gtk::GestureClick::new();
-        let item_for_click = item.clone();
+        click.set_button(gtk::gdk::BUTTON_PRIMARY);
+        let item_for_click = item.downgrade();
         let selection = selection.clone();
         click.connect_pressed(move |_, _, _, _| {
-            selection.set_selected(item_for_click.position());
+            if let Some(item) = item_for_click.upgrade() {
+                selection.set_selected(item.position());
+            }
         });
         label.add_controller(click);
         item.set_child(Some(&label));
-    });
-    factory.connect_bind(move |_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        let (Some(label), Some(data)) = (
-            item.child().and_downcast::<gtk::Label>(),
-            item.item().and_downcast::<glib::BoxedAnyObject>(),
-        ) else {
-            return;
-        };
-        clear_label_selection(&label);
-        let entry = data.borrow::<StackEntry>();
-        reset_semantic_css(&label);
-        let text = match column {
-            StackColumn::Anchor => entry
-                .address_registers
-                .iter()
-                .map(|name| format!("${name}"))
-                .collect::<Vec<_>>()
-                .join(","),
-            StackColumn::Address => {
-                label.add_css_class("memory-stack");
-                let width = usize::try_from(entry.pointer_bits / 4)
-                    .unwrap_or(16)
-                    .clamp(8, 16);
-                format!("0x{:0width$x}", entry.address, width = width)
-            }
-            StackColumn::Value => {
-                label.add_css_class(memory_kind_css(entry.memory_kind));
-                stack_entry_text(&entry)
-            }
-            StackColumn::Offset => format!("+0x{:04x}", entry.offset),
-            StackColumn::Index => format!("+{:03}", entry.index),
-            StackColumn::References => stack_references(&entry),
-            StackColumn::Region => entry.region.clone().unwrap_or_else(|| String::from("—")),
-        };
-        label.set_text(&text);
-        label.set_tooltip_text(Some(&stack_tooltip(&entry)));
+        let label = label.downgrade();
+        super::lifecycle::connect_snapshot_cell(item, move |data| {
+            let Some(label) = label.upgrade() else {
+                return;
+            };
+            clear_label_selection(&label);
+            let entry = data.borrow::<StackEntry>();
+            set_semantic_css(
+                &label,
+                match column {
+                    StackColumn::Address => Some("memory-stack"),
+                    StackColumn::Value => Some(memory_kind_css(entry.memory_kind)),
+                    _ => None,
+                },
+            );
+            let text = match column {
+                StackColumn::Anchor => entry
+                    .address_registers
+                    .iter()
+                    .map(|name| format!("${name}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                StackColumn::Address => {
+                    let width = usize::try_from(entry.pointer_bits / 4)
+                        .unwrap_or(16)
+                        .clamp(8, 16);
+                    format!("0x{:0width$x}", entry.address, width = width)
+                }
+                StackColumn::Value => stack_entry_text(&entry),
+                StackColumn::Offset => format!("+0x{:04x}", entry.offset),
+                StackColumn::Index => format!("+{:03}", entry.index),
+                StackColumn::References => stack_references(&entry),
+                StackColumn::Region => entry.region.clone().unwrap_or_else(|| String::from("—")),
+            };
+            label.set_text(&text);
+        });
     });
 
     components::table_column(title, width, factory)
@@ -1939,6 +1953,10 @@ pub(super) fn stack_column_css(column: StackColumn) -> &'static str {
 }
 
 pub(super) fn reset_semantic_css(label: &gtk::Label) {
+    set_semantic_css(label, None);
+}
+
+pub(super) fn set_semantic_css(label: &gtk::Label, active: Option<&str>) {
     for class in [
         "memory-code",
         "memory-heap",
@@ -1951,7 +1969,13 @@ pub(super) fn reset_semantic_css(label: &gtk::Label) {
         "register-zero",
         "modified-register",
     ] {
-        label.remove_css_class(class);
+        if Some(class) != active {
+            label.remove_css_class(class);
+        }
+    }
+
+    if let Some(active) = active {
+        label.add_css_class(active);
     }
 }
 
@@ -1980,7 +2004,7 @@ pub(super) fn instruction_column(
         label.connect_query_tooltip(move |_, _, _, _, tooltip| {
             let Some(data) = tooltip_item.upgrade()
                 .and_then(|item| item.item())
-                .and_downcast::<glib::BoxedAnyObject>()
+                .and_downcast::<components::SnapshotRow>()
             else {
                 return false;
             };
@@ -2004,29 +2028,24 @@ pub(super) fn instruction_column(
         });
         label.add_controller(click);
         item.set_child(Some(&label));
-    });
-    factory.connect_bind(move |_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-        let (Some(label), Some(data)) = (
-            item.child().and_downcast::<gtk::Label>(),
-            item.item().and_downcast::<glib::BoxedAnyObject>(),
-        ) else {
-            return;
-        };
-        clear_label_selection(&label);
-        let data = data.borrow::<InstructionRowData>();
-        if class == "instruction-address"
-            && data.instruction.function != "??"
-            && data.instruction.offset == "0"
-        {
-            label.add_css_class("function-boundary-cell");
-        } else {
-            label.remove_css_class("function-boundary-cell");
-        }
+        let label = label.downgrade();
+        super::lifecycle::connect_snapshot_cell(item, move |row| {
+            let Some(label) = label.upgrade() else {
+                return;
+            };
+            let data = row.borrow::<InstructionRowData>();
+            clear_label_selection(&label);
+            if class == "instruction-address"
+                && data.instruction.function != "??"
+                && data.instruction.offset == "0"
+            {
+                label.add_css_class("function-boundary-cell");
+            } else {
+                label.remove_css_class("function-boundary-cell");
+            }
 
-        label.set_text(&text(&data));
+            label.set_text(&text(&data));
+        });
     });
 
     components::table_column(title, width, factory)

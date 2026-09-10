@@ -101,6 +101,10 @@ fn paging_preserves_selection_scroll_and_column_widths() {
     settle();
     assert_eq!(selection.selected(), 20);
     assert_eq!(displayed.borrow()[7].pointer_chain, ["0x5678"]);
+    assert_eq!(
+        inspector.interpretation.text(),
+        stack_entry_text(&details[20])
+    );
     assert!(displayed.borrow()[8].pointer_chain.is_empty());
     update_details(&store, &displayed, &details);
     settle();

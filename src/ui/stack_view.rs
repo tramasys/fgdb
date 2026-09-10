@@ -219,13 +219,13 @@ fn append_page(
         // annotations are presentation-only and final details replace them.
         let mut rendered = entries.to_vec();
         debug_state::preserve_stack_render_details(&mut rendered, &displayed.borrow());
-        replace_boxed_store_if_changed(store, rendered.iter().cloned());
+        components::replace_snapshot_store(store, rendered.iter().cloned());
         displayed.replace(rendered);
     } else {
         let objects = entries
             .iter()
             .cloned()
-            .map(glib::BoxedAnyObject::new)
+            .map(components::SnapshotRow::new)
             .collect::<Vec<_>>();
 
         store.splice(index as u32, 0, &objects);
@@ -239,13 +239,18 @@ fn update_details(
     entries: &[StackEntry],
 ) {
     for entry in entries {
-        let changed = displayed.borrow().get(entry.index) != Some(entry);
+        let changed = displayed
+            .borrow()
+            .get(entry.index)
+            .is_some_and(|current| current != entry);
         if changed {
-            store.splice(
-                entry.index as u32,
-                1,
-                &[glib::BoxedAnyObject::new(entry.clone())],
-            );
+            let Some(row) = store
+                .item(entry.index as u32)
+                .and_downcast::<components::SnapshotRow>()
+            else {
+                continue;
+            };
+            row.replace(entry.clone());
 
             displayed.borrow_mut()[entry.index].clone_from(entry);
         }

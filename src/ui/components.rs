@@ -8,7 +8,7 @@ mod models;
 mod subtabs;
 mod tables;
 pub(super) use models::{
-    replace_boxed_store, replace_boxed_store_if_changed, replace_sorted_boxed_store_if_changed,
+    SnapshotRow, replace_boxed_store, replace_boxed_store_if_changed, replace_snapshot_store,
 };
 pub(super) use subtabs::{build_subtab_navigation, update_subtab_arrows};
 pub(super) use tables::{column_view, table_column};

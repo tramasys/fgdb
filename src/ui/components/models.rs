@@ -2,8 +2,8 @@
 
 use gtk::{gio, glib, prelude::*};
 
-mod ordered;
-pub(in crate::ui) use ordered::replace_sorted_boxed_store_if_changed;
+mod snapshot;
+pub(in crate::ui) use snapshot::{SnapshotRow, replace_snapshot_store};
 
 pub(in crate::ui) fn replace_boxed_store<T: 'static>(
     store: &gio::ListStore,

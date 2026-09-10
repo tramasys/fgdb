@@ -179,7 +179,7 @@ impl Ui {
             let Some(object) = self
                 .instructions_store
                 .item(position)
-                .and_downcast::<glib::BoxedAnyObject>()
+                .and_downcast::<components::SnapshotRow>()
             else {
                 continue;
             };
@@ -209,8 +209,7 @@ impl Ui {
             };
 
             if let Some(row) = replacement {
-                self.instructions_store
-                    .splice(position, 1, &[glib::BoxedAnyObject::new(row)]);
+                object.replace(row);
             }
         }
     }

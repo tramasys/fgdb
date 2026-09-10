@@ -317,17 +317,11 @@ impl Ui {
                     return;
                 }
 
-                let Some(item) = store
-                    .item(position)
-                    .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
-                else {
+                let Some((register, display)) = store.item(position).and_then(|item| {
+                    with_register_row(&item, |row| (row.register.clone(), row.vector_display))
+                }) else {
                     return;
                 };
-
-                let row = item.borrow::<RegisterRowData>();
-                let register = row.register.clone();
-                let display = row.vector_display;
-                drop(row);
 
                 let Some(parent) = panel
                     .upgrade()
@@ -772,7 +766,7 @@ impl Ui {
     fn render_stack(&self, entries: Cow<'_, [StackEntry]>) {
         self.update_stack_paging();
         if self.displayed_stack.borrow().as_slice() != entries.as_ref() {
-            replace_boxed_store_if_changed(&self.stack_store, entries.iter().cloned());
+            components::replace_snapshot_store(&self.stack_store, entries.iter().cloned());
             self.displayed_stack.replace(entries.into_owned());
         }
 

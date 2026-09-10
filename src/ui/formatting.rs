@@ -19,13 +19,8 @@ pub(super) fn populate_register_group(
         .into_iter()
         .enumerate()
         .map(|(index, mut row)| {
-            if preserve_details
-                && let Some(previous) = group
-                    .store
-                    .item(index as u32)
-                    .and_downcast::<glib::BoxedAnyObject>()
-            {
-                row.preserve_details_from(&previous.borrow::<RegisterRowData>());
+            if preserve_details && let Some(previous) = group.store.item(index as u32) {
+                with_register_row(&previous, |previous| row.preserve_details_from(previous));
             }
 
             row
@@ -37,7 +32,7 @@ pub(super) fn populate_register_group(
 
     match &group.view {
         RegisterGroupWidget::Table(_) => {
-            replace_boxed_store_if_changed(&group.store, rows);
+            components::replace_snapshot_store(&group.store, rows);
         }
         RegisterGroupWidget::Vector(list) => simd::replace_rows(&group.store, list, rows),
     }
@@ -56,6 +51,22 @@ pub(super) fn populate_register_group(
         && let RegisterGroupWidget::Table(view) = &group.view
     {
         view.set_size_request(-1, 24 + count * 26);
+    }
+}
+
+/// SIMD keeps its specialized lane model. Ordinary register tables use live
+/// snapshot slots. Activation and retained details read either representation
+/// here rather than duplicating payload handling in each consumer.
+pub(super) fn with_register_row<T>(
+    object: &glib::Object,
+    read: impl FnOnce(&RegisterRowData) -> T,
+) -> Option<T> {
+    if let Some(row) = object.downcast_ref::<components::SnapshotRow>() {
+        Some(read(&row.borrow::<RegisterRowData>()))
+    } else {
+        object
+            .downcast_ref::<glib::BoxedAnyObject>()
+            .map(|row| read(&row.borrow::<RegisterRowData>()))
     }
 }
 

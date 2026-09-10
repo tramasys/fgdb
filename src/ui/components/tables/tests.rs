@@ -3,6 +3,8 @@ use crate::theme::Theme;
 use gtk::glib;
 use std::{cell::Cell, rc::Rc, time::Duration};
 
+mod snapshots;
+
 fn settle() {
     glib::MainContext::default().block_on(glib::timeout_future(Duration::from_millis(50)));
 }
@@ -271,7 +273,7 @@ fn debugger_table_dividers_resize_with_optional_instruction_columns() {
 
 #[test]
 #[ignore = "requires a GTK display, run separately from other GTK tests"]
-fn moving_instruction_windows_reuse_rows_and_release_cells() {
+fn instruction_snapshots_reuse_cells_and_release_bindings() {
     use crate::ui::{ColumnLayouts, InstructionRowData, TableId, views};
     use std::cell::RefCell;
 
@@ -316,21 +318,43 @@ fn moving_instruction_windows_reuse_rows_and_release_cells() {
         })
     };
 
-    let key = |row: &InstructionRowData| row.instruction.address.clone();
-    super::super::replace_sorted_boxed_store_if_changed(&store, rows(0..440, 32), key);
+    super::super::replace_snapshot_store(&store, rows(0..440, 32));
     let (window, scroll) = present(&view, 1200);
     let initial_binds = binds.replace(0);
     assert!(initial_binds > 0);
     selection.set_selected(48);
-    let selected = selection.selected_item().unwrap();
+    let first = store.item(0).unwrap();
+    let focus = selection
+        .selected_item()
+        .and_downcast::<super::super::SnapshotRow>()
+        .unwrap()
+        .borrow::<InstructionRowData>()
+        .instruction
+        .address
+        .clone();
     let column = columns(&view).remove(2);
     column.set_fixed_width(420);
     settle();
     binds.set(0);
 
-    super::super::replace_sorted_boxed_store_if_changed(&store, rows(16..456, 33), key);
+    super::super::replace_snapshot_store(&store, rows(16..456, 33));
+    // Snapshot slots are presentation positions, not instruction identities.
+    // Like show_instructions, restore the requested focus by its address.
+    let selected = (0..store.n_items())
+        .find(|&index| {
+            store
+                .item(index)
+                .and_downcast::<super::super::SnapshotRow>()
+                .unwrap()
+                .borrow::<InstructionRowData>()
+                .instruction
+                .address
+                == focus
+        })
+        .unwrap();
+    selection.set_selected(selected);
     settle();
-    assert_eq!(selection.selected_item().as_ref(), Some(&selected));
+    assert_eq!(store.item(0).unwrap(), first);
     assert_eq!(selection.selected(), 32);
     assert_eq!(column.fixed_width(), 420);
     assert!(
@@ -341,10 +365,35 @@ fn moving_instruction_windows_reuse_rows_and_release_cells() {
 
     let current = store
         .item(17)
-        .and_downcast::<glib::BoxedAnyObject>()
+        .and_downcast::<super::super::SnapshotRow>()
         .unwrap();
 
     assert!(current.borrow::<InstructionRowData>().current);
+
+    let mut checked = 0;
+    for item in items.borrow().iter().filter_map(glib::WeakRef::upgrade) {
+        let (Some(label), Some(row)) = (
+            item.child().and_downcast::<gtk::Label>(),
+            item.item().and_downcast::<super::super::SnapshotRow>(),
+        ) else {
+            continue;
+        };
+        if label.has_css_class("instruction-address") {
+            let row = row.borrow::<InstructionRowData>();
+            let marker = if row.current { "›" } else { " " };
+            assert_eq!(
+                label.text(),
+                format!(
+                    "{marker} {}",
+                    crate::ui::full_address(&row.instruction.address, row.pointer_bits)
+                )
+            );
+            assert!(label.is_selectable());
+            checked += 1;
+        }
+    }
+
+    assert!(checked > 0);
     let weak_view = view.downgrade();
     scroll.set_child(gtk::Widget::NONE);
     window.close();

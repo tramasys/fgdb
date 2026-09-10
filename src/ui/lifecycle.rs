@@ -1,6 +1,40 @@
 use gtk::{gio, glib, prelude::*};
 use std::{cell::RefCell, rc::Rc};
 
+/// Observe only the snapshot currently bound to a recycled list item. The
+/// subscription disconnects on unbind and destruction, without retaining a
+/// row, item, or cell. An update callback must only change cell presentation.
+pub(super) fn connect_snapshot_cell(
+    item: &gtk::ListItem,
+    update: impl Fn(&super::components::SnapshotRow) + 'static,
+) {
+    use super::components::SnapshotRow;
+
+    let subscription = RefCell::new(None::<SignalSubscription>);
+    let update = Rc::new(update);
+
+    item.connect_item_notify(move |item| {
+        drop(subscription.borrow_mut().take());
+        let Some(row) = item.item().and_downcast::<SnapshotRow>() else {
+            return;
+        };
+
+        update(&row);
+        let update = Rc::clone(&update);
+        let item = item.downgrade();
+        let handler = row.connect_updated(move |row| {
+            if item
+                .upgrade()
+                .is_some_and(|item| item.item().as_ref() == Some(row.upcast_ref()))
+            {
+                update(row);
+            }
+        });
+
+        subscription.replace(Some(SignalSubscription::new(&row, handler)));
+    });
+}
+
 /// Disconnect on rebinding or teardown without retaining the observed object.
 #[must_use]
 pub(super) struct SignalSubscription {

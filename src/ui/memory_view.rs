@@ -466,7 +466,7 @@ pub(super) fn show_memory_watch_data(
     let changed = rows.iter().filter(|row| row.changed).count();
     drop(previous);
 
-    if replace_boxed_store_if_changed(&watch.store, rows) {
+    if components::replace_snapshot_store(&watch.store, rows) {
         watch.selection.set_selected(gtk::INVALID_LIST_POSITION);
         watch.follow_button.set_sensitive(false);
     }
@@ -516,7 +516,7 @@ pub(super) fn show_memory_watch_error(watch: &MemoryWatchView, error: &str) {
 fn selected_memory_pointer(selection: &gtk::SingleSelection) -> Option<u64> {
     selection
         .selected_item()
-        .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+        .and_then(|item| item.downcast::<components::SnapshotRow>().ok())
         .and_then(|item| item.borrow::<MemoryRowData>().pointer)
         .filter(|pointer| *pointer != 0)
 }
@@ -524,7 +524,7 @@ fn selected_memory_pointer(selection: &gtk::SingleSelection) -> Option<u64> {
 fn build_memory_watch_table(
     layout: &TableLayout,
 ) -> (gtk::ColumnView, gio::ListStore, gtk::SingleSelection) {
-    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let store = gio::ListStore::new::<components::SnapshotRow>();
     let selection = gtk::SingleSelection::new(Some(store.clone()));
     selection.set_autoselect(false);
     selection.set_can_unselect(true);
@@ -575,7 +575,12 @@ fn memory_watch_column(
         label.add_css_class("memory-watch-cell");
         label.set_halign(gtk::Align::Start);
         label.set_ellipsize(pango::EllipsizeMode::Middle);
-        enable_stable_text_selection(&label);
+        enable_recycled_text_selection(&label);
+        label.set_has_tooltip(true);
+        label.connect_query_tooltip(|label, _, _, _, tooltip| {
+            tooltip.set_text(Some(&label.text()));
+            true
+        });
         let click = gtk::GestureClick::new();
         let weak_item = item.downgrade();
         let selection = selection.clone();
@@ -588,44 +593,36 @@ fn memory_watch_column(
 
         label.add_controller(click);
         item.set_child(Some(&label));
-    });
+        let label = label.downgrade();
+        super::lifecycle::connect_snapshot_cell(item, move |data| {
+            let Some(label) = label.upgrade() else {
+                return;
+            };
 
-    factory.connect_bind(move |_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
+            clear_label_selection(&label);
+            let row = data.borrow::<MemoryRowData>();
+            set_semantic_css(&label, Some(memory_kind_css(row.kind)));
 
-        let (Some(label), Some(data)) = (
-            item.child().and_downcast::<gtk::Label>(),
-            item.item().and_downcast::<glib::BoxedAnyObject>(),
-        ) else {
-            return;
-        };
+            if row.changed {
+                label.add_css_class("memory-row-changed");
+            } else {
+                label.remove_css_class("memory-row-changed");
+            }
 
-        clear_label_selection(&label);
-        reset_semantic_css(&label);
-        label.remove_css_class("memory-row-changed");
-        let row = data.borrow::<MemoryRowData>();
-        label.add_css_class(memory_kind_css(row.kind));
+            let width = usize::try_from(row.pointer_bits / 4)
+                .unwrap_or(16)
+                .clamp(8, 16);
 
-        if row.changed {
-            label.add_css_class("memory-row-changed");
-        }
+            let text = match column {
+                MemoryRowColumn::Address => format!("0x{:0width$x}", row.address),
+                MemoryRowColumn::Offset => format!("+0x{:04x}", row.offset),
+                MemoryRowColumn::Value => row.value.clone(),
+                MemoryRowColumn::Decoded => row.decoded.clone(),
+                MemoryRowColumn::Interpretation => row.interpretation.clone(),
+            };
 
-        let width = usize::try_from(row.pointer_bits / 4)
-            .unwrap_or(16)
-            .clamp(8, 16);
-
-        let text = match column {
-            MemoryRowColumn::Address => format!("0x{:0width$x}", row.address),
-            MemoryRowColumn::Offset => format!("+0x{:04x}", row.offset),
-            MemoryRowColumn::Value => row.value.clone(),
-            MemoryRowColumn::Decoded => row.decoded.clone(),
-            MemoryRowColumn::Interpretation => row.interpretation.clone(),
-        };
-
-        label.set_text(&text);
-        label.set_tooltip_text(Some(&text));
+            label.set_text(&text);
+        });
     });
 
     components::table_column(title, width, factory)
@@ -827,6 +824,9 @@ pub(super) fn push_hex_bytes(output: &mut String, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod benchmarks;
+    mod snapshots;
 
     #[test]
     #[ignore = "requires a GTK display, run separately from other GTK tests"]

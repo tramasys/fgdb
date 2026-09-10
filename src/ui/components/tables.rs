@@ -3,6 +3,8 @@
 use gtk::prelude::*;
 
 #[cfg(test)]
+mod benchmarks;
+#[cfg(test)]
 mod tests;
 
 /// Only the last visible column absorbs spare width. Expanding a middle column

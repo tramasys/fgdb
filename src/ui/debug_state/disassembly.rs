@@ -137,9 +137,7 @@ impl Ui {
             })
             .collect::<Vec<_>>();
 
-        components::replace_sorted_boxed_store_if_changed(&self.instructions_store, rows, |row| {
-            hex_value(&row.instruction.address)
-        });
+        components::replace_snapshot_store(&self.instructions_store, rows);
 
         let selected = u32::try_from(selected).unwrap_or(0);
         let selection_changed = self.instructions_selection.selected() != selected;
@@ -153,10 +151,10 @@ impl Ui {
         if let (Some(first), Some(last)) = (
             self.instructions_store
                 .item(0)
-                .and_downcast::<glib::BoxedAnyObject>(),
+                .and_downcast::<components::SnapshotRow>(),
             self.instructions_store
                 .item(self.instructions_store.n_items().saturating_sub(1))
-                .and_downcast::<glib::BoxedAnyObject>(),
+                .and_downcast::<components::SnapshotRow>(),
         ) {
             let first = first.borrow::<InstructionRowData>();
             let last = last.borrow::<InstructionRowData>();
@@ -329,7 +327,7 @@ impl Ui {
         self.instructions_view.connect_activate(move |_, position| {
             let Some(item) = store
                 .item(position)
-                .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+                .and_then(|item| item.downcast::<components::SnapshotRow>().ok())
             else {
                 return;
             };
@@ -496,7 +494,7 @@ impl Ui {
 
         self.instructions_store
             .item(position)
-            .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+            .and_then(|item| item.downcast::<components::SnapshotRow>().ok())
             .map(|item| item.borrow::<InstructionRowData>().clone())
     }
 
