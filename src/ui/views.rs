@@ -638,14 +638,6 @@ fn local_name_column(
             label.remove_css_class("local-name");
             label.add_css_class("muted");
         }
-
-        let tooltip = if node.placeholder {
-            format!("{}\n{}", node.variable.name, node.variable.value)
-        } else {
-            variable_tooltip(&node.variable)
-        };
-
-        content.set_tooltip_text(Some(&tooltip));
     });
 
     factory.connect_unbind(move |_, object| {
@@ -1237,14 +1229,6 @@ fn local_text_column(
         } else {
             label.remove_css_class("muted");
         }
-
-        let tooltip = if node.placeholder {
-            format!("{}\n{}", variable.name, variable.value)
-        } else {
-            variable_tooltip(variable)
-        };
-
-        label.set_tooltip_text(Some(&tooltip));
     });
 
     factory.connect_unbind(move |_, object| {
@@ -1414,28 +1398,6 @@ pub(super) fn variable_details(
     } else {
         format!("{decimal}  {details}")
     }
-}
-
-pub(super) fn variable_tooltip(variable: &Variable) -> String {
-    let interaction = if !variable.is_available() {
-        "This value is unavailable in the selected frame"
-    } else if variable.can_expand() {
-        "Click the name or press Enter to expand. Use Edit to change the value"
-    } else {
-        "Double-click or press Enter to edit"
-    };
-    format!(
-        "{}  {}\n{}\n{} child{}\n{interaction}",
-        variable.type_name.as_deref().unwrap_or("<unknown type>"),
-        variable.name,
-        variable.value,
-        variable.num_children,
-        if variable.num_children == 1 {
-            ""
-        } else {
-            "ren"
-        }
-    )
 }
 
 pub(super) fn build_instruction_view(
