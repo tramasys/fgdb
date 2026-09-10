@@ -2484,6 +2484,14 @@ listview.kernel-overview-list > row:hover .kernel-section-heading {
     min-height: 22px;
 }
 
+paned.kernel-tls-split > separator {
+    min-height: 5px;
+}
+
+paned.kernel-tls-split > separator:hover {
+    background: alpha(@app_accent, 0.35);
+}
+
 .kernel-tls-metadata-header {
     min-height: 27px;
     padding: 2px 6px;

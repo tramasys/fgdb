@@ -903,6 +903,7 @@ struct KernelView {
     tls_symbol_count: gtk::Label,
     tls_symbols_empty: gtk::Label,
     tls_metadata: gtk::Stack,
+    tls_split: gtk::Paned,
     change_store: gio::ListStore,
     mapping_change_store: gio::ListStore,
     mapping_change_count: gtk::Label,

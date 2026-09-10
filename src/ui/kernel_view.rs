@@ -4,6 +4,9 @@ use components::{build_subtab_navigation, update_subtab_arrows};
 mod memory_summary;
 pub(super) use memory_summary::MemorySummary;
 
+#[cfg(test)]
+mod tls_tests;
+
 const MIN_MAPPING_DELTA_HEIGHT: i32 = 190;
 const PRIVATE_CATEGORY_TABLE_HEIGHT: i32 = 205;
 const KERNEL_FACT_LABEL_MAX_WIDTH: i32 = 42;
@@ -366,6 +369,7 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
         tls_symbol_count,
         tls_symbols_empty,
         tls_metadata,
+        tls_split: tls,
         change_store,
         mapping_change_store,
         mapping_change_count,
@@ -711,7 +715,7 @@ fn build_overview(
 fn build_tls(
     columns: &ColumnLayouts,
 ) -> (
-    gtk::Box,
+    gtk::Paned,
     gio::ListStore,
     gio::ListStore,
     gtk::Label,
@@ -728,10 +732,6 @@ fn build_tls(
     runtime_title.set_xalign(0.0);
     runtime_page.append(&runtime_title);
     let (runtime, runtime_store) = build_overview(HashSet::new(), None);
-    runtime.set_vexpand(false);
-    runtime.set_min_content_height(1);
-    runtime.set_max_content_height(260);
-    runtime.set_propagate_natural_height(true);
     runtime_page.append(&runtime);
     let modules_page = gtk::Box::new(gtk::Orientation::Vertical, 3);
     let module_count = gtk::Label::new(Some("No snapshot"));
@@ -876,13 +876,18 @@ fn build_tls(
     metadata.add_named(&metadata_content, Some("content"));
     metadata.add_named(&metadata_empty, Some("empty"));
     metadata.set_visible_child_name("empty");
-    let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    page.add_css_class("kernel-tls-split");
-    page.append(&runtime_page);
-    page.append(&metadata);
+    let split = gtk::Paned::new(gtk::Orientation::Vertical);
+    split.add_css_class("kernel-tls-split");
+    split.set_vexpand(true);
+    split.set_position(280);
+    split.set_wide_handle(true);
+    split.set_shrink_start_child(true);
+    split.set_shrink_end_child(true);
+    split.set_start_child(Some(&runtime_page));
+    split.set_end_child(Some(&metadata));
 
     (
-        page,
+        split,
         runtime_store,
         module_store,
         module_count,

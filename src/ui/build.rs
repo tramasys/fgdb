@@ -674,6 +674,7 @@ pub(super) fn build_workspace(
         layout::Pane::new("locals_instructions", &inspector.context_split),
         layout::Pane::with_default_fraction("memory_inspector_map", &inspector.memory_split, 0.5),
         layout::Pane::new("kernel_changes", &inspector.kernel_view.changes_split),
+        layout::Pane::with_default_fraction("kernel_tls", &inspector.kernel_view.tls_split, 0.5),
         layout::Pane::with_default_fraction(
             "misc_startup_vectors",
             &inspector.misc_view.startup_split,
