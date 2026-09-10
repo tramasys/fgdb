@@ -116,7 +116,13 @@ pub(super) fn open_debugger_with_printers(
     }
 
     assert!(request(&client, "-enable-pretty-printing").is_done());
-    assert!(request(&client, &format!("-break-insert {checkpoint}")).is_done());
+
+    let breakpoint = request(
+        &client,
+        &format!("-break-insert {}", crate::debugger::quote(checkpoint)),
+    );
+
+    assert!(breakpoint.is_done(), "{fixture}: {breakpoint:?}");
     assert_eq!(request(&client, "-exec-run").class, "running");
     wait_until(|| stopped.get());
     (debugger, client)

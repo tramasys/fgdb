@@ -1,6 +1,19 @@
 use super::*;
 use std::{path::Path, process::Command, time::Duration};
 
+mod ada;
+mod d;
+
+#[test]
+fn assignments_quote_both_expressions_without_interpolating_python() {
+    let command = assignment_command("object.field", "\"quoted\\value\"");
+    assert!(command.starts_with("-interpreter-exec console "));
+    assert!(command.contains(".assign("));
+    assert!(!command.contains('\n'));
+    let hostile = assignment_command("name\nquit", "\"; raise RuntimeError('injected')");
+    assert!(!hostile.contains('\n'));
+}
+
 fn fixture(name: &str, breakpoint: &str, assertions: &str) {
     let executable = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("target/debug-fixtures")

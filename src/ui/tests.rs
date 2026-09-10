@@ -24,6 +24,31 @@ use crate::debugger::{
 use crate::misc::CallAbiPhase;
 
 #[test]
+#[ignore = "requires a GTK display, run separately from other GTK tests"]
+fn d_and_ada_sources_use_installed_syntax_definitions() {
+    use sourceview5::prelude::*;
+
+    gtk::init().unwrap();
+
+    for (path, expected) in [
+        ("main.d", "d"),
+        ("types.di", "d"),
+        ("main.adb", "ada"),
+        ("types.ads", "ada"),
+        ("main.ada", "ada"),
+    ] {
+        let buffer = super::views::build_source_buffer("", Some(Path::new(path)), None);
+
+        assert_eq!(
+            buffer.language().expect("installed syntax definition").id(),
+            expected
+        );
+
+        assert!(buffer.is_highlight_syntax());
+    }
+}
+
+#[test]
 fn stop_point_submissions_recheck_execution_and_selection_locks() {
     use crate::model::{DebuggerModel, DebuggerStateDelta, actions::*};
 

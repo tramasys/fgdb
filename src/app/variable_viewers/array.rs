@@ -149,7 +149,7 @@ impl ArrayRequest {
             .variable
             .type_name
             .as_deref()
-            .is_some_and(crate::language::is_fortran_array)
+            .is_some_and(crate::language::has_native_array_bounds)
         {
             self.session.fail("Native array bounds are unavailable. Python-enabled GDB and allocated array storage are required");
             return;

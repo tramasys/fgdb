@@ -5,6 +5,9 @@ GDB ?= gdb
 FORTRAN ?= gfortran
 ZIG ?= zig
 ODIN ?= odin
+GDC ?= gdc
+DMD ?= dmd
+GNATMAKE ?= gnatmake
 MUSL_CC ?= musl-gcc
 
 CFLAGS ?= -std=c17 -g3 -O0 -fno-omit-frame-pointer -fno-inline -Wall -Wextra -Wpedantic
@@ -54,10 +57,13 @@ OPTIMIZED_TARGETS := \
 	$(TARGET_DIR)/rust-debug-target-o2
 TARGETS := $(C_TARGETS) $(CXX_TARGETS) $(RUST_TARGETS) $(OPTIMIZED_TARGETS)
 LANGUAGE_TARGETS := \
+	$(TARGET_DIR)/d-variable-viewer-target \
+	$(TARGET_DIR)/ada-variable-viewer-target \
 	$(TARGET_DIR)/fortran-array-viewer-target \
 	$(TARGET_DIR)/fortran-variable-viewer-target \
 	$(TARGET_DIR)/zig-variable-viewer-target \
 	$(TARGET_DIR)/odin-variable-viewer-target
+OPTIONAL_LANGUAGE_TARGETS := $(TARGET_DIR)/dmd-variable-viewer-target
 ALLOCATOR_TARGETS := \
 	$(TARGET_DIR)/c-glibc-allocator-target \
 	$(TARGET_DIR)/c-musl-allocator-target \
@@ -99,6 +105,15 @@ $(TARGET_DIR)/c-mimalloc-allocator-target: c_allocator_target.c | $(TARGET_DIR)
 
 $(TARGET_DIR)/fortran-variable-viewer-target: fortran_variable_viewer_target.f90 | $(TARGET_DIR)
 	$(FORTRAN) -g3 -O0 -fcheck=all $< -o $@
+
+$(TARGET_DIR)/d-variable-viewer-target: d_variable_viewer_target.d | $(TARGET_DIR)
+	$(GDC) -g3 -O0 -fno-inline $< -o $@
+
+$(TARGET_DIR)/dmd-variable-viewer-target: d_variable_viewer_target.d | $(TARGET_DIR)
+	$(DMD) -g -od=$(TARGET_DIR) -of=$@ $<
+
+$(TARGET_DIR)/ada-variable-viewer-target: ada_variable_viewer_target.adb | $(TARGET_DIR)
+	cd $(TARGET_DIR) && $(GNATMAKE) -g -O0 -fno-inline $(abspath $<) -o $(notdir $@)
 
 $(TARGET_DIR)/fortran-array-viewer-target: fortran_array_viewer_target.f90 | $(TARGET_DIR)
 	$(FORTRAN) -g3 -O0 -fcheck=all $< -o $@
@@ -198,4 +213,4 @@ $(CORE_DUMP): $(TARGET_DIR)/c-misc-core-target
 		-ex "generate-core-file $(abspath $@)"
 
 clean:
-	$(RM) $(TARGETS) $(LANGUAGE_TARGETS) $(ALLOCATOR_TARGETS) $(CORE_DUMP)
+	$(RM) $(TARGETS) $(LANGUAGE_TARGETS) $(OPTIONAL_LANGUAGE_TARGETS) $(ALLOCATOR_TARGETS) $(CORE_DUMP)

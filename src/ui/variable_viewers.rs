@@ -64,7 +64,7 @@ impl VariableViewerRegistry {
     pub(crate) fn with_builtins() -> Self {
         let mut registry = Self::default();
         let array_registered = registry.register(ArrayViewerProvider);
-        let native_array_registered = registry.register(FortranArrayProvider);
+        let native_array_registered = registry.register(NativeArrayProvider);
         let list_registered = registry.register(LinkedListViewerProvider);
         debug_assert!(array_registered && native_array_registered && list_registered);
 
@@ -100,9 +100,9 @@ impl VariableViewerRegistry {
 
 struct ArrayViewerProvider;
 
-struct FortranArrayProvider;
+struct NativeArrayProvider;
 
-impl VariableViewerProvider for FortranArrayProvider {
+impl VariableViewerProvider for NativeArrayProvider {
     fn descriptor(&self) -> VariableViewerDescriptor {
         VariableViewerDescriptor {
             id: String::from("native-array"),
@@ -119,7 +119,7 @@ impl VariableViewerProvider for FortranArrayProvider {
             && variable
                 .type_name
                 .as_deref()
-                .is_some_and(crate::language::is_fortran_array)
+                .is_some_and(crate::language::has_native_array_bounds)
     }
 }
 
@@ -952,6 +952,30 @@ mod tests {
 
         lazy_array.value = String::from("<optimized out>");
         assert!(registry.matching(&lazy_array).is_empty());
+    }
+
+    #[test]
+    fn d_sequences_and_ada_arrays_use_the_existing_bounded_viewers() {
+        let registry = VariableViewerRegistry::with_builtins();
+        let d = registry.matching(&variable("int[]"));
+        assert_eq!(d.len(), 1);
+
+        assert!(matches!(
+            d[0].plan,
+            VariableViewerPlan::IndexedChildren { .. }
+        ));
+
+        let ada = registry.matching(&variable("array (-2 .. 2) of integer"));
+        assert_eq!(ada.len(), 1);
+
+        assert!(matches!(
+            ada[0].plan,
+            VariableViewerPlan::NativeArray { .. }
+        ));
+
+        let mut null = variable("access fixture.node");
+        null.value = "0x0".into();
+        assert!(registry.matching(&null).is_empty());
     }
 
     struct CustomViewer;

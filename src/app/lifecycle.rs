@@ -1133,6 +1133,7 @@ mod tests {
         use crate::{debugger::parse_record, language::Language};
 
         for (language, file, name) in [
+            (Language::D, "fixture.d", "D main"),
             (Language::Zig, "fixture.zig", "fixture.main"),
             (Language::Odin, "fixture.odin", "fixture::main"),
         ] {

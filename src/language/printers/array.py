@@ -13,7 +13,8 @@ import operator
 import gdb
 
 from .common import MAX_ARRAY_BYTES, MAX_ARRAY_OUTPUT_BYTES, read_only
-from .fortran import Array, CHARACTER_LIMIT, array_bounds, is_fortran_array, preview, resolve_member_path
+from .fortran import Array, CHARACTER_LIMIT, array_bounds, is_fortran_array, preview
+from .paths import resolve_member_path
 
 BATCH_LIMIT = 64
 SEQUENTIAL_LIMIT = 4096
@@ -26,6 +27,7 @@ class NativeArray:
         self.value = value
         self.bounds, self.element_type = array_bounds(value.type.strip_typedefs())
         self.fortran = is_fortran_array(value.type.strip_typedefs())
+        self.ada = str(value.type.strip_typedefs()).startswith("array (")
         self.order = "column" if self.fortran else "row"
         self.sequential = False
         self.length_known = True
@@ -255,7 +257,8 @@ def inspect_array(expression, member_path, axes, offset, count):
                 text = "<unavailable: " + str(error)[:256] + ">"
                 value_type = "<unknown>"
 
-            index = "(" + ",".join(map(str, coordinate)) + ")" if array.order == "column" else "".join("[" + str(i) + "]" for i in coordinate)
+            native_indices = array.order == "column" or getattr(array, "ada", False)
+            index = "(" + ",".join(map(str, coordinate)) + ")" if native_indices else "".join("[" + str(i) + "]" for i in coordinate)
             fields = (index, text, value_type)
             line = "FGDB_ARRAY_ROW:" + "\t".join(field.encode("utf-8", "replace").hex() for field in fields) + "\n"
 

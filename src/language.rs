@@ -13,6 +13,8 @@ pub(crate) mod toolchain;
 pub(crate) enum Language {
     C,
     Cpp,
+    D,
+    Ada,
     Rust,
     Fortran,
     Zig,
@@ -54,6 +56,26 @@ pub(crate) const PRIMARY_LANGUAGES: &[LanguageSupport] = &[
         entrypoint_pattern: None,
         inspection: "Native values and available libstdc++ pretty printers",
         expressions: "GDB C++ expressions",
+    },
+    LanguageSupport {
+        language: Language::D,
+        name: "D",
+        extensions: &["d", "di"],
+        syntax: "d",
+        gdb_dialects: &["d"],
+        entrypoint_pattern: Some("^D main$"),
+        inspection: "Native values, static and dynamic arrays, and bounded UTF-8/16/32 string previews with supported debug layouts",
+        expressions: "GDB's partial D support. Dynamic array indexing may require slice.ptr[index]. Associative arrays retain raw fields.",
+    },
+    LanguageSupport {
+        language: Language::Ada,
+        name: "Ada",
+        extensions: &["adb", "ads", "ada"],
+        syntax: "ada",
+        gdb_dialects: &["ada"],
+        entrypoint_pattern: None,
+        inspection: "GNAT native values, records, access types and arrays with their declared bounds",
+        expressions: "GDB Ada expressions, including a(i,j), value.member and pointer.all. Other Ada compilers are not supported.",
     },
     LanguageSupport {
         language: Language::Rust,
@@ -101,9 +123,9 @@ pub(crate) const PRIMARY_LANGUAGES: &[LanguageSupport] = &[
 
 // These remain usable without promoting their runtimes to primary targets.
 pub(crate) const OTHER_SOURCE_EXTENSIONS: &[&str] = &[
-    "s", "asm", "inc", "inl", "m", "mm", "go", "swift", "adb", "ads", "d", "di", "cu", "cuh", "cl",
-    "pas", "pp", "java", "kt", "kts", "scala", "cs", "vala", "vapi", "py", "pyx", "pxd", "js",
-    "jsx", "ts", "tsx", "sh", "bash", "zsh", "fish", "lua", "rb", "php",
+    "s", "asm", "inc", "inl", "m", "mm", "go", "swift", "cu", "cuh", "cl", "pas", "pp", "java",
+    "kt", "kts", "scala", "cs", "vala", "vapi", "py", "pyx", "pxd", "js", "jsx", "ts", "tsx", "sh",
+    "bash", "zsh", "fish", "lua", "rb", "php",
 ];
 
 pub(crate) fn source_extensions() -> impl Iterator<Item = &'static str> {
@@ -158,10 +180,20 @@ impl Language {
         match (self, value) {
             (Self::Fortran, true) => ".true.",
             (Self::Fortran, false) => ".false.",
+            (Self::Ada | Self::D, true) => "true",
+            (Self::Ada | Self::D, false) => "false",
             (_, true) => "1",
             (_, false) => "0",
         }
     }
+}
+
+pub(crate) fn is_ada_array(name: &str) -> bool {
+    name.trim_start().starts_with("array (") && name.contains(") of ")
+}
+
+pub(crate) fn has_native_array_bounds(name: &str) -> bool {
+    is_fortran_array(name) || is_ada_array(name)
 }
 
 pub(crate) fn is_fortran_type(name: &str) -> bool {
@@ -223,6 +255,11 @@ mod tests {
             ("x.F90", Language::Fortran),
             ("x.C", Language::Cpp),
             ("x.c", Language::C),
+            ("x.d", Language::D),
+            ("x.di", Language::D),
+            ("x.adb", Language::Ada),
+            ("x.ADS", Language::Ada),
+            ("x.ada", Language::Ada),
             ("x.zig", Language::Zig),
             ("x.odin", Language::Odin),
             ("x.go", Language::Unknown),
@@ -231,6 +268,10 @@ mod tests {
         }
 
         assert_eq!(Language::from_gdb("minimal"), Language::Unknown);
+        assert_eq!(Language::from_gdb("d"), Language::D);
+        assert_eq!(Language::from_gdb("ada"), Language::Ada);
+        assert_eq!(Language::Ada.boolean_literal(false), "false");
+        assert_eq!(Language::D.boolean_literal(true), "true");
         assert_eq!(Language::Fortran.boolean_literal(false), ".false.");
         assert!(is_fortran_array("integer(kind=4) (-2:2,4:5)"));
         assert!(is_fortran_array("integer(kind=4), allocatable (:)"));
@@ -242,5 +283,45 @@ mod tests {
         assert!(uses_fortran_kind_star("character*24"));
         assert!(!uses_fortran_kind_star("integer (*)(int)"));
         assert!(!uses_fortran_kind_star("real *"));
+    }
+
+    #[test]
+    fn native_array_bounds_do_not_alias_access_or_scalar_types() {
+        for name in [
+            "array (-2 .. 2) of integer",
+            "array (-1 .. 1, 4 .. 5) of integer",
+            "array (1 .. 0) of character",
+            "integer(kind=4) (-2:2)",
+        ] {
+            assert!(has_native_array_bounds(name), "{name}");
+        }
+
+        for name in [
+            "access array (-2 .. 2) of integer",
+            "integer",
+            "array_type",
+            "std::array<int, 5>",
+            "int[]",
+        ] {
+            assert!(!has_native_array_bounds(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn source_extensions_are_unique_and_primary_languages_have_highlighters() {
+        let mut extensions = std::collections::HashSet::new();
+
+        for extension in source_extensions() {
+            assert!(
+                extensions.insert(extension),
+                "duplicate extension {extension}"
+            );
+        }
+
+        for language in [Language::D, Language::Ada] {
+            let support = language.support().unwrap();
+            assert!(!support.syntax.is_empty());
+            assert_eq!(Language::from_gdb(support.gdb_dialects[0]), language);
+        }
     }
 }

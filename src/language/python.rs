@@ -7,7 +7,10 @@ mod tests;
 const MODULES: &[(&str, &str)] = &[
     ("common", include_str!("printers/common.py")),
     ("values", include_str!("printers/values.py")),
+    ("d", include_str!("printers/d.py")),
     ("fortran", include_str!("printers/fortran.py")),
+    ("ada", include_str!("printers/ada.py")),
+    ("paths", include_str!("printers/paths.py")),
     ("zig", include_str!("printers/zig.py")),
     ("odin", include_str!("printers/odin.py")),
     ("array", include_str!("printers/array.py")),
@@ -16,6 +19,15 @@ const MODULES: &[(&str, &str)] = &[
 
 pub(crate) fn install_command() -> String {
     crate::debugger::console_command(&installation_script())
+}
+
+pub(crate) fn assignment_command(expression: &str, value: &str) -> String {
+    crate::debugger::console_command(&format!(
+        "python {}.assign({}, {})",
+        module("values"),
+        crate::debugger::quote(expression),
+        crate::debugger::quote(value),
+    ))
 }
 
 fn installation_script() -> String {
@@ -36,10 +48,10 @@ fn installation_script() -> String {
     command
 }
 
-pub(crate) fn fortran_value_expression(expression: &str, members: &str) -> String {
+pub(crate) fn native_value_expression(expression: &str, members: &str) -> String {
     format!(
         "{}.resolve_member_path({}, {})",
-        module("fortran"),
+        module("paths"),
         crate::debugger::quote(expression),
         crate::debugger::quote(members),
     )

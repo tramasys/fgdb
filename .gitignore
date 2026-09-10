@@ -27,5 +27,6 @@ rustc-ice-*.txt
 .trigger-tree/
 .serena/
 /docs/architecture.md
+/docs/languages.md
 /result
 /result-*

@@ -21,17 +21,17 @@ def read_only():
 
 
 class Sequence(gdb.ValuePrinter):
-    def __init__(self, value, pointer_name, capacity=False):
+    def __init__(self, value, pointer_name, capacity=False, *, length_name="len"):
         self._pointer = value[pointer_name]
         pointer_type = self._pointer.type.strip_typedefs()
 
-        if pointer_type.code != gdb.TYPE_CODE_PTR or value["len"].type.strip_typedefs().code != gdb.TYPE_CODE_INT:
+        if pointer_type.code != gdb.TYPE_CODE_PTR or value[length_name].type.strip_typedefs().code != gdb.TYPE_CODE_INT:
             raise ValueError("invalid sequence field types")
 
         if capacity and value["cap"].type.strip_typedefs().code != gdb.TYPE_CODE_INT:
             raise ValueError("invalid sequence capacity type")
 
-        self._length = int(value["len"])
+        self._length = int(value[length_name])
         self._capacity = int(value["cap"]) if capacity else None
 
         size = int(pointer_type.target().sizeof)

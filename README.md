@@ -36,7 +36,7 @@ and rr are optional.
 - Registers and SIMD values, stack and memory inspection, memory search and control-flow graphs
 - Threads, multiple inferiors and fork control, with Linux process, mapping and file descriptor details
 - GDB recording and reverse execution, plus rr replay when available
-- Source support for C, C++, Rust, Fortran, Zig and Odin, with debug-symbol lookup and pretty printers
+- Source support for C, C++, D, Ada, Rust, Fortran, Zig and Odin, with debug-symbol lookup and pretty printers
 - Saved investigations, configurable shortcuts and detachable panels
 
 ## Showcase

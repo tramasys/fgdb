@@ -757,14 +757,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         };
 
         let command = variable.varobj.as_deref().map_or_else(
-            || {
-                let expression = assignment_expression(&variable.name, &value);
-
-                format!(
-                    "-data-evaluate-expression {}",
-                    crate::debugger::quote(&expression)
-                )
-            },
+            || crate::language::python::assignment_command(&variable.name, &value),
             |varobj| {
                 format!(
                     "-var-assign {} {}",
@@ -974,8 +967,4 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
             ui.save_layout();
         }
     });
-}
-
-pub(super) fn assignment_expression(name: &str, value: &str) -> String {
-    format!("{name} = ({value})")
 }

@@ -1,8 +1,18 @@
-"""Read-only, bounded structural queries shared by native value viewers."""
+"""Bounded structural queries and explicit, frame-scoped scalar edits."""
 
 import gdb
 
 from .common import read_only
+
+
+def assign(expression, value):
+    if not expression or not value or max(len(expression), len(value)) > 16384:
+        raise ValueError("Assignment expression exceeds the editor budget or is empty")
+
+    # Source tabs can differ from the stopped frame. Select assignment syntax
+    # in the frame-scoped request, without changing the user's GDB language.
+    operator = ":=" if gdb.current_language() == "ada" else "="
+    gdb.parse_and_eval(expression + " " + operator + " (" + value + ")")
 
 
 def _location(expression, members):
@@ -18,7 +28,7 @@ def _location(expression, members):
         if members is None:
             value = gdb.parse_and_eval(expression)
         else:
-            from .fortran import resolve_member_path
+            from .paths import resolve_member_path
             value = resolve_member_path(expression, members)
 
         referenced = value.type.strip_typedefs().code in (gdb.TYPE_CODE_REF, gdb.TYPE_CODE_RVALUE_REF)

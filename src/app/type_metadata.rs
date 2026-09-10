@@ -285,12 +285,16 @@ pub(super) fn metadata_python(expression: &str, members: Option<&str>) -> String
         r#"import gdb
 v={value}
 t=v.type.strip_typedefs()
+base=t
+for _ in range(16):
+ if base.code != gdb.TYPE_CODE_RANGE: break
+ base=base.target().strip_typedefs()
 kind="other"
-if t.code == gdb.TYPE_CODE_ENUM: kind="enum"
-elif t.code == gdb.TYPE_CODE_FLT: kind="float"
-elif t.code == gdb.TYPE_CODE_BOOL: kind="boolean"
-elif t.code == gdb.TYPE_CODE_CHAR: kind="character"
-elif t.code == gdb.TYPE_CODE_INT: kind="integer"
+if base.code == gdb.TYPE_CODE_ENUM: kind="enum"
+elif base.code == gdb.TYPE_CODE_FLT: kind="float"
+elif base.code == gdb.TYPE_CODE_BOOL: kind="boolean"
+elif base.code == gdb.TYPE_CODE_CHAR: kind="character"
+elif base.code == gdb.TYPE_CODE_INT: kind="integer"
 try: bits=str(int(t.sizeof)*8)
 except Exception: bits=""
 try: signed="1" if t.is_signed else "0"
@@ -307,7 +311,7 @@ except Exception: language=""
 variants=[]
 size=0
 if kind == "enum":
- for f in t.fields()[:512]:
+ for f in base.fields()[:512]:
   if f.name is not None:
    assert len(f.name) <= 8192, "enum variant name exceeds the editor budget"
    entry=f.name.encode("utf-8","surrogateescape").hex()+"="+str(f.enumval)

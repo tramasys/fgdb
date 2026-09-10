@@ -9,7 +9,10 @@ pub(super) fn is_pointer_type(type_name: &str) -> bool {
         return false;
     }
 
-    if type_name.starts_with(['&', '^', '*']) || type_name.starts_with("[^]") {
+    if type_name.starts_with(['&', '^', '*'])
+        || type_name.starts_with("[^]")
+        || type_name.starts_with("access ")
+    {
         return true;
     }
 
@@ -87,6 +90,9 @@ mod tests {
             "void (*)(int)",
             "int (*)[4]",
             "std::vector<Node *> *",
+            "access long_long_integer",
+            "access all fixture.node",
+            "access array (1 .. 4) of integer",
         ] {
             assert!(is_pointer_type(name), "{name}");
         }
@@ -99,6 +105,7 @@ mod tests {
             "int (*[4])(void)",
             "character*24",
             "integer(kind=4) (-1:1,4:5)",
+            "array (1 .. 4) of access fixture.node",
         ] {
             assert!(!is_pointer_type(name), "{name}");
         }

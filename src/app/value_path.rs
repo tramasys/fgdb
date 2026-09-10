@@ -21,7 +21,7 @@ pub(super) fn variable_path_root<'a>(
 
 pub(super) fn value_python(expression: &str, members: Option<&str>) -> String {
     if let Some(members) = members {
-        crate::language::python::fortran_value_expression(expression, members)
+        crate::language::python::native_value_expression(expression, members)
     } else {
         format!("gdb.parse_and_eval({})", crate::debugger::quote(expression))
     }

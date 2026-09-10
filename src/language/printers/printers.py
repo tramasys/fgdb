@@ -3,7 +3,7 @@
 import gdb
 import gdb.printing
 
-from . import fortran, odin, zig
+from . import d, fortran, odin, zig
 
 
 class Adapter(gdb.printing.SubPrettyPrinter):
@@ -17,6 +17,7 @@ class LanguagePrinter(gdb.printing.PrettyPrinter):
     def __init__(self):
         aggregates = (gdb.TYPE_CODE_STRUCT, gdb.TYPE_CODE_UNION)
         adapters = (
+            Adapter("d", (gdb.TYPE_CODE_STRUCT,), d.lookup),
             Adapter("fortran", (gdb.TYPE_CODE_ARRAY,), fortran.lookup),
             Adapter("zig", aggregates, zig.lookup),
             Adapter("odin", aggregates, odin.lookup),

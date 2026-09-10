@@ -31,6 +31,9 @@ mod watches;
 #[cfg(test)]
 mod test_support;
 
+#[cfg(test)]
+mod language_tests;
+
 use std::{
     cell::{Cell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
@@ -75,9 +78,6 @@ use stop_requests::{edit_requests, stop_requests};
 
 pub use build::build;
 
-#[cfg(test)]
-use build::assignment_expression;
-
 use assignments::*;
 use backend::*;
 use breakpoints::*;
@@ -108,8 +108,8 @@ fn next_variable_object_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        assignment_expression, parse_gdb_integer, register_string_address, source_symbol_pattern,
-        stack_string_address, symbol_annotation,
+        parse_gdb_integer, register_string_address, source_symbol_pattern, stack_string_address,
+        symbol_annotation,
     };
     use crate::debugger::{MemoryKind, Register, StackEntry, TargetArchitecture, TargetEndian};
 
@@ -186,16 +186,6 @@ mod tests {
                 TargetArchitecture::X86_64,
             ),
             None
-        );
-    }
-
-    #[test]
-    fn builds_variable_assignment_expressions() {
-        assert_eq!(assignment_expression("count", "42"), "count = (42)");
-
-        assert_eq!(
-            assignment_expression("message", "\"hello world\""),
-            "message = (\"hello world\")"
         );
     }
 

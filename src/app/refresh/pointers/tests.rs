@@ -75,7 +75,7 @@ fn pointer_commands_retain_frame_scope_and_quote_data() {
 }
 
 #[test]
-#[ignore = "requires Python-enabled GDB and the C, C++, Rust, Fortran, Zig and Odin fixtures"]
+#[ignore = "requires Python-enabled GDB and the language fixtures"]
 fn live_pointer_probes_preserve_results_language_and_print_settings() {
     use crate::{
         app::test_support::{open_debugger, request, wait_until},
@@ -117,6 +117,9 @@ fn live_pointer_probes_preserve_results_language_and_print_settings() {
         ("c-variable-location-target", "location_checkpoint"),
         ("cpp-variable-viewer-target", "variable_viewer_checkpoint"),
         ("rust-variable-viewer-target", "rust_types_ready"),
+        ("d-variable-viewer-target", "D main"),
+        ("dmd-variable-viewer-target", "D main"),
+        ("ada-variable-viewer-target", "ada_variable_viewer_target"),
         (
             "fortran-variable-viewer-target",
             "fortran_variable_viewer_target",
