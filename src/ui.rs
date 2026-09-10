@@ -66,6 +66,7 @@ use domain::{
     local_refresh_indices,
 };
 use log_view::{ApplicationLog, LogLevel};
+pub(crate) use misc_view::locks::LockSymbolRequest;
 pub(crate) use syscall_view::SyscallAction;
 use variables::VariableNode;
 pub(crate) use workspace::PanelId;
@@ -994,14 +995,7 @@ struct MiscView {
     heap_inspector_snapshot_stop: Cell<Option<u64>>,
     heap_selection: Rc<misc_view::AllocatorSelection>,
     heap_backend_selector: gtk::DropDown,
-    lock_summary: gtk::Label,
-    lock_note: gtk::Label,
-    lock_store: gio::ListStore,
-    lock_empty: gtk::Label,
-    lock_graph_summary: gtk::Label,
-    lock_dependency_store: gio::ListStore,
-    lock_graph_empty: gtk::Label,
-    lock_split: gtk::Paned,
+    locks: Rc<misc_view::locks::LocksView>,
     core_summary: gtk::Label,
     core_warning: gtk::Label,
     core_note_store: gio::ListStore,

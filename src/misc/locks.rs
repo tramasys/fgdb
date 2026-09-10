@@ -4,6 +4,9 @@ use super::*;
 
 const MAX_TASKS: usize = 4096;
 
+mod evidence;
+pub(crate) use evidence::{LockObservation, LockOwnership};
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LockSnapshot {
     pub threads_scanned: usize,
@@ -13,7 +16,7 @@ pub(crate) struct LockSnapshot {
     pub warnings: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct LockWait {
     pub tid: u32,
     pub thread: String,
@@ -22,6 +25,8 @@ pub(crate) struct LockWait {
     pub operation: String,
     pub expected: Option<u64>,
     pub details: String,
+    pub operation_flags: Option<u64>,
+    pub observation: LockObservation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,10 +45,16 @@ pub(crate) struct DeadlockCycle {
     pub description: String,
 }
 
-pub(super) fn read_locks(root: &Path, architecture: TargetArchitecture) -> LockSnapshot {
+pub(super) fn read_locks(
+    root: &Path,
+    architecture: TargetArchitecture,
+    endian: Option<TargetEndian>,
+    maps: &[ProcessMapping],
+) -> LockSnapshot {
     let mut snapshot = LockSnapshot::default();
     let mut thread_names = HashMap::new();
     let task_root = root.join("task");
+    let mut unavailable_syscalls = 0;
 
     let entries = match std::fs::read_dir(&task_root) {
         Ok(entries) => entries,
@@ -90,6 +101,7 @@ pub(super) fn read_locks(root: &Path, architecture: TargetArchitecture) -> LockS
             .to_owned();
 
         let syscall = crate::bounded::read_string(&task.join("syscall"), 64 * 1024).ok();
+        unavailable_syscalls += usize::from(syscall.is_none());
 
         if let Some(wait) = syscall
             .as_deref()
@@ -109,6 +121,8 @@ pub(super) fn read_locks(root: &Path, architecture: TargetArchitecture) -> LockS
                 operation: String::from("futex wait"),
                 expected: None,
                 details: format!("kernel wait channel {wchan}. Syscall arguments unavailable"),
+                operation_flags: None,
+                observation: LockObservation::default(),
             });
         }
     }
@@ -119,50 +133,50 @@ pub(super) fn read_locks(root: &Path, architecture: TargetArchitecture) -> LockS
 
     snapshot.dependencies = derive_lock_dependencies(
         root,
-        &snapshot.waits,
+        &mut snapshot.waits,
         &thread_names,
-        architecture.default_endian(),
+        endian,
+        maps,
         &mut snapshot.warnings,
     );
 
     snapshot.deadlocks = find_deadlock_cycles(&snapshot.dependencies);
+
+    let cycle_tids = snapshot
+        .deadlocks
+        .iter()
+        .flat_map(|cycle| cycle.tids.iter().copied())
+        .collect::<HashSet<_>>();
+
+    for wait in &mut snapshot.waits {
+        wait.observation.cycle = cycle_tids.contains(&wait.tid);
+    }
+
+    if unavailable_syscalls > 0 {
+        snapshot.warnings.push(format!("Syscall arguments were unreadable for {unavailable_syscalls} threads. Some waits and owners may be absent"));
+    }
+
+    if architecture == TargetArchitecture::Unknown {
+        snapshot.warnings.push(
+            "The target architecture is unknown. Futex syscall arguments could not be decoded"
+                .into(),
+        );
+    }
 
     snapshot
 }
 
 fn derive_lock_dependencies(
     root: &Path,
-    waits: &[LockWait],
+    waits: &mut [LockWait],
     thread_names: &HashMap<u32, String>,
     endian: Option<TargetEndian>,
+    maps: &[ProcessMapping],
     warnings: &mut Vec<String>,
 ) -> Vec<LockDependency> {
-    let Some(endian) = endian else {
-        if waits.iter().any(|wait| wait.address.is_some()) {
-            warnings.push(String::from(
-                "Lock ownership is unavailable because the target byte order is unknown",
-            ));
-        }
-
-        return Vec::new();
-    };
-
     let memory_path = root.join("mem");
-
-    let memory = match File::open(&memory_path) {
-        Ok(memory) => memory,
-        Err(error) => {
-            if waits.iter().any(|wait| wait.address.is_some()) {
-                warnings.push(format!(
-                    "Lock ownership is unavailable because {} could not be read: {error}",
-                    memory_path.display()
-                ));
-            }
-
-            return Vec::new();
-        }
-    };
-
+    let memory = File::open(&memory_path);
+    let mut words = HashMap::new();
     let mut dependencies = Vec::new();
 
     for wait in waits {
@@ -170,37 +184,35 @@ fn derive_lock_dependencies(
             continue;
         };
 
-        let mut bytes = [0_u8; 4];
+        // A contended address is read once, so all of its waiters share the
+        // same word observation and additional waiters do not add target reads.
+        let (word, mapping) = words.entry(address).or_insert_with(|| {
+            let mapping = maps
+                .iter()
+                .find(|mapping| mapping.start <= address && address < mapping.end)
+                .cloned();
 
-        if memory.read_at(&mut bytes, address).ok() != Some(bytes.len()) {
-            continue;
-        }
+            (
+                evidence::read_word(memory.as_ref(), address, endian),
+                mapping,
+            )
+        });
 
-        let value = match endian {
-            TargetEndian::Little => u32::from_le_bytes(bytes),
-            TargetEndian::Big => u32::from_be_bytes(bytes),
+        wait.observation.mapping.clone_from(mapping);
+
+        wait.observation.ownership = match word {
+            Ok(value) => {
+                wait.observation.word = Some(*value);
+
+                evidence::ownership(wait, *value, thread_names)
+            }
+
+            Err(reason) => reason.clone(),
         };
 
-        // Linux PI and robust futex words carry the owner TID in their low
-        // 30 bits. Ordinary pthread mutexes commonly use 1 or 2 instead, so
-        // accept an owner only when it matches a thread observed in this task.
-        let owner_tid = value & 0x3fff_ffff;
-        let pi_owner_word = matches!(wait.operation.as_str(), "FUTEX_LOCK_PI" | "FUTEX_LOCK_PI2");
-
-        let robust_owner_word =
-            matches!(wait.operation.as_str(), "FUTEX_WAIT" | "FUTEX_WAIT_BITSET")
-                && value & 0x8000_0000 != 0
-                && wait.expected == Some(u64::from(value));
-
-        let owner_encoded = pi_owner_word || robust_owner_word;
-
-        if !owner_encoded
-            || owner_tid <= 2
-            || owner_tid == wait.tid
-            || !thread_names.contains_key(&owner_tid)
-        {
+        let Some(owner_tid) = wait.observation.ownership.owner() else {
             continue;
-        }
+        };
 
         dependencies.push(LockDependency {
             waiter_tid: wait.tid,
@@ -211,12 +223,17 @@ fn derive_lock_dependencies(
                 .cloned()
                 .unwrap_or_else(|| String::from("<unnamed>")),
             address,
-            futex_value: value,
+            futex_value: wait.observation.word.unwrap_or_default(),
         });
     }
 
     dependencies.sort_by_key(|edge| (edge.waiter_tid, edge.owner_tid, edge.address));
     dependencies.dedup();
+    let unreadable = words.values().filter(|(word, _)| word.is_err()).count();
+
+    if unreadable > 0 {
+        warnings.push(format!("Current futex words are unavailable at {unreadable} wait addresses. Select a waiter for details"));
+    }
 
     dependencies
 }
@@ -231,8 +248,15 @@ fn find_deadlock_cycles(dependencies: &[LockDependency]) -> Vec<DeadlockCycle> {
     starts.sort_unstable();
     let mut canonical_cycles = HashSet::new();
     let mut cycles = Vec::new();
+    // Each thread has at most one current wait edge. Retire complete paths
+    // instead of traversing every suffix of a long chain again.
+    let mut processed = HashSet::new();
 
     for start in starts {
+        if processed.contains(&start) {
+            continue;
+        }
+
         let mut path = Vec::new();
         let mut positions = HashMap::new();
         let mut current = start;
@@ -240,10 +264,6 @@ fn find_deadlock_cycles(dependencies: &[LockDependency]) -> Vec<DeadlockCycle> {
         while let Some(&next) = edges.get(&current) {
             if let Some(&position) = positions.get(&current) {
                 let mut cycle = path[position..].to_vec();
-
-                if cycle.len() < 2 {
-                    break;
-                }
 
                 let rotation = cycle
                     .iter()
@@ -267,10 +287,16 @@ fn find_deadlock_cycles(dependencies: &[LockDependency]) -> Vec<DeadlockCycle> {
                 break;
             }
 
+            if processed.contains(&current) {
+                break;
+            }
+
             positions.insert(current, path.len());
             path.push(current);
             current = next;
         }
+
+        processed.extend(path);
     }
 
     cycles.sort_by(|left, right| left.tids.cmp(&right.tids));
@@ -340,6 +366,8 @@ fn parse_lock_wait(
             operation: String::from("FUTEX_WAITV"),
             expected: count,
             details,
+            operation_flags: Some(flags),
+            observation: LockObservation::default(),
         });
     }
 
@@ -372,8 +400,12 @@ fn parse_lock_wait(
         state: state.to_owned(),
         address: arguments.first().copied(),
         operation: futex_operation(base).to_owned(),
-        expected: arguments.get(2).copied(),
+        expected: matches!(base, 0 | 9 | 11)
+            .then(|| arguments.get(2).copied())
+            .flatten(),
         details: flags.join("  "),
+        operation_flags: Some(operation & !0x7f),
+        observation: LockObservation::default(),
     })
 }
 
@@ -429,6 +461,90 @@ fn futex_operation(operation: u64) -> &'static str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn captures_mapping_cycle_evidence_and_incomplete_wait_coverage() {
+        let root =
+            gtk::glib::mkdtemp(std::env::temp_dir().join("fgdb-lock-snapshot-XXXXXX")).unwrap();
+
+        let mut memory = [0_u8; 64];
+
+        for (tid, address, owner) in [(10, 16, 20), (20, 32, 10)] {
+            let task = root.join("task").join(tid.to_string());
+            std::fs::create_dir_all(&task).unwrap();
+            std::fs::write(task.join("comm"), format!("worker-{tid}")).unwrap();
+            std::fs::write(task.join("status"), "State:\tT (tracing stop)\n").unwrap();
+            std::fs::write(task.join("wchan"), "futex_wait_queue").unwrap();
+            let word = 0x8000_0000_u32 | owner;
+            memory[address..address + 4].copy_from_slice(&word.to_le_bytes());
+
+            std::fs::write(
+                task.join("syscall"),
+                format!("202 0x{address:x} 0x80 0x{word:x} 0 0 0"),
+            )
+            .unwrap();
+        }
+
+        std::fs::write(root.join("mem"), memory).unwrap();
+
+        let maps = [ProcessMapping {
+            start: 0,
+            end: 64,
+            permissions: "rw-p".into(),
+            path: "[test mapping]".into(),
+        }];
+
+        let read = || {
+            read_locks(
+                &root,
+                TargetArchitecture::X86_64,
+                Some(TargetEndian::Little),
+                &maps,
+            )
+        };
+
+        let snapshot = read();
+        assert_eq!(snapshot.deadlocks.len(), 1);
+        assert_eq!(snapshot.deadlocks[0].tids, [10, 20]);
+        assert!(snapshot.warnings.is_empty());
+
+        for wait in snapshot.waits {
+            assert!(wait.observation.cycle);
+            assert!(wait.observation.word.is_some());
+            assert_eq!(wait.observation.mapping.as_ref(), Some(&maps[0]));
+
+            assert!(matches!(
+                wait.observation.ownership,
+                LockOwnership::RobustCandidate(_)
+            ));
+        }
+
+        std::fs::remove_file(root.join("task/10/syscall")).unwrap();
+        std::fs::remove_file(root.join("mem")).unwrap();
+        let snapshot = read();
+        assert!(snapshot.deadlocks.is_empty());
+
+        assert!(
+            snapshot
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("unreadable for 1 threads"))
+        );
+
+        assert!(
+            snapshot.waits.iter().any(|wait| wait.address.is_none()
+                && wait.observation.ownership == LockOwnership::NoAddress)
+        );
+
+        assert!(
+            snapshot
+                .waits
+                .iter()
+                .any(|wait| matches!(wait.observation.ownership, LockOwnership::Unreadable(_)))
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn dependency(waiter_tid: u32, owner_tid: u32) -> LockDependency {
         LockDependency {
             waiter_tid,
@@ -476,7 +592,7 @@ mod tests {
         memory[16..20].copy_from_slice(&0x8000_0014_u32.to_le_bytes());
         std::fs::write(root.join("mem"), memory).unwrap();
 
-        let waits = [LockWait {
+        let mut waits = [LockWait {
             tid: 10,
             thread: String::from("waiter"),
             state: String::from("sleeping"),
@@ -484,6 +600,8 @@ mod tests {
             operation: String::from("FUTEX_WAIT"),
             expected: Some(0x8000_0014),
             details: String::new(),
+            operation_flags: None,
+            observation: LockObservation::default(),
         }];
 
         let names = HashMap::from([(10, String::from("waiter")), (20, String::from("owner"))]);
@@ -491,9 +609,10 @@ mod tests {
 
         let dependencies = derive_lock_dependencies(
             &root,
-            &waits,
+            &mut waits,
             &names,
             Some(TargetEndian::Little),
+            &[],
             &mut warnings,
         );
 
@@ -518,7 +637,7 @@ mod tests {
         memory[16..20].copy_from_slice(&0x8000_0014_u32.to_le_bytes());
         std::fs::write(root.join("mem"), memory).unwrap();
 
-        let waits = [LockWait {
+        let mut waits = [LockWait {
             tid: 10,
             thread: String::from("waiter"),
             state: String::from("sleeping"),
@@ -526,15 +645,18 @@ mod tests {
             operation: String::from("FUTEX_WAIT_REQUEUE_PI"),
             expected: Some(0x8000_0014),
             details: String::new(),
+            operation_flags: None,
+            observation: LockObservation::default(),
         }];
 
         let names = HashMap::from([(10, String::from("waiter")), (20, String::from("owner"))]);
 
         let dependencies = derive_lock_dependencies(
             &root,
-            &waits,
+            &mut waits,
             &names,
             Some(TargetEndian::Little),
+            &[],
             &mut Vec::new(),
         );
 
@@ -553,6 +675,7 @@ mod tests {
             TargetArchitecture::X86_64,
         )
         .unwrap();
+
         assert_eq!(wait.address, Some(0x1234));
         assert_eq!(wait.operation, "FUTEX_WAIT");
         assert_eq!(wait.expected, Some(7));
@@ -570,6 +693,7 @@ mod tests {
             TargetArchitecture::X86_64,
         )
         .unwrap();
+
         assert_eq!(wait.operation, "FUTEX_WAITV");
         assert_eq!(wait.address, None);
         assert_eq!(wait.expected, Some(3));

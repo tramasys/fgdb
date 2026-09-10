@@ -9,6 +9,7 @@ use std::{
 use super::*;
 
 mod heap;
+pub(super) mod locks;
 pub(super) use heap::request_heap_inspection;
 
 fn allocator_python_expression(script: &str) -> String {

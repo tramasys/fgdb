@@ -386,6 +386,7 @@ impl Ui {
     }
 
     pub(super) fn render_threads(&self) {
+        self.update_lock_controls();
         let render_started = Instant::now();
         let threads = self.model.threads();
         let threads = threads.as_ref();

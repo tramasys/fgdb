@@ -32,6 +32,8 @@ struct WorkerArgument {
     const char *name;
 };
 
+static struct LockFixture fixture;
+
 static int futex_wait(_Atomic uint32_t *address, uint32_t expected) {
     return (int)syscall(
         SYS_futex,
@@ -82,7 +84,6 @@ FGDB_NOINLINE void c_misc_locks_checkpoint(const struct LockFixture *fixture) {
 }
 
 int main(void) {
-    struct LockFixture fixture = {0};
     struct WorkerArgument arguments[3] = {
         {.fixture = &fixture, .gate = &fixture.shared_gate, .name = "fgdb-lock-a"},
         {.fixture = &fixture, .gate = &fixture.shared_gate, .name = "fgdb-lock-b"},

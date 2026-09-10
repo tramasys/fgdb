@@ -11,7 +11,7 @@ const MISC_PAGES: [(&str, &str); 8] = [
     ("syscalls", "Syscalls"),
     ("core-dump", "Core dump"),
 ];
-const LOCKS_NOTE: &str = "This is a stopped-process wait snapshot from /proc/<pid>/task. It reports futex waiters and shared wait addresses.";
+pub(super) mod locks;
 
 struct StartupWidgets {
     root: gtk::Box,
@@ -31,17 +31,6 @@ struct MiscTablePage {
     store: gio::ListStore,
     empty: gtk::Label,
     view: gtk::ColumnView,
-}
-
-struct LocksWidgets {
-    root: gtk::Paned,
-    summary: gtk::Label,
-    note: gtk::Label,
-    store: gio::ListStore,
-    empty: gtk::Label,
-    graph_summary: gtk::Label,
-    dependency_store: gio::ListStore,
-    graph_empty: gtk::Label,
 }
 
 struct CallAbiWidgets {
@@ -207,7 +196,7 @@ pub(super) fn build_misc_view(theme: &Theme, columns: &ColumnLayouts) -> MiscVie
     pages.add_titled(&cfg.root, Some("cfg"), "CFG");
     let allocator = build_allocator_page(columns);
     pages.add_titled(&allocator.root, Some("allocator"), "Allocator");
-    let locks = build_locks_page(columns);
+    let locks = locks::build_locks_page(columns);
     pages.add_titled(&locks.root, Some("locks"), "Locks");
     let syscalls = syscall_view::SyscallView::new(&columns.table(TableId::Syscalls));
     pages.add_titled(&syscalls.root, Some("syscalls"), "Syscalls");
@@ -266,14 +255,7 @@ pub(super) fn build_misc_view(theme: &Theme, columns: &ColumnLayouts) -> MiscVie
         heap_inspector_snapshot_stop: Cell::new(None),
         heap_selection: allocator.inspector.selection,
         heap_backend_selector: allocator.inspector.backend_selector,
-        lock_summary: locks.summary,
-        lock_note: locks.note,
-        lock_store: locks.store,
-        lock_empty: locks.empty,
-        lock_graph_summary: locks.graph_summary,
-        lock_dependency_store: locks.dependency_store,
-        lock_graph_empty: locks.graph_empty,
-        lock_split: locks.root,
+        locks,
         core_summary: core.summary,
         core_warning: core.warning,
         core_note_store: core.note_store,
@@ -1255,147 +1237,6 @@ fn set_allocator_class(label: &gtk::Label, class: &str, enabled: bool) {
     }
 }
 
-fn build_locks_page(columns: &ColumnLayouts) -> LocksWidgets {
-    let page = build_misc_table_page("Open this tab to inspect kernel-visible futex waits");
-    page.note.set_text(LOCKS_NOTE);
-
-    let layout = columns.table(TableId::LockWaits);
-
-    layout.append(
-        &page.view,
-        "tid",
-        &misc_column::<LockWait>("TID", 90, |row| row.tid.to_string()),
-    );
-
-    layout.append(
-        &page.view,
-        "thread",
-        &misc_column::<LockWait>("THREAD", 180, |row| row.thread.clone()),
-    );
-
-    layout.append(
-        &page.view,
-        "state",
-        &misc_column::<LockWait>("STATE", 150, |row| row.state.clone()),
-    );
-
-    layout.append(
-        &page.view,
-        "wait-address",
-        &misc_column::<LockWait>("WAIT ADDRESS", 190, |row| {
-            row.address
-                .map_or_else(|| String::from("-"), |value| format!("0x{value:016x}"))
-        }),
-    );
-
-    layout.append(
-        &page.view,
-        "operation",
-        &misc_column::<LockWait>("OPERATION", 190, |row| row.operation.clone()),
-    );
-
-    layout.append(
-        &page.view,
-        "expected-count",
-        &misc_column::<LockWait>("EXPECTED / COUNT", 140, |row| {
-            row.expected
-                .map_or_else(|| String::from("-"), |value| format!("0x{value:x}"))
-        }),
-    );
-
-    layout.append(
-        &page.view,
-        "details",
-        &misc_column::<LockWait>("DETAILS", 360, |row| row.details.clone()),
-    );
-
-    let graph = gtk::Box::new(gtk::Orientation::Vertical, 4);
-    graph.add_css_class("lock-graph");
-    graph.append(&section_title("WAIT-FOR GRAPH"));
-    let graph_summary = misc_note_label();
-
-    graph_summary
-        .set_text("Owner edges appear only when the live futex word identifies a scanned thread");
-
-    graph.append(&graph_summary);
-    let dependency_store = gio::ListStore::new::<glib::BoxedAnyObject>();
-    let dependency_selection = gtk::NoSelection::new(Some(dependency_store.clone()));
-    let dependency_view = components::column_view(dependency_selection);
-    dependency_view.add_css_class("debug-table");
-    dependency_view.set_vexpand(true);
-    dependency_view.set_reorderable(true);
-
-    let layout = columns.table(TableId::LockDependencies);
-
-    layout.append(
-        &dependency_view,
-        "waiter",
-        &misc_column::<LockDependency>("WAITER", 200, |row| {
-            format!("{}  {}", row.waiter_tid, row.waiter)
-        }),
-    );
-
-    layout.append(
-        &dependency_view,
-        "relation",
-        &misc_column::<LockDependency>("RELATION", 110, |_| String::from("waits for")),
-    );
-
-    layout.append(
-        &dependency_view,
-        "owner",
-        &misc_column::<LockDependency>("OWNER", 200, |row| {
-            format!("{}  {}", row.owner_tid, row.owner)
-        }),
-    );
-
-    layout.append(
-        &dependency_view,
-        "address",
-        &misc_column::<LockDependency>("ADDRESS", 190, |row| format!("0x{:016x}", row.address)),
-    );
-
-    layout.append(
-        &dependency_view,
-        "futex-word",
-        &misc_column::<LockDependency>("FUTEX WORD", 130, |row| {
-            format!("0x{:08x}", row.futex_value)
-        }),
-    );
-
-    let graph_empty = empty_label("No reliable thread-owner edges were found");
-    graph.append(&graph_empty);
-
-    let dependency_scrolled = gtk::ScrolledWindow::builder()
-        .child(&dependency_view)
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Automatic)
-        .build();
-
-    configure_misc_scroller(&dependency_scrolled);
-    graph.append(&dependency_scrolled);
-    let root = gtk::Paned::new(gtk::Orientation::Vertical);
-    root.set_wide_handle(true);
-    root.set_shrink_start_child(false);
-    root.set_shrink_end_child(false);
-    root.set_resize_start_child(true);
-    root.set_resize_end_child(true);
-    root.set_start_child(Some(&page.root));
-    root.set_end_child(Some(&graph));
-    root.set_position(390);
-
-    LocksWidgets {
-        root,
-        summary: page.summary,
-        note: page.note,
-        store: page.store,
-        empty: page.empty,
-        graph_summary,
-        dependency_store,
-        graph_empty,
-    }
-}
-
 fn build_core_page(columns: &ColumnLayouts) -> CoreWidgets {
     let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
     root.set_vexpand(true);
@@ -2172,7 +2013,7 @@ impl MiscView {
         self.show_allocator(snapshot.allocator);
 
         if let Some(locks) = snapshot.locks {
-            self.show_locks(locks);
+            self.locks.show(locks);
         }
 
         if !snapshot.warnings.is_empty() {
@@ -2334,68 +2175,6 @@ impl MiscView {
         self.heap_inspector_empty.set_visible(row_count == 0);
     }
 
-    fn show_locks(&self, locks: LockSnapshot) {
-        let wait_count = locks.waits.len();
-        let dependency_count = locks.dependencies.len();
-        let deadlock_count = locks.deadlocks.len();
-
-        let address_count = locks
-            .waits
-            .iter()
-            .filter_map(|wait| wait.address)
-            .collect::<HashSet<_>>()
-            .len();
-
-        self.lock_summary.set_text(&format!(
-            "{} thread{} scanned  {wait_count} kernel-visible waits  {address_count} wait addresses",
-            locks.threads_scanned,
-            if locks.threads_scanned == 1 { "" } else { "s" }
-        ));
-
-        let mut note = String::from(LOCKS_NOTE);
-
-        if !locks.warnings.is_empty() {
-            if !note.is_empty() {
-                note.push('\n');
-            }
-
-            note.push_str(&locks.warnings.join("\n"));
-        }
-
-        self.lock_note.set_text(&note);
-        replace_boxed_store_if_changed(&self.lock_store, locks.waits);
-
-        self.lock_empty
-            .set_text("No kernel-visible futex waits are present");
-
-        self.lock_empty.set_visible(wait_count == 0);
-
-        let graph_summary = if deadlock_count == 0 {
-            format!("{dependency_count} reliable wait-for edges  no deadlock cycles detected")
-        } else {
-            format!(
-                "{dependency_count} reliable wait-for edges  {deadlock_count} deadlock cycle(s)\n{}",
-                locks
-                    .deadlocks
-                    .iter()
-                    .map(|cycle| cycle.description.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )
-        };
-
-        self.lock_graph_summary.set_text(&graph_summary);
-
-        if deadlock_count > 0 {
-            self.lock_graph_summary.add_css_class("status-error");
-        } else {
-            self.lock_graph_summary.remove_css_class("status-error");
-        }
-
-        replace_boxed_store_if_changed(&self.lock_dependency_store, locks.dependencies);
-        self.lock_graph_empty.set_visible(dependency_count == 0);
-    }
-
     fn show_call_abi(&self, snapshot: CallAbiSnapshot) {
         let current = snapshot.current_frame.as_ref().map_or_else(
             || String::from("no selected frame"),
@@ -2534,17 +2313,7 @@ impl MiscView {
 
         self.heap_inspector_store.remove_all();
         self.heap_inspector_empty.set_visible(true);
-        self.lock_summary.set_text("-");
-        self.lock_store.remove_all();
-        self.lock_empty.set_visible(true);
-
-        self.lock_graph_summary.set_text(
-            "Owner edges appear only when the live futex word identifies a scanned thread",
-        );
-
-        self.lock_graph_summary.remove_css_class("status-error");
-        self.lock_dependency_store.remove_all();
-        self.lock_graph_empty.set_visible(true);
+        self.locks.clear();
     }
 
     fn clear_core(&self) {
@@ -2782,6 +2551,7 @@ impl Ui {
         let generation = self.misc_refresh_generation.get().wrapping_add(1);
         self.misc_refresh_generation.set(generation);
         self.misc_view.in_flight.set(true);
+        self.update_lock_controls();
 
         Some(generation)
     }
@@ -2808,6 +2578,7 @@ impl Ui {
             .set(needs_locks || needs_allocator);
 
         self.misc_view.clear_core();
+        self.bind_lock_context();
         self.misc_view.show_live_snapshot(snapshot);
         self.update_control_sensitivity();
 
@@ -2981,6 +2752,8 @@ impl Ui {
     }
 
     pub fn invalidate_misc_refresh(&self) {
+        self.misc_view.locks.invalidate();
+
         self.misc_refresh_generation
             .set(self.misc_refresh_generation.get().wrapping_add(1));
 
@@ -3014,6 +2787,7 @@ impl Ui {
             && self.model.inferior_has_started()
             && !self.model.inferior_is_running()
             && !self.model.execution().command_pending
+            && (!self.misc_locks_requested() || !locks::process_running(&self.model))
     }
 }
 

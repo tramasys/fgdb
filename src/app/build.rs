@@ -54,6 +54,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
 
     memory_search::connect(&ui, &mi_client);
+    misc::locks::connect(&ui, &mi_client);
     connect_stack_paging(&ui, &mi_client);
     let weak = Rc::downgrade(&ui);
     let client = Rc::clone(&mi_client);

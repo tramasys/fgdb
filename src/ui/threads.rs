@@ -362,7 +362,7 @@ impl Ui {
         self.update_thread_control_sensitivity();
     }
 
-    fn emit_thread_action(&self, action: ThreadAction) -> bool {
+    pub(super) fn emit_thread_action(&self, action: ThreadAction) -> bool {
         if !self.model.thread_action_can_dispatch(&action) {
             return false;
         }
@@ -627,6 +627,7 @@ impl Ui {
     }
 
     pub(super) fn update_thread_control_sensitivity(&self) {
+        self.update_lock_controls();
         let pending = self.model.execution().thread_action_pending.is_some();
         let ready = self.model.execution().ready;
         let visual_transition = self.execution_visual_transition_pending();

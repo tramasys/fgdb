@@ -23,7 +23,7 @@ pub(crate) use allocator::*;
 pub(crate) use call_abi::*;
 pub(crate) use core_dump::{CoreDumpSnapshot, CoreMappedFile, CoreNote, read_core_dump};
 use locks::read_locks;
-pub(crate) use locks::{LockDependency, LockSnapshot, LockWait};
+pub(crate) use locks::{LockDependency, LockOwnership, LockSnapshot, LockWait};
 
 pub(crate) use heap::{
     HeapDiscovery, HeapReadBudget, NativeHeapQuery, NativeHeapReadRequest, inspect_native_heap,
@@ -582,7 +582,7 @@ struct Abi {
     pointer_bits: u32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ProcessMapping {
     pub start: u64,
     pub end: u64,
@@ -664,7 +664,11 @@ fn read_live_misc_at(
     }
 
     let allocator = allocator_snapshot(&maps, &allocator_probe);
-    let locks = include_locks.then(|| read_locks(root, abi.architecture));
+    let locks = include_locks.then(|| {
+        let endian = (abi.architecture != TargetArchitecture::Unknown).then_some(abi.endian);
+
+        read_locks(root, abi.architecture, endian, &maps)
+    });
 
     Ok(LiveMiscSnapshot {
         startup,

@@ -692,8 +692,8 @@ pub(super) fn build_workspace(
         ),
         layout::Pane::with_default_fraction(
             "misc_locks_graph",
-            &inspector.misc_view.lock_split,
-            0.6,
+            &inspector.misc_view.locks.root,
+            0.42,
         ),
     ];
 
