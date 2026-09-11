@@ -1357,14 +1357,6 @@ pub(super) fn build_inspector(
     let breakpoints_page = gtk::Box::new(gtk::Orientation::Vertical, 4);
     breakpoints_page.add_css_class("panel-content");
 
-    let hint = gtk::Label::new(Some(
-        "Use the source gutter for line breakpoints, or Add breakpoint for advanced locations and behavior.",
-    ));
-
-    hint.add_css_class("muted");
-    hint.set_halign(gtk::Align::Start);
-    hint.set_wrap(true);
-    breakpoints_page.append(&hint);
     let stop_point_filter_row = components::control_row();
 
     let stop_point_search = components::delayed_search_entry("Search stop points, groups, or tags");
@@ -1392,10 +1384,13 @@ pub(super) fn build_inspector(
     breakpoints_page.append(&stop_point_filter_row);
     let stop_point_filter_empty = empty_label("No stop points match this filter");
     stop_point_filter_empty.set_visible(false);
+    let organization = debug_state::StopPointOrganization::new();
+    breakpoints_page.append(&organization.root);
 
     let stop_point_filter = StopPointFilterControls {
         search: stop_point_search,
         kind: stop_point_kind,
+        organization,
         empty: stop_point_filter_empty,
     };
 

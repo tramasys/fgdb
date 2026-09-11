@@ -355,7 +355,7 @@ impl Ui {
             breakpoint_condition_handler: Rc::new(RefCell::new(None)),
             breakpoint_editor_handler: Rc::new(RefCell::new(None)),
             breakpoint_enabled_handler: Rc::new(RefCell::new(None)),
-            breakpoint_bulk_delete_handler: Rc::new(RefCell::new(None)),
+            stop_point_bulk_handler: Rc::new(RefCell::new(None)),
             signal_catchpoint_handler: Rc::new(RefCell::new(None)),
             event_catchpoint_handler: Rc::new(RefCell::new(None)),
             filtered_catchpoint_handler: Rc::new(RefCell::new(None)),
@@ -1244,6 +1244,7 @@ impl Ui {
 
         self.memory_search.update_state(self);
         self.update_lock_controls();
+        self.update_stop_point_group_controls();
         self.update_stack_paging();
         self.update_module_control_sensitivity();
         let ready = self.model.execution().ready;
@@ -1818,9 +1819,11 @@ impl Ui {
             .replace(Some(Rc::new(handler)));
     }
 
-    pub fn set_breakpoint_bulk_delete_handler(&self, handler: impl Fn(Vec<String>) + 'static) {
-        self.breakpoint_bulk_delete_handler
-            .replace(Some(Rc::new(handler)));
+    pub(crate) fn set_stop_point_bulk_handler(
+        &self,
+        handler: impl Fn(StopPointBulkAction, Vec<String>) + 'static,
+    ) {
+        self.stop_point_bulk_handler.replace(Some(Rc::new(handler)));
     }
 
     pub fn set_event_catchpoint_handler(

@@ -67,9 +67,9 @@ use crate::{
         BreakpointEditRequest, BreakpointSpec, CallAbiTargetRequest, DisassemblyRequest,
         DisassemblySyntax, EventCatchpoint, FilteredCatchpointKind, FilteredCatchpointRequest,
         GefContextControl, HeapInspectionAction, HeapInspectionRequest, SourceDiscoveryRequest,
-        ThreadBacktrace, ThreadComparison, ThreadComparisonRow, Ui, VariableViewerPlan,
-        VariableViewerRequest, VariableViewerRow, VariableViewerSession, WatchpointAccess,
-        WatchpointRequest, compact_variable_type,
+        StopPointBulkAction, ThreadBacktrace, ThreadComparison, ThreadComparisonRow, Ui,
+        VariableViewerPlan, VariableViewerRequest, VariableViewerRow, VariableViewerSession,
+        WatchpointAccess, WatchpointRequest, compact_variable_type,
     },
 };
 

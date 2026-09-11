@@ -1,5 +1,8 @@
 use super::*;
 
+mod navigation;
+pub(super) mod organization;
+
 pub(super) fn breakpoint_layout_matches(current: &[Breakpoint], incoming: &[Breakpoint]) -> bool {
     current.len() == incoming.len()
         && current.iter().zip(incoming).all(|(current, incoming)| {
@@ -166,6 +169,12 @@ impl Ui {
             .search
             .connect_search_changed(move |_| on_search());
 
+        let on_organization = Rc::clone(&refresh);
+
+        self.stop_point_filter
+            .organization
+            .connect_changed(move || on_organization());
+
         self.stop_point_filter
             .kind
             .connect_selected_notify(move |_| refresh());
@@ -189,7 +198,7 @@ impl Ui {
         });
 
         let breakpoints = Rc::clone(&self.breakpoints);
-        let handler = Rc::clone(&self.breakpoint_bulk_delete_handler);
+        let handler = Rc::clone(&self.stop_point_bulk_handler);
 
         self.delete_all_breakpoints_button
             .connect_clicked(move |_| {
@@ -199,12 +208,12 @@ impl Ui {
                 if !numbers.is_empty()
                     && let Some(handler) = handler
                 {
-                    handler(numbers);
+                    handler(StopPointBulkAction::Delete, numbers);
                 }
             });
 
         let breakpoints = Rc::clone(&self.breakpoints);
-        let handler = Rc::clone(&self.breakpoint_bulk_delete_handler);
+        let handler = Rc::clone(&self.stop_point_bulk_handler);
 
         self.delete_all_watchpoints_button
             .connect_clicked(move |_| {
@@ -214,12 +223,12 @@ impl Ui {
                 if !numbers.is_empty()
                     && let Some(handler) = handler
                 {
-                    handler(numbers);
+                    handler(StopPointBulkAction::Delete, numbers);
                 }
             });
 
         let breakpoints = Rc::clone(&self.breakpoints);
-        let handler = Rc::clone(&self.breakpoint_bulk_delete_handler);
+        let handler = Rc::clone(&self.stop_point_bulk_handler);
 
         self.delete_all_catchpoints_button
             .connect_clicked(move |_| {
@@ -229,12 +238,12 @@ impl Ui {
                 if !numbers.is_empty()
                     && let Some(handler) = handler
                 {
-                    handler(numbers);
+                    handler(StopPointBulkAction::Delete, numbers);
                 }
             });
 
         let breakpoints = Rc::clone(&self.breakpoints);
-        let handler = Rc::clone(&self.breakpoint_bulk_delete_handler);
+        let handler = Rc::clone(&self.stop_point_bulk_handler);
         let model = Rc::clone(&self.model);
 
         self.delete_all_signal_catchpoints_button
@@ -254,7 +263,7 @@ impl Ui {
                 if !numbers.is_empty()
                     && let Some(handler) = handler
                 {
-                    handler(numbers);
+                    handler(StopPointBulkAction::Delete, numbers);
                 }
             });
     }
@@ -345,6 +354,7 @@ impl Ui {
             .retain(|number, _| active_numbers.contains(number.as_str()));
 
         self.prepare_source_breakpoints(breakpoints, false);
+        self.update_stop_point_group_controls();
     }
 
     pub(in crate::ui) fn render_breakpoints(
@@ -411,15 +421,25 @@ impl Ui {
 
         let terms = query.split_whitespace().collect::<Vec<_>>();
         let metadata = self.stop_point_metadata.borrow();
+
+        self.stop_point_filter
+            .organization
+            .sync(&breakpoints, &metadata);
+
+        let organization_filter = self.stop_point_filter.organization.selection();
+
         let matching = breakpoints
             .iter()
             .filter(|breakpoint| {
-                stop_point_matches(
-                    breakpoint,
-                    metadata.get(breakpoint.command_number()),
-                    &terms,
-                    self.stop_point_filter.kind.selected(),
-                )
+                let metadata = metadata.get(breakpoint.command_number());
+
+                organization_filter.matches(metadata)
+                    && stop_point_matches(
+                        breakpoint,
+                        metadata,
+                        &terms,
+                        self.stop_point_filter.kind.selected(),
+                    )
             })
             .collect::<Vec<_>>();
 
@@ -460,6 +480,11 @@ impl Ui {
 
         // Search the complete model before bounding widget construction.
         let stop_point_limit = crate::performance::STOP_POINT_WIDGET_BUDGET;
+
+        let mut groups = organization::GroupRows::new(
+            &self.stop_point_filter.organization,
+            self.self_weak.borrow().clone(),
+        );
 
         if breakpoints.is_empty() {
             self.breakpoints_list.append(&empty_label(
@@ -510,6 +535,9 @@ impl Ui {
                 }
 
                 rendered_stop_points += 1;
+                let current_metadata = metadata.get(breakpoint.command_number());
+                let group = current_metadata.and_then(|metadata| metadata.group.as_deref());
+                let container = groups.parent_container(group);
 
                 let name = if breakpoint.is_watchpoint() {
                     breakpoint
@@ -578,7 +606,7 @@ impl Ui {
                     row.add_css_class("breakpoint-row-pending");
                 }
 
-                let heading_row = gtk::Box::new(gtk::Orientation::Horizontal, 3);
+                let heading_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
 
                 let kind = if breakpoint.is_logpoint() {
                     String::from("LOGPOINT")
@@ -593,6 +621,7 @@ impl Ui {
                 let badge = gtk::Button::with_label(&format!("#{}", breakpoint.number));
                 badge.add_css_class("breakpoint-badge");
                 badge.set_focus_on_click(false);
+                badge.set_valign(gtk::Align::Center);
 
                 badge.add_css_class(if breakpoint.enabled {
                     "breakpoint-badge-enabled"
@@ -660,21 +689,12 @@ impl Ui {
                 location.set_tooltip_text(Some(&location_text));
                 row.append(&heading_row);
                 row.append(&location);
-                let organization = gtk::Label::new(None);
-                organization.add_css_class("breakpoint-metadata");
-                organization.set_halign(gtk::Align::Start);
+                let tags = current_metadata.map_or(&[][..], |metadata| metadata.tags.as_slice());
 
-                let current_metadata = self
-                    .stop_point_metadata
-                    .borrow()
-                    .get(breakpoint.command_number())
-                    .cloned()
-                    .unwrap_or_default();
+                if !tags.is_empty() {
+                    row.append(&organization::tag_chips(tags));
+                }
 
-                let organization_text = stop_point_metadata_text(&current_metadata);
-                organization.set_text(&organization_text);
-                organization.set_visible(!organization_text.is_empty());
-                row.append(&organization);
                 let status_text = breakpoint_status_text(breakpoint);
                 let status = gtk::Label::new(Some(&status_text));
                 status.add_css_class("breakpoint-metadata");
@@ -752,18 +772,16 @@ impl Ui {
                     let current = metadata.borrow().get(&number).cloned().unwrap_or_default();
                     let metadata_for_apply = Rc::clone(&metadata);
                     let controls_for_apply = filter_controls.clone();
-                    let organization = organization.clone();
                     let number_for_apply = number.clone();
+                    let (groups, tags) = filter_controls.organization.suggestions();
 
                     let editor = open_stop_point_metadata_editor(
                         &parent,
                         &number,
                         &current,
+                        groups,
+                        tags,
                         Rc::new(move |updated| {
-                            let text = stop_point_metadata_text(&updated);
-                            organization.set_text(&text);
-                            organization.set_visible(!text.is_empty());
-
                             if updated == StopPointMetadata::default() {
                                 metadata_for_apply.borrow_mut().remove(&number_for_apply);
                             } else {
@@ -804,7 +822,8 @@ impl Ui {
                     }
                 });
 
-                self.breakpoints_list.append(&row);
+                self.connect_breakpoint_source(&row, &location, breakpoint);
+                container.append(&row);
 
                 for location in locations_by_parent
                     .get(breakpoint.number.as_str())
@@ -827,6 +846,7 @@ impl Ui {
                     badge.add_css_class("breakpoint-badge");
                     badge.add_css_class("breakpoint-location-badge");
                     badge.set_focus_on_click(false);
+                    badge.set_valign(gtk::Align::Center);
 
                     badge.add_css_class(if location.enabled {
                         "breakpoint-badge-enabled"
@@ -881,7 +901,8 @@ impl Ui {
                         }
                     });
 
-                    self.breakpoints_list.append(&location_row);
+                    self.connect_breakpoint_source(&location_row, &source_label, location);
+                    container.append(&location_row);
                 }
 
                 self.stop_point_filter_rows
@@ -892,6 +913,8 @@ impl Ui {
                     });
             }
         }
+
+        groups.append_to(&self.breakpoints_list);
 
         if rendered_stop_points < total_stop_points {
             let omitted = total_stop_points - rendered_stop_points;

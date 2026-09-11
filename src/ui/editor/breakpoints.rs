@@ -44,15 +44,34 @@ fn same_locations(left: &[Breakpoint], right: &[Breakpoint]) -> bool {
 }
 
 impl Ui {
-    pub(in crate::ui) fn latest_source_breakpoints(&self) -> Vec<Breakpoint> {
-        self.source_breakpoint_refresh
-            .borrow()
+    pub(in crate::ui) fn latest_source_breakpoint(&self, number: &str) -> Option<Breakpoint> {
+        self.with_latest_source_breakpoints(|breakpoints| {
+            breakpoints
+                .iter()
+                .find(|breakpoint| breakpoint.number == number)
+                .cloned()
+        })
+    }
+
+    pub(in crate::ui) fn with_latest_source_breakpoints<T>(
+        &self,
+        read: impl FnOnce(&[Breakpoint]) -> T,
+    ) -> T {
+        let refresh = self.source_breakpoint_refresh.borrow();
+        let rendered = self.breakpoints.borrow();
+
+        let breakpoints = refresh
             .pending
             .as_ref()
-            .map_or_else(
-                || self.breakpoints.borrow().clone(),
-                |pending| (*pending.breakpoints).clone(),
-            )
+            .map_or(rendered.as_slice(), |pending| {
+                pending.breakpoints.as_slice()
+            });
+
+        read(breakpoints)
+    }
+
+    pub(in crate::ui) fn latest_source_breakpoints(&self) -> Vec<Breakpoint> {
+        self.with_latest_source_breakpoints(<[Breakpoint]>::to_vec)
     }
 
     pub(in crate::ui) fn refresh_source_breakpoint_index(&self) {

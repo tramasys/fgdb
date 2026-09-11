@@ -1842,12 +1842,33 @@ impl MiClient {
                     capabilities.features = listed_features(&record);
                 }
 
-                client.detect_gdb_version();
+                client.configure_breakpoint_output();
             })
             .is_err()
             && let Some(client) = weak_client.upgrade()
         {
-            client.detect_gdb_version();
+            client.configure_breakpoint_output();
+        }
+    }
+
+    fn configure_breakpoint_output(&self) {
+        let epoch = self.transport_epoch.get();
+
+        // MI2 otherwise emits unnamed sibling tuples for multiple locations,
+        // rather than the structured locations list used by the model.
+        if self
+            .request(
+                "-fix-multi-location-breakpoint-output",
+                move |client, record| {
+                    if client.transport_epoch.get() == epoch && record.class != "superseded" {
+                        client.detect_gdb_version();
+                    }
+                },
+            )
+            .is_err()
+            && self.transport_epoch.get() == epoch
+        {
+            self.detect_gdb_version();
         }
     }
 

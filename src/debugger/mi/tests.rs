@@ -125,6 +125,61 @@ fn injected_transport_runs_a_deterministic_request_transcript() {
 }
 
 #[test]
+fn breakpoint_output_negotiation_continues_on_unsupported_but_not_stale_responses() {
+    use std::io::{Read, Write};
+
+    let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+    let context = gtk::glib::MainContext::new();
+
+    context
+        .with_thread_default(|| {
+            for (response, replace_epoch, continues) in [
+                ("done", false, true),
+                ("error,msg=\"Undefined MI command\"", false, true),
+                ("superseded", false, false),
+                ("done", true, false),
+            ] {
+                let (client, mut peer) =
+                    super::MiClient::open_with_injected_transport(|_, _| {}).unwrap();
+
+                client.configure_breakpoint_output();
+                super::MiClient::on_write_ready(&client.weak(), gtk::glib::IOCondition::OUT);
+                let mut buffer = [0_u8; 256];
+                let count = peer.read(&mut buffer).unwrap();
+                let command = std::str::from_utf8(&buffer[..count]).unwrap();
+                let (token, command) = command.split_once('-').unwrap();
+                assert_eq!(command, "fix-multi-location-breakpoint-output\n");
+
+                if replace_epoch {
+                    client.transport_epoch.set(client.transport_epoch.get() + 1);
+                }
+
+                peer.write_all(format!("{token}^{response}\n").as_bytes())
+                    .unwrap();
+
+                super::MiClient::on_io_ready(&client.weak(), gtk::glib::IOCondition::IN);
+                super::MiClient::on_write_ready(&client.weak(), gtk::glib::IOCondition::OUT);
+
+                if continues {
+                    let count = peer.read(&mut buffer).unwrap();
+
+                    assert!(
+                        std::str::from_utf8(&buffer[..count])
+                            .unwrap()
+                            .contains("-data-evaluate-expression \"$_gdb_major\"\n")
+                    );
+                } else {
+                    assert_eq!(
+                        peer.read(&mut buffer).unwrap_err().kind(),
+                        std::io::ErrorKind::WouldBlock
+                    );
+                }
+            }
+        })
+        .unwrap();
+}
+
+#[test]
 fn one_readiness_callback_drains_records_across_chunk_boundaries() {
     use std::{cell::RefCell, io::Write, rc::Rc};
 
@@ -196,10 +251,11 @@ fn reconnect_does_not_publish_ready_from_an_old_printer_probe() {
             .unwrap();
             client.process_line("(gdb)");
             client.process_line(r#"1^done,features=[]"#);
-            client.process_line(r#"2^done,value="17""#);
-            client.process_line(r#"3^done,value="2""#);
-            client.process_line("4^done");
+            client.process_line("2^done");
+            client.process_line(r#"3^done,value="17""#);
+            client.process_line(r#"4^done,value="2""#);
             client.process_line("5^done");
+            client.process_line("6^done");
             assert!(events.borrow().is_empty());
             client.reconnect().unwrap();
             assert!(events.borrow().is_empty());
@@ -231,12 +287,14 @@ fn publishes_ready_only_after_capability_negotiation() {
                 r#"1^done,features=["pending-breakpoints","data-read-memory-bytes"]"#,
             );
 
-            client.process_line(r#"2^done,value="17""#);
-            client.process_line(r#"3^done,value="2""#);
-            client.process_line("4^done");
+            client.process_line("2^done");
+            client.process_line(r#"3^done,value="17""#);
+            client.process_line(r#"4^done,value="2""#);
             client.process_line("5^done");
             client.process_line("6^done");
             client.process_line("7^done");
+            assert!(events.borrow().is_empty());
+            client.process_line("8^done");
             let events = events.borrow();
 
             let [super::MiEvent::Ready(capabilities)] = events.as_slice() else {
@@ -271,12 +329,13 @@ fn remains_ready_when_rust_printer_probing_is_unavailable() {
             .unwrap();
             client.process_line("(gdb)");
             client.process_line(r#"1^done,features=[]"#);
-            client.process_line(r#"2^done,value="17""#);
-            client.process_line(r#"3^done,value="2""#);
-            client.process_line("4^done");
+            client.process_line("2^done");
+            client.process_line(r#"3^done,value="17""#);
+            client.process_line(r#"4^done,value="2""#);
             client.process_line("5^done");
-            client.process_line(r#"6^error,msg="Python is unavailable""#);
+            client.process_line("6^done");
             client.process_line(r#"7^error,msg="Python is unavailable""#);
+            client.process_line(r#"8^error,msg="Python is unavailable""#);
             let events = events.borrow();
 
             let [super::MiEvent::Ready(capabilities)] = events.as_slice() else {

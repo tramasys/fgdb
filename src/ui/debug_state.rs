@@ -5,6 +5,7 @@ mod locals;
 mod stop_points;
 
 use locals::locals_summary_text;
+pub(super) use stop_points::organization::StopPointOrganization;
 
 #[cfg(test)]
 use {

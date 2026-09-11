@@ -34,6 +34,10 @@ pub(super) fn load_source(
         ));
     }
 
+    if snapshot.contents.contains('\0') {
+        return Err(format!("{reported} contains binary data"));
+    }
+
     if snapshot.exceeds_lines(250_000) {
         return Err(format!(
             "{reported} exceeds the 250000-line source-file limit"
@@ -42,6 +46,9 @@ pub(super) fn load_source(
 
     Ok((path, snapshot))
 }
+
+#[cfg(test)]
+mod tests;
 
 impl Ui {
     pub(in crate::ui) fn open_source_batch(

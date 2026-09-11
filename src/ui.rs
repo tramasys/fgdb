@@ -179,7 +179,7 @@ fn set_transient_execution_sensitive<W: IsA<gtk::Widget>>(widget: &W, sensitive:
     }
 }
 
-fn stop_point_actions_available(model: &crate::model::DebuggerModel) -> bool {
+pub(crate) fn stop_point_actions_available(model: &crate::model::DebuggerModel) -> bool {
     model.stop_point_commands_available()
         && model.execution().inferior_action_pending.is_none()
         && model.execution().thread_action_pending.is_none()
@@ -303,7 +303,7 @@ type VectorAssignmentHandler =
 type BreakpointConditionHandler = Rc<dyn Fn(String, Option<String>)>;
 type BreakpointEditorHandler = Rc<dyn Fn(BreakpointEditRequest)>;
 type BreakpointEnabledHandler = Rc<dyn Fn(String, bool)>;
-type BreakpointBulkDeleteHandler = Rc<dyn Fn(Vec<String>)>;
+type StopPointBulkHandler = Rc<dyn Fn(StopPointBulkAction, Vec<String>)>;
 type BreakpointInsertHandler = Rc<dyn Fn(PathBuf, u32)>;
 type SourceJumpHandler = Rc<dyn Fn(PathBuf, u32)>;
 type SourceDiscoveryHandler = Rc<dyn Fn(SourceDiscoveryRequest)>;
@@ -524,6 +524,13 @@ pub(crate) enum WatchpointRequest {
     },
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum StopPointBulkAction {
+    Enable,
+    Disable,
+    Delete,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct StopPointMetadata {
     group: Option<String>,
@@ -540,6 +547,7 @@ struct StopPointFilterRow {
 struct StopPointFilterControls {
     search: gtk::SearchEntry,
     kind: gtk::DropDown,
+    organization: Rc<debug_state::StopPointOrganization>,
     empty: gtk::Label,
 }
 
@@ -1491,7 +1499,7 @@ pub struct Ui {
     breakpoint_condition_handler: Rc<RefCell<Option<BreakpointConditionHandler>>>,
     breakpoint_editor_handler: Rc<RefCell<Option<BreakpointEditorHandler>>>,
     breakpoint_enabled_handler: Rc<RefCell<Option<BreakpointEnabledHandler>>>,
-    breakpoint_bulk_delete_handler: Rc<RefCell<Option<BreakpointBulkDeleteHandler>>>,
+    stop_point_bulk_handler: Rc<RefCell<Option<StopPointBulkHandler>>>,
     signal_catchpoint_handler: Rc<RefCell<Option<SignalCatchpointHandler>>>,
     event_catchpoint_handler: Rc<RefCell<Option<EventCatchpointHandler>>>,
     filtered_catchpoint_handler: Rc<RefCell<Option<FilteredCatchpointHandler>>>,

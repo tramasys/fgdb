@@ -140,6 +140,7 @@ headerbar.topbar button.window-control.close:active {
 
 .breakpoint-row {
     min-height: 42px;
+    padding: 5px 8px;
     background: alpha(@app_fg, 0.018);
 }
 
@@ -165,13 +166,97 @@ headerbar.topbar button.window-control.close:active {
 
 .breakpoint-location-row {
     min-height: 34px;
-    padding: 2px 4px 2px 22px;
+    padding: 3px 8px 3px 26px;
     background: alpha(@app_fg, 0.025);
     border-left: 1px solid alpha(@app_accent, 0.34);
 }
 
 .breakpoint-location-row:hover {
     background: @app_hover;
+}
+
+.breakpoint-row:focus-visible,
+.breakpoint-location-row:focus-visible {
+    outline: 1px solid @app_accent;
+    outline-offset: -1px;
+}
+
+label.breakpoint-source link,
+label.breakpoint-source link:visited,
+label.breakpoint-source link:hover,
+label.breakpoint-source link:active {
+    color: @app_muted;
+}
+
+expander-widget.breakpoint-group {
+    margin-bottom: 5px;
+}
+
+expander-widget.breakpoint-group > box > title {
+    min-height: 24px;
+    padding: 3px 8px;
+    color: @app_fg;
+    background: @app_card;
+    border-bottom: 1px solid @app_border;
+}
+
+expander-widget.breakpoint-group > box > title:hover {
+    background: @app_hover;
+}
+
+expander-widget.breakpoint-group > box > title > expander {
+    -gtk-icon-source: none;
+    -gtk-icon-size: 0;
+    min-width: 0;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+}
+
+menubutton.breakpoint-group-menu > button {
+    min-width: 20px;
+    min-height: 20px;
+    padding: 0 3px;
+    color: @app_muted;
+    background: transparent;
+    border-color: transparent;
+}
+
+menubutton.breakpoint-group-menu > button:hover {
+    color: @app_fg;
+    background: @app_hover;
+}
+
+flowbox.breakpoint-tags {
+    padding: 2px 0;
+}
+
+flowbox.breakpoint-tags > flowboxchild {
+    padding: 0;
+}
+
+label.breakpoint-tag {
+    padding: 1px 5px;
+    color: @app_muted;
+    background: alpha(@app_fg, 0.04);
+    border: 1px solid @app_border;
+    border-radius: 3px;
+}
+
+list.metadata-suggestions {
+    background: transparent;
+}
+
+list.metadata-suggestions > row {
+    min-height: 24px;
+    padding: 2px 6px;
+    color: @app_fg;
+}
+
+list.metadata-suggestions > row:hover,
+list.metadata-suggestions > row:selected {
+    color: @app_fg;
+    background: alpha(@app_fg, 0.10);
 }
 
 button.breakpoint-location-badge {
@@ -181,7 +266,8 @@ button.breakpoint-location-badge {
 button.breakpoint-badge {
     min-width: 24px;
     min-height: 20px;
-    padding: 1px 4px;
+    padding: 3px 7px;
+    margin-right: 3px;
     border: 0;
 }
 
@@ -226,7 +312,7 @@ button.breakpoint-badge-disabled:checked {
 }
 
 .breakpoint-metadata {
-    color: @app_accent;
+    color: @app_muted;
     padding: 1px 3px;
 }
 

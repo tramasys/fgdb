@@ -555,22 +555,12 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
 
-    ui.set_breakpoint_bulk_delete_handler(move |numbers| {
+    ui.set_stop_point_bulk_handler(move |action, numbers| {
         let Some(client) = weak_client.upgrade() else {
             return;
         };
 
-        let count = numbers.len();
-
-        mutate_breakpoint(
-            weak_ui.clone(),
-            &client,
-            format!("-break-delete {}", numbers.join(" ")),
-            format!(
-                "Deleted {count} stop point{}",
-                if count == 1 { "" } else { "s" }
-            ),
-        );
+        mutate_stop_points(weak_ui.clone(), &client, action, &numbers);
     });
 
     let weak_ui = Rc::downgrade(&ui);

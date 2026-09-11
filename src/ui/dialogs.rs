@@ -1,5 +1,7 @@
 use super::*;
 
+mod metadata_completion;
+
 impl Ui {
     pub(crate) fn begin_variable_editor_request(
         &self,
@@ -2188,6 +2190,8 @@ pub(super) fn open_stop_point_metadata_editor(
     parent: &impl IsA<gtk::Window>,
     number: &str,
     metadata: &StopPointMetadata,
+    group_suggestions: Vec<String>,
+    tag_suggestions: Vec<String>,
     on_apply: Rc<dyn Fn(StopPointMetadata)>,
 ) -> gtk::Window {
     let editor = gtk::Window::builder()
@@ -2237,7 +2241,7 @@ pub(super) fn open_stop_point_metadata_editor(
     actions.append(&apply);
     content.append(&actions);
     editor.set_child(Some(&content));
-    connect_escape_to_close(&editor);
+    metadata_completion::connect(&editor, &group, &tags, group_suggestions, tag_suggestions);
     let editor_for_apply = editor.clone();
     let group_for_apply = group.clone();
     let tags_for_apply = tags.clone();

@@ -484,6 +484,71 @@ fn relocated_source_breakpoint_summary(breakpoints: &[Breakpoint]) -> Option<Str
     }
 }
 
+fn bulk_stop_point_command(
+    action: StopPointBulkAction,
+    numbers: &[String],
+) -> Result<(String, &'static str), &'static str> {
+    if numbers.is_empty() {
+        return Err("No stop points selected");
+    }
+
+    // A bare bulk MI command applies to every breakpoint in the debugger.
+    // Accept only explicit IDs, never group names or command fragments.
+    let valid_segment = |part: &str| {
+        !part.is_empty()
+            && part.bytes().all(|byte| byte.is_ascii_digit())
+            && part.bytes().any(|byte| byte != b'0')
+    };
+
+    if numbers.iter().any(|number| match number.split_once('.') {
+        Some((parent, location)) => {
+            action == StopPointBulkAction::Delete
+                || !valid_segment(parent)
+                || !valid_segment(location)
+        }
+        None => !valid_segment(number),
+    }) {
+        return Err("Invalid stop-point number");
+    }
+
+    let (operation, success) = match action {
+        StopPointBulkAction::Enable => ("enable", "Enabled stop points"),
+        StopPointBulkAction::Disable => ("disable", "Disabled stop points"),
+        StopPointBulkAction::Delete => ("delete", "Deleted stop points"),
+    };
+
+    Ok((format!("-break-{operation} {}", numbers.join(" ")), success))
+}
+
+pub(super) fn mutate_stop_points(
+    ui: Weak<Ui>,
+    client: &MiClient,
+    action: StopPointBulkAction,
+    numbers: &[String],
+) {
+    let Some(current_ui) = ui.upgrade() else {
+        return;
+    };
+
+    if !crate::ui::stop_point_actions_available(&current_ui.model) {
+        return;
+    }
+
+    match bulk_stop_point_command(action, numbers) {
+        Ok((command, success)) => {
+            drop(current_ui);
+            mutate_breakpoint(ui, client, command, success.to_owned());
+        }
+        Err(error) => {
+            current_ui.set_status(
+                "Stop-point command unavailable",
+                error,
+                Some("status-error"),
+            );
+        }
+    }
+}
+
 pub(super) fn mutate_breakpoint(ui: Weak<Ui>, client: &MiClient, command: String, success: String) {
     if !client.is_ready() {
         if let Some(ui) = ui.upgrade() {
@@ -1252,14 +1317,132 @@ pub(super) fn refresh_threads(ui: &Weak<Ui>, client: &MiClient) {
 mod tests {
     use super::{
         accepted_source_breakpoint_line, breakpoint_commands_command, breakpoint_insert_command,
-        canonical_breakpoint_location, filtered_catchpoint_command,
+        bulk_stop_point_command, canonical_breakpoint_location, filtered_catchpoint_command,
         relocated_source_breakpoint_summary, watchpoint_command,
     };
     use crate::debugger::Breakpoint;
     use crate::ui::{
-        BreakpointSpec, FilteredCatchpointKind, FilteredCatchpointRequest, WatchpointAccess,
-        WatchpointRequest,
+        BreakpointSpec, FilteredCatchpointKind, FilteredCatchpointRequest, StopPointBulkAction,
+        WatchpointAccess, WatchpointRequest,
     };
+
+    #[test]
+    fn bulk_stop_point_commands_require_explicit_valid_targets() {
+        for (action, operation) in [
+            (StopPointBulkAction::Enable, "enable"),
+            (StopPointBulkAction::Disable, "disable"),
+            (StopPointBulkAction::Delete, "delete"),
+        ] {
+            assert_eq!(
+                bulk_stop_point_command(action, &["1".into(), "12".into()])
+                    .unwrap()
+                    .0,
+                format!("-break-{operation} 1 12"),
+            );
+
+            assert!(bulk_stop_point_command(action, &[]).is_err());
+
+            for number in [
+                "",
+                "0",
+                "00",
+                "1 2",
+                "1\n-break-delete",
+                "-1",
+                "1-9",
+                "1.",
+                ".1",
+                "1.0",
+                "1.2.3",
+                "all",
+                "group name",
+            ] {
+                assert!(
+                    bulk_stop_point_command(action, &[number.into()]).is_err(),
+                    "{number:?}"
+                );
+
+                assert!(bulk_stop_point_command(action, &["1".into(), number.into()]).is_err());
+            }
+        }
+
+        assert_eq!(
+            bulk_stop_point_command(StopPointBulkAction::Enable, &["1".into(), "1.2".into()])
+                .unwrap()
+                .0,
+            "-break-enable 1 1.2",
+        );
+
+        assert_eq!(
+            bulk_stop_point_command(StopPointBulkAction::Disable, &["1.2".into()])
+                .unwrap()
+                .0,
+            "-break-disable 1.2",
+        );
+
+        assert!(bulk_stop_point_command(StopPointBulkAction::Delete, &["1.2".into()]).is_err());
+    }
+
+    #[test]
+    #[ignore = "requires GDB and the cpp-debug-target fixture, run separately"]
+    fn bulk_stop_point_commands_update_locations_and_delete_only_targets() {
+        use crate::app::test_support::{open_debugger, request};
+
+        let (_debugger, client) = open_debugger("cpp-debug-target", "main");
+        let inserted = request(&client, "-break-insert std::move");
+        assert!(inserted.is_done(), "{inserted:?}");
+        let breakpoints = crate::debugger::inserted_breakpoints(&inserted);
+
+        let parent = breakpoints
+            .iter()
+            .find(|breakpoint| !breakpoint.is_location())
+            .unwrap();
+
+        let child = breakpoints
+            .iter()
+            .find(|breakpoint| breakpoint.is_location())
+            .unwrap();
+
+        let numbers = vec![parent.number.clone(), child.number.clone()];
+
+        let command = bulk_stop_point_command(StopPointBulkAction::Disable, &numbers)
+            .unwrap()
+            .0;
+
+        assert!(request(&client, &command).is_done());
+        let snapshot = crate::debugger::breakpoints(&request(&client, "-break-list"));
+
+        assert!(
+            snapshot
+                .iter()
+                .filter(|breakpoint| numbers.contains(&breakpoint.number))
+                .all(|breakpoint| !breakpoint.enabled)
+        );
+
+        let command = bulk_stop_point_command(StopPointBulkAction::Enable, &numbers)
+            .unwrap()
+            .0;
+
+        assert!(request(&client, &command).is_done());
+        let snapshot = crate::debugger::breakpoints(&request(&client, "-break-list"));
+
+        assert!(
+            snapshot
+                .iter()
+                .filter(|breakpoint| numbers.contains(&breakpoint.number))
+                .all(|breakpoint| breakpoint.enabled)
+        );
+
+        let command = bulk_stop_point_command(StopPointBulkAction::Delete, &numbers[..1])
+            .unwrap()
+            .0;
+
+        assert!(request(&client, &command).is_done());
+        let remaining = crate::debugger::breakpoints(&request(&client, "-break-list"));
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].number, "1");
+        assert!(remaining[0].enabled);
+    }
 
     fn breakpoint_spec(location: &str) -> BreakpointSpec {
         BreakpointSpec {
