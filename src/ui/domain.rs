@@ -305,6 +305,7 @@ mod tests {
     fn variable(name: &str, varobj: &str) -> Variable {
         Variable {
             local_index: None,
+            return_value: None,
             name: name.to_owned(),
             value: String::from("1"),
             type_name: Some(String::from("int")),

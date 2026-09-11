@@ -22,6 +22,7 @@ pub enum MiEvent {
     },
     Stopped {
         reason: Option<String>,
+        return_value: Option<ReturnValue>,
         signal_name: Option<String>,
         signal_meaning: Option<String>,
         address: Option<String>,
@@ -57,6 +58,12 @@ pub enum MiEvent {
     Performance(crate::performance::PerformanceNotice),
     Error(String),
     Disconnected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReturnValue {
+    pub value: String,
+    pub history_variable: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

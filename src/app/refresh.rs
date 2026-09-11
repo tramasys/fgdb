@@ -86,6 +86,7 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
         return;
     };
     client.cancel_stale_stop_requests(generation);
+    return_values::refresh(ui, client, generation);
     let process = current_ui
         .model
         .inferior_pid()

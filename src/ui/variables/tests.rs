@@ -45,6 +45,7 @@ fn pages_require_the_original_parent_and_expected_offset() {
         },
         Variable {
             local_index: Some(3),
+            return_value: None,
             ..parent.clone()
         },
         Variable {

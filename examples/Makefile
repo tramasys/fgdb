@@ -27,7 +27,9 @@ MIMALLOC_LIBS ?= -lmimalloc
 
 TARGET_DIR := ../target/debug-fixtures
 C_TARGETS := \
+	$(TARGET_DIR)/c-aggregate-return-target \
 	$(TARGET_DIR)/c-variable-location-target \
+	$(TARGET_DIR)/c-return-value-target \
 	$(TARGET_DIR)/c-linked-list-viewer-target \
 	$(TARGET_DIR)/c-array-viewer-target \
 	$(TARGET_DIR)/c-simd-target \
@@ -44,11 +46,14 @@ C_TARGETS := \
 	$(TARGET_DIR)/c-thread-target \
 	$(TARGET_DIR)/c-process-target
 CXX_TARGETS := \
+	$(TARGET_DIR)/cpp-aggregate-return-target \
+	$(TARGET_DIR)/cpp-return-value-target \
 	$(TARGET_DIR)/cpp-array-viewer-target \
 	$(TARGET_DIR)/cpp-debug-target \
 	$(TARGET_DIR)/cpp-object-target \
 	$(TARGET_DIR)/cpp-variable-viewer-target
 RUST_TARGETS := \
+	$(TARGET_DIR)/rust-return-value-target \
 	$(TARGET_DIR)/rust-array-viewer-target \
 	$(TARGET_DIR)/rust-debug-target \
 	$(TARGET_DIR)/rust-variable-viewer-target
@@ -57,13 +62,20 @@ OPTIMIZED_TARGETS := \
 	$(TARGET_DIR)/rust-debug-target-o2
 TARGETS := $(C_TARGETS) $(CXX_TARGETS) $(RUST_TARGETS) $(OPTIMIZED_TARGETS)
 LANGUAGE_TARGETS := \
+	$(TARGET_DIR)/d-return-value-target \
+	$(TARGET_DIR)/ada-return-value-target \
+	$(TARGET_DIR)/fortran-return-value-target \
+	$(TARGET_DIR)/zig-return-value-target \
+	$(TARGET_DIR)/odin-return-value-target \
 	$(TARGET_DIR)/d-variable-viewer-target \
 	$(TARGET_DIR)/ada-variable-viewer-target \
 	$(TARGET_DIR)/fortran-array-viewer-target \
 	$(TARGET_DIR)/fortran-variable-viewer-target \
 	$(TARGET_DIR)/zig-variable-viewer-target \
 	$(TARGET_DIR)/odin-variable-viewer-target
-OPTIONAL_LANGUAGE_TARGETS := $(TARGET_DIR)/dmd-variable-viewer-target
+OPTIONAL_LANGUAGE_TARGETS := \
+	$(TARGET_DIR)/dmd-variable-viewer-target \
+	$(TARGET_DIR)/dmd-return-value-target
 ALLOCATOR_TARGETS := \
 	$(TARGET_DIR)/c-glibc-allocator-target \
 	$(TARGET_DIR)/c-musl-allocator-target \
@@ -176,6 +188,39 @@ $(TARGET_DIR)/c-misc-locks-target: c_misc_locks_target.c | $(TARGET_DIR)
 
 $(TARGET_DIR)/c-thread-target: c_thread_target.c | $(TARGET_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -pthread -o $@
+
+$(TARGET_DIR)/c-return-value-target: c_return_value_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@
+
+$(TARGET_DIR)/cpp-return-value-target: c_return_value_target.c | $(TARGET_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -x c++ $< $(LDFLAGS) -o $@
+
+$(TARGET_DIR)/c-aggregate-return-target: c_aggregate_return_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@
+
+$(TARGET_DIR)/cpp-aggregate-return-target: c_aggregate_return_target.c | $(TARGET_DIR)
+	$(CXX) $(CPPFLAGS) $(CXXFLAGS) -x c++ $< $(LDFLAGS) -o $@
+
+$(TARGET_DIR)/rust-return-value-target: rust_return_value_target.rs | $(TARGET_DIR)
+	$(RUSTC) $(RUSTFLAGS) $< -o $@
+
+$(TARGET_DIR)/d-return-value-target: d_return_value_target.d | $(TARGET_DIR)
+	$(GDC) -g3 -O0 -fno-inline $< -o $@
+
+$(TARGET_DIR)/dmd-return-value-target: d_return_value_target.d | $(TARGET_DIR)
+	$(DMD) -g -od=$(TARGET_DIR) -of=$@ $<
+
+$(TARGET_DIR)/ada-return-value-target: ada_return_value_target.adb | $(TARGET_DIR)
+	cd $(TARGET_DIR) && $(GNATMAKE) -g -O0 -fno-inline $(abspath $<) -o $(notdir $@)
+
+$(TARGET_DIR)/fortran-return-value-target: fortran_return_value_target.f90 | $(TARGET_DIR)
+	cd $(TARGET_DIR) && $(FORTRAN) -g3 -O0 -fno-inline $(abspath $<) -o $(notdir $@)
+
+$(TARGET_DIR)/zig-return-value-target: zig_return_value_target.zig | $(TARGET_DIR)
+	$(ZIG) build-exe $< -O Debug -fllvm -femit-bin=$@
+
+$(TARGET_DIR)/odin-return-value-target: odin_return_value_target.odin | $(TARGET_DIR)
+	$(ODIN) build $< -file -debug -o:none -out:$@
 
 $(TARGET_DIR)/c-tls-target: c_tls_target.c | $(TARGET_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -pthread -o $@

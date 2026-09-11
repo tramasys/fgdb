@@ -136,6 +136,8 @@ impl DebuggerModel {
     }
 
     pub(crate) fn forget_thread_group(&self, thread_id: &str) {
+        self.invalidate_return_value_owner(Some(thread_id), None);
+
         self.processes
             .thread_inferior_ids
             .borrow_mut()
@@ -190,6 +192,7 @@ impl DebuggerModel {
     }
 
     pub(crate) fn record_inferior_started(&self, id: &str, pid: Option<u32>) {
+        self.invalidate_return_value_owner(None, Some(id));
         self.invalidate_replay_target(id);
 
         if let Some(parent) = pid.and_then(|pid| {
@@ -667,6 +670,7 @@ impl DebuggerModel {
         // An exact thread ID that is not in our latest snapshot means the
         // snapshot is stale. It does not mean every inferior started running.
         let all = running_event_affects_all(group.as_deref(), exact_thread);
+
         let mut inferiors = self.processes.inferiors.borrow_mut();
 
         for inferior in inferiors.iter_mut() {
@@ -813,6 +817,7 @@ impl DebuggerModel {
     }
 
     pub(crate) fn record_inferior_exited(&self, id: &str) {
+        self.invalidate_return_value_owner(None, Some(id));
         self.invalidate_replay_target(id);
 
         self.processes
@@ -844,6 +849,7 @@ impl DebuggerModel {
     }
 
     pub(crate) fn clear_inferiors(&self) {
+        self.clear_return_value();
         self.reset_replay();
         self.invalidate_stop_context();
         self.processes.threads.replace(Rc::from([]));

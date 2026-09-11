@@ -107,7 +107,7 @@ pub(super) fn assign_string(
     kind: crate::ui::StringAssignmentKind,
 ) {
     let Some(generation) = ui.upgrade().and_then(|current_ui| {
-        if !current_ui.variable_action_is_current(&variable) {
+        if variable.return_value.is_some() || !current_ui.variable_action_is_current(&variable) {
             return None;
         }
 

@@ -92,6 +92,7 @@ pub(crate) struct Preferences {
     pub terminal_scrollback: u32,
     pub integer_display: IntegerDisplay,
     pub variable_locations: bool,
+    pub return_values: bool,
     pub instruction_bytes: bool,
     pub instruction_symbols: bool,
     pub instruction_source: bool,
@@ -139,6 +140,7 @@ impl Preferences {
             ("terminal_scrollback", self.terminal_scrollback.to_string()),
             ("integer_display", self.integer_display.as_str().into()),
             ("variable_locations", self.variable_locations.to_string()),
+            ("return_values", self.return_values.to_string()),
             ("instruction_bytes", self.instruction_bytes.to_string()),
             ("instruction_symbols", self.instruction_symbols.to_string()),
             ("instruction_source", self.instruction_source.to_string()),
@@ -199,6 +201,7 @@ impl Preferences {
             terminal_scrollback: layer.terminal_scrollback.unwrap_or(20_000),
             integer_display: layer.integer_display.unwrap_or(IntegerDisplay::Automatic),
             variable_locations: layer.variable_locations.unwrap_or(false),
+            return_values: layer.return_values.unwrap_or(true),
             instruction_bytes: layer.instruction_bytes.unwrap_or(true),
             instruction_symbols: layer.instruction_symbols.unwrap_or(true),
             instruction_source: layer.instruction_source.unwrap_or(false),
@@ -349,6 +352,13 @@ pub(crate) const SETTINGS: &[Setting] = &[
         key: "variable_locations",
         title: "Show variable locations",
         help: "Show storage addresses in locals, arguments, and watches. Resolves visible rows only while paused. Pointer storage is distinct from its target. Locations are also available in the right-click menu",
+        page: "Debugging",
+        control: Control::Toggle,
+    },
+    Setting {
+        key: "return_values",
+        title: "Show return values",
+        help: "Show captured results in a separate Context table. Keeps up to 32 recent results across threads. Values are read-only, while pointer targets are inspected at the current stop",
         page: "Debugging",
         control: Control::Toggle,
     },
@@ -921,6 +931,29 @@ mod tests {
                 .parse::<bool>()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn return_values_round_trip_and_follow_live_profiles() {
+        let config =
+            document("# Keep this\nreturn_values=true\n[profile quiet]\nreturn_values=false\n");
+
+        let defaults = LiveSettings::new(None, ConfigLayer::default());
+        let quiet = LiveSettings::new(Some("quiet".into()), ConfigLayer::default());
+        assert!(defaults.resolve(&config).unwrap().0.return_values);
+        assert!(!quiet.resolve(&config).unwrap().0.return_values);
+
+        let edited = config
+            .patch(
+                Some("quiet"),
+                &Values::from([("return_values", "true".into())]),
+            )
+            .unwrap();
+
+        assert!(edited.starts_with("# Keep this\n"));
+        assert!(quiet.resolve(&document(&edited)).unwrap().0.return_values);
+        assert_eq!(document("").values(None).unwrap()["return_values"], "true");
+        assert!(!document("return_values=maybe").issues.is_empty());
     }
 
     #[test]

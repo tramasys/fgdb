@@ -218,6 +218,7 @@ mod tests {
     fn linked_end_markers_require_a_pointer_or_optional_type() {
         let variable = |type_name: &str, value: &str| Variable {
             local_index: None,
+            return_value: None,
             name: String::from("next"),
             value: value.into(),
             type_name: Some(type_name.into()),
@@ -255,6 +256,7 @@ mod tests {
 
         let wrapper = Variable {
             local_index: None,
+            return_value: None,
             name: String::from("_M_elems"),
             value: String::from("{...}"),
             type_name: None,
@@ -273,6 +275,7 @@ mod tests {
 
         let access_group = Variable {
             local_index: None,
+            return_value: None,
             name: String::from("public"),
             varobj: Some(String::from("var1.public")),
             ..wrapper.clone()
@@ -288,6 +291,7 @@ mod tests {
     fn unwraps_known_rust_ownership_layers_without_guessing_user_fields() {
         let child = |name: &str, type_name: &str| Variable {
             local_index: None,
+            return_value: None,
             name: name.to_owned(),
             value: String::from("{...}"),
             type_name: Some(type_name.to_owned()),

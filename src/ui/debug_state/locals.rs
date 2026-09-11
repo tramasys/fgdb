@@ -406,7 +406,11 @@ impl Ui {
     }
 
     pub(crate) fn show_lazy_variable_children_error(&self, variable: &Variable, error: &str) {
-        let Some((_, node)) = self.local_variable_node(variable) else {
+        let Some(node) = self
+            .local_variable_node(variable)
+            .map(|(_, node)| node)
+            .or_else(|| self.return_variable_node(variable))
+        else {
             return;
         };
 
@@ -431,6 +435,10 @@ impl Ui {
             return false;
         }
 
+        if variable.return_value.is_some() {
+            return self.return_value_action_is_current(variable);
+        }
+
         if variable.local_index.is_some() {
             return self.locals_inspection_available()
                 && self.local_variable_node(variable).is_some();
@@ -453,7 +461,8 @@ impl Ui {
             .varobj
             .as_deref()
             .and_then(|varobj| self.find_variable_node(varobj))
-            .or_else(|| self.local_variable_node(variable).map(|(_, node)| node));
+            .or_else(|| self.local_variable_node(variable).map(|(_, node)| node))
+            .or_else(|| self.return_variable_node(variable));
 
         if let Some(node) = node
             && node.variable.has_same_children(variable)
@@ -585,13 +594,14 @@ impl Ui {
         local_refresh_indices(variables, &query, limit)
     }
 
-    pub(super) fn find_variable_node(&self, varobj: &str) -> Option<VariableNode> {
+    pub(in crate::ui) fn find_variable_node(&self, varobj: &str) -> Option<VariableNode> {
         self.variable_node_index.borrow().get(varobj)
     }
 
     pub(in crate::ui) fn rebuild_variable_node_index(&self) {
         let mut index = self.variable_node_index.borrow_mut();
         index.rebuild(&self.locals_store, &self.expression_watches_store);
+        index.index_store(&self.return_value.store);
     }
 
     pub(in crate::ui) fn reindex_variable_root(

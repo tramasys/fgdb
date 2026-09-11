@@ -318,6 +318,7 @@ impl Ui {
     }
 
     pub fn clear_debugger_state(&self) {
+        self.model.clear_return_value();
         self.reset_thread_analysis();
         self.clear_thread_action_pending();
         self.defer_displayed_variable_object_deletions();

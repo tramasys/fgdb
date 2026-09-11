@@ -332,6 +332,9 @@ impl Settings {
 
         ui.variable_locations
             .set_enabled(preferences.variable_locations);
+
+        ui.set_return_values_enabled(preferences.return_values);
+
         ui.application_log
             .apply_preferences(&previous, preferences, initial);
         ui.apply_instruction_preferences(&previous, preferences, initial);

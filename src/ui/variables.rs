@@ -41,7 +41,9 @@ impl VariableNode {
         }
     }
 
-    pub(super) fn child(&self, variable: Variable) -> Self {
+    pub(super) fn child(&self, mut variable: Variable) -> Self {
+        variable.return_value = self.variable.return_value;
+
         Self {
             local: self.local,
             ..Self::new(variable)
@@ -51,6 +53,7 @@ impl VariableNode {
     pub(super) fn placeholder(name: &str, value: &str) -> Self {
         let variable = Variable {
             local_index: None,
+            return_value: None,
             name: name.to_owned(),
             value: value.to_owned(),
             type_name: None,
@@ -90,6 +93,7 @@ impl VariableNode {
 
         let variable = Variable {
             local_index: None,
+            return_value: None,
             name: String::from("Load more…"),
             value: detail,
             type_name: None,
@@ -151,6 +155,7 @@ impl VariableNode {
             && self.variable.value == variable.value
             && self.variable.type_name == variable.type_name
             && self.variable.argument == variable.argument
+            && self.variable.return_value.is_some() == variable.return_value.is_some()
         {
             Rc::clone(&self.search_text)
         } else {

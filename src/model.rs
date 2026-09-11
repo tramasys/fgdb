@@ -22,6 +22,7 @@ pub(crate) use execution::CommandOperationId;
 pub(crate) mod printers;
 pub(crate) mod processes;
 pub(crate) mod replay;
+pub(crate) mod return_value;
 pub(crate) mod stack;
 mod state;
 mod stopped;
@@ -154,6 +155,7 @@ impl ProcessState {
 }
 
 struct StoppedState {
+    return_value: RefCell<return_value::ReturnHistory>,
     stop_refresh_generation: Cell<u64>,
     active_stop_context: RefCell<Option<crate::debugger::StopContext>>,
     latest_frames: RefCell<Rc<[StackFrame]>>,
@@ -179,6 +181,7 @@ struct StoppedState {
 impl StoppedState {
     fn new() -> Self {
         Self {
+            return_value: RefCell::default(),
             stop_refresh_generation: Cell::new(0),
             active_stop_context: RefCell::new(None),
             latest_frames: RefCell::new(Rc::from([])),

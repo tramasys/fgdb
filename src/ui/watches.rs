@@ -88,6 +88,7 @@ impl Ui {
             .iter()
             .map(|expression| Variable {
                 local_index: None,
+                return_value: None,
                 name: expression.clone(),
                 value: value.to_owned(),
                 type_name: None,

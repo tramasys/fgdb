@@ -81,7 +81,7 @@ pub(super) fn build_locals_view(
     viewers: &Rc<VariableViewerRegistry>,
     presentation: &Rc<variable_presentation::VariablePresentation>,
     locations: &Rc<variables::locations::Locations>,
-    filter_controls: Option<(&gtk::Entry, &gtk::ToggleButton)>,
+    filter_controls: Option<(&gtk::Entry, Option<&gtk::ToggleButton>)>,
 ) -> (gtk::ColumnView, gio::ListStore, gtk::SingleSelection) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
 
@@ -110,12 +110,14 @@ pub(super) fn build_locals_view(
             filter_for_search.changed(gtk::FilterChange::Different);
         });
 
-        let filter_for_changed = filter.clone();
+        if let Some(changed_toggle) = changed_toggle {
+            let filter_for_changed = filter.clone();
 
-        changed_toggle.connect_toggled(move |toggle| {
-            changed_only.set(toggle.is_active());
-            filter_for_changed.changed(gtk::FilterChange::Different);
-        });
+            changed_toggle.connect_toggled(move |toggle| {
+                changed_only.set(toggle.is_active());
+                filter_for_changed.changed(gtk::FilterChange::Different);
+            });
+        }
 
         gtk::FilterListModel::new(Some(store.clone()), Some(filter)).upcast()
     } else {
@@ -197,7 +199,9 @@ pub(super) fn variable_search_text(variable: &Variable) -> String {
         variable.type_name.as_deref().unwrap_or_default(),
         compact_variable_type(variable.type_name.as_deref().unwrap_or_default()),
         variable.value,
-        if variable.argument {
+        if variable.return_value.is_some() {
+            "return result"
+        } else if variable.argument {
             "argument arg"
         } else {
             "local"
@@ -610,7 +614,9 @@ fn local_name_column(
             ""
         });
 
-        scope.set_text(if node.variable.argument {
+        scope.set_text(if node.variable.return_value.is_some() {
+            "RETURN"
+        } else if node.variable.argument {
             "ARG"
         } else {
             "LOCAL"
@@ -843,7 +849,9 @@ fn show_variable_context_menu(
         1,
     )));
 
-    let summary = variable_menu_summary(if variable.argument {
+    let summary = variable_menu_summary(if variable.return_value.is_some() {
+        "RETURN VALUE"
+    } else if variable.argument {
         "ARGUMENT"
     } else {
         "VARIABLE"

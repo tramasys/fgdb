@@ -76,6 +76,7 @@ fn live_local_roots_resolve_in_one_request_without_variable_object_paths() {
         .enumerate()
         .map(|(index, expression)| Variable {
             local_index: Some(index),
+            return_value: None,
             ..variable(&client, expression)
         })
         .collect();

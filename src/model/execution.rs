@@ -200,6 +200,7 @@ impl DebuggerModel {
         let changed = self.execution.debugger_ready.replace(ready) != ready;
 
         if !ready {
+            self.clear_return_value();
             self.symbols.reset();
             self.invalidate_stop_context();
             self.execution
@@ -252,6 +253,7 @@ impl DebuggerModel {
 
     pub(crate) fn set_inferior_started(&self, started: bool) -> bool {
         if !started {
+            self.clear_return_value();
             self.execution.inferior_pid.set(None);
         }
 
@@ -281,6 +283,7 @@ impl DebuggerModel {
     }
 
     pub(crate) fn apply_debugger_state_delta(&self, delta: DebuggerStateDelta) {
+        self.clear_return_value();
         self.invalidate_stop_context();
         self.execution
             .debugger_state
@@ -293,6 +296,10 @@ impl DebuggerModel {
     }
 
     pub(crate) fn set_resynchronizing(&self, resynchronizing: bool) -> bool {
+        if resynchronizing {
+            self.clear_return_value();
+        }
+
         let state = self.execution.debugger_state.get();
         self.execution
             .debugger_state

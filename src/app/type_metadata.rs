@@ -14,7 +14,7 @@ pub(super) fn request_value_type_metadata(
 ) {
     let Some(request) = ui
         .upgrade()
-        .filter(|ui| ui.variable_action_is_current(&variable))
+        .filter(|ui| variable.return_value.is_none() && ui.variable_action_is_current(&variable))
         .and_then(|ui| ui.begin_variable_editor_request(origin))
     else {
         return;
@@ -82,7 +82,7 @@ pub(super) fn assign_float_bytes(
     raw_bytes: Vec<u8>,
 ) {
     let Some(generation) = ui.upgrade().and_then(|current_ui| {
-        if !current_ui.variable_action_is_current(&variable) {
+        if variable.return_value.is_some() || !current_ui.variable_action_is_current(&variable) {
             return None;
         }
 

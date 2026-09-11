@@ -32,6 +32,7 @@ and rr are optional.
 
 - Launch and attach to processes, open core dumps and connect to remote GDB servers
 - Source and instruction stepping, conditional breakpoints, watchpoints and signal handling
+- Separate return-value history with expandable scalars and verified aggregates after Finish and supported forward stepping
 - Locals, watches, value editing and storage addresses, with array and linked-list viewers
 - Registers and SIMD values, stack and memory inspection, memory search and control-flow graphs
 - Threads, multiple inferiors and fork control, with Linux process, mapping and file descriptor details

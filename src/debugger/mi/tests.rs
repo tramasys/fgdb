@@ -380,6 +380,39 @@ fn publishes_when_rust_printer_availability_changes() {
 }
 
 #[test]
+fn finished_events_preserve_return_values_without_inventing_void_results() {
+    use std::{cell::RefCell, rc::Rc};
+
+    let _guard = MI_CLIENT_TEST_LOCK.lock().unwrap();
+    let context = gtk::glib::MainContext::new();
+
+    context.with_thread_default(|| {
+        let returns = Rc::new(RefCell::new(Vec::new()));
+        let observed = Rc::clone(&returns);
+
+        let (client, _peer) = super::MiClient::open_with_injected_transport(move |_, event| {
+            if let super::MiEvent::Stopped { return_value, .. } = event {
+                observed.borrow_mut().push(return_value);
+            }
+        }).unwrap();
+
+        client.process_line(r#"*stopped,reason="function-finished",gdb-result-var="$1",return-value="42",thread-id="1""#);
+        client.process_line(r#"*stopped,reason="function-finished",return-value="{x = 7, y = 11}",thread-id="1""#);
+        client.process_line(r#"*stopped,reason="function-finished",thread-id="1""#);
+        client.process_line(r#"*stopped,reason="breakpoint-hit",return-value="stale",thread-id="1""#);
+        client.process_line(r#"*stopped,reason="function-finished",return-value={},thread-id="1""#);
+
+        assert_eq!(*returns.borrow(), [
+            Some(super::ReturnValue { value: "42".into(), history_variable: Some("$1".into()) }),
+            Some(super::ReturnValue { value: "{x = 7, y = 11}".into(), history_variable: None }),
+            None,
+            None,
+            None,
+        ]);
+    }).unwrap();
+}
+
+#[test]
 fn publishes_process_scoped_async_events() {
     use std::{cell::RefCell, rc::Rc};
 
@@ -448,6 +481,7 @@ fn publishes_process_scoped_async_events() {
                     },
                     super::MiEvent::Stopped {
                         reason: Some(String::from("fork")),
+                        return_value: None,
                         signal_name: None,
                         signal_meaning: None,
                         address: Some(String::from("0x401000")),

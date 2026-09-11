@@ -218,6 +218,7 @@ fn separates_raw_variable_values_from_gdb_details() {
 
     let integer = |type_name: &str, value: &str| Variable {
         local_index: None,
+        return_value: None,
         name: String::from("value"),
         value: value.to_owned(),
         type_name: Some(type_name.to_owned()),
@@ -286,6 +287,7 @@ fn compacts_cpp_and_rust_debug_types_without_losing_user_types() {
 fn filters_variables_across_scope_type_and_pretty_value() {
     let variable = Variable {
         local_index: None,
+        return_value: None,
         name: String::from("state"),
         value: String::from("PacketKind::Payload"),
         type_name: Some(String::from("core::option::Option<demo::PacketKind>")),
@@ -307,6 +309,7 @@ fn filters_variables_across_scope_type_and_pretty_value() {
 
     let root = VariableNode::new(Variable {
         local_index: None,
+        return_value: None,
         name: String::from("fixture"),
         value: String::from("{...}"),
         type_name: Some(String::from("struct Fixture")),
@@ -330,6 +333,7 @@ fn pointer_updates_retire_children_when_the_object_is_no_longer_readable() {
 
     let pointer = VariableNode::new(Variable {
         local_index: None,
+        return_value: None,
         name: String::from("tailward"),
         value: String::from("0x1234"),
         type_name: Some(String::from("struct CustomNode *")),
@@ -392,6 +396,7 @@ fn decodes_rust_c_and_cpp_integer_types() {
     let decimal = |type_name: &str, value: &str, pointer_bits| {
         let variable = Variable {
             local_index: None,
+            return_value: None,
             name: String::from("value"),
             value: value.to_owned(),
             type_name: Some(type_name.to_owned()),
@@ -505,6 +510,7 @@ fn parses_and_converts_type_aware_editor_values() {
 fn chooses_safe_editor_semantics_from_type_and_register_role() {
     let variable = |name: &str, type_name: &str, value: &str| Variable {
         local_index: None,
+        return_value: None,
         name: name.to_owned(),
         value: value.to_owned(),
         type_name: Some(type_name.to_owned()),

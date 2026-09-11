@@ -14,6 +14,7 @@ mod refresh;
 pub(super) fn variable(index: usize) -> Variable {
     Variable {
         local_index: Some(index),
+        return_value: None,
         name: format!("value_{index}"),
         value: index.to_string(),
         type_name: Some("int".into()),

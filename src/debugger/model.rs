@@ -38,6 +38,8 @@ pub struct Variable {
     /// Full locals-catalog occurrence, valid only within its stop generation.
     /// Child values and expression watches have no local root identity.
     pub local_index: Option<usize>,
+    /// Immutable captured-return identity, inherited by inspected descendants.
+    pub return_value: Option<u64>,
     pub name: String,
     pub value: String,
     pub type_name: Option<String>,
@@ -148,6 +150,7 @@ impl Variable {
     /// Scalar/aggregate summary changes alone need not discard loaded children.
     pub fn has_same_children(&self, other: &Self) -> bool {
         self.varobj == other.varobj
+            && self.return_value == other.return_value
             && self.local_index == other.local_index
             && self.name == other.name
             && self.argument == other.argument
@@ -485,6 +488,7 @@ pub fn variables(record: &MiRecord) -> Vec<Variable> {
         .filter_map(|tuple| {
             Some(Variable {
                 local_index: None,
+                return_value: None,
                 name: constant(tuple, "name")?.to_owned(),
                 value: constant(tuple, "value")
                     .unwrap_or("<not available>")
@@ -504,6 +508,7 @@ pub fn variables(record: &MiRecord) -> Vec<Variable> {
 pub fn variable_object(record: &MiRecord, display_name: &str) -> Option<Variable> {
     Some(Variable {
         local_index: None,
+        return_value: None,
         name: display_name.to_owned(),
         value: record
             .field("value")
@@ -584,6 +589,7 @@ pub fn variable_children(record: &MiRecord) -> Vec<Variable> {
 
             Some(Variable {
                 local_index: None,
+                return_value: None,
                 name: variable_child_name(expression),
                 value: constant(tuple, "value")
                     .unwrap_or("<not available>")
@@ -1724,6 +1730,7 @@ mod tests {
 
         let null_pointer = super::Variable {
             local_index: None,
+            return_value: None,
             name: String::from("pointer"),
             value: String::from("0x0"),
             type_name: Some(String::from("Demo *")),

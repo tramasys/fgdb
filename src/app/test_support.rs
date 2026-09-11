@@ -56,9 +56,20 @@ pub(super) fn open_debugger_with_printers(
     checkpoint: &str,
     rust_printers: bool,
 ) -> (Debugger, Rc<MiClient>) {
+    open_debugger_observing(fixture, checkpoint, rust_printers, |_| {})
+}
+
+pub(super) fn open_debugger_observing(
+    fixture: &str,
+    checkpoint: &str,
+    rust_printers: bool,
+    observe: impl Fn(&MiEvent) + 'static,
+) -> (Debugger, Rc<MiClient>) {
     let stopped = Rc::new(Cell::new(false));
     let stopped_event = Rc::clone(&stopped);
     let client = MiClient::open(move |_, event| {
+        observe(&event);
+
         if matches!(event, MiEvent::Stopped { .. }) {
             stopped_event.set(true);
         }

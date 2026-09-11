@@ -19,6 +19,15 @@ pub(in crate::app) fn request_variable_children(
 
     if parent.varobj.is_none() {
         drop(current_ui);
+
+        if parent.return_value.is_some() {
+            if from == 0 {
+                crate::app::return_values::request(ui, client, parent, true);
+            }
+
+            return;
+        }
+
         request_lazy_local_variable_children(ui, client, parent, from);
         return;
     }

@@ -54,6 +54,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
 
     memory_search::connect(&ui, &mi_client);
+    return_values::connect(&ui, &mi_client);
     misc::locks::connect(&ui, &mi_client);
     connect_stack_paging(&ui, &mi_client);
     let weak = Rc::downgrade(&ui);
@@ -738,6 +739,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         let generation = current_ui.model.current_stop_refresh_generation();
 
         if !current_ui.model.can_edit_variable(generation)
+            || variable.return_value.is_some()
             || !current_ui.variable_action_is_current(&variable)
         {
             return;

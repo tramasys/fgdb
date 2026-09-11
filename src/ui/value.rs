@@ -1309,6 +1309,7 @@ mod float_tests {
     fn target_metadata_overrides_host_abi_integer_guesses() {
         let variable = Variable {
             local_index: None,
+            return_value: None,
             name: String::from("platform_long"),
             value: String::from("1"),
             type_name: Some(String::from("long")),
@@ -1339,6 +1340,7 @@ mod float_tests {
 
         let mut variable = Variable {
             local_index: None,
+            return_value: None,
             name: String::from("value"),
             value: String::new(),
             type_name: None,

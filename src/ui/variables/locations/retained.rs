@@ -7,6 +7,7 @@ use crate::debugger::StopContext;
 struct Identity {
     varobj: Option<String>,
     index: Option<usize>,
+    return_value: Option<u64>,
     name: String,
     argument: bool,
     type_name: Option<String>,
@@ -23,6 +24,7 @@ impl From<&Variable> for Identity {
                 variable.varobj.clone()
             },
             index: variable.local_index,
+            return_value: variable.return_value,
             name: variable.name.clone(),
             argument: variable.argument,
             type_name: variable.type_name.clone(),

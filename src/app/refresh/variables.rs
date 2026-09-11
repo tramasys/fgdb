@@ -99,6 +99,7 @@ pub(in crate::app) fn refresh_expression_variable_objects(
         .iter()
         .map(|expression| Variable {
             local_index: None,
+            return_value: None,
             name: expression.clone(),
             value: String::from("<not available>"),
             type_name: None,

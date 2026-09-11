@@ -276,6 +276,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
 
         MiEvent::Stopped {
             reason,
+            return_value,
             signal_name,
             signal_meaning,
             address,
@@ -332,6 +333,9 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 ui.mark_inferior_stopped(thread_id.as_deref(), terminal_all_stopped);
 
             ui.set_controls_running(false);
+
+            ui.model
+                .record_return_value(return_value, thread_id.as_deref(), group_id.as_deref());
 
             if inferior_transition_affected {
                 ui.finish_inferior_execution_action();

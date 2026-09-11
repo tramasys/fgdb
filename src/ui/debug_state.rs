@@ -351,6 +351,7 @@ impl Ui {
                         &parent,
                         Variable {
                             local_index: None,
+                            return_value: None,
                             name: format!("${}", register.name),
                             value: register.value,
                             type_name: None,
@@ -1408,6 +1409,7 @@ mod render_tests {
     fn page_errors_preserve_loaded_children_and_offer_a_retry() {
         let parent = Variable {
             local_index: None,
+            return_value: None,
             name: String::from("items"),
             value: String::from("{...}"),
             type_name: Some(String::from("Item [256]")),
@@ -1424,6 +1426,7 @@ mod render_tests {
         node.children
             .append(&glib::BoxedAnyObject::new(VariableNode::new(Variable {
                 local_index: None,
+                return_value: None,
                 name: String::from("[0]"),
                 value: String::from("1"),
                 type_name: Some(String::from("int")),
@@ -1467,6 +1470,7 @@ mod render_tests {
     fn initial_expansion_errors_can_be_retried() {
         let parent = Variable {
             local_index: None,
+            return_value: None,
             name: String::from("head"),
             value: String::from("0x20"),
             type_name: Some(String::from("Node *")),

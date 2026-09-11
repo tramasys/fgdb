@@ -36,6 +36,7 @@ def install(sources):
         # Register only after every dependency is ready. Reloading preserves
         # GDB's enable/disable state and never duplicates a printer collection.
         package._printer = package.printers.register()
+        package.returns.register()
         package._installed = True
     except BaseException:
         for name in reversed(installed):

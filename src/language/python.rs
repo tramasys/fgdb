@@ -15,10 +15,24 @@ const MODULES: &[(&str, &str)] = &[
     ("odin", include_str!("printers/odin.py")),
     ("array", include_str!("printers/array.py")),
     ("printers", include_str!("printers/printers.py")),
+    (
+        "return_transfers",
+        include_str!("../debugger/return_transfers.py"),
+    ),
+    ("returns", include_str!("../debugger/returns.py")),
 ];
 
 pub(crate) fn install_command() -> String {
     crate::debugger::console_command(&installation_script())
+}
+
+pub(crate) fn return_values_command(enabled: bool, discard: bool) -> String {
+    crate::debugger::console_command(&format!(
+        "python {}.snapshot({}, {})",
+        module("returns"),
+        if enabled { "True" } else { "False" },
+        if discard { "True" } else { "False" },
+    ))
 }
 
 pub(crate) fn assignment_command(expression: &str, value: &str) -> String {

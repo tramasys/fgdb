@@ -13,6 +13,7 @@ mod memory_search;
 mod misc;
 mod refresh;
 mod replay;
+mod return_values;
 mod rr;
 mod session;
 mod source_control;
@@ -33,6 +34,9 @@ mod test_support;
 
 #[cfg(test)]
 mod language_tests;
+
+#[cfg(test)]
+mod return_value_tests;
 
 use std::{
     cell::{Cell, RefCell},

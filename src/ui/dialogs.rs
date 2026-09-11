@@ -210,6 +210,7 @@ pub(super) fn replace_variable_roots(
 
                     !node.placeholder
                         && node.variable.local_index == variable.local_index
+                        && node.variable.return_value == variable.return_value
                         && node.variable.name == variable.name
                         && node.variable.argument == variable.argument
                 })
@@ -1751,6 +1752,7 @@ pub(super) fn open_flag_editor(
 
     let variable = Variable {
         local_index: None,
+        return_value: None,
         name: format!("${}", register.name),
         value: register.value,
         type_name: Some(String::from("flags register")),
@@ -2319,6 +2321,7 @@ mod variable_tree_tests {
     fn variable(name: &str, value: &str, varobj: Option<&str>, children: usize) -> Variable {
         Variable {
             local_index: None,
+            return_value: None,
             name: name.to_owned(),
             value: value.to_owned(),
             type_name: Some(String::from("demo::Value")),

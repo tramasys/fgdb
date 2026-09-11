@@ -9,6 +9,7 @@ use super::{
 fn variable(name: &str, value: &str, type_name: Option<&str>, varobj: Option<&str>) -> Variable {
     Variable {
         local_index: None,
+        return_value: None,
         name: name.to_owned(),
         value: value.to_owned(),
         type_name: type_name.map(str::to_owned),

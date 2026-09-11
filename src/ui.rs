@@ -22,6 +22,7 @@ mod memory_view;
 mod misc_view;
 mod modules;
 mod replay;
+mod return_value;
 mod session;
 mod settings;
 mod simd;
@@ -1366,6 +1367,7 @@ pub struct Ui {
     locals_view: gtk::ColumnView,
     locals_empty: gtk::Label,
     locals_summary: gtk::Label,
+    return_value: return_value::ReturnValueView,
     locals_edit_button: gtk::Button,
     locals_more_button: gtk::Button,
     locals_filter: gtk::Entry,
@@ -1567,6 +1569,7 @@ struct Workspace {
     locals_view: gtk::ColumnView,
     locals_empty: gtk::Label,
     locals_summary: gtk::Label,
+    return_value: return_value::ReturnValueView,
     locals_edit_button: gtk::Button,
     locals_more_button: gtk::Button,
     locals_filter: gtk::Entry,
@@ -1631,6 +1634,7 @@ struct Inspector {
     locals_view: gtk::ColumnView,
     locals_empty: gtk::Label,
     locals_summary: gtk::Label,
+    return_value: return_value::ReturnValueView,
     locals_edit_button: gtk::Button,
     locals_more_button: gtk::Button,
     locals_filter: gtk::Entry,

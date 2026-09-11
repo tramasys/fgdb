@@ -718,6 +718,7 @@ pub(super) fn build_workspace(
         locals_view: inspector.locals_view,
         locals_empty: inspector.locals_empty,
         locals_summary: inspector.locals_summary,
+        return_value: inspector.return_value,
         locals_edit_button: inspector.locals_edit_button,
         locals_more_button: inspector.locals_more_button,
         locals_filter: inspector.locals_filter,
@@ -848,7 +849,7 @@ pub(super) fn build_inspector(
         bindings.variable_viewers,
         bindings.variable_presentation,
         bindings.variable_locations,
-        Some((&locals_filter, &locals_changed)),
+        Some((&locals_filter, Some(&locals_changed))),
     );
 
     let (expression_watches_view, expression_watches_store, expression_watches_selection) =
@@ -1088,7 +1089,17 @@ pub(super) fn build_inspector(
     instructions_panel.append(&instruction_insight);
     instructions_panel.append(&instructions_empty);
     instructions_panel.append(&instructions_scrolled);
-    context.set_start_child(Some(&locals_panel));
+    let return_value = return_value::ReturnValueView::new(bindings);
+    let values_split = gtk::Paned::new(gtk::Orientation::Vertical);
+    values_split.add_css_class("context-split");
+    values_split.set_start_child(Some(&return_value.root));
+    values_split.set_end_child(Some(&locals_panel));
+    values_split.set_resize_start_child(false);
+    values_split.set_resize_end_child(true);
+    values_split.set_shrink_start_child(false);
+    values_split.set_shrink_end_child(false);
+    values_split.set_position(210);
+    context.set_start_child(Some(&values_split));
     context.set_end_child(Some(&instructions_panel));
     state.append(&context);
     let expression_watches_page = components::panel();
@@ -1686,6 +1697,7 @@ pub(super) fn build_inspector(
         locals_view,
         locals_empty,
         locals_summary,
+        return_value,
         locals_edit_button,
         locals_more_button,
         locals_filter,

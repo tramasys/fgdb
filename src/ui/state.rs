@@ -214,6 +214,7 @@ impl Ui {
             locals_view: workspace.locals_view,
             locals_empty: workspace.locals_empty,
             locals_summary: workspace.locals_summary,
+            return_value: workspace.return_value,
             locals_edit_button: workspace.locals_edit_button,
             locals_more_button: workspace.locals_more_button,
             locals_filter: workspace.locals_filter,
@@ -1234,6 +1235,8 @@ impl Ui {
     }
 
     pub(super) fn update_control_sensitivity(&self) {
+        self.sync_return_values();
+
         self.variable_locations
             .set_context(self.model.stopped_inspection_available().then(|| {
                 (

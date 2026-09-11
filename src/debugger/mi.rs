@@ -21,7 +21,7 @@ pub(crate) use stopped::StopRequests;
 
 pub use parser::{parse_record, quote};
 pub use protocol::{
-    GdbCapabilities, MiEvent, MiListItem, MiRecord, MiResult, MiValue, result_field,
+    GdbCapabilities, MiEvent, MiListItem, MiRecord, MiResult, MiValue, ReturnValue, result_field,
 };
 
 use crate::performance::{
@@ -2277,6 +2277,22 @@ impl MiClient {
                     .and_then(MiValue::as_const)
                     .map(str::to_owned);
 
+                let return_value = (reason.as_deref() == Some("function-finished"))
+                    .then(|| {
+                        record
+                            .field("return-value")
+                            .and_then(MiValue::as_const)
+                            .map(|value| ReturnValue {
+                                value: value.to_owned(),
+                                history_variable: record
+                                    .field("gdb-result-var")
+                                    .and_then(MiValue::as_const)
+                                    .filter(|variable| !variable.is_empty())
+                                    .map(str::to_owned),
+                            })
+                    })
+                    .flatten();
+
                 let signal_name = record
                     .field("signal-name")
                     .and_then(MiValue::as_const)
@@ -2324,6 +2340,7 @@ impl MiClient {
                     self,
                     MiEvent::Stopped {
                         reason,
+                        return_value,
                         signal_name,
                         signal_meaning,
                         address,
