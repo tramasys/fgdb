@@ -4,9 +4,21 @@ use std::{
     path::Path,
 };
 
+mod file;
+pub(crate) use file::{FileIdentity, open_regular_file};
+
 pub(crate) fn read_bytes(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
     let file = File::open(path)?;
-    let mut bytes = Vec::with_capacity(initial_capacity(&file, maximum));
+    read_file(&file, path, maximum)
+}
+
+pub(crate) fn read_regular_bytes(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
+    let (file, _) = open_regular_file(path)?;
+    read_file(&file, path, maximum)
+}
+
+pub(crate) fn read_file(file: &File, path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(initial_capacity(file, maximum));
 
     file.take(u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1))
         .read_to_end(&mut bytes)?;

@@ -1,9 +1,6 @@
 use std::{
-    sync::{
-        atomic::{AtomicUsize, Ordering},
-        mpsc::{self, TryRecvError},
-    },
-    time::{Duration, Instant},
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
 };
 
 use super::*;
@@ -112,21 +109,19 @@ fn read_kernel_snapshot(
         return;
     }
 
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = futures_channel::oneshot::channel();
     let work = crate::kernel::WorkDeadline::new(SNAPSHOT_TIMEOUT);
     let worker_work = work.clone();
 
     let worker = std::thread::Builder::new()
         .name(String::from("fgdb-procfs"))
         .spawn(move || {
-            let _guard = KernelWorkerGuard;
+            let result = {
+                let _guard = KernelWorkerGuard;
+                crate::kernel::read_snapshot(pid, debugger_pid, include_tls_metadata, &worker_work)
+            };
 
-            let _ = sender.send(crate::kernel::read_snapshot(
-                pid,
-                debugger_pid,
-                include_tls_metadata,
-                &worker_work,
-            ));
+            let _ = sender.send(result);
         });
 
     if let Err(error) = worker {
@@ -141,61 +136,37 @@ fn read_kernel_snapshot(
         return;
     }
 
-    let started = Instant::now();
+    gtk::glib::MainContext::default().spawn_local(async move {
+        let result = crate::background::receive_current(receiver, SNAPSHOT_TIMEOUT, || {
+            ui.upgrade()
+                .is_some_and(|ui| ui.kernel_refresh_is_current(generation))
+        })
+        .await;
 
-    gtk::glib::timeout_add_local(Duration::from_millis(20), move || {
-        match receiver.try_recv() {
+        work.cancel();
+
+        match result {
             Ok(Ok(snapshot)) => {
                 if let Some(ui) = ui.upgrade() {
                     ui.show_kernel_snapshot(generation, snapshot);
                 }
-
-                gtk::glib::ControlFlow::Break
             }
-            Ok(Err(error)) => {
-                show_kernel_error(&ui, generation, &error);
-
-                gtk::glib::ControlFlow::Break
-            }
-
-            Err(TryRecvError::Empty) if ui.strong_count() == 0 => {
-                work.cancel();
-
-                gtk::glib::ControlFlow::Break
-            }
-            Err(TryRecvError::Empty)
-                if ui
-                    .upgrade()
-                    .is_some_and(|ui| !ui.kernel_refresh_is_current(generation)) =>
-            {
-                work.cancel();
-
+            Ok(Err(error)) => show_kernel_error(&ui, generation, &error),
+            Err(crate::background::CompletionError::Superseded) => {
                 if let Some(ui) = ui.upgrade() {
                     ui.finish_stale_kernel_refresh();
                 }
-
-                gtk::glib::ControlFlow::Break
             }
-            Err(TryRecvError::Empty) if started.elapsed() >= SNAPSHOT_TIMEOUT => {
-                work.cancel();
-                show_kernel_error(
-                    &ui,
-                    generation,
-                    "The procfs snapshot exceeded the 15-second collection limit",
-                );
-
-                gtk::glib::ControlFlow::Break
-            }
-            Err(TryRecvError::Disconnected) => {
-                show_kernel_error(
-                    &ui,
-                    generation,
-                    "The background procfs reader stopped before returning a snapshot",
-                );
-
-                gtk::glib::ControlFlow::Break
-            }
-            Err(TryRecvError::Empty) => gtk::glib::ControlFlow::Continue,
+            Err(crate::background::CompletionError::TimedOut) => show_kernel_error(
+                &ui,
+                generation,
+                "The procfs snapshot exceeded the 15-second collection limit",
+            ),
+            Err(crate::background::CompletionError::Disconnected) => show_kernel_error(
+                &ui,
+                generation,
+                "The background procfs reader stopped before returning a snapshot",
+            ),
         }
     });
 }

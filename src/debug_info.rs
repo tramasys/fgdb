@@ -1,14 +1,14 @@
 use std::{
-    collections::VecDeque,
     fs::File,
     io::{self, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
-    time::SystemTime,
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use crate::{
+    bounded::{FileIdentity, open_regular_file},
+    performance::BoundedLruCache,
+};
 
 use goblin::{
     container::Ctx,
@@ -61,24 +61,6 @@ impl Default for DebugFileSearch {
     }
 }
 
-fn open_regular_file(path: &Path) -> io::Result<(File, std::fs::Metadata)> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(nix::fcntl::OFlag::O_NONBLOCK.bits())
-        .open(path)?;
-
-    let metadata = file.metadata()?;
-
-    if !metadata.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "The path is not a regular file",
-        ));
-    }
-
-    Ok((file, metadata))
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModuleDebugMetadata {
     pub(crate) path: PathBuf,
@@ -90,8 +72,7 @@ pub(crate) struct ModuleDebugMetadata {
     pub(crate) embedded_debug_info: bool,
     pub(crate) suggestion: Option<String>,
     pub(crate) error: Option<String>,
-    pub(crate) file_size: Option<u64>,
-    pub(crate) modified: Option<SystemTime>,
+    pub(crate) file_identity: Option<FileIdentity>,
 }
 
 impl ModuleDebugMetadata {
@@ -106,8 +87,7 @@ impl ModuleDebugMetadata {
             embedded_debug_info: false,
             suggestion: None,
             error: Some(error.into()),
-            file_size: None,
-            modified: None,
+            file_identity: None,
         }
     }
 
@@ -117,8 +97,7 @@ impl ModuleDebugMetadata {
         metadata: &std::fs::Metadata,
     ) -> Self {
         let mut unavailable = Self::unavailable(path, error);
-        unavailable.file_size = Some(metadata.len());
-        unavailable.modified = metadata.modified().ok();
+        unavailable.file_identity = FileIdentity::from_metadata(path, metadata).ok();
 
         unavailable
     }
@@ -184,10 +163,32 @@ fn read_module_metadata(path: &Path, is_current: &impl Fn() -> bool) -> ModuleDe
         }
     };
 
+    let file_identity = match FileIdentity::from_metadata(path, &metadata) {
+        Ok(identity) => identity,
+        Err(error) => {
+            return ModuleDebugMetadata::unavailable(
+                path,
+                format!("Cannot identify host module: {error}"),
+            );
+        }
+    };
+
     let elf = match inspect_elf_metadata(&mut file, metadata.len(), is_current) {
         Ok(elf) => elf,
         Err(error) => return ModuleDebugMetadata::unavailable_for_file(path, error, &metadata),
     };
+
+    let after = file
+        .metadata()
+        .and_then(|metadata| FileIdentity::from_metadata(path, &metadata))
+        .ok();
+
+    if after.as_ref() != Some(&file_identity) {
+        return ModuleDebugMetadata::unavailable(
+            path,
+            "Host module changed or became inaccessible during inspection",
+        );
+    }
 
     ModuleDebugMetadata {
         path: path.to_path_buf(),
@@ -199,8 +200,7 @@ fn read_module_metadata(path: &Path, is_current: &impl Fn() -> bool) -> ModuleDe
         embedded_debug_info: elf.embedded_debug_info,
         suggestion: None,
         error: None,
-        file_size: Some(metadata.len()),
-        modified: metadata.modified().ok(),
+        file_identity: Some(file_identity),
     }
 }
 
@@ -893,79 +893,7 @@ fn gnu_debuglink_crc_while(path: &Path, is_current: &impl Fn() -> bool) -> io::R
     Ok(!crc)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct DebuglinkFileIdentity {
-    path: PathBuf,
-    size: u64,
-    modified: SystemTime,
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-}
-
-impl DebuglinkFileIdentity {
-    fn read(path: &Path) -> io::Result<Self> {
-        let metadata = std::fs::metadata(path)?;
-
-        Ok(Self {
-            path: path.to_owned(),
-            size: metadata.len(),
-            modified: metadata.modified()?,
-            #[cfg(unix)]
-            device: metadata.dev(),
-            #[cfg(unix)]
-            inode: metadata.ino(),
-        })
-    }
-}
-
-struct DebuglinkCrcCache {
-    entries: VecDeque<(DebuglinkFileIdentity, u32)>,
-    capacity: usize,
-}
-
-impl DebuglinkCrcCache {
-    fn new(capacity: usize) -> Self {
-        Self {
-            entries: VecDeque::with_capacity(capacity),
-            capacity,
-        }
-    }
-
-    fn get(&mut self, identity: &DebuglinkFileIdentity) -> Option<u32> {
-        let index = self
-            .entries
-            .iter()
-            .position(|(cached, _)| cached == identity)?;
-
-        let entry = self.entries.remove(index)?;
-        let crc = entry.1;
-        self.entries.push_back(entry);
-
-        Some(crc)
-    }
-
-    fn insert(&mut self, identity: DebuglinkFileIdentity, crc: u32) {
-        if self.capacity == 0 {
-            return;
-        }
-
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|(cached, _)| cached == &identity)
-        {
-            self.entries.remove(index);
-        }
-
-        self.entries.push_back((identity, crc));
-
-        while self.entries.len() > self.capacity {
-            self.entries.pop_front();
-        }
-    }
-}
+type DebuglinkCrcCache = BoundedLruCache<FileIdentity, u32>;
 
 fn debuglink_crc_cache() -> &'static Mutex<DebuglinkCrcCache> {
     static CACHE: OnceLock<Mutex<DebuglinkCrcCache>> = OnceLock::new();
@@ -979,18 +907,18 @@ fn cached_gnu_debuglink_crc(path: &Path) -> io::Result<u32> {
 }
 
 fn cached_gnu_debuglink_crc_while(path: &Path, is_current: &impl Fn() -> bool) -> io::Result<u32> {
-    let before = DebuglinkFileIdentity::read(path)?;
+    let before = FileIdentity::read(path)?;
 
     if let Some(crc) = debuglink_crc_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&before)
+        .get_cloned(&before)
     {
         return Ok(crc);
     }
 
     let crc = gnu_debuglink_crc_while(path, is_current)?;
-    let after = DebuglinkFileIdentity::read(path)?;
+    let after = FileIdentity::read(path)?;
 
     if before != after {
         return Err(io::Error::other(
@@ -1130,6 +1058,7 @@ fn hexadecimal(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
 
     struct TestDirectory(PathBuf);
 
@@ -1206,6 +1135,35 @@ mod tests {
         }
 
         bytes
+    }
+
+    #[test]
+    fn module_metadata_rejects_a_file_changed_during_inspection() {
+        let directory = TestDirectory::new("metadata-changed");
+        let path = directory.path().join("module");
+        std::fs::write(&path, metadata_elf(true)).unwrap();
+        let checks = std::cell::Cell::new(0);
+
+        let metadata = read_module_metadata(&path, &|| {
+            checks.set(checks.get() + 1);
+
+            if checks.get() == 2 {
+                std::fs::write(&path, metadata_elf(false)).unwrap();
+            }
+
+            true
+        });
+
+        assert!(
+            metadata
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("changed"))
+        );
+
+        assert!(metadata.file_identity.is_none());
+        assert!(metadata.build_id.is_none());
+        assert!(!metadata.embedded_debug_info);
     }
 
     #[test]
@@ -1480,6 +1438,27 @@ mod tests {
     }
 
     #[test]
+    fn crc_cache_reloads_same_size_edits_with_restored_modification_time() {
+        let directory = TestDirectory::new("debuglink-cache-restored-time");
+        let candidate = directory.path().join("cached.debug");
+        std::fs::write(&candidate, b"first").unwrap();
+        let modified = std::fs::metadata(&candidate).unwrap().modified().unwrap();
+        let first = cached_gnu_debuglink_crc(&candidate).unwrap();
+        std::fs::write(&candidate, b"other").unwrap();
+
+        File::options()
+            .write(true)
+            .open(&candidate)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+
+        let expected = gnu_debuglink_crc(&candidate).unwrap();
+        assert_ne!(first, expected);
+        assert_eq!(cached_gnu_debuglink_crc(&candidate).unwrap(), expected);
+    }
+
+    #[test]
     fn crc_read_failures_do_not_poison_the_cache() {
         let directory = TestDirectory::new("debuglink-cache-failure");
         let candidate = directory.path().join("later.debug");
@@ -1495,7 +1474,7 @@ mod tests {
             debuglink_crc_cache()
                 .lock()
                 .unwrap()
-                .get(&DebuglinkFileIdentity::read(&candidate).unwrap())
+                .get_cloned(&FileIdentity::read(&candidate).unwrap())
                 .is_none()
         );
         assert_eq!(
@@ -1506,52 +1485,43 @@ mod tests {
 
     #[test]
     fn crc_cache_is_bounded_and_evicts_the_oldest_identity() {
-        let identity = |inode| DebuglinkFileIdentity {
+        let identity = |inode| FileIdentity {
             path: PathBuf::from(format!("/debug/{inode}")),
             size: inode,
             modified: SystemTime::UNIX_EPOCH,
-            #[cfg(unix)]
             device: 1,
-            #[cfg(unix)]
             inode,
+            changed: (0, 0),
         };
+
         let mut cache = DebuglinkCrcCache::new(2);
         cache.insert(identity(1), 1);
         cache.insert(identity(2), 2);
         cache.insert(identity(3), 3);
-        assert_eq!(cache.entries.len(), 2);
-        assert_eq!(cache.get(&identity(1)), None);
-        assert_eq!(cache.get(&identity(2)), Some(2));
-        assert_eq!(cache.get(&identity(3)), Some(3));
+        assert_eq!(cache.keys().count(), 2);
+        assert_eq!(cache.get_cloned(&identity(1)), None);
+        assert_eq!(cache.get_cloned(&identity(2)), Some(2));
+        assert_eq!(cache.get_cloned(&identity(3)), Some(3));
     }
 
     #[test]
     fn crc_cache_misses_when_strong_file_identity_changes() {
-        let original = DebuglinkFileIdentity {
+        let original = FileIdentity {
             path: PathBuf::from("/debug/module.debug"),
             size: 10,
             modified: SystemTime::UNIX_EPOCH,
-            #[cfg(unix)]
             device: 1,
-            #[cfg(unix)]
             inode: 2,
+            changed: (0, 0),
         };
+
         let mut changed_time = original.clone();
         changed_time.modified = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
         let mut changed_inode = original.clone();
-        #[cfg(unix)]
-        {
-            changed_inode.inode += 1;
-        }
-
-        #[cfg(not(unix))]
-        {
-            changed_inode.size += 1;
-        }
-
+        changed_inode.inode += 1;
         let mut cache = DebuglinkCrcCache::new(4);
         cache.insert(original, 42);
-        assert_eq!(cache.get(&changed_time), None);
-        assert_eq!(cache.get(&changed_inode), None);
+        assert_eq!(cache.get_cloned(&changed_time), None);
+        assert_eq!(cache.get_cloned(&changed_inode), None);
     }
 }

@@ -1,13 +1,13 @@
 use std::{
     collections::VecDeque,
-    io,
-    path::{Path, PathBuf},
+    path::Path,
     sync::{Arc, Mutex, OnceLock},
-    time::SystemTime,
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+use crate::bounded::FileIdentity;
+
+#[cfg(test)]
+use std::path::PathBuf;
 
 use super::MAX_SEARCHABLE_SOURCE_BYTES;
 
@@ -124,39 +124,8 @@ impl<'a> Iterator for CachedSourceLines<'a> {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct SourceFileIdentity {
-    path: PathBuf,
-    size: u64,
-    modified: SystemTime,
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    #[cfg(unix)]
-    changed: (i64, i64),
-}
-
-impl SourceFileIdentity {
-    fn read(path: &Path) -> io::Result<Self> {
-        let metadata = std::fs::metadata(path)?;
-
-        Ok(Self {
-            path: path.to_owned(),
-            size: metadata.len(),
-            modified: metadata.modified()?,
-            #[cfg(unix)]
-            device: metadata.dev(),
-            #[cfg(unix)]
-            inode: metadata.ino(),
-            #[cfg(unix)]
-            changed: (metadata.ctime(), metadata.ctime_nsec()),
-        })
-    }
-}
-
 struct SourceCacheEntry {
-    identity: SourceFileIdentity,
+    identity: FileIdentity,
     source: CachedSource,
     weight: usize,
 }
@@ -178,7 +147,7 @@ impl SourceFileCache {
         }
     }
 
-    fn get(&mut self, identity: &SourceFileIdentity) -> Option<CachedSource> {
+    fn get(&mut self, identity: &FileIdentity) -> Option<CachedSource> {
         let index = self
             .entries
             .iter()
@@ -191,7 +160,7 @@ impl SourceFileCache {
         Some(source)
     }
 
-    fn insert(&mut self, identity: SourceFileIdentity, source: CachedSource) {
+    fn insert(&mut self, identity: FileIdentity, source: CachedSource) {
         let weight = source.weight();
 
         if self.max_files == 0 || weight > self.max_bytes {
@@ -241,7 +210,7 @@ fn source_cache() -> &'static Mutex<SourceFileCache> {
 
 pub(super) fn searchable_source(path: &Path) -> Option<CachedSource> {
     let (identity, (source, loaded)) = stable_read(
-        || SourceFileIdentity::read(path).ok(),
+        || FileIdentity::read(path).ok(),
         |identity| {
             if identity.size > MAX_SEARCHABLE_SOURCE_BYTES as u64 {
                 return None;
@@ -257,7 +226,9 @@ pub(super) fn searchable_source(path: &Path) -> Option<CachedSource> {
 
             #[cfg(test)]
             record_source_file_read(path);
-            let bytes = crate::bounded::read_bytes(path, MAX_SEARCHABLE_SOURCE_BYTES).ok()?;
+
+            let bytes =
+                crate::bounded::read_regular_bytes(path, MAX_SEARCHABLE_SOURCE_BYTES).ok()?;
 
             Some((CachedSource::from_bytes(bytes), true))
         },
@@ -377,6 +348,7 @@ mod tests {
     use super::*;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::SystemTime;
 
     #[test]
     fn indexed_lines_match_rust_lines_across_dense_sparse_and_unicode_input() {
@@ -494,15 +466,12 @@ mod tests {
     fn cache_enforces_file_and_byte_bounds() {
         let directory = TestDirectory::new();
 
-        let identity = |name: &str| SourceFileIdentity {
+        let identity = |name: &str| FileIdentity {
             path: directory.0.join(name),
             size: 1,
             modified: SystemTime::UNIX_EPOCH,
-            #[cfg(unix)]
             device: 1,
-            #[cfg(unix)]
             inode: name.len() as u64,
-            #[cfg(unix)]
             changed: (0, 0),
         };
 
@@ -523,15 +492,12 @@ mod tests {
     fn cache_identity_includes_size_and_modification_time() {
         let directory = TestDirectory::new();
 
-        let original = SourceFileIdentity {
+        let original = FileIdentity {
             path: directory.0.join("identity.c"),
             size: 1,
             modified: SystemTime::UNIX_EPOCH,
-            #[cfg(unix)]
             device: 1,
-            #[cfg(unix)]
             inode: 2,
-            #[cfg(unix)]
             changed: (0, 0),
         };
 

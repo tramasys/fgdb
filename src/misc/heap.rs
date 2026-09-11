@@ -2122,6 +2122,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_heap_rows_remain_bounded_and_preserve_explicit_inspection_addresses() {
+        let version = GlibcVersion {
+            major: 2,
+            minor: 40,
+        };
+
+        let mut inspector = Inspector {
+            reader: MemoryReader {
+                file: File::open("/dev/null").unwrap(),
+                mappings: &[],
+                endian: TargetEndian::Little,
+                pointer_size: 8,
+                bytes_read: 0,
+                budget: HeapReadBudget::new(),
+            },
+            mappings: &[],
+            layout: GlibcLayout::new(version, TargetArchitecture::X86_64, 64).unwrap(),
+            version,
+            main_arena: 0,
+            main_heap: None,
+            tcache_hint: None,
+            tls_bases: &[],
+            rows: Vec::new(),
+            truncated: false,
+        };
+
+        for index in 0..MAX_HEAP_INSPECTION_ROWS {
+            inspector.push_inspectable_row("Chunk", "", "", "", "", Some(index as u64));
+        }
+
+        assert!(!inspector.truncated);
+        inspector.push_row("Info", "", "", "", "omitted");
+        assert!(inspector.truncated);
+        assert_eq!(inspector.rows.len(), MAX_HEAP_INSPECTION_ROWS);
+
+        for (index, row) in inspector.rows.iter().enumerate() {
+            assert_eq!(row.inspect_address, Some(index as u64));
+        }
+    }
+
+    #[test]
     fn parses_glibc_versions_without_accepting_noise() {
         assert_eq!(
             version_from_bytes(b"GNU C Library glibc 2.44 release"),

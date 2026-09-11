@@ -1,13 +1,14 @@
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::{
-        Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::{Duration, Instant, UNIX_EPOCH},
+    sync::{Mutex, OnceLock},
+    time::{Duration, Instant},
+};
+
+use crate::{
+    bounded::{FileIdentity, open_regular_file},
+    performance::BoundedLruCache,
 };
 
 use goblin::elf::{
@@ -28,15 +29,6 @@ const MAX_TLS_SYMBOLS_PER_MODULE: usize = 256;
 // of thousands of symbol strings alive after the user changes targets.
 const MAX_CACHE_ENTRIES: usize = MAX_MODULES;
 
-#[derive(Clone, Debug, Hash, PartialEq, Eq)]
-struct CacheKey {
-    path: String,
-    bytes: u64,
-    modified_nanos: u128,
-    device: u64,
-    inode: u64,
-}
-
 #[derive(Clone, Debug)]
 struct ParsedTls {
     template_address: u64,
@@ -54,19 +46,13 @@ struct ModuleCandidate {
     role: String,
 }
 
-#[derive(Clone, Debug)]
-struct CacheEntry {
-    parsed: Option<ParsedTls>,
-    last_used: u64,
-}
-
 struct ScanBudget {
     remaining_bytes: usize,
     deadline: Instant,
 }
 
-static TLS_CACHE: OnceLock<Mutex<HashMap<CacheKey, CacheEntry>>> = OnceLock::new();
-static TLS_CACHE_CLOCK: AtomicU64 = AtomicU64::new(1);
+static TLS_CACHE: OnceLock<Mutex<BoundedLruCache<FileIdentity, Option<ParsedTls>>>> =
+    OnceLock::new();
 
 pub(super) fn populate_tls_metadata(
     snapshot: &mut KernelSnapshot,
@@ -132,7 +118,7 @@ pub(super) fn populate_tls_metadata(
         ));
     }
 
-    snapshot.tls_modules.sort_by_key(|module| {
+    snapshot.tls_modules.sort_by_cached_key(|module| {
         (
             module.role != "Main executable",
             module.module.to_ascii_lowercase(),
@@ -190,7 +176,7 @@ fn module_candidates(
 
         candidates.push(ModuleCandidate {
             display_path: path.to_owned(),
-            open_path: if rooted_path.exists() {
+            open_path: if path == normalized && rooted_path.exists() {
                 rooted_path
             } else {
                 mapped_file
@@ -241,7 +227,8 @@ fn cached_tls_analysis(
     work: &WorkDeadline,
 ) -> Result<Option<ParsedTls>, String> {
     work.check()?;
-    let metadata = fs::metadata(path).map_err(|error| format!("Cannot inspect ELF: {error}"))?;
+    let (file, metadata) =
+        open_regular_file(path).map_err(|error| format!("Cannot inspect ELF: {error}"))?;
 
     if metadata.len() > MAX_ELF_BYTES as u64 {
         return Err(format!(
@@ -250,26 +237,19 @@ fn cached_tls_analysis(
         ));
     }
 
-    let key = CacheKey {
-        path: normalized_deleted_path(display_path).to_owned(),
-        bytes: metadata.len(),
-        modified_nanos: metadata
-            .modified()
-            .ok()
-            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-            .map_or(0, |duration| duration.as_nanos()),
-        device: metadata.dev(),
-        inode: metadata.ino(),
+    let identity = |metadata: &fs::Metadata| {
+        FileIdentity::from_metadata(Path::new(normalized_deleted_path(display_path)), metadata)
+            .map_err(|error| format!("Cannot identify ELF: {error}"))
     };
 
-    let cache = TLS_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = identity(&metadata)?;
+    let cache = TLS_CACHE.get_or_init(|| Mutex::new(BoundedLruCache::new(MAX_CACHE_ENTRIES)));
 
     {
         let mut cache = cache.lock().unwrap_or_else(|poison| poison.into_inner());
 
-        if let Some(cached) = cache.get_mut(&key) {
-            cached.last_used = TLS_CACHE_CLOCK.fetch_add(1, Ordering::Relaxed);
-            return Ok(cached.parsed.clone());
+        if let Some(cached) = cache.get_cloned(&key) {
+            return Ok(cached);
         }
     }
 
@@ -286,34 +266,27 @@ fn cached_tls_analysis(
 
     budget.remaining_bytes -= file_bytes;
 
-    let bytes = crate::bounded::read_bytes(path, MAX_ELF_BYTES)
+    let bytes = crate::bounded::read_file(&file, path, file_bytes)
         .map_err(|error| format!("Cannot read ELF: {error}"))?;
 
     work.check()?;
     let parsed = parse_elf_tls(&bytes)?;
     work.check()?;
-    let mut cache = cache.lock().unwrap_or_else(|poison| poison.into_inner());
 
-    if cache.len() >= MAX_CACHE_ENTRIES {
-        let oldest = cache
-            .iter()
-            .min_by_key(|(_, entry)| entry.last_used)
-            .map(|(key, _)| key.clone());
+    let after = file
+        .metadata()
+        .map_err(|error| format!("Cannot recheck ELF: {error}"))?;
 
-        if let Some(oldest) = oldest {
-            cache.remove(&oldest);
-        }
+    if key != identity(&after)? {
+        return Err(String::from(
+            "ELF changed while its TLS metadata was being read",
+        ));
     }
 
-    cache.insert(
-        key,
-        CacheEntry {
-            parsed: parsed.clone(),
-            last_used: TLS_CACHE_CLOCK.fetch_add(1, Ordering::Relaxed),
-        },
-    );
-
-    drop(cache);
+    cache
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .insert(key, parsed.clone());
 
     Ok(parsed)
 }
@@ -342,31 +315,54 @@ fn parse_elf_tls(bytes: &[u8]) -> Result<Option<ParsedTls>, String> {
 }
 
 fn tls_symbols(elf: &Elf<'_>) -> (usize, Vec<KernelTlsSymbol>) {
-    let mut tls = HashMap::<(String, u64), KernelTlsSymbol>::new();
+    collect_tls_symbols(
+        [(&elf.dynsyms, &elf.dynstrtab), (&elf.syms, &elf.strtab)]
+            .into_iter()
+            .flat_map(|(table, strings)| {
+                table
+                    .iter()
+                    .filter(|symbol| symbol.st_type() == STT_TLS)
+                    .filter_map(|symbol| {
+                        let name = strings
+                            .get_at(symbol.st_name)
+                            .filter(|name| !name.is_empty())?;
 
-    for (table, strings) in [(&elf.dynsyms, &elf.dynstrtab), (&elf.syms, &elf.strtab)] {
-        for symbol in table.iter().filter(|symbol| symbol.st_type() == STT_TLS) {
-            let Some(name) = strings
-                .get_at(symbol.st_name)
-                .filter(|name| !name.is_empty())
-            else {
-                continue;
-            };
+                        Some((name, symbol))
+                    })
+            }),
+    )
+}
 
-            tls.entry((name.to_owned(), symbol.st_value))
-                .or_insert_with(|| KernelTlsSymbol {
-                    name: name.to_owned(),
-                    offset: symbol.st_value,
-                    size: symbol.st_size,
-                    binding: symbol_binding(symbol.st_bind()).to_owned(),
-                });
-        }
+fn collect_tls_symbols<'a>(
+    symbols: impl IntoIterator<Item = (&'a str, sym::Sym)>,
+) -> (usize, Vec<KernelTlsSymbol>) {
+    let mut tls = HashMap::new();
+
+    for (name, symbol) in symbols {
+        tls.entry((symbol.st_value, name)).or_insert(symbol);
     }
 
     let count = tls.len();
-    let mut symbols = tls.into_values().collect::<Vec<_>>();
-    symbols.sort_by_key(|symbol| (symbol.offset, symbol.name.clone()));
-    symbols.truncate(MAX_TLS_SYMBOLS_PER_MODULE);
+    let mut symbols = tls.into_iter().collect::<Vec<_>>();
+
+    // Count every unique symbol, but only sort and allocate display strings
+    // for the bounded prefix that the snapshot can actually retain.
+    if symbols.len() > MAX_TLS_SYMBOLS_PER_MODULE {
+        symbols.select_nth_unstable_by_key(MAX_TLS_SYMBOLS_PER_MODULE, |(key, _)| *key);
+        symbols.truncate(MAX_TLS_SYMBOLS_PER_MODULE);
+    }
+
+    symbols.sort_unstable_by_key(|(key, _)| *key);
+
+    let symbols = symbols
+        .into_iter()
+        .map(|((offset, name), symbol)| KernelTlsSymbol {
+            name: name.to_owned(),
+            offset,
+            size: symbol.st_size,
+            binding: symbol_binding(symbol.st_bind()).to_owned(),
+        })
+        .collect();
 
     (count, symbols)
 }
@@ -386,6 +382,140 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "manual release-mode throughput benchmark"]
+    fn benchmark_tls_symbol_collection() {
+        let symbols = (0..20_000)
+            .map(|index| {
+                (
+                    format!("tls_symbol_{index:05}"),
+                    sym::Sym {
+                        st_value: (index * 7919) % 20_000,
+                        st_size: 8,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+
+        crate::benchmarks::measure("tls/symbols-20k", || {
+            collect_tls_symbols(
+                symbols
+                    .iter()
+                    .map(|(name, symbol)| (name.as_str(), *symbol)),
+            )
+        });
+    }
+
+    #[test]
+    fn tls_symbols_are_deduplicated_ordered_and_bounded() {
+        let names = (0..MAX_TLS_SYMBOLS_PER_MODULE + 100)
+            .map(|index| format!("symbol_{index:04}"))
+            .collect::<Vec<_>>();
+
+        let symbols = names.iter().enumerate().rev().map(|(index, name)| {
+            (
+                name.as_str(),
+                sym::Sym {
+                    st_value: index as u64 % 7,
+                    st_size: 4,
+                    ..Default::default()
+                },
+            )
+        });
+
+        let duplicate = (
+            names[0].as_str(),
+            sym::Sym {
+                st_value: 0,
+                st_size: 99,
+                ..Default::default()
+            },
+        );
+
+        let (count, retained) = collect_tls_symbols(symbols.chain([duplicate]));
+        assert_eq!(count, names.len());
+        assert_eq!(retained.len(), MAX_TLS_SYMBOLS_PER_MODULE);
+
+        let mut ordered = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| (index as u64 % 7, name))
+            .collect::<Vec<_>>();
+
+        ordered.sort_unstable();
+
+        for (symbol, (offset, name)) in retained.iter().zip(ordered) {
+            assert_eq!(symbol.offset, offset);
+            assert_eq!(&symbol.name, name);
+            assert_eq!(symbol.size, 4);
+        }
+
+        for length in [0, 1, MAX_TLS_SYMBOLS_PER_MODULE] {
+            let (count, retained) = collect_tls_symbols(
+                names[..length]
+                    .iter()
+                    .map(|name| (name.as_str(), sym::Sym::default())),
+            );
+
+            assert_eq!(count, length);
+            assert_eq!(retained.len(), length);
+        }
+    }
+
+    fn tls_elf(total: u64) -> Vec<u8> {
+        let mut bytes = vec![0; 120];
+        bytes[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        bytes[16..18].copy_from_slice(&3_u16.to_le_bytes());
+        bytes[18..20].copy_from_slice(&62_u16.to_le_bytes());
+        bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[32..40].copy_from_slice(&64_u64.to_le_bytes());
+        bytes[52..54].copy_from_slice(&64_u16.to_le_bytes());
+        bytes[54..56].copy_from_slice(&56_u16.to_le_bytes());
+        bytes[56..58].copy_from_slice(&1_u16.to_le_bytes());
+        bytes[64..68].copy_from_slice(&PT_TLS.to_le_bytes());
+        bytes[104..112].copy_from_slice(&total.to_le_bytes());
+        bytes[112..120].copy_from_slice(&8_u64.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn tls_cache_reloads_same_size_edits_with_restored_modification_time() {
+        let root = gtk::glib::mkdtemp(std::env::temp_dir().join("fgdb-tls-cache-XXXXXX")).unwrap();
+        let path = root.join("module.so");
+        fs::write(&path, tls_elf(8)).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+
+        let mut budget = ScanBudget {
+            remaining_bytes: MAX_TOTAL_ELF_BYTES,
+            deadline: Instant::now() + Duration::from_secs(5),
+        };
+
+        let work = WorkDeadline::new(Duration::from_secs(5));
+
+        assert_eq!(
+            cached_tls_analysis(&path, path.to_str().unwrap(), &mut budget, &work)
+                .unwrap()
+                .unwrap()
+                .total_bytes,
+            8
+        );
+
+        fs::write(&path, tls_elf(16)).unwrap();
+
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(modified))
+            .unwrap();
+
+        let result = cached_tls_analysis(&path, path.to_str().unwrap(), &mut budget, &work);
+        fs::remove_file(&path).unwrap();
+        fs::remove_dir(root).unwrap();
+        assert_eq!(result.unwrap().unwrap().total_bytes, 16);
+    }
+
+    #[test]
     fn parses_the_current_test_elf_for_tls_metadata() {
         let bytes = fs::read(std::env::current_exe().expect("test executable path"))
             .expect("read test executable");
@@ -403,5 +533,32 @@ mod tests {
         );
 
         assert_eq!(normalized_deleted_path("/tmp/demo (deleted)"), "/tmp/demo");
+    }
+
+    #[test]
+    fn deleted_modules_never_use_a_replacement_at_the_original_path() {
+        let root =
+            gtk::glib::mkdtemp(std::env::temp_dir().join("fgdb-tls-deleted-XXXXXX")).unwrap();
+        fs::create_dir(root.join("root")).unwrap();
+        fs::write(root.join("root/module.so"), tls_elf(8)).unwrap();
+
+        let snapshot = KernelSnapshot {
+            mappings: vec![super::super::KernelMapping {
+                start: 0x1000,
+                end: 0x2000,
+                permissions: "r-xp".into(),
+                path: Some("/module.so (deleted)".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        let candidates =
+            module_candidates(&snapshot, &root, &WorkDeadline::new(Duration::from_secs(1)));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].open_path, root.join("map_files/1000-2000"));
+        fs::remove_file(root.join("root/module.so")).unwrap();
+        fs::remove_dir(root.join("root")).unwrap();
+        fs::remove_dir(root).unwrap();
     }
 }

@@ -1,8 +1,5 @@
 use std::{
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc::{self, TryRecvError},
-    },
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -381,8 +378,6 @@ fn read_live_misc(
     include_locks: bool,
     allocator_probe: crate::misc::AllocatorProbe,
 ) {
-    const READ_TIMEOUT: Duration = Duration::from_secs(5);
-
     if !ui
         .upgrade()
         .is_some_and(|ui| ui.misc_refresh_is_current(generation))
@@ -390,6 +385,38 @@ fn read_live_misc(
         return;
     }
 
+    if allocator_probe.complete
+        && let Some(current_ui) = ui.upgrade()
+    {
+        current_ui.cache_allocator_probe(allocator_probe.clone());
+    }
+
+    read_misc_data(
+        ui,
+        generation,
+        "fgdb-misc-live",
+        move || crate::misc::read_live_misc(pid, debugger_pid, include_locks, allocator_probe),
+        Ui::show_misc_snapshot,
+    );
+}
+
+fn read_core_dump(ui: Weak<Ui>, generation: u64, path: std::path::PathBuf) {
+    read_misc_data(
+        ui,
+        generation,
+        "fgdb-misc-core",
+        move || crate::misc::read_core_dump(&path),
+        Ui::show_misc_core_snapshot,
+    );
+}
+
+fn read_misc_data<T: Send + 'static>(
+    ui: Weak<Ui>,
+    generation: u64,
+    name: &'static str,
+    read: impl FnOnce() -> Result<T, String> + Send + 'static,
+    show: impl FnOnce(&Ui, u64, T) + 'static,
+) {
     if MISC_READER_ACTIVE.swap(true, Ordering::AcqRel) {
         show_misc_error(
             &ui,
@@ -400,25 +427,17 @@ fn read_live_misc(
         return;
     }
 
-    if allocator_probe.complete
-        && let Some(current_ui) = ui.upgrade()
-    {
-        current_ui.cache_allocator_probe(allocator_probe.clone());
-    }
-
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = futures_channel::oneshot::channel();
 
     let worker = std::thread::Builder::new()
-        .name(String::from("fgdb-misc-live"))
+        .name(name.into())
         .spawn(move || {
-            let _guard = MiscWorkerGuard;
+            let result = {
+                let _guard = MiscWorkerGuard;
+                read()
+            };
 
-            let _ = sender.send(crate::misc::read_live_misc(
-                pid,
-                debugger_pid,
-                include_locks,
-                allocator_probe,
-            ));
+            let _ = sender.send(result);
         });
 
     if let Err(error) = worker {
@@ -433,126 +452,32 @@ fn read_live_misc(
         return;
     }
 
-    let started = Instant::now();
+    gtk::glib::MainContext::default().spawn_local(async move {
+        // This reader has no cooperative cancellation. Keep its single-flight
+        // claim until completion or timeout, then let the view retire stale data.
+        let result = crate::background::receive_current(receiver, Duration::from_secs(5), || {
+            ui.strong_count() > 0
+        })
+        .await;
 
-    gtk::glib::timeout_add_local(Duration::from_millis(20), move || {
-        match receiver.try_recv() {
+        match result {
             Ok(Ok(snapshot)) => {
                 if let Some(ui) = ui.upgrade() {
-                    ui.show_misc_snapshot(generation, snapshot);
+                    show(&ui, generation, snapshot);
                 }
-
-                gtk::glib::ControlFlow::Break
             }
-            Ok(Err(error)) => {
-                show_misc_error(&ui, generation, &error);
-
-                gtk::glib::ControlFlow::Break
-            }
-
-            Err(TryRecvError::Empty)
-                if ui.strong_count() > 0 && started.elapsed() < READ_TIMEOUT =>
-            {
-                gtk::glib::ControlFlow::Continue
-            }
-            Err(TryRecvError::Empty) if ui.strong_count() > 0 => {
-                show_misc_error(
-                    &ui,
-                    generation,
-                    "Reading bounded Misc process data exceeded five seconds",
-                );
-
-                gtk::glib::ControlFlow::Break
-            }
-            Err(TryRecvError::Disconnected) => {
-                show_misc_error(
-                    &ui,
-                    generation,
-                    "The Misc data reader stopped before returning data",
-                );
-
-                gtk::glib::ControlFlow::Break
-            }
-            Err(TryRecvError::Empty) => gtk::glib::ControlFlow::Break,
-        }
-    });
-}
-
-fn read_core_dump(ui: Weak<Ui>, generation: u64, path: std::path::PathBuf) {
-    const READ_TIMEOUT: Duration = Duration::from_secs(5);
-
-    if MISC_READER_ACTIVE.swap(true, Ordering::AcqRel) {
-        show_misc_error(
-            &ui,
-            generation,
-            "A previous Misc data reader is still finishing",
-        );
-
-        return;
-    }
-
-    let (sender, receiver) = mpsc::channel();
-
-    let worker = std::thread::Builder::new()
-        .name(String::from("fgdb-misc-core"))
-        .spawn(move || {
-            let _guard = MiscWorkerGuard;
-            let _ = sender.send(crate::misc::read_core_dump(&path));
-        });
-
-    if let Err(error) = worker {
-        MISC_READER_ACTIVE.store(false, Ordering::Release);
-
-        show_misc_error(
-            &ui,
-            generation,
-            &format!("Cannot start the core-note reader: {error}"),
-        );
-
-        return;
-    }
-
-    let started = Instant::now();
-
-    gtk::glib::timeout_add_local(Duration::from_millis(20), move || {
-        match receiver.try_recv() {
-            Ok(Ok(snapshot)) => {
-                if let Some(ui) = ui.upgrade() {
-                    ui.show_misc_core_snapshot(generation, snapshot);
-                }
-
-                gtk::glib::ControlFlow::Break
-            }
-            Ok(Err(error)) => {
-                show_misc_error(&ui, generation, &error);
-
-                gtk::glib::ControlFlow::Break
-            }
-
-            Err(TryRecvError::Empty)
-                if ui.strong_count() > 0 && started.elapsed() < READ_TIMEOUT =>
-            {
-                gtk::glib::ControlFlow::Continue
-            }
-            Err(TryRecvError::Empty) if ui.strong_count() > 0 => {
-                show_misc_error(
-                    &ui,
-                    generation,
-                    "Reading bounded core metadata exceeded five seconds",
-                );
-
-                gtk::glib::ControlFlow::Break
-            }
-            Err(TryRecvError::Disconnected) => {
-                show_misc_error(
-                    &ui,
-                    generation,
-                    "The core-note reader stopped before returning data",
-                );
-
-                gtk::glib::ControlFlow::Break
-            }
-            Err(TryRecvError::Empty) => gtk::glib::ControlFlow::Break,
+            Ok(Err(error)) => show_misc_error(&ui, generation, &error),
+            Err(crate::background::CompletionError::Superseded) => {}
+            Err(crate::background::CompletionError::TimedOut) => show_misc_error(
+                &ui,
+                generation,
+                "Reading bounded Misc data exceeded five seconds",
+            ),
+            Err(crate::background::CompletionError::Disconnected) => show_misc_error(
+                &ui,
+                generation,
+                "The Misc data reader stopped before returning data",
+            ),
         }
     });
 }

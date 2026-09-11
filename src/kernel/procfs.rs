@@ -1,12 +1,9 @@
 use std::{
-    collections::VecDeque,
     path::{Path, PathBuf},
     sync::{Mutex, OnceLock},
-    time::SystemTime,
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
+use crate::{bounded::FileIdentity, performance::BoundedLruCache};
 
 const MAX_TARGET_ABI_CACHE_ENTRIES: usize = 32;
 
@@ -90,119 +87,117 @@ pub(crate) fn read_local_target_abi(pid: u32, debugger_pid: u32) -> Option<Targe
         let identity = TargetAbiIdentity::read(pid, target.start_time(), &executable)
             .map_err(|error| format!("Cannot inspect /proc/{pid}/exe: {error}"))?;
 
-        target_abi_cache()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .resolve(identity.clone(), || {
-                let bytes = crate::bounded::read_prefix(&executable, 40)
-                    .map_err(|error| format!("Cannot inspect /proc/{pid}/exe: {error}"))?;
+        target_abi_cache().resolve(identity.clone(), || {
+            let bytes = crate::bounded::read_prefix(&executable, 40)
+                .map_err(|error| format!("Cannot inspect /proc/{pid}/exe: {error}"))?;
 
-                let abi = crate::debugger::TargetArchitecture::from_elf_ident(&bytes).ok_or_else(
-                    || format!("Cannot identify the executable ABI for process {pid}"),
-                )?;
+            let abi = crate::debugger::TargetArchitecture::from_elf_ident(&bytes)
+                .ok_or_else(|| format!("Cannot identify the executable ABI for process {pid}"))?;
 
-                let after = TargetAbiIdentity::read(pid, target.start_time(), &executable)
-                    .map_err(|error| format!("Cannot recheck /proc/{pid}/exe: {error}"))?;
+            let after = TargetAbiIdentity::read(pid, target.start_time(), &executable)
+                .map_err(|error| format!("Cannot recheck /proc/{pid}/exe: {error}"))?;
 
-                if after != identity {
-                    return Err(format!(
-                        "Process {pid} changed executable while its ABI was being read"
-                    ));
-                }
+            if after != identity {
+                return Err(format!(
+                    "Process {pid} changed executable while its ABI was being read"
+                ));
+            }
 
-                Ok(abi)
-            })
+            Ok(abi)
+        })
     })
     .ok()
 }
 
 pub(crate) fn invalidate_local_target_abi_cache() {
-    target_abi_cache()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
+    target_abi_cache().clear();
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct TargetAbiIdentity {
     pid: u32,
     start_time: u64,
-    executable_size: u64,
-    executable_modified: SystemTime,
-    #[cfg(unix)]
-    executable_device: u64,
-    #[cfg(unix)]
-    executable_inode: u64,
+    executable: FileIdentity,
 }
 
 impl TargetAbiIdentity {
     fn read(pid: u32, start_time: u64, executable: &Path) -> std::io::Result<Self> {
-        let metadata = std::fs::metadata(executable)?;
-
         Ok(Self {
             pid,
             start_time,
-            executable_size: metadata.len(),
-            executable_modified: metadata.modified()?,
-            #[cfg(unix)]
-            executable_device: metadata.dev(),
-            #[cfg(unix)]
-            executable_inode: metadata.ino(),
+            executable: FileIdentity::read(executable)?,
         })
     }
 }
 
 struct TargetAbiCache {
-    entries: VecDeque<(TargetAbiIdentity, TargetAbi)>,
-    capacity: usize,
+    state: Mutex<TargetAbiCacheState>,
+}
+
+struct TargetAbiCacheState {
+    entries: BoundedLruCache<TargetAbiIdentity, TargetAbi>,
+    generation: u64,
 }
 
 impl TargetAbiCache {
     fn new(capacity: usize) -> Self {
         Self {
-            entries: VecDeque::with_capacity(capacity),
-            capacity,
+            state: Mutex::new(TargetAbiCacheState {
+                entries: BoundedLruCache::new(capacity),
+                generation: 0,
+            }),
         }
     }
 
     fn resolve(
-        &mut self,
+        &self,
         identity: TargetAbiIdentity,
         load: impl FnOnce() -> Result<TargetAbi, String>,
     ) -> Result<TargetAbi, String> {
-        if let Some(index) = self
-            .entries
-            .iter()
-            .position(|(cached, _)| cached == &identity)
-        {
-            let entry = self.entries.remove(index).expect("cache index is valid");
-            let abi = entry.1;
-            self.entries.push_back(entry);
-            return Ok(abi);
-        }
+        let generation = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
 
+            if let Some(abi) = state.entries.get_cloned(&identity) {
+                return Ok(abi);
+            }
+
+            state.generation
+        };
+
+        // Target reset clears this cache from GTK. Never hold its mutex during
+        // filesystem work, or publish a read that crossed that invalidation.
         let abi = load()?;
 
-        if self.capacity > 0 {
-            self.entries.push_back((identity, abi));
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-            while self.entries.len() > self.capacity {
-                self.entries.pop_front();
-            }
+        if state.generation == generation {
+            state.entries.insert(identity, abi);
         }
 
         Ok(abi)
     }
 
-    fn clear(&mut self) {
-        self.entries.clear();
+    fn clear(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        state.generation = state.generation.wrapping_add(1);
+        state.entries.clear();
     }
 }
 
-fn target_abi_cache() -> &'static Mutex<TargetAbiCache> {
-    static CACHE: OnceLock<Mutex<TargetAbiCache>> = OnceLock::new();
+fn target_abi_cache() -> &'static TargetAbiCache {
+    static CACHE: OnceLock<TargetAbiCache> = OnceLock::new();
 
-    CACHE.get_or_init(|| Mutex::new(TargetAbiCache::new(MAX_TARGET_ABI_CACHE_ENTRIES)))
+    CACHE.get_or_init(|| TargetAbiCache::new(MAX_TARGET_ABI_CACHE_ENTRIES))
 }
 
 pub(crate) fn read_local_parent_pid(pid: u32, debugger_pid: u32) -> Option<u32> {
@@ -317,12 +312,14 @@ mod tests {
         TargetAbiIdentity {
             pid,
             start_time,
-            executable_size: 4096,
-            executable_modified: SystemTime::UNIX_EPOCH,
-            #[cfg(unix)]
-            executable_device: 1,
-            #[cfg(unix)]
-            executable_inode,
+            executable: FileIdentity {
+                path: PathBuf::from("/target"),
+                size: 4096,
+                modified: std::time::SystemTime::UNIX_EPOCH,
+                device: 1,
+                inode: executable_inode,
+                changed: (0, 0),
+            },
         }
     }
 
@@ -399,7 +396,7 @@ mod tests {
     #[test]
     fn target_abi_cache_uses_process_and_executable_identity() {
         let loads = std::cell::Cell::new(0);
-        let mut cache = TargetAbiCache::new(8);
+        let cache = TargetAbiCache::new(8);
 
         let load = || {
             loads.set(loads.get() + 1);
@@ -433,7 +430,7 @@ mod tests {
     #[test]
     fn failed_abi_reads_do_not_poison_the_cache_and_invalidation_forces_a_miss() {
         let identity = abi_identity(7, 99, 100);
-        let mut cache = TargetAbiCache::new(8);
+        let cache = TargetAbiCache::new(8);
 
         assert!(
             cache
@@ -463,7 +460,7 @@ mod tests {
 
     #[test]
     fn target_abi_cache_is_bounded() {
-        let mut cache = TargetAbiCache::new(2);
+        let cache = TargetAbiCache::new(2);
 
         for inode in 1..=3 {
             assert_eq!(
@@ -472,7 +469,36 @@ mod tests {
             );
         }
 
-        assert_eq!(cache.entries.len(), 2);
-        assert!(cache.entries.iter().all(|(identity, _)| identity.pid != 1));
+        let state = cache.state.lock().unwrap();
+        assert_eq!(state.entries.keys().count(), 2);
+        assert!(state.entries.keys().all(|identity| identity.pid != 1));
+    }
+
+    #[test]
+    fn abi_loading_does_not_lock_out_reset_or_repopulate_an_invalidated_cache() {
+        let cache = TargetAbiCache::new(2);
+        let identity = abi_identity(7, 99, 100);
+
+        assert_eq!(
+            cache.resolve(identity.clone(), || {
+                assert!(cache.state.try_lock().is_ok());
+                cache.clear();
+                Ok(test_abi())
+            }),
+            Ok(test_abi())
+        );
+
+        assert_eq!(cache.state.lock().unwrap().entries.keys().count(), 0);
+        let loads = std::cell::Cell::new(0);
+
+        assert_eq!(
+            cache.resolve(identity, || {
+                loads.set(loads.get() + 1);
+                Ok(test_abi())
+            }),
+            Ok(test_abi())
+        );
+
+        assert_eq!(loads.get(), 1);
     }
 }

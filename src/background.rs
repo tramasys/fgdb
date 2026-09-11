@@ -6,6 +6,9 @@ use std::{
     thread,
 };
 
+mod completion;
+pub(crate) use completion::{CompletionError, receive_current};
+
 const BACKGROUND_WORKERS: usize = 3;
 const BACKGROUND_QUEUE_CAPACITY: usize = 24;
 const RESERVED_CRITICAL_SLOTS: usize = 6;

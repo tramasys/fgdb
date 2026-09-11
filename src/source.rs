@@ -892,11 +892,11 @@ fn case_insensitive_match_column(line: &str, query_lower: &str) -> Option<usize>
     let mut produced_lowercase_characters = 0;
 
     for (original_character_offset, character) in line.chars().enumerate() {
-        if produced_lowercase_characters >= lowered_character_offset {
+        produced_lowercase_characters += character.to_lowercase().count();
+
+        if produced_lowercase_characters > lowered_character_offset {
             return Some(original_character_offset + 1);
         }
-
-        produced_lowercase_characters += character.to_lowercase().count();
     }
 
     Some(line.chars().count().saturating_add(1))
@@ -1173,6 +1173,8 @@ mod tests {
         );
 
         assert_eq!(case_insensitive_match_column("İtarget", "target"), Some(2));
+        assert_eq!(case_insensitive_match_column("İtarget", "\u{307}"), Some(1));
+        assert_eq!(case_insensitive_match_column("İ", "\u{307}"), Some(1));
         assert_eq!(case_insensitive_match_column("Ärger", "är"), Some(1));
     }
 

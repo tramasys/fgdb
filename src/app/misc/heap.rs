@@ -462,13 +462,17 @@ fn start_native_heap_reader(state: std::cell::RefMut<'_, HeapDiscoveryState>) {
         return;
     }
 
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = futures_channel::oneshot::channel();
 
     let worker = std::thread::Builder::new()
         .name(String::from("fgdb-native-heap"))
         .spawn(move || {
-            let _guard = HeapWorkerGuard;
-            let _ = sender.send(crate::misc::inspect_native_heap(request));
+            let result = {
+                let _guard = HeapWorkerGuard;
+                crate::misc::inspect_native_heap(request)
+            };
+
+            let _ = sender.send(result);
         });
 
     if let Err(error) = worker {
@@ -485,69 +489,37 @@ fn start_native_heap_reader(state: std::cell::RefMut<'_, HeapDiscoveryState>) {
         return;
     }
 
-    let started = Instant::now();
+    gtk::glib::MainContext::default().spawn_local(async move {
+        let result = crate::background::receive_current(receiver, READ_TIMEOUT, || {
+            requests.is_current()
+                && ui
+                    .upgrade()
+                    .is_some_and(|ui| ui.heap_inspection_is_current(generation))
+        })
+        .await;
 
-    gtk::glib::timeout_add_local(Duration::from_millis(20), move || {
-        if !requests.is_current()
-            || !ui
-                .upgrade()
-                .is_some_and(|ui| ui.heap_inspection_is_current(generation))
-        {
-            budget.cancel();
+        budget.cancel();
 
-            if let Some(ui) = ui.upgrade() {
+        let Some(ui) = ui.upgrade() else {
+            return;
+        };
+
+        match result {
+            Ok(Ok(snapshot)) => ui.show_heap_inspection(generation, snapshot),
+            Ok(Err(error)) => ui.show_heap_inspection_error(generation, query.title(), &error),
+            Err(crate::background::CompletionError::Superseded) => {
                 ui.finish_heap_inspection(generation);
             }
-
-            return gtk::glib::ControlFlow::Break;
-        }
-
-        match receiver.try_recv() {
-            Ok(Ok(snapshot)) => {
-                if let Some(ui) = ui.upgrade() {
-                    ui.show_heap_inspection(generation, snapshot);
-                }
-
-                gtk::glib::ControlFlow::Break
-            }
-            Ok(Err(error)) => {
-                if let Some(ui) = ui.upgrade() {
-                    ui.show_heap_inspection_error(generation, query.title(), &error);
-                }
-
-                gtk::glib::ControlFlow::Break
-            }
-
-            Err(TryRecvError::Empty)
-                if ui.strong_count() > 0 && started.elapsed() < READ_TIMEOUT =>
-            {
-                gtk::glib::ControlFlow::Continue
-            }
-            Err(TryRecvError::Empty) if ui.strong_count() > 0 => {
-                budget.cancel();
-
-                if let Some(ui) = ui.upgrade() {
-                    ui.show_heap_inspection_error(
-                        generation,
-                        query.title(),
-                        "Native heap inspection exceeded eight seconds",
-                    );
-                }
-
-                gtk::glib::ControlFlow::Break
-            }
-            Err(TryRecvError::Disconnected) => {
-                if let Some(ui) = ui.upgrade() {
-                    ui.show_heap_inspection_error(
-                        generation,
-                        query.title(),
-                        "The native heap reader stopped before returning data",
-                    );
-                }
-
-                gtk::glib::ControlFlow::Break
-            }
-            Err(TryRecvError::Empty) => gtk::glib::ControlFlow::Break,
+            Err(crate::background::CompletionError::TimedOut) => ui.show_heap_inspection_error(
+                generation,
+                query.title(),
+                "Native heap inspection exceeded eight seconds",
+            ),
+            Err(crate::background::CompletionError::Disconnected) => ui.show_heap_inspection_error(
+                generation,
+                query.title(),
+                "The native heap reader stopped before returning data",
+            ),
         }
     });
 }

@@ -1826,16 +1826,12 @@ impl Ui {
                         break;
                     }
 
-                    let file = std::fs::metadata(&path).ok();
+                    let identity = crate::bounded::FileIdentity::read(&path).ok();
 
-                    let unchanged = file.as_ref().and_then(|file| {
-                        let modified = file.modified().ok();
-
-                        cached.get(&path).filter(|cached| {
-                            modified.is_some()
-                                && cached.file_size == Some(file.len())
-                                && cached.modified == modified
-                        })
+                    let unchanged = identity.as_ref().and_then(|identity| {
+                        cached
+                            .get(&path)
+                            .filter(|cached| cached.file_identity.as_ref() == Some(identity))
                     });
 
                     let details = match unchanged {

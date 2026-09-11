@@ -161,19 +161,27 @@ impl Persistence {
                 }
 
                 state.cancel_pane_restore(key);
-                let widget = widget.clone();
                 let weak_state = Rc::downgrade(&state);
+                let measured = Cell::new(false);
 
-                let source = glib::idle_add_local_once(move || {
+                // A map signal and an idle callback can both precede allocation.
+                // Let one layout frame finish before restoring the new pane.
+                let source = widget.add_tick_callback(move |widget, _| {
+                    if !measured.replace(true) {
+                        return glib::ControlFlow::Continue;
+                    }
+
                     let Some(state) = weak_state.upgrade() else {
-                        return;
+                        return glib::ControlFlow::Break;
                     };
 
                     state.pending_pane_restores.borrow_mut().remove(key);
 
                     if !state.finished.get() && widget.is_mapped() {
-                        state.restore_position(key, default_fraction, &widget);
+                        state.restore_position(key, default_fraction, widget);
                     }
+
+                    glib::ControlFlow::Break
                 });
 
                 state.pending_pane_restores.borrow_mut().insert(key, source);
@@ -467,7 +475,7 @@ struct State {
     #[cfg(test)]
     final_save_done: Cell<bool>,
     pending_save: RefCell<Option<glib::SourceId>>,
-    pending_pane_restores: RefCell<HashMap<&'static str, glib::SourceId>>,
+    pending_pane_restores: RefCell<HashMap<&'static str, gtk::TickCallbackId>>,
     restore_started: Cell<bool>,
     restoring_position: Cell<bool>,
     ready_to_save: Cell<bool>,

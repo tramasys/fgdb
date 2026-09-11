@@ -81,8 +81,17 @@ fn tls_split_resizes_and_restores_after_page_and_metadata_changes() {
         persistence.on_ready(move || observed.set(true));
         window.present();
         wait(|| ready.get());
-        pages.set_visible_child_name("tls");
+        let clock = window.frame_clock().unwrap();
+        let mapped_pages = pages.clone();
+
+        // Map between layout frames so an idle callback cannot assume that
+        // the newly visible pane already has an allocation.
+        let handler =
+            clock.connect_after_paint(move |_| mapped_pages.set_visible_child_name("tls"));
+
+        clock.request_phase(gtk::gdk::FrameClockPhase::AFTER_PAINT);
         wait(|| split.is_mapped() && split.height() > 600);
+        clock.disconnect(handler);
         settle();
 
         (window, pages, split, metadata, persistence)
@@ -144,6 +153,20 @@ fn tls_split_resizes_and_restores_after_page_and_metadata_changes() {
     wait(|| split.is_mapped());
     settle();
     assert_eq!(split.position(), 180);
+
+    pages.set_visible_child_name("overview");
+    wait(|| !split.is_mapped());
+    pages.set_visible_child_name("tls");
+    split.set_position(240);
+    settle();
+
+    assert_eq!(
+        split.position(),
+        240,
+        "a pending restore must not override an explicit move"
+    );
+
+    split.set_position(180);
     persistence.finish();
     wait(|| persistence.final_save_done());
 
