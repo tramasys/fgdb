@@ -7,6 +7,7 @@ mod tests;
 const MODULES: &[(&str, &str)] = &[
     ("common", include_str!("printers/common.py")),
     ("values", include_str!("printers/values.py")),
+    ("c3", include_str!("printers/c3.py")),
     ("d", include_str!("printers/d.py")),
     ("fortran", include_str!("printers/fortran.py")),
     ("ada", include_str!("printers/ada.py")),

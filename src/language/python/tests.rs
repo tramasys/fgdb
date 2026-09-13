@@ -2,6 +2,7 @@ use super::*;
 use std::{path::Path, process::Command, time::Duration};
 
 mod ada;
+mod c3;
 mod d;
 
 #[test]

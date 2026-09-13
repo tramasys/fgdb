@@ -49,6 +49,52 @@ fn d_and_ada_sources_use_installed_syntax_definitions() {
 }
 
 #[test]
+#[ignore = "requires a GTK display, run separately from other GTK tests"]
+fn c3_sources_use_bundled_syntax_and_keep_comments_and_strings_scoped() {
+    use sourceview5::prelude::*;
+
+    gtk::init().unwrap();
+    gtk::gio::resources_register_include!("fgdb.gresource").unwrap();
+
+    let text = r#"<* docs *>
+/* outer /* inner */ still comment */
+fn int main() @noinline {
+    String text = "// literal"; // comment
+    String raw = `// raw
+`` escaped /* literal */`;
+    return 0;
+}
+"#;
+
+    for path in ["main.c3", "types.c3i", "generic.c3t", "main.C3"] {
+        let buffer = super::views::build_source_buffer(text, Some(Path::new(path)), None);
+        assert_eq!(buffer.language().unwrap().id(), "fgdb-c3");
+        buffer.ensure_highlight(&buffer.start_iter(), &buffer.end_iter());
+
+        for (needle, class) in [
+            ("docs", "comment"),
+            ("still comment", "comment"),
+            ("// literal", "string"),
+            ("// comment", "comment"),
+            ("// raw", "string"),
+            ("escaped /* literal */", "string"),
+        ] {
+            let offset = i32::try_from(text[..text.find(needle).unwrap()].chars().count()).unwrap();
+
+            assert!(
+                buffer.iter_has_context_class(&buffer.iter_at_offset(offset), class),
+                "{path}: {needle}"
+            );
+        }
+
+        let offset = i32::try_from(text.find("return").unwrap()).unwrap();
+        let code = buffer.iter_at_offset(offset);
+        assert!(!buffer.iter_has_context_class(&code, "comment"));
+        assert!(!buffer.iter_has_context_class(&code, "string"));
+    }
+}
+
+#[test]
 fn stop_point_submissions_recheck_execution_and_selection_locks() {
     use crate::model::{DebuggerModel, DebuggerStateDelta, actions::*};
 

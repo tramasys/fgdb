@@ -8,6 +8,7 @@ ODIN ?= odin
 GDC ?= gdc
 DMD ?= dmd
 GNATMAKE ?= gnatmake
+C3C ?= c3c
 MUSL_CC ?= musl-gcc
 
 CFLAGS ?= -std=c17 -g3 -O0 -fno-omit-frame-pointer -fno-inline -Wall -Wextra -Wpedantic
@@ -62,6 +63,8 @@ OPTIMIZED_TARGETS := \
 	$(TARGET_DIR)/rust-debug-target-o2
 TARGETS := $(C_TARGETS) $(CXX_TARGETS) $(RUST_TARGETS) $(OPTIMIZED_TARGETS)
 LANGUAGE_TARGETS := \
+	$(TARGET_DIR)/c3-return-value-target \
+	$(TARGET_DIR)/c3-variable-viewer-target \
 	$(TARGET_DIR)/d-return-value-target \
 	$(TARGET_DIR)/ada-return-value-target \
 	$(TARGET_DIR)/fortran-return-value-target \
@@ -120,6 +123,12 @@ $(TARGET_DIR)/fortran-variable-viewer-target: fortran_variable_viewer_target.f90
 
 $(TARGET_DIR)/d-variable-viewer-target: d_variable_viewer_target.d | $(TARGET_DIR)
 	$(GDC) -g3 -O0 -fno-inline $< -o $@
+
+$(TARGET_DIR)/c3-variable-viewer-target: c3_variable_viewer_target.c3 | $(TARGET_DIR)
+	$(C3C) compile -g -O0 --build-dir $(TARGET_DIR) $< -o $@
+
+$(TARGET_DIR)/c3-return-value-target: c3_return_value_target.c3 | $(TARGET_DIR)
+	$(C3C) compile -g -O0 --build-dir $(TARGET_DIR) $< -o $@
 
 $(TARGET_DIR)/dmd-variable-viewer-target: d_variable_viewer_target.d | $(TARGET_DIR)
 	$(DMD) -g -od=$(TARGET_DIR) -of=$@ $<

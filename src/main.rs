@@ -239,6 +239,7 @@ mod tests {
         for path in [
             "/dev/fgdb/Fgdb/icons/dev.fgdb.Fgdb.png",
             "/dev/fgdb/Fgdb/language-specs/assembly.lang",
+            "/dev/fgdb/Fgdb/language-specs/c3.lang",
             "/dev/fgdb/Fgdb/themes/carbon.xml",
         ] {
             assert!(

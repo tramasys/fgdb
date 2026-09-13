@@ -233,11 +233,102 @@ fn live_source_steps_and_instruction_step_out_capture_verified_results() {
 }
 
 #[test]
+#[ignore = "requires x86-64 GDB and the C3 return-value fixture"]
+fn live_c3_returns_use_native_types_and_skip_unproven_source_steps() {
+    for command in ["-exec-finish", "-exec-next", "-exec-next-instruction"] {
+        for (function, assertion) in [
+            ("return_pair", "int(v['x']) == 7 and int(v['y']) == 11"),
+            ("return_integer", "int(v) == 42"),
+        ] {
+            let stopped = Rc::new(Cell::new(false));
+            let observed = Rc::clone(&stopped);
+            let native = Rc::new(RefCell::new(None));
+            let captured = Rc::clone(&native);
+
+            let (_debugger, client) = open_debugger_observing(
+                "c3-return-value-target",
+                &format!("c3_return_value_target.{function}"),
+                false,
+                move |event| {
+                    if let MiEvent::Stopped { return_value, .. } = event {
+                        captured.replace(return_value.clone());
+                        observed.set(true);
+                    }
+                },
+            );
+
+            assert!(return_values::parse_snapshot(&snapshot(&client)).is_none());
+            let mut returned = None;
+
+            for _ in 0..32 {
+                stopped.set(false);
+                let record = request(&client, command);
+                assert_eq!(record.class, "running", "{function} {command}: {record:?}");
+                wait_until(|| stopped.get());
+                let output = snapshot(&client);
+
+                // C3 reloads RAX through a temporary before Next stops in the
+                // caller. The capture policy must not assume it was preserved.
+                if command == "-exec-next" && function == "return_pair" {
+                    assert!(return_values::parse_snapshot(&output).is_none());
+                    assert!(native.borrow().is_none());
+
+                    console_output(
+                        &client,
+                        "python assert gdb.newest_frame().name() == 'main'; v = gdb.parse_and_eval('pair'); assert int(v['x']) == 7 and int(v['y']) == 11",
+                    );
+
+                    break;
+                }
+
+                returned = return_values::parse_snapshot(&output)
+                    .map(|snapshot| snapshot.value)
+                    .or_else(|| native.take());
+
+                if returned.is_some() {
+                    break;
+                }
+            }
+
+            if command == "-exec-next" && function == "return_pair" {
+                continue;
+            }
+
+            let returned =
+                returned.unwrap_or_else(|| panic!("{function} {command} lost its return"));
+
+            let reference = returned.history_variable.unwrap();
+            let typed = request(&client, &format!("-var-create returned * {reference}"));
+            let variable = crate::debugger::variable_object(&typed, &reference).unwrap();
+            assert!(variable.type_name.is_some(), "{typed:?}");
+
+            if function == "return_pair" {
+                assert!(variable.num_children > 0, "{function} {command}: {typed:?}");
+            }
+
+            console_output(
+                &client,
+                &format!(
+                    "python v = gdb.history({}); assert {assertion}, str(v); assert len(gdb.breakpoints()) == 1",
+                    &reference[1..],
+                ),
+            );
+
+            assert!(return_values::parse_snapshot(&snapshot(&client)).is_none());
+        }
+    }
+}
+
+#[test]
 #[ignore = "requires GDB and all language return-value fixtures"]
 fn live_aggregate_returns_preserve_native_language_layouts_and_children() {
     for (fixture, checkpoint) in [
         ("c-return-value-target", "return_pair"),
         ("cpp-return-value-target", "return_pair"),
+        (
+            "c3-return-value-target",
+            "c3_return_value_target.return_pair",
+        ),
         (
             "rust-return-value-target",
             "rust_return_value_target::return_pair",

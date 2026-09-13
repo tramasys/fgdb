@@ -1,6 +1,6 @@
 //! Source-language policy shared by discovery, presentation, and value editing.
 //!
-//! A source language is not an expression dialect. In particular, Zig and Odin
+//! A source language is not an expression dialect. In particular, C3, Zig and Odin
 //! currently rely on GDB's DWARF support rather than native expression parsers.
 
 use std::path::Path;
@@ -13,6 +13,7 @@ pub(crate) mod toolchain;
 pub(crate) enum Language {
     C,
     Cpp,
+    C3,
     D,
     Ada,
     Rust,
@@ -56,6 +57,16 @@ pub(crate) const PRIMARY_LANGUAGES: &[LanguageSupport] = &[
         entrypoint_pattern: None,
         inspection: "Native values and available libstdc++ pretty printers",
         expressions: "GDB C++ expressions",
+    },
+    LanguageSupport {
+        language: Language::C3,
+        name: "C3",
+        extensions: &["c3", "c3i", "c3t"],
+        syntax: "fgdb-c3",
+        gdb_dialects: &[],
+        entrypoint_pattern: None,
+        inspection: "Native scalars, enums, structs, pointers and arrays, with bounded byte-slice previews and paged slices",
+        expressions: "GDB's DWARF-selected dialect, not native C3 expressions. Slice indexing uses slice.ptr[index]. Lowered optionals, faults and bitstructs retain their emitted representation.",
     },
     LanguageSupport {
         language: Language::D,
@@ -255,6 +266,9 @@ mod tests {
             ("x.F90", Language::Fortran),
             ("x.C", Language::Cpp),
             ("x.c", Language::C),
+            ("x.c3", Language::C3),
+            ("x.c3i", Language::C3),
+            ("x.C3T", Language::C3),
             ("x.d", Language::D),
             ("x.di", Language::D),
             ("x.adb", Language::Ada),
@@ -268,6 +282,10 @@ mod tests {
         }
 
         assert_eq!(Language::from_gdb("minimal"), Language::Unknown);
+        assert_eq!(Language::from_gdb("c"), Language::C);
+        assert!(Language::C3.support().unwrap().gdb_dialects.is_empty());
+        assert_eq!(Language::C3.boolean_literal(false), "0");
+        assert_eq!(Language::C3.boolean_literal(true), "1");
         assert_eq!(Language::from_gdb("d"), Language::D);
         assert_eq!(Language::from_gdb("ada"), Language::Ada);
         assert_eq!(Language::Ada.boolean_literal(false), "false");
@@ -318,10 +336,12 @@ mod tests {
             );
         }
 
-        for language in [Language::D, Language::Ada] {
-            let support = language.support().unwrap();
+        for support in PRIMARY_LANGUAGES {
             assert!(!support.syntax.is_empty());
-            assert_eq!(Language::from_gdb(support.gdb_dialects[0]), language);
+
+            for dialect in support.gdb_dialects {
+                assert_eq!(Language::from_gdb(dialect), support.language);
+            }
         }
     }
 }

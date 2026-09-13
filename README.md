@@ -38,7 +38,7 @@ and rr are optional.
 - Threads, multiple inferiors and fork control, with Linux process, mapping and file descriptor details
 - Lock waiters, ownership evidence and wait-chain navigation, with thread and memory inspection
 - GDB recording and reverse execution, plus rr replay when available
-- Source support for C, C++, D, Ada, Rust, Fortran, Zig and Odin, with debug-symbol lookup and pretty printers
+- Source support for C, C++, C3, D, Ada, Rust, Fortran, Zig and Odin, with debug-symbol lookup and pretty printers
 - Saved investigations, configurable shortcuts and detachable panels
 
 ## Showcase

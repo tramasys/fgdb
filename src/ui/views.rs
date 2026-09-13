@@ -2633,7 +2633,9 @@ pub(super) fn build_source_buffer(
 
             if matches!(
                 language,
-                crate::language::Language::Zig | crate::language::Language::Odin
+                crate::language::Language::C3
+                    | crate::language::Language::Zig
+                    | crate::language::Language::Odin
             ) {
                 configured().or_else(|| manager.guess_language(Some(path), None))
             } else {
