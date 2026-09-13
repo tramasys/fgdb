@@ -109,3 +109,16 @@ Run `fgdb --help` for launch, attach, core dump and replay options.
 ---
 
 [MIT license](LICENSE)
+
+## Development checks
+
+Run `python3 tools/check.py unit`, `gtk`, or `gdb` from the checkout. The runner
+builds the matching test binary and runs each GTK/live-GDB check separately.
+GTK checks use `xvfb-run` with a 1920x1080 display. GDB checks build the examples
+first; their language compiler requirements and Make overrides are listed in
+`tools/check.py` and `examples/Makefile`.
+
+Use `--filter NAME` for a subset, `--list` to list checks, or
+`--no-default-features` to omit eBPF. `python3 tools/check.py clippy` checks all
+targets with warnings denied. `python3 tools/check.py bench` runs the ignored
+release benchmarks; use an otherwise idle machine for timing comparisons.

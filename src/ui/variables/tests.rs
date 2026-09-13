@@ -1,6 +1,45 @@
 use super::*;
+use std::cell::RefCell;
+
+#[test]
+fn root_update_distinguishes_rejection_no_change_and_changed_payload() {
+    use crate::ui::variables::{VariableRootChange, replace_variable_root};
+
+    let node = VariableNode::placeholder("value", "1");
+    let variable = node.variable.clone();
+    let store = gio::ListStore::new::<SnapshotRow>();
+    let row = SnapshotRow::new(VariableNode::new(variable.clone()));
+    store.append(&row);
+    let index = RefCell::new(VariableNodeIndex::default());
+    index.borrow_mut().index_store(&store);
+    let notifications = Rc::new(Cell::new(0));
+    let count = Rc::clone(&notifications);
+    row.connect_updated(move |_| count.set(count.get() + 1));
+
+    assert_eq!(
+        replace_variable_root(&store, 0, &variable, false, &index),
+        Some(VariableRootChange::Unchanged),
+    );
+    assert_eq!(notifications.get(), 0);
+    let mut changed = variable.clone();
+    changed.value = String::from("2");
+
+    assert_eq!(
+        replace_variable_root(&store, 0, &changed, false, &index),
+        Some(VariableRootChange::Updated),
+    );
+    assert_eq!(notifications.get(), 1);
+    changed.name = String::from("other");
+    assert_eq!(
+        replace_variable_root(&store, 0, &changed, false, &index),
+        None
+    );
+
+    assert_eq!(notifications.get(), 1);
+    assert_eq!(row.borrow::<VariableNode>().variable.value, "2");
+}
 use crate::debugger::{parse_record, variable_object, variable_updates};
-use crate::ui::dialogs::clear_variable_change_markers;
+use crate::ui::variables::clear_variable_change_markers;
 
 fn root() -> VariableNode {
     let record = parse_record(
@@ -221,6 +260,9 @@ fn clearing_descendant_changes_notifies_roots_once_after_children_are_clear() {
     store.append(&SnapshotRow::new(root));
     store.append(&SnapshotRow::new(VariableNode::placeholder("other", "")));
 
+    let index = RefCell::new(VariableNodeIndex::default());
+    index.borrow_mut().index_store(&store);
+
     let notifications = Rc::new(Cell::new(0));
     let observed = Rc::clone(&notifications);
 
@@ -233,9 +275,9 @@ fn clearing_descendant_changes_notifies_roots_once_after_children_are_clear() {
             observed.set(observed.get() + 1);
         });
 
-    clear_variable_change_markers(&store);
+    clear_variable_change_markers(&store, &index);
     assert_eq!(notifications.get(), 1);
-    clear_variable_change_markers(&store);
+    clear_variable_change_markers(&store, &index);
     assert_eq!(notifications.get(), 1);
 }
 
@@ -265,8 +307,8 @@ fn changed_filter_reacts_to_cleared_descendant_markers() {
         |_| None,
     )));
     assert_eq!(filtered.n_items(), 1);
-    clear_variable_change_markers(&store);
-    crate::ui::views::invalidate_variable_filter(&selection);
+    let tree = VariableTree::new(store, selection);
+    tree.clear_change_markers();
     assert_eq!(filtered.n_items(), 0);
 }
 
@@ -275,8 +317,8 @@ fn changed_filter_reacts_to_cleared_descendant_markers() {
 fn value_updates_keep_tree_rows_selection_and_cells_and_refresh_filters() {
     use crate::config::settings::IntegerDisplay;
     use crate::ui::{
-        dialogs, variable_presentation::VariablePresentation,
-        variable_viewers::VariableViewerRegistry, views,
+        variable_presentation::VariablePresentation, variable_viewers::VariableViewerRegistry,
+        variables, views,
     };
     gtk::init().unwrap();
     crate::theme::Theme::graphite().install();
@@ -304,6 +346,7 @@ fn value_updates_keep_tree_rows_selection_and_cells_and_refresh_filters() {
     root.children_loaded.set(true);
     root.expanded.set(true);
     store.append(&SnapshotRow::new(root));
+    let tree = variables::VariableTree::new(store.clone(), selection.clone());
     let window = gtk::Window::builder()
         .default_width(1100)
         .default_height(300)
@@ -335,12 +378,9 @@ fn value_updates_keep_tree_rows_selection_and_cells_and_refresh_filters() {
     let updates = variable_updates(
         &parse_record(r#"^done,changelist=[{name="root.0",value="99",in_scope="true"}]"#).unwrap(),
     );
-    assert_eq!(
-        dialogs::apply_variable_updates(&store, &updates, |_, _| {}),
-        1
-    );
-    views::invalidate_variable_filter(&selection);
+    assert_eq!(tree.apply_updates(&updates), 1);
     settle();
+    assert_eq!(tree.get("root.0").unwrap().variable.value, "99");
     assert_eq!(selection.selected_item().unwrap(), selected);
     assert_eq!(binds.get(), 0);
 
@@ -365,13 +405,28 @@ fn value_updates_keep_tree_rows_selection_and_cells_and_refresh_filters() {
     assert_eq!(selection.n_items(), 2);
     changed.set_active(true);
     assert_eq!(selection.n_items(), 2);
-    dialogs::clear_variable_change_markers(&store);
-    views::invalidate_variable_filter(&selection);
+    tree.clear_change_markers();
     assert_eq!(selection.n_items(), 0);
     search.set_text("");
     changed.set_active(false);
     settle();
     assert_eq!(selection.n_items(), 2);
+    let mut replacement = tree.get("root").unwrap().variable;
+    replacement.varobj = Some("replacement".into());
+    assert_eq!(
+        tree.replace_root(0, &replacement, false),
+        Some(variables::VariableRootChange::Updated)
+    );
+    assert!(!tree.contains("root"));
+    assert!(!tree.contains("root.0"));
+    assert!(tree.contains("replacement"));
+    assert_eq!(
+        tree.replace_root(0, &replacement, false),
+        Some(variables::VariableRootChange::Unchanged)
+    );
+    replacement.name = "other".into();
+    assert_eq!(tree.replace_root(0, &replacement, false), None);
+    assert!(tree.contains("replacement"));
     window.close();
 }
 
@@ -380,13 +435,13 @@ fn value_updates_keep_tree_rows_selection_and_cells_and_refresh_filters() {
 fn benchmark_variable_refresh() {
     use crate::config::settings::IntegerDisplay;
     use crate::ui::{
-        dialogs, variable_presentation::VariablePresentation,
-        variable_viewers::VariableViewerRegistry, views,
+        variable_presentation::VariablePresentation, variable_viewers::VariableViewerRegistry,
+        variables, views,
     };
     gtk::init().unwrap();
     crate::theme::Theme::graphite().install();
     let model = Rc::new(crate::model::DebuggerModel::new(None));
-    let (view, store, _) = views::build_locals_view(
+    let (view, store, selection) = views::build_locals_view(
         &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::Locals),
         &Rc::new(std::cell::RefCell::new(None)),
         &Rc::new(std::cell::RefCell::new(None)),
@@ -405,7 +460,8 @@ fn benchmark_variable_refresh() {
             variable
         })
         .collect::<Vec<_>>();
-    dialogs::replace_variable_roots_if_changed(&store, &variables);
+    let tree = variables::VariableTree::new(store.clone(), selection.clone());
+    tree.replace_roots(&variables, true);
     let window = gtk::Window::builder()
         .default_width(1100)
         .default_height(800)
@@ -435,7 +491,7 @@ fn benchmark_variable_refresh() {
                     store.splice(position as u32, 1, &[SnapshotRow::new(node)]);
                 }
             } else {
-                dialogs::replace_variable_roots_if_changed(&store, &variables);
+                tree.replace_roots(&variables, true);
             }
             eprintln!(
                 "locals/{} iteration={iteration} sync_us={}",

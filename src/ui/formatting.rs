@@ -1,4 +1,5 @@
 use super::*;
+use crate::debugger::PointerWidth;
 pub(super) use crate::debugger::instruction::{
     direct_control_flow_address, hex_value, instruction_operand_is_register, is_call_instruction,
     is_conditional_branch, is_indirect_branch, is_return_instruction, is_unconditional_branch,
@@ -77,7 +78,7 @@ impl RegisterRowData {
             && self.register.value == previous.register.value
             && self.architecture == previous.architecture
             && self.endian == previous.endian
-            && self.pointer_bits == previous.pointer_bits
+            && self.pointer_width == previous.pointer_width
         {
             self.register
                 .pointer_chain
@@ -139,7 +140,7 @@ pub(super) fn register_value_css(
     register: &Register,
     architecture: TargetArchitecture,
     endian: Option<TargetEndian>,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
 ) -> &'static str {
     if architecture.is_program_counter(&register.name) {
         "memory-code"
@@ -149,7 +150,7 @@ pub(super) fn register_value_css(
         value.contains('"')
             || hex_value(value).is_some_and(|value| {
                 endian.is_some_and(|endian| {
-                    ascii_annotation(value, endian, pointer_bits)
+                    ascii_annotation(value, endian, pointer_width)
                         .is_some_and(|annotation| !annotation.starts_with('('))
                 })
             })
@@ -175,7 +176,7 @@ pub(super) fn register_text(
     register: &Register,
     architecture: TargetArchitecture,
     endian: Option<TargetEndian>,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
 ) -> String {
     let values = if register.pointer_chain.is_empty() {
         std::slice::from_ref(&register.value)
@@ -195,10 +196,10 @@ pub(super) fn register_text(
                 false,
                 architecture,
                 endian,
-                pointer_bits,
+                pointer_width,
             )
         } else {
-            format_target_pointer_word(value, endian, pointer_bits)
+            format_target_pointer_word(value, endian, pointer_width)
         };
         text.push_str(&value);
     }
@@ -218,7 +219,7 @@ pub(super) fn register_details(
     register: &Register,
     _architecture: TargetArchitecture,
     endian: Option<TargetEndian>,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
 ) -> String {
     let mut details = String::new();
     for value in register.pointer_chain.iter().skip(1) {
@@ -226,7 +227,7 @@ pub(super) fn register_details(
             details.push_str("  →  ");
         }
 
-        details.push_str(&format_target_pointer_word(value, endian, pointer_bits));
+        details.push_str(&format_target_pointer_word(value, endian, pointer_width));
     }
 
     details
@@ -235,7 +236,7 @@ pub(super) fn register_details(
 fn format_target_pointer_word(
     value: &str,
     endian: Option<TargetEndian>,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
 ) -> String {
     // Dereference chains contain pointer-sized memory words, even when their
     // source register is wider (x32, AArch64 ILP32, or MIPS n32).
@@ -245,7 +246,7 @@ fn format_target_pointer_word(
         true,
         TargetArchitecture::Unknown,
         endian,
-        pointer_bits,
+        pointer_width,
     )
 }
 
@@ -261,7 +262,7 @@ pub(super) fn format_register_value(register: &str, value: &str, show_ascii: boo
         show_ascii,
         TargetArchitecture::Unknown,
         Some(TargetEndian::Little),
-        64,
+        crate::debugger::PointerWidth::Bits64,
     )
 }
 
@@ -277,7 +278,9 @@ pub(super) fn format_register_value_for_architecture(
         show_ascii,
         architecture,
         architecture.default_endian(),
-        architecture.pointer_bits().unwrap_or(64),
+        architecture
+            .pointer_width()
+            .unwrap_or(crate::debugger::PointerWidth::Bits64),
     )
 }
 
@@ -287,7 +290,7 @@ pub(super) fn format_register_value_for_target(
     show_ascii: bool,
     architecture: TargetArchitecture,
     endian: Option<TargetEndian>,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
 ) -> String {
     if let Some(vector) = format_vector_register_value(register, value) {
         return vector;
@@ -307,14 +310,14 @@ pub(super) fn format_register_value_for_target(
     let Some(number) = hex_value(value) else {
         return value.lines().next().unwrap_or(value).to_owned();
     };
-    let width = register_hex_width(register, architecture, pointer_bits);
+    let width = register_hex_width(register, architecture, pointer_width);
     let mut formatted = format!("0x{number:0width$x}");
     if let Some((_, annotation)) = value.trim().split_once(char::is_whitespace) {
         formatted.push(' ');
         formatted.push_str(annotation.trim());
     } else if show_ascii
         && let Some(annotation) =
-            endian.and_then(|endian| ascii_annotation(number, endian, pointer_bits))
+            endian.and_then(|endian| ascii_annotation(number, endian, pointer_width))
     {
         formatted.push(' ');
         formatted.push_str(&annotation);
@@ -539,9 +542,9 @@ pub(super) fn format_float(value: f64) -> String {
 pub(super) fn register_hex_width(
     register: &str,
     architecture: TargetArchitecture,
-    target_pointer_bits: u32,
+    target_pointer_width: PointerWidth,
 ) -> usize {
-    usize::try_from(architecture.scalar_register_bits(register, target_pointer_bits) / 4)
+    usize::try_from(architecture.scalar_register_bits(register, target_pointer_width) / 4)
         .unwrap_or(16)
         .clamp(4, 32)
 }
@@ -549,10 +552,10 @@ pub(super) fn register_hex_width(
 pub(super) fn ascii_annotation(
     value: u64,
     endian: TargetEndian,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
 ) -> Option<String> {
     let bytes = endian.word_bytes(value);
-    let word_size = usize::try_from(pointer_bits / 8).unwrap_or(8).clamp(4, 8);
+    let word_size = pointer_width.bytes();
     let bytes = match endian {
         TargetEndian::Little => &bytes[..word_size],
         TargetEndian::Big => &bytes[8 - word_size..],
@@ -788,9 +791,7 @@ pub(super) fn stack_tooltip(entry: &StackEntry) -> String {
     let anchors = format_register_names(&entry.address_registers);
     let references = stack_references(entry);
     let region = stack_pointer_target(entry);
-    let width = usize::try_from(entry.pointer_bits / 4)
-        .unwrap_or(16)
-        .clamp(8, 16);
+    let width = entry.pointer_width.bytes() * 2;
     format!(
         "0x{:0width$x}  +0x{:04x} / +{:03}\n{}\nanchors: {}  references: {}\nPointer target: {}",
         entry.address,
@@ -821,7 +822,7 @@ pub(super) fn stack_entry_text(entry: &StackEntry) -> String {
     } else {
         entry.pointer_chain.as_slice()
     };
-    let architecture = if entry.pointer_bits == 32 {
+    let architecture = if entry.pointer_width == crate::debugger::PointerWidth::Bits32 {
         TargetArchitecture::X86
     } else {
         TargetArchitecture::X86_64
@@ -838,7 +839,7 @@ pub(super) fn stack_entry_text(entry: &StackEntry) -> String {
             index > 0,
             architecture,
             Some(entry.endian),
-            entry.pointer_bits,
+            entry.pointer_width,
         ));
     }
 
@@ -893,18 +894,6 @@ pub(super) fn thread_os_id(target_id: &str) -> Option<String> {
         .strip_prefix("process ")
         .and_then(|pid| pid.split_whitespace().next())
         .map(str::to_owned)
-}
-
-pub(super) fn stop_reason_label(reason: &str) -> String {
-    match reason {
-        "breakpoint-hit" => String::from("BREAKPOINT"),
-        "end-stepping-range" => String::from("STEP"),
-        "function-finished" => String::from("FINISH"),
-        "location-reached" => String::from("UNTIL"),
-        "signal-received" => String::from("SIGNAL"),
-        "watchpoint-trigger" => String::from("WATCHPOINT"),
-        other => other.replace('-', " ").to_uppercase(),
-    }
 }
 
 pub(super) fn thread_detail(thread: &ThreadInfo, stop_reason: Option<&str>) -> String {
@@ -1018,8 +1007,8 @@ pub(super) fn thread_metadata(thread: &ThreadInfo, stop_reason: Option<&str>) ->
     metadata
 }
 
-pub(super) fn full_address(address: &str, pointer_bits: u32) -> String {
-    let width = usize::try_from(pointer_bits / 4).unwrap_or(16).clamp(8, 16);
+pub(super) fn full_address(address: &str, pointer_width: PointerWidth) -> String {
+    let width = pointer_width.bytes() * 2;
     hex_value(address).map_or_else(
         || address.to_owned(),
         |address| format!("0x{address:0width$x}"),
@@ -1091,7 +1080,7 @@ fn instructions_are_adjacent(previous: &Instruction, current: &Instruction) -> b
 fn riscv_branch_taken(
     instruction: &Instruction,
     registers: &[Register],
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
 ) -> Option<bool> {
     let (mnemonic, operands) = split_instruction(&instruction.text);
     let operands = operands.split(',').map(str::trim).collect::<Vec<_>>();
@@ -1101,7 +1090,7 @@ fn riscv_branch_taken(
         _ => (value(operands.first()?)?, value(operands.get(1)?)?),
     };
     let signed = |value: u64| {
-        if pointer_bits == 32 {
+        if pointer_width == crate::debugger::PointerWidth::Bits32 {
             i64::from(value as u32 as i32)
         } else {
             value as i64
@@ -1278,7 +1267,9 @@ pub(super) fn conditional_branch_taken(
         return riscv_branch_taken(
             instruction,
             registers,
-            architecture.pointer_bits().unwrap_or(64),
+            architecture
+                .pointer_width()
+                .unwrap_or(crate::debugger::PointerWidth::Bits64),
         );
     }
 

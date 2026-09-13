@@ -428,7 +428,6 @@ impl Ui {
     }
 
     pub(crate) fn reset_runtime_pretty_printer_scripts(&self) {
-        self.model.printer_scripts.borrow_mut().reset();
         let mut state = self.debug_data_state.borrow_mut();
         let reload_registry = state.pretty_printers_ready
             || state.pretty_printers_loading
@@ -623,52 +622,27 @@ impl Ui {
     }
 
     pub(crate) fn add_runtime_source_directory(&self, path: PathBuf) {
-        if !self.source_roots.borrow().contains(&path) {
-            self.source_roots.borrow_mut().push(path.clone());
-        }
-
-        if !self.source_tree_roots.borrow().contains(&path) {
-            self.source_tree_roots.borrow_mut().push(path);
-        }
+        self.source.add_directory(path);
 
         self.invalidate_source_discovery();
     }
 
     pub(crate) fn remove_runtime_source_directory(&self, path: &str) {
-        let path = Path::new(path);
-        self.source_roots.borrow_mut().retain(|root| root != path);
-
-        self.source_tree_roots
-            .borrow_mut()
-            .retain(|root| root != path);
+        self.source.remove_directory(Path::new(path));
 
         self.invalidate_source_discovery();
     }
 
     pub(crate) fn invalidate_source_discovery(&self) {
-        self.resolved_source_paths.borrow_mut().clear();
-        self.source_loaded_cache.borrow_mut().take();
-        self.source_loaded_search.borrow_mut().take();
-        self.source_tree_cache.borrow_mut().take();
-        self.source_tree_search.borrow_mut().take();
-        self.source_index.borrow_mut().take();
+        self.source.invalidate_discovery();
         self.refresh_source_breakpoint_index();
-        self.source_tree.file_routes.borrow_mut().clear();
-        self.source_tree_generation.fetch_add(1, Ordering::Relaxed);
-
-        self.source_tree_render_generation
-            .fetch_add(1, Ordering::Relaxed);
-
-        // A worker for the old generation may still complete, but it must not
-        // keep a new generation from starting its own index.
-        self.source_tree_indexing.set(false);
     }
 
     pub(crate) fn cache_loaded_source_files(&self, files: &[SourceFile]) {
-        let files_changed = self.loaded_source_files.borrow().as_slice() != files;
+        let files_changed = self.source.loaded_files.borrow().as_slice() != files;
 
         if files_changed {
-            self.loaded_source_files.replace(files.to_vec());
+            self.source.loaded_files.replace(files.to_vec());
         }
 
         let state_changed = {
@@ -726,7 +700,7 @@ impl Ui {
     }
 
     pub(crate) fn loaded_source_files_request_is_current(&self, generation: u64) -> bool {
-        self.source_loaded_generation.load(Ordering::Relaxed) == generation
+        self.source.loaded_generation.load(Ordering::Relaxed) == generation
     }
 
     pub(crate) fn show_debug_data_source_files(&self) -> bool {
@@ -1049,7 +1023,7 @@ impl Ui {
         let loaded_sources = if sources_loading {
             String::from("Loading…")
         } else if sources_ready {
-            self.loaded_source_files.borrow().len().to_string()
+            self.source.loaded_files.borrow().len().to_string()
         } else {
             String::from("Not loaded")
         };
@@ -1369,7 +1343,7 @@ impl Ui {
 
         let source_actions = gtk::Box::new(gtk::Orientation::Horizontal, 7);
         source_actions.add_css_class("debug-data-control-card");
-        let source_count = self.loaded_source_files.borrow().len();
+        let source_count = self.source.loaded_files.borrow().len();
 
         let source_status = if files_loading {
             String::from("Asking GDB for its source-file list…")
@@ -1431,7 +1405,7 @@ impl Ui {
         }
 
         let query = view.source_search.text().trim().to_ascii_lowercase();
-        let files = self.loaded_source_files.borrow();
+        let files = self.source.loaded_files.borrow();
         let mut shown = 0_usize;
         let mut matching = 0_usize;
 

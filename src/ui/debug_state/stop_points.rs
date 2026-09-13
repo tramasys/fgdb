@@ -977,7 +977,7 @@ impl Ui {
             }
         }
 
-        for document in self.source_documents.borrow().iter() {
+        for document in self.source.documents.borrow().iter() {
             document.breakpoint_renderer.queue_draw();
         }
 

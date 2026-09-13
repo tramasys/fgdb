@@ -2806,19 +2806,23 @@ impl KernelView {
 
     fn set_tls_runtime(
         &self,
-        target: (TargetArchitecture, Option<TargetEndian>, u32),
+        target: (
+            TargetArchitecture,
+            Option<TargetEndian>,
+            crate::debugger::PointerWidth,
+        ),
         register: Option<&str>,
         base: Option<u64>,
         mapping: Option<&str>,
         bytes: &[u8],
         error: Option<&str>,
     ) {
-        let (architecture, endian, pointer_bits) = target;
+        let (architecture, endian, pointer_width) = target;
         let current = self.tls_runtime.borrow();
 
         if current.architecture == architecture
             && current.endian == endian
-            && current.pointer_bits == pointer_bits
+            && current.pointer_width == pointer_width
             && current.register.as_deref() == register
             && current.base == base
             && current.mapping.as_deref() == mapping
@@ -2835,7 +2839,7 @@ impl KernelView {
             thread,
             architecture,
             endian,
-            pointer_bits,
+            pointer_width,
             register: register.map(str::to_owned),
             base,
             mapping: mapping.map(str::to_owned),
@@ -2959,12 +2963,9 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
 
     let base = runtime.base.unwrap_or_default();
 
-    let pointer_bits = match runtime.pointer_bits {
-        32 | 64 => runtime.pointer_bits,
-        _ => runtime.architecture.pointer_bits().unwrap_or(64),
-    };
+    let pointer_width = runtime.pointer_width;
 
-    let address_width = usize::try_from(pointer_bits / 4).unwrap_or(16).clamp(8, 16);
+    let address_width = pointer_width.bytes() * 2;
 
     rows.extend([
         KernelOverviewRow {
@@ -3033,7 +3034,7 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
     };
 
     let abi_section = if runtime.architecture == TargetArchitecture::X86_64
-        && pointer_bits == 64
+        && pointer_width == crate::debugger::PointerWidth::Bits64
         && register == "fs_base"
         && endian == TargetEndian::Little
     {
@@ -3072,7 +3073,7 @@ fn tls_runtime_rows(runtime: &KernelTlsRuntime) -> Vec<KernelOverviewRow> {
             }
         }
     } else {
-        let word_size = usize::try_from(pointer_bits / 8).unwrap_or(8).clamp(4, 8);
+        let word_size = pointer_width.bytes();
 
         for (index, bytes) in runtime.bytes.chunks_exact(word_size).take(10).enumerate() {
             let Some(value) = tls_value(bytes, 0, word_size, endian) else {
@@ -3337,7 +3338,11 @@ impl Ui {
     pub fn show_tls_runtime_for_refresh(
         &self,
         generation: u64,
-        target: (TargetArchitecture, Option<TargetEndian>, u32),
+        target: (
+            TargetArchitecture,
+            Option<TargetEndian>,
+            crate::debugger::PointerWidth,
+        ),
         register: &str,
         base: u64,
         mapping: Option<&str>,
@@ -3373,7 +3378,7 @@ impl Ui {
                 (
                     self.model.target_architecture(),
                     self.model.target_endian(),
-                    self.model.target_pointer_bits(),
+                    self.model.target_pointer_width(),
                 ),
                 None,
                 None,
@@ -3571,7 +3576,7 @@ mod memory_view_tests {
             thread: Some(String::from("GDB #1")),
             architecture: TargetArchitecture::X86_64,
             endian: Some(TargetEndian::Little),
-            pointer_bits: 64,
+            pointer_width: crate::debugger::PointerWidth::Bits64,
             register: Some(String::from("fs_base")),
             base: Some(0x7fff_0000),
             mapping: Some(String::from("rw-p")),
@@ -3596,7 +3601,7 @@ mod memory_view_tests {
             thread: Some(String::from("GDB #1")),
             architecture: TargetArchitecture::X86_64,
             endian: Some(TargetEndian::Little),
-            pointer_bits: 32,
+            pointer_width: crate::debugger::PointerWidth::Bits32,
             register: Some(String::from("fs_base")),
             base: Some(0x1000),
             mapping: None,
@@ -3620,7 +3625,7 @@ mod memory_view_tests {
             thread: None,
             architecture: TargetArchitecture::PowerPc64,
             endian: None,
-            pointer_bits: 64,
+            pointer_width: crate::debugger::PointerWidth::Bits64,
             register: Some(String::from("r13")),
             base: Some(0x1000),
             mapping: None,

@@ -1,3 +1,4 @@
+use crate::debugger::PointerWidth;
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -73,7 +74,7 @@ pub(crate) struct NativeHeapReadRequest {
     pub debugger_pid: u32,
     pub architecture: TargetArchitecture,
     pub endian: TargetEndian,
-    pub pointer_bits: u32,
+    pub pointer_width: PointerWidth,
     pub query: NativeHeapQuery,
     pub discovery: HeapDiscovery,
     pub budget: HeapReadBudget,
@@ -156,13 +157,9 @@ impl GlibcLayout {
     fn new(
         version: GlibcVersion,
         architecture: TargetArchitecture,
-        pointer_bits: u32,
+        pointer_width: PointerWidth,
     ) -> Result<Self, String> {
-        let pointer_size = match pointer_bits {
-            32 => 4,
-            64 => 8,
-            other => return Err(format!("Unsupported {other}-bit glibc target")),
-        };
+        let pointer_size = pointer_width.bytes() as u64;
 
         let special_32 = pointer_size == 4
             && matches!(
@@ -381,12 +378,10 @@ impl<'a> MemoryReader<'a> {
         root: &Path,
         mappings: &'a [ProcessMapping],
         endian: TargetEndian,
-        pointer_bits: u32,
+        pointer_width: PointerWidth,
         budget: HeapReadBudget,
     ) -> Result<Self, String> {
-        let pointer_size = usize::try_from(pointer_bits / 8)
-            .unwrap_or_default()
-            .clamp(4, 8);
+        let pointer_size = pointer_width.bytes();
 
         let file = File::open(root.join("mem"))
             .map_err(|error| format!("Cannot read the traced process memory: {error}"))?;
@@ -591,12 +586,12 @@ fn inspect_native_heap_at(
         ));
     }
 
-    let layout = GlibcLayout::new(version, request.architecture, request.pointer_bits)?;
+    let layout = GlibcLayout::new(version, request.architecture, request.pointer_width)?;
     let reader = MemoryReader::new(
         root,
         &mappings,
         request.endian,
-        request.pointer_bits,
+        request.pointer_width,
         request.budget,
     )?;
 
@@ -2165,7 +2160,7 @@ mod tests {
                         &directory,
                         &mappings,
                         endian,
-                        pointer_size as u32 * 8,
+                        PointerWidth::try_from(pointer_size as u32 * 8).unwrap(),
                         HeapReadBudget::new(),
                     )
                     .unwrap();
@@ -2198,7 +2193,12 @@ mod tests {
                 budget: HeapReadBudget::new(),
             },
             mappings: &[],
-            layout: GlibcLayout::new(version, TargetArchitecture::X86_64, 64).unwrap(),
+            layout: GlibcLayout::new(
+                version,
+                TargetArchitecture::X86_64,
+                crate::debugger::PointerWidth::Bits64,
+            )
+            .unwrap(),
             version,
             main_arena: 0,
             main_heap: None,
@@ -2251,7 +2251,7 @@ mod tests {
                 minor: 42,
             },
             TargetArchitecture::X86_64,
-            64,
+            crate::debugger::PointerWidth::Bits64,
         )
         .unwrap();
         assert_eq!(old.fastbins, Some(16));
@@ -2263,7 +2263,7 @@ mod tests {
                 minor: 44,
             },
             TargetArchitecture::X86_64,
-            64,
+            crate::debugger::PointerWidth::Bits64,
         )
         .unwrap();
         assert_eq!(current.fastbins, None);
@@ -2281,7 +2281,7 @@ mod tests {
                 minor: 29,
             },
             TargetArchitecture::X86_64,
-            64,
+            crate::debugger::PointerWidth::Bits64,
         )
         .unwrap();
         assert_eq!(v29.tcache_struct_size(), 576);
@@ -2292,7 +2292,7 @@ mod tests {
                 minor: 44,
             },
             TargetArchitecture::X86_64,
-            64,
+            crate::debugger::PointerWidth::Bits64,
         )
         .unwrap();
         assert_eq!(v44.tcache_struct_size(), 760);
@@ -2307,7 +2307,7 @@ mod tests {
                 minor: 26,
             },
             TargetArchitecture::X86,
-            32,
+            crate::debugger::PointerWidth::Bits32,
         )
         .unwrap();
         assert_eq!(layout.malloc_alignment, 16);
@@ -2371,7 +2371,7 @@ mod tests {
             debugger_pid,
             architecture: TargetArchitecture::X86_64,
             endian: TargetEndian::Little,
-            pointer_bits: 64,
+            pointer_width: PointerWidth::Bits64,
             query,
             budget: HeapReadBudget::new(),
             discovery: HeapDiscovery {

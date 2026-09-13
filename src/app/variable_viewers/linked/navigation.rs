@@ -10,7 +10,6 @@ pub(in crate::app::variable_viewers) struct LinkedListSettings {
 }
 
 struct LinkedPager {
-    ui: Weak<Ui>,
     client: Rc<MiClient>,
     requests: StopRequests,
     session: Weak<VariableViewerSession>,
@@ -21,12 +20,11 @@ struct LinkedPager {
 
 impl Drop for LinkedPager {
     fn drop(&mut self) {
-        cleanup_viewer_variable_objects(&self.ui, &self.client, self.settings.owned_root.take());
+        cleanup_viewer_variable_objects(&self.client, self.settings.owned_root.take());
     }
 }
 
 pub(in crate::app::variable_viewers) fn start_linked_list(
-    ui: Weak<Ui>,
     client: Rc<MiClient>,
     requests: StopRequests,
     session: Rc<VariableViewerSession>,
@@ -34,7 +32,6 @@ pub(in crate::app::variable_viewers) fn start_linked_list(
     settings: LinkedListSettings,
 ) {
     let pager = Rc::new(LinkedPager {
-        ui,
         client,
         requests,
         session: Rc::downgrade(&session),
@@ -151,7 +148,6 @@ impl LinkedPager {
 
         let revision = session.begin_linked();
         let traversal = Rc::new(RefCell::new(LinkedTraversal {
-            ui: self.ui.clone(),
             client: Rc::clone(&self.client),
             requests: self.requests.clone(),
             session: self.session.clone(),

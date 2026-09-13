@@ -108,7 +108,7 @@ mod tests {
                 referenced: false,
             }),
             true,
-            64,
+            crate::debugger::PointerWidth::Bits64,
             None,
         );
         retained.remember(&variable, &display);
@@ -148,7 +148,7 @@ mod tests {
                 referenced: false,
             }),
             true,
-            64,
+            crate::debugger::PointerWidth::Bits64,
             None,
         );
 

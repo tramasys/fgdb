@@ -1,4 +1,24 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExecutionAction {
+    Run,
+    Pause,
+    Next,
+    Step,
+    NextInstruction,
+    StepInstruction,
+    Finish,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ExecutionTarget<'a> {
+    SelectedInferior,
+    SelectedThread,
+    Inferior(&'a str),
+    Thread(&'a str),
+    All,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionAction {
     Restart,
     Kill,

@@ -52,7 +52,7 @@ pub(super) fn request(
             .unscoped(&command)
             .when(move || guard.is_current())
             .enrich(move |_, record| {
-                if record.class == "superseded" || !response.is_current() {
+                if record.is_superseded() || !response.is_current() {
                     response.finish(None);
                     return;
                 }
@@ -119,7 +119,7 @@ impl Batch {
             .frame(&command)
             .when(move || guard.is_current())
             .capture(move |_, record, output| {
-                if record.class == "superseded" || !response.is_current() {
+                if record.is_superseded() || !response.is_current() {
                     response.finish(None);
                     return;
                 }

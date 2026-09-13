@@ -130,8 +130,31 @@ impl GdbCapabilities {
     }
 }
 
+/// Local request failures are distinct from result classes received from GDB.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RequestFailure {
+    Superseded,
+    Unavailable,
+    Timeout,
+    ResourceLimit,
+    Protocol,
+}
+
+impl RequestFailure {
+    pub(super) const fn class(self) -> &'static str {
+        match self {
+            Self::Superseded => "superseded",
+            Self::Unavailable => "unavailable",
+            Self::Timeout => "timeout",
+            Self::ResourceLimit => "resource-limit",
+            Self::Protocol => "error",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MiRecord {
+    pub(super) failure: Option<RequestFailure>,
     pub token: Option<u64>,
     pub kind: char,
     pub class: String,
@@ -139,6 +162,26 @@ pub struct MiRecord {
 }
 
 impl MiRecord {
+    pub(crate) fn request_failure(&self) -> Option<RequestFailure> {
+        self.failure
+    }
+
+    pub(crate) fn is_superseded(&self) -> bool {
+        self.failure == Some(RequestFailure::Superseded)
+    }
+
+    pub(crate) fn is_unavailable(&self) -> bool {
+        self.failure == Some(RequestFailure::Unavailable)
+    }
+
+    pub(crate) fn is_timed_out(&self) -> bool {
+        self.failure == Some(RequestFailure::Timeout)
+    }
+
+    pub(crate) fn is_gdb_error(&self) -> bool {
+        self.failure.is_none() && self.kind == '^' && self.class == "error"
+    }
+
     pub fn has_feature(&self, name: &str) -> bool {
         self.is_done()
             && self

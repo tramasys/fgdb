@@ -1,12 +1,43 @@
 use super::{
-    GdbCapabilities, MiListItem, MiValue, OutgoingQueue, complete_input_end, drain_outgoing,
-    gdb_version_from_banner, listed_features, parse_record, parse_stream_output, quote,
-    result_field, scoped_mi_command, validate_mi_command,
+    GdbCapabilities, MiListItem, MiValue, OutgoingQueue, RequestFailure, complete_input_end,
+    drain_outgoing, gdb_version_from_banner, listed_features, parse_record, parse_stream_output,
+    quote, result_field, scoped_mi_command, validate_mi_command,
 };
 use std::sync::Mutex;
 
 pub(super) static MI_CLIENT_TEST_LOCK: Mutex<()> = Mutex::new(());
+// Direct transcript callbacks must also consume the GLib source that a real
+// event-loop dispatch would remove when the callback returns Break.
+pub(super) fn dispatch_test_write(client: &super::MiClient) {
+    if let Some(source) = client.write_source.borrow_mut().take() {
+        source.remove();
+    }
+
+    super::MiClient::on_write_ready(&client.weak(), gtk::glib::IOCondition::OUT);
+}
+
 struct BackpressuredWriter;
+
+#[test]
+fn local_failures_remain_distinct_from_gdb_result_classes() {
+    for failure in [
+        RequestFailure::Superseded,
+        RequestFailure::Unavailable,
+        RequestFailure::Timeout,
+        RequestFailure::ResourceLimit,
+        RequestFailure::Protocol,
+    ] {
+        let local = super::synthetic_error_record(failure, "diagnostic");
+        assert_eq!(local.request_failure(), Some(failure));
+        assert!(!local.is_gdb_error());
+        assert!(!local.is_success());
+        assert_eq!(local.error_message(), Some("diagnostic"));
+        let wire = parse_record(&format!("^{},msg=\"diagnostic\"", failure.class())).unwrap();
+        assert_eq!(wire.request_failure(), None);
+        assert!(!wire.is_superseded());
+        assert_eq!(wire.is_gdb_error(), failure == RequestFailure::Protocol);
+    }
+}
 
 impl std::io::Write for BackpressuredWriter {
     fn write(&mut self, _buffer: &[u8]) -> std::io::Result<usize> {
@@ -106,7 +137,7 @@ fn injected_transport_runs_a_deterministic_request_transcript() {
                 })
                 .unwrap();
 
-            super::MiClient::on_write_ready(&client.weak(), gtk::glib::IOCondition::OUT);
+            dispatch_test_write(&client);
             let mut command = [0_u8; 128];
             let count = peer.read(&mut command).unwrap();
 
@@ -143,7 +174,7 @@ fn breakpoint_output_negotiation_continues_on_unsupported_but_not_stale_response
                     super::MiClient::open_with_injected_transport(|_, _| {}).unwrap();
 
                 client.configure_breakpoint_output();
-                super::MiClient::on_write_ready(&client.weak(), gtk::glib::IOCondition::OUT);
+                dispatch_test_write(&client);
                 let mut buffer = [0_u8; 256];
                 let count = peer.read(&mut buffer).unwrap();
                 let command = std::str::from_utf8(&buffer[..count]).unwrap();
@@ -154,11 +185,26 @@ fn breakpoint_output_negotiation_continues_on_unsupported_but_not_stale_response
                     client.transport_epoch.set(client.transport_epoch.get() + 1);
                 }
 
-                peer.write_all(format!("{token}^{response}\n").as_bytes())
-                    .unwrap();
+                if response == "superseded" {
+                    let request = client
+                        .pending
+                        .borrow_mut()
+                        .remove(&token.parse().unwrap())
+                        .unwrap();
+                    request.complete(
+                        &client,
+                        super::synthetic_error_record(
+                            RequestFailure::Superseded,
+                            "request superseded",
+                        ),
+                    );
+                } else {
+                    peer.write_all(format!("{token}^{response}\n").as_bytes())
+                        .unwrap();
+                }
 
                 super::MiClient::on_io_ready(&client.weak(), gtk::glib::IOCondition::IN);
-                super::MiClient::on_write_ready(&client.weak(), gtk::glib::IOCondition::OUT);
+                dispatch_test_write(&client);
 
                 if continues {
                     let count = peer.read(&mut buffer).unwrap();
@@ -1420,7 +1466,7 @@ fn accepts_all_successful_mi_result_classes_for_session_commands() {
             .is_success()
     );
 
-    assert!(!super::synthetic_error_record("timeout", "timed out").is_success());
+    assert!(!super::synthetic_error_record(RequestFailure::Timeout, "timed out").is_success());
 }
 
 #[test]

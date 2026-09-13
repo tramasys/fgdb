@@ -1,4 +1,5 @@
 use super::*;
+use crate::debugger::PointerWidth;
 use crate::ui::layout::{Pane, Persistence};
 use std::time::{Duration, Instant};
 
@@ -51,7 +52,7 @@ fn tls_split_resizes_and_restores_after_page_and_metadata_changes() {
         let runtime = KernelTlsRuntime {
             architecture: TargetArchitecture::X86_64,
             endian: Some(TargetEndian::Little),
-            pointer_bits: 64,
+            pointer_width: PointerWidth::Bits64,
             register: Some(String::from("fs_base")),
             base: Some(0x7fff_0000),
             bytes: vec![0; 80],

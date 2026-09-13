@@ -19,9 +19,9 @@ impl Ui {
             }
 
             if let Some(bits) =
-                TargetArchitecture::explicit_pointer_bits_from_gdb_description(description)
+                TargetArchitecture::explicit_pointer_width_from_gdb_description(description)
             {
-                self.model.set_target_pointer_bits(bits);
+                self.model.set_target_pointer_width(bits);
             }
 
             if let Some(endian) = TargetEndian::from_architecture_description(description) {
@@ -63,7 +63,7 @@ impl Ui {
             &instructions,
             pc,
             self.model.target_architecture(),
-            self.model.target_pointer_bits(),
+            self.model.target_pointer_width(),
         );
 
         if instructions.is_empty() {
@@ -140,7 +140,7 @@ impl Ui {
             .into_iter()
             .map(|instruction| InstructionRowData {
                 current: addresses_equal(&instruction.address, pc),
-                pointer_bits: self.model.target_pointer_bits(),
+                pointer_width: self.model.target_pointer_width(),
                 source_text: self.disassembly_source_text(&instruction),
                 instruction,
             })
@@ -178,8 +178,11 @@ impl Ui {
 
             let range = format!(
                 "{function}  {}-{}  {} instructions",
-                full_address(&first.instruction.address, self.model.target_pointer_bits()),
-                full_address(&last.instruction.address, self.model.target_pointer_bits()),
+                full_address(
+                    &first.instruction.address,
+                    self.model.target_pointer_width()
+                ),
+                full_address(&last.instruction.address, self.model.target_pointer_width()),
                 self.instructions.store.n_items()
             );
 
@@ -305,9 +308,7 @@ impl Ui {
 
         let text = match result {
             Ok(memory) => {
-                let width = usize::try_from(self.model.target_pointer_bits() / 4)
-                    .unwrap_or(16)
-                    .clamp(8, 16);
+                let width = self.model.target_pointer_width().bytes() * 2;
 
                 format!(
                     "MEMORY  {expression} = 0x{:0width$x}  {}",

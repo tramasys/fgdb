@@ -16,7 +16,7 @@ pub(super) struct Presentation {
 pub(super) fn format(
     location: Option<&ValueLocation>,
     current: bool,
-    bits: u32,
+    width: crate::debugger::PointerWidth,
     regions: Option<&[MemoryRegion]>,
 ) -> Presentation {
     let location = location.filter(|_| current);
@@ -25,7 +25,7 @@ pub(super) fn format(
             address,
             referenced,
         }) => {
-            let width = (bits / 4).clamp(1, 16) as usize;
+            let width = width.bytes() * 2;
             let text = format!(
                 "0x{address:0width$x}{}",
                 if *referenced { " (referent)" } else { "" }

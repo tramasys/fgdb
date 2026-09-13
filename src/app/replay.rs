@@ -187,7 +187,7 @@ fn query_next(query: Rc<ReplayQuery>) {
 }
 
 fn receive_query(query: Rc<ReplayQuery>, command: &str, record: MiRecord, output: String) {
-    if !query.current() || matches!(record.class.as_str(), "superseded" | "timeout") {
+    if !query.current() || (record.is_superseded() || record.is_timed_out()) {
         query.finish(false);
         return;
     }
@@ -531,7 +531,7 @@ fn run_next(operation: Rc<ReplayOperation>) {
                 return;
             }
 
-            if record.class == "timeout" {
+            if record.is_timed_out() {
                 // The transport quarantines timed-out commands that reached GDB.
                 // A request canceled before dispatch must not kill a healthy backend.
                 // Do not queue inspection work before that decision is applied.
@@ -544,7 +544,7 @@ fn run_next(operation: Rc<ReplayOperation>) {
                         Some("status-error"),
                     );
                 }
-            } else if record.class == "superseded" {
+            } else if record.is_superseded() {
                 complete_operation(
                     &response,
                     Some("The execution-history command was interrupted. Refresh before retrying"),

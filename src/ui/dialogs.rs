@@ -1,4 +1,5 @@
 use super::*;
+use crate::debugger::PointerWidth;
 
 mod metadata_completion;
 
@@ -47,7 +48,7 @@ impl Ui {
         let editor = open_variable_editor(
             &parent,
             variable,
-            self.model.target_pointer_bits(),
+            self.model.target_pointer_width(),
             self.model.target_architecture(),
             self.current_source_language.get(),
             metadata.as_ref(),
@@ -63,426 +64,10 @@ impl Ui {
     }
 }
 
-pub(super) fn variable_at(selection: &gtk::SingleSelection, position: u32) -> Option<Variable> {
-    variable_row_at(selection, position).map(|(_, variable)| variable)
-}
-
-pub(super) fn root_variable_at(
-    selection: &gtk::SingleSelection,
-    position: u32,
-) -> Option<Variable> {
-    let (mut row, _) = variable_node_at(selection, position)?;
-
-    while let Some(parent) = row.parent() {
-        row = parent;
-    }
-
-    let item = row.item()?.downcast::<SnapshotRow>().ok()?;
-    let node = item.borrow::<VariableNode>();
-
-    (!node.placeholder).then(|| node.variable.clone())
-}
-
-pub(super) fn variable_row_at(
-    selection: &gtk::SingleSelection,
-    position: u32,
-) -> Option<(gtk::TreeListRow, Variable)> {
-    variable_node_at(selection, position)
-        .and_then(|(row, node)| (!node.placeholder).then_some((row, node.variable)))
-}
-
-pub(super) fn variable_node_at(
-    selection: &gtk::SingleSelection,
-    position: u32,
-) -> Option<(gtk::TreeListRow, VariableNode)> {
-    selection
-        .item(position)
-        .and_then(|item| item.downcast::<gtk::TreeListRow>().ok())
-        .and_then(|row| {
-            let item = row
-                .item()
-                .and_then(|item| item.downcast::<SnapshotRow>().ok())?;
-
-            let node = item.borrow::<VariableNode>();
-
-            Some((row, node.clone()))
-        })
-}
-
-pub(super) fn index_variable_nodes(
-    store: &gio::ListStore,
-    index: &mut HashMap<String, VariableNode>,
-) {
-    let mut pending = vec![store.clone()];
-
-    while let Some(store) = pending.pop() {
-        for position in 0..store.n_items() {
-            let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
-                continue;
-            };
-
-            let node = item.borrow::<VariableNode>().clone();
-
-            if let Some(varobj) = node.variable.varobj.as_ref() {
-                index.insert(varobj.clone(), node.clone());
-            }
-
-            if node.children.n_items() > 0 {
-                pending.push(node.children);
-            }
-        }
-    }
-}
-
-pub(super) fn remove_indexed_variable_nodes(
-    store: &gio::ListStore,
-    index: &mut HashMap<String, VariableNode>,
-) {
-    let mut pending = vec![store.clone()];
-
-    while let Some(store) = pending.pop() {
-        for position in 0..store.n_items() {
-            let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
-                continue;
-            };
-
-            let node = item.borrow::<VariableNode>().clone();
-
-            if let Some(varobj) = node.variable.varobj.as_ref() {
-                index.remove(varobj);
-            }
-
-            if node.children.n_items() > 0 {
-                pending.push(node.children);
-            }
-        }
-    }
-}
-
-pub(super) fn root_variables(store: &gio::ListStore) -> Vec<Variable> {
-    (0..store.n_items())
-        .filter_map(|position| {
-            store
-                .item(position)
-                .and_then(|item| item.downcast::<SnapshotRow>().ok())
-                .and_then(|item| {
-                    let node = item.borrow::<VariableNode>();
-
-                    (!node.placeholder).then(|| node.variable.clone())
-                })
-        })
-        .collect()
-}
-
-pub(super) fn variable_root_node(store: &gio::ListStore, position: usize) -> Option<VariableNode> {
-    store
-        .item(u32::try_from(position).ok()?)
-        .and_downcast::<SnapshotRow>()
-        .map(|item| item.borrow::<VariableNode>().clone())
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum VariableRootChange {
-    Unchanged,
-    Updated,
-    Rebuilt,
-}
-
-pub(super) fn replace_variable_roots_if_changed(
-    store: &gio::ListStore,
-    variables: &[Variable],
-) -> VariableRootChange {
-    replace_variable_roots(store, variables, true)
-}
-
-pub(super) fn replace_variable_roots(
-    store: &gio::ListStore,
-    variables: &[Variable],
-    mark_changed: bool,
-) -> VariableRootChange {
-    let same_roots = usize::try_from(store.n_items()).ok() == Some(variables.len())
-        && variables.iter().enumerate().all(|(index, variable)| {
-            store
-                .item(u32::try_from(index).unwrap_or(u32::MAX))
-                .and_downcast::<SnapshotRow>()
-                .is_some_and(|item| {
-                    let node = item.borrow::<VariableNode>();
-
-                    !node.placeholder
-                        && node.variable.local_index == variable.local_index
-                        && node.variable.return_value == variable.return_value
-                        && node.variable.name == variable.name
-                        && node.variable.argument == variable.argument
-                })
-        });
-
-    if !same_roots {
-        let rows = variables
-            .iter()
-            .cloned()
-            .map(VariableNode::new)
-            .map(SnapshotRow::new)
-            .collect::<Vec<_>>();
-        store.splice(0, store.n_items(), &rows);
-        return VariableRootChange::Rebuilt;
-    }
-
-    let mut changed = false;
-
-    for (index, variable) in variables.iter().enumerate() {
-        let position = u32::try_from(index).unwrap_or(u32::MAX);
-
-        let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
-            continue;
-        };
-
-        let node = item.borrow::<VariableNode>().clone();
-
-        let value_changed = if mark_changed {
-            node.variable.value != variable.value
-        } else {
-            node.changed
-        };
-
-        if node.variable == *variable && node.changed == value_changed {
-            continue;
-        }
-
-        update_variable_node(
-            store,
-            position,
-            node.updated(variable.clone(), mark_changed),
-        );
-
-        changed = true;
-    }
-
-    if changed {
-        VariableRootChange::Updated
-    } else {
-        VariableRootChange::Unchanged
-    }
-}
-
-pub(super) fn replace_variable_root(
-    store: &gio::ListStore,
-    index: usize,
-    variable: &Variable,
-    mark_changed: bool,
-) -> bool {
-    let Ok(position) = u32::try_from(index) else {
-        return false;
-    };
-
-    let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
-        return false;
-    };
-
-    let node = item.borrow::<VariableNode>().clone();
-
-    if node.placeholder
-        || node.variable.local_index != variable.local_index
-        || node.variable.name != variable.name
-        || node.variable.argument != variable.argument
-    {
-        return false;
-    }
-
-    let target_changed = if mark_changed {
-        node.variable.value != variable.value
-    } else {
-        node.changed
-    };
-
-    if node.variable == *variable && node.changed == target_changed {
-        return true;
-    }
-
-    update_variable_node(
-        store,
-        position,
-        node.updated(variable.clone(), mark_changed),
-    );
-
-    true
-}
-
-fn update_variable_node(store: &gio::ListStore, position: u32, node: VariableNode) {
-    let Some(row) = store.item(position).and_downcast::<SnapshotRow>() else {
-        return;
-    };
-
-    let same_structure = {
-        let previous = row.borrow::<VariableNode>();
-        previous.children == node.children
-            && previous.variable.can_expand() == node.variable.can_expand()
-    };
-
-    if same_structure {
-        row.set(node);
-    } else {
-        store.splice(position, 1, &[SnapshotRow::new(node)]);
-    }
-}
-
-pub(super) fn changed_variable_roots(store: &gio::ListStore) -> usize {
-    (0..store.n_items())
-        .filter(|position| {
-            store
-                .item(*position)
-                .and_downcast::<SnapshotRow>()
-                .is_some_and(|item| item.borrow::<VariableNode>().has_changes())
-        })
-        .count()
-}
-
-pub(super) fn apply_variable_updates(
-    store: &gio::ListStore,
-    updates: &[VariableUpdate],
-    mut on_updated: impl FnMut(&VariableNode, &VariableNode),
-) -> usize {
-    let updates = updates
-        .iter()
-        .map(|update| (update.varobj.as_str(), update))
-        .collect::<HashMap<_, _>>();
-
-    apply_variable_updates_to_store(store, &updates, &mut on_updated)
-}
-
-pub(super) fn clear_variable_change_markers(roots: &gio::ListStore) {
-    let mut changed_roots = vec![false; roots.n_items() as usize];
-    let mut pending = Vec::new();
-
-    for position in 0..roots.n_items() {
-        let Some(item) = roots.item(position).and_downcast::<SnapshotRow>() else {
-            continue;
-        };
-
-        let node = item.borrow::<VariableNode>();
-        changed_roots[position as usize] = node.changed;
-
-        if node.children.n_items() > 0 {
-            pending.push((node.children.clone(), position));
-        }
-    }
-
-    while let Some((store, root)) = pending.pop() {
-        for position in 0..store.n_items() {
-            let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
-                continue;
-            };
-
-            let node = item.borrow::<VariableNode>();
-
-            if node.children.n_items() > 0 {
-                pending.push((node.children.clone(), root));
-            }
-
-            let replacement = node.changed.then(|| node.without_change_marker());
-            drop(node);
-
-            if let Some(replacement) = replacement {
-                changed_roots[root as usize] = true;
-                update_variable_node(&store, position, replacement);
-            }
-        }
-    }
-
-    // Root filters do not observe descendant-store changes. Notify them only
-    // after every child marker is cleared, and only for affected roots.
-    for (position, changed) in changed_roots.into_iter().enumerate() {
-        if !changed {
-            continue;
-        }
-
-        let position = position as u32;
-
-        if let Some(item) = roots.item(position).and_downcast::<SnapshotRow>() {
-            let replacement = item.borrow::<VariableNode>().without_change_marker();
-            update_variable_node(roots, position, replacement);
-        }
-    }
-}
-
-fn apply_variable_updates_to_store(
-    store: &gio::ListStore,
-    updates: &HashMap<&str, &VariableUpdate>,
-    on_updated: &mut impl FnMut(&VariableNode, &VariableNode),
-) -> usize {
-    let mut applied = 0;
-    let mut pending = vec![store.clone()];
-
-    while let Some(store) = pending.pop() {
-        for position in 0..store.n_items() {
-            let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
-                continue;
-            };
-
-            let node = item.borrow::<VariableNode>();
-
-            let update = node
-                .variable
-                .varobj
-                .as_deref()
-                .and_then(|varobj| updates.get(varobj).copied());
-
-            let children = if let Some(update) = update {
-                let updated = node.apply_update(update);
-                let children = updated.children.clone();
-                on_updated(&node, &updated);
-                drop(node);
-                update_variable_node(&store, position, updated);
-                applied += 1;
-
-                children
-            } else {
-                node.children.clone()
-            };
-
-            if children.n_items() > 0 {
-                pending.push(children);
-            }
-        }
-    }
-
-    applied
-}
-
-pub(super) fn root_variable_position(
-    selection: &gtk::SingleSelection,
-    name: &str,
-    argument: bool,
-    local_index: Option<usize>,
-) -> Option<u32> {
-    let model = selection.model()?;
-
-    (0..model.n_items()).find(|position| {
-        variable_node_at(selection, *position).is_some_and(|(row, node)| {
-            row.depth() == 0
-                && node.variable.name == name
-                && node.variable.argument == argument
-                && node.variable.local_index == local_index
-        })
-    })
-}
-
-pub(super) fn remove_load_more_rows(store: &gio::ListStore) {
-    for position in (0..store.n_items()).rev() {
-        let is_load_more = store
-            .item(position)
-            .and_then(|item| item.downcast::<SnapshotRow>().ok())
-            .is_some_and(|item| item.borrow::<VariableNode>().load_more.is_some());
-
-        if is_load_more {
-            store.remove(position);
-        }
-    }
-}
-
 pub(super) fn open_variable_editor(
     parent: &impl IsA<gtk::Window>,
     variable: Variable,
-    target_pointer_bits: u32,
+    target_pointer_width: PointerWidth,
     target_architecture: TargetArchitecture,
     source_language: crate::language::Language,
     metadata: Option<&ValueTypeMetadata>,
@@ -522,7 +107,7 @@ pub(super) fn open_variable_editor(
     let editor = build_variable_editor(
         parent,
         variable,
-        target_pointer_bits,
+        target_pointer_width,
         target_architecture,
         source_language,
         metadata,
@@ -567,10 +152,57 @@ fn guard_assignment_handler<T: 'static>(
     Rc::new(RefCell::new(Some(guarded)))
 }
 
+fn value_editor_window(
+    parent: &impl IsA<gtk::Window>,
+    name: &str,
+    type_name: Option<&str>,
+) -> (gtk::Window, gtk::Box) {
+    let editor = gtk::Window::builder()
+        .title(format!("Edit {name}"))
+        .transient_for(parent)
+        .modal(true)
+        .default_width(620)
+        .build();
+
+    editor.add_css_class("value-editor");
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    components::inset(&content, components::DIALOG_INSET);
+
+    for (text, class) in [(Some(name), "local-name"), (type_name, "local-type")] {
+        let label = gtk::Label::new(text);
+        label.add_css_class(class);
+        label.set_halign(gtk::Align::Start);
+        content.append(&label);
+    }
+
+    (editor, content)
+}
+
+fn value_editor_actions(
+    editor: &gtk::Window,
+    content: &gtk::Box,
+    apply_label: &str,
+) -> gtk::Button {
+    let actions = components::control_row();
+    actions.set_halign(gtk::Align::End);
+    let cancel = gtk::Button::with_label("Cancel");
+    let apply = gtk::Button::with_label(apply_label);
+    apply.add_css_class("primary-control");
+    actions.append(&cancel);
+    actions.append(&apply);
+    content.append(&actions);
+    editor.set_child(Some(content));
+    connect_escape_to_close(editor);
+    let editor = editor.clone();
+    cancel.connect_clicked(move |_| editor.close());
+
+    apply
+}
+
 fn build_variable_editor(
     parent: &impl IsA<gtk::Window>,
     variable: Variable,
-    target_pointer_bits: u32,
+    target_pointer_width: PointerWidth,
     target_architecture: TargetArchitecture,
     source_language: crate::language::Language,
     metadata: Option<&ValueTypeMetadata>,
@@ -621,35 +253,17 @@ fn build_variable_editor(
         );
     }
 
-    let editor = gtk::Window::builder()
-        .title(format!("Edit {}", variable.name))
-        .transient_for(parent)
-        .modal(true)
-        .default_width(620)
-        .build();
-
-    editor.add_css_class("value-editor");
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    content.set_spacing(6);
-    components::inset(&content, components::DIALOG_INSET);
-    let expression = gtk::Label::new(Some(&variable.name));
-    expression.add_css_class("local-name");
-    expression.set_halign(gtk::Align::Start);
-    content.append(&expression);
-
-    let type_name = gtk::Label::new(Some(
-        variable.type_name.as_deref().unwrap_or("<unknown type>"),
-    ));
-
-    type_name.add_css_class("local-type");
-    type_name.set_halign(gtk::Align::Start);
-    content.append(&type_name);
+    let (editor, content) = value_editor_window(
+        parent,
+        &variable.name,
+        Some(variable.type_name.as_deref().unwrap_or("<unknown type>")),
+    );
 
     let character_format =
-        variable_character_format(&variable, target_pointer_bits, source_language, metadata);
+        variable_character_format(&variable, target_pointer_width, source_language, metadata);
 
     let integer_format = character_format
-        .or_else(|| variable_integer_format(&variable, target_pointer_bits, metadata))
+        .or_else(|| variable_integer_format(&variable, target_pointer_width, metadata))
         .or_else(|| {
             variable
                 .type_name
@@ -657,7 +271,7 @@ fn build_variable_editor(
                 .then(|| {
                     register_integer_format(
                         &variable.name,
-                        target_pointer_bits,
+                        target_pointer_width,
                         target_architecture,
                     )
                 })
@@ -752,16 +366,7 @@ fn build_variable_editor(
 
     content.append(&entry);
     content.append(&validation);
-    let actions = components::control_row();
-    actions.set_halign(gtk::Align::End);
-    let cancel = gtk::Button::with_label("Cancel");
-    let apply = gtk::Button::with_label("Set value");
-    apply.add_css_class("primary-control");
-    actions.append(&cancel);
-    actions.append(&apply);
-    content.append(&actions);
-    editor.set_child(Some(&content));
-    connect_escape_to_close(&editor);
+    let apply = value_editor_actions(&editor, &content, "Set value");
     let original_value = editable_value.to_owned();
     let handler = handlers.assignment;
     let variable_for_submit = variable.clone();
@@ -815,8 +420,6 @@ fn build_variable_editor(
     let submit_for_button = Rc::clone(&submit);
     apply.connect_clicked(move |_| submit_for_button());
     entry.connect_activate(move |_| submit());
-    let editor_for_cancel = editor.clone();
-    cancel.connect_clicked(move |_| editor_for_cancel.close());
 
     if let Some((format, dropdown, _, active)) = notation {
         update_scalar_validation(
@@ -889,24 +492,9 @@ fn open_float_editor(
     handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
     raw_handler: Rc<RefCell<Option<FloatAssignmentHandler>>>,
 ) -> gtk::Window {
-    let editor = gtk::Window::builder()
-        .title(format!("Edit {}", variable.name))
-        .transient_for(parent)
-        .modal(true)
-        .default_width(620)
-        .build();
+    let (editor, content) =
+        value_editor_window(parent, &variable.name, variable.type_name.as_deref());
 
-    editor.add_css_class("value-editor");
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    components::inset(&content, components::DIALOG_INSET);
-    let expression = gtk::Label::new(Some(&variable.name));
-    expression.add_css_class("local-name");
-    expression.set_halign(gtk::Align::Start);
-    content.append(&expression);
-    let type_name = gtk::Label::new(variable.type_name.as_deref());
-    type_name.add_css_class("local-type");
-    type_name.set_halign(gtk::Align::Start);
-    content.append(&type_name);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     let label = gtk::Label::new(Some("Format"));
     label.add_css_class("muted");
@@ -945,16 +533,7 @@ fn open_float_editor(
     validation.set_halign(gtk::Align::Start);
     validation.set_visible(false);
     content.append(&validation);
-    let actions = components::control_row();
-    actions.set_halign(gtk::Align::End);
-    let cancel = gtk::Button::with_label("Cancel");
-    let apply = gtk::Button::with_label("Set value");
-    apply.add_css_class("primary-control");
-    actions.append(&cancel);
-    actions.append(&apply);
-    content.append(&actions);
-    editor.set_child(Some(&content));
-    connect_escape_to_close(&editor);
+    let apply = value_editor_actions(&editor, &content, "Set value");
 
     update_float_validation(
         &entry,
@@ -1061,8 +640,6 @@ fn open_float_editor(
         }
     });
 
-    let editor_for_cancel = editor.clone();
-    cancel.connect_clicked(move |_| editor_for_cancel.close());
     editor.present();
     entry.grab_focus();
     entry.select_region(0, -1);
@@ -1095,24 +672,9 @@ fn open_enum_editor(
     metadata: &ValueTypeMetadata,
     handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
 ) -> gtk::Window {
-    let editor = gtk::Window::builder()
-        .title(format!("Edit {}", variable.name))
-        .transient_for(parent)
-        .modal(true)
-        .default_width(620)
-        .build();
+    let (editor, content) =
+        value_editor_window(parent, &variable.name, variable.type_name.as_deref());
 
-    editor.add_css_class("value-editor");
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    components::inset(&content, components::DIALOG_INSET);
-    let expression = gtk::Label::new(Some(&variable.name));
-    expression.add_css_class("local-name");
-    expression.set_halign(gtk::Align::Start);
-    content.append(&expression);
-    let type_name = gtk::Label::new(variable.type_name.as_deref());
-    type_name.add_css_class("local-type");
-    type_name.set_halign(gtk::Align::Start);
-    content.append(&type_name);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     let label = gtk::Label::new(Some("Variant"));
     label.add_css_class("muted");
@@ -1152,16 +714,7 @@ fn open_enum_editor(
     detail.set_wrap(true);
     update_enum_detail(&detail, metadata, selected);
     content.append(&detail);
-    let actions = components::control_row();
-    actions.set_halign(gtk::Align::End);
-    let cancel = gtk::Button::with_label("Cancel");
-    let apply = gtk::Button::with_label("Set value");
-    apply.add_css_class("primary-control");
-    actions.append(&cancel);
-    actions.append(&apply);
-    content.append(&actions);
-    editor.set_child(Some(&content));
-    connect_escape_to_close(&editor);
+    let apply = value_editor_actions(&editor, &content, "Set value");
     let metadata = metadata.clone();
     let metadata_for_selection = metadata.clone();
     let custom_for_selection = custom.clone();
@@ -1207,8 +760,6 @@ fn open_enum_editor(
 
     let apply_for_entry = apply;
     custom.connect_activate(move |_| apply_for_entry.emit_clicked());
-    let editor_for_cancel = editor.clone();
-    cancel.connect_clicked(move |_| editor_for_cancel.close());
     editor.present();
     editor
 }
@@ -1241,24 +792,9 @@ fn open_boolean_editor(
     dialect: crate::language::Language,
     handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
 ) -> gtk::Window {
-    let editor = gtk::Window::builder()
-        .title(format!("Edit {}", variable.name))
-        .transient_for(parent)
-        .modal(true)
-        .default_width(620)
-        .build();
+    let (editor, content) =
+        value_editor_window(parent, &variable.name, variable.type_name.as_deref());
 
-    editor.add_css_class("value-editor");
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    components::inset(&content, components::DIALOG_INSET);
-    let expression = gtk::Label::new(Some(&variable.name));
-    expression.add_css_class("local-name");
-    expression.set_halign(gtk::Align::Start);
-    content.append(&expression);
-    let type_name = gtk::Label::new(variable.type_name.as_deref());
-    type_name.add_css_class("local-type");
-    type_name.set_halign(gtk::Align::Start);
-    content.append(&type_name);
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
     let label = gtk::Label::new(Some("Value"));
     label.add_css_class("muted");
@@ -1277,16 +813,7 @@ fn open_boolean_editor(
     detail.add_css_class("muted");
     detail.set_halign(gtk::Align::Start);
     content.append(&detail);
-    let actions = components::control_row();
-    actions.set_halign(gtk::Align::End);
-    let cancel = gtk::Button::with_label("Cancel");
-    let apply = gtk::Button::with_label("Set value");
-    apply.add_css_class("primary-control");
-    actions.append(&cancel);
-    actions.append(&apply);
-    content.append(&actions);
-    editor.set_child(Some(&content));
-    connect_escape_to_close(&editor);
+    let apply = value_editor_actions(&editor, &content, "Set value");
     let editor_for_apply = editor.clone();
 
     apply.connect_clicked(move |_| {
@@ -1306,8 +833,6 @@ fn open_boolean_editor(
         editor_for_apply.close();
     });
 
-    let editor_for_cancel = editor.clone();
-    cancel.connect_clicked(move |_| editor_for_cancel.close());
     editor.present();
     editor
 }
@@ -1374,24 +899,8 @@ fn open_string_editor(
     assignment_handler: Rc<RefCell<Option<VariableAssignmentHandler>>>,
     string_handler: Rc<RefCell<Option<StringAssignmentHandler>>>,
 ) -> gtk::Window {
-    let editor = gtk::Window::builder()
-        .title(format!("Edit {}", variable.name))
-        .transient_for(parent)
-        .modal(true)
-        .default_width(620)
-        .build();
-
-    editor.add_css_class("value-editor");
-    let content = gtk::Box::new(gtk::Orientation::Vertical, 6);
-    components::inset(&content, components::DIALOG_INSET);
-    let expression = gtk::Label::new(Some(&variable.name));
-    expression.add_css_class("local-name");
-    expression.set_halign(gtk::Align::Start);
-    content.append(&expression);
-    let type_name = gtk::Label::new(variable.type_name.as_deref());
-    type_name.add_css_class("local-type");
-    type_name.set_halign(gtk::Align::Start);
-    content.append(&type_name);
+    let (editor, content) =
+        value_editor_window(parent, &variable.name, variable.type_name.as_deref());
 
     let mode = matches!(string.storage, StringStorage::Buffer { pointer: true, .. }).then(|| {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 5);
@@ -1425,16 +934,7 @@ fn open_string_editor(
     validation.set_halign(gtk::Align::Start);
     validation.set_visible(false);
     content.append(&validation);
-    let actions = components::control_row();
-    actions.set_halign(gtk::Align::End);
-    let cancel = gtk::Button::with_label("Cancel");
-    let apply = gtk::Button::with_label("Set value");
-    apply.add_css_class("primary-control");
-    actions.append(&cancel);
-    actions.append(&apply);
-    content.append(&actions);
-    editor.set_child(Some(&content));
-    connect_escape_to_close(&editor);
+    let apply = value_editor_actions(&editor, &content, "Set value");
     update_string_editor(&entry, &detail, &validation, &apply, &string, false);
     let detail_for_entry = detail.clone();
     let validation_for_entry = validation.clone();
@@ -1541,8 +1041,6 @@ fn open_string_editor(
         }
     });
 
-    let editor_for_cancel = editor.clone();
-    cancel.connect_clicked(move |_| editor_for_cancel.close());
     editor.present();
     entry.grab_focus();
     entry.select_region(0, -1);
@@ -1742,16 +1240,7 @@ pub(super) fn open_flag_editor(
     }
 
     content.append(&flags);
-    let actions = components::control_row();
-    actions.set_halign(gtk::Align::End);
-    let cancel = gtk::Button::with_label("Cancel");
-    let apply = gtk::Button::with_label("Apply flags");
-    apply.add_css_class("primary-control");
-    actions.append(&cancel);
-    actions.append(&apply);
-    content.append(&actions);
-    editor.set_child(Some(&content));
-    connect_escape_to_close(&editor);
+    let apply = value_editor_actions(&editor, &content, "Apply flags");
     let editor_for_apply = editor.clone();
 
     let variable = Variable {
@@ -1790,8 +1279,6 @@ pub(super) fn open_flag_editor(
         editor_for_apply.close();
     });
 
-    let editor_for_cancel = editor.clone();
-    cancel.connect_clicked(move |_| editor_for_cancel.close());
     editor.present();
 
     Some(editor)
@@ -2295,7 +1782,7 @@ pub(super) fn connect_escape_to_close(window: &gtk::Window) {
 }
 
 #[cfg(test)]
-mod variable_tree_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -2322,6 +1809,110 @@ mod variable_tree_tests {
         assert!(original.borrow().is_none());
     }
 
+    #[test]
+    #[ignore = "requires a GTK display, run separately from other GTK tests"]
+    fn value_editors_validate_apply_and_cancel_without_changing_submission() {
+        use crate::ui::tests::descendants;
+
+        gtk::init().unwrap();
+        let parent = gtk::Window::new();
+        let float = ValueTypeMetadata {
+            kind: ValueTypeKind::Float,
+            bits: Some(32),
+            ..Default::default()
+        };
+
+        let enumeration = ValueTypeMetadata {
+            kind: ValueTypeKind::Enum,
+            bits: Some(32),
+            enum_variants: ["First", "Second"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| crate::debugger::EnumVariant {
+                    name: name.into(),
+                    value: index.to_string(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        for (type_name, original, metadata, expected) in [
+            ("int", "1", None, "2"),
+            ("float", "1", Some(float), "2.5"),
+            ("bool", "false", None, "1"),
+            ("char [8]", "\"old\"", None, "new"),
+            ("Mode", "First", Some(enumeration), "Second"),
+        ] {
+            for cancel in [false, true] {
+                let applied = Rc::new(RefCell::new(Vec::<String>::new()));
+                let captured = Rc::clone(&applied);
+                let strings = Rc::clone(&applied);
+                let mut variable = variable("value", original, None, 0);
+                variable.type_name = Some(type_name.into());
+
+                let dialog = build_variable_editor(
+                    &parent,
+                    variable,
+                    PointerWidth::Bits64,
+                    TargetArchitecture::X86_64,
+                    crate::language::Language::C,
+                    metadata.as_ref(),
+                    ValueEditorHandlers {
+                        model: Rc::new(crate::model::DebuggerModel::new(None)),
+                        assignment: Rc::new(RefCell::new(Some(Rc::new(move |_, value| {
+                            captured.borrow_mut().push(value)
+                        })))),
+                        float: Rc::default(),
+                        string: Rc::new(RefCell::new(Some(Rc::new(move |_, bytes, _| {
+                            strings.borrow_mut().push(String::from_utf8(bytes).unwrap())
+                        })))),
+                    },
+                );
+
+                let buttons = descendants::<gtk::Button>(&dialog);
+                let apply = buttons
+                    .iter()
+                    .find(|button| button.label().as_deref() == Some("Set value"))
+                    .unwrap();
+
+                if matches!(type_name, "bool" | "Mode") {
+                    descendants::<gtk::DropDown>(&dialog)[0].set_selected(1);
+                } else {
+                    let entry = descendants::<gtk::Entry>(&dialog).remove(0);
+
+                    if matches!(type_name, "int" | "float") {
+                        entry.set_text("invalid");
+                        assert!(!apply.is_sensitive());
+                        entry.emit_activate();
+                        assert!(dialog.is_visible());
+                    }
+
+                    entry.set_text(expected);
+                }
+
+                assert!(applied.borrow().is_empty());
+                assert!(apply.is_sensitive());
+                let button = if cancel { "Cancel" } else { "Set value" };
+                buttons
+                    .iter()
+                    .find(|candidate| candidate.label().as_deref() == Some(button))
+                    .unwrap()
+                    .emit_clicked();
+                assert!(!dialog.is_visible());
+                assert_eq!(
+                    *applied.borrow(),
+                    if cancel {
+                        vec![]
+                    } else {
+                        vec![expected.to_owned()]
+                    }
+                );
+            }
+        }
+
+        parent.close();
+    }
+
     fn variable(name: &str, value: &str, varobj: Option<&str>, children: usize) -> Variable {
         Variable {
             local_index: None,
@@ -2336,112 +1927,5 @@ mod variable_tree_tests {
             display_hint: None,
             dynamic: false,
         }
-    }
-
-    #[test]
-    fn incremental_child_updates_preserve_expansion_and_clear_per_stop_markers() {
-        let root = VariableNode::new(variable("root", "{...}", Some("var1"), 1));
-
-        root.children
-            .append(&SnapshotRow::new(VariableNode::new(variable(
-                "field",
-                "1",
-                Some("var1.field"),
-                0,
-            ))));
-
-        root.children_loaded.set(true);
-        root.expanded.set(true);
-        let store = gio::ListStore::new::<SnapshotRow>();
-        store.append(&SnapshotRow::new(root));
-
-        let mut index = super::domain::VariableNodeIndex::default();
-        index.index_store(&store);
-
-        let applied = apply_variable_updates(
-            &store,
-            &[VariableUpdate {
-                varobj: String::from("var1.field"),
-                value: Some(String::from("2")),
-                in_scope: Some(true),
-                type_changed: false,
-                new_type: None,
-                new_num_children: None,
-                has_more: None,
-                display_hint: None,
-                dynamic: None,
-            }],
-            |previous, updated| index.replace(previous, updated),
-        );
-
-        assert_eq!(applied, 1);
-        assert_eq!(index.get("var1.field").unwrap().variable.value, "2");
-
-        let root = store.item(0).and_downcast::<SnapshotRow>().unwrap();
-
-        let root = root.borrow::<VariableNode>();
-        assert!(root.expanded.get());
-        assert!(root.has_changes());
-
-        let child = root.children.item(0).and_downcast::<SnapshotRow>().unwrap();
-
-        assert_eq!(child.borrow::<VariableNode>().variable.value, "2");
-        assert!(child.borrow::<VariableNode>().changed);
-        drop(root);
-        clear_variable_change_markers(&store);
-
-        let root = store.item(0).and_downcast::<SnapshotRow>().unwrap();
-
-        let root = root.borrow::<VariableNode>();
-        assert!(root.expanded.get());
-        assert!(!root.has_changes());
-
-        assert_eq!(
-            root.children
-                .item(0)
-                .and_downcast::<SnapshotRow>()
-                .unwrap()
-                .borrow::<VariableNode>()
-                .variable
-                .value,
-            "2"
-        );
-    }
-
-    #[test]
-    fn argument_scope_is_part_of_a_root_identity() {
-        let store = gio::ListStore::new::<SnapshotRow>();
-
-        store.append(&SnapshotRow::new(VariableNode::new(variable(
-            "value", "1", None, 0,
-        ))));
-
-        let mut argument = variable("value", "1", None, 0);
-        argument.argument = true;
-
-        assert_eq!(
-            replace_variable_roots_if_changed(&store, &[argument]),
-            VariableRootChange::Rebuilt
-        );
-    }
-
-    #[test]
-    fn variable_node_index_includes_loaded_descendants() {
-        let root = VariableNode::new(variable("root", "{...}", Some("var1"), 1));
-
-        root.children
-            .append(&SnapshotRow::new(VariableNode::new(variable(
-                "field",
-                "1",
-                Some("var1.field"),
-                0,
-            ))));
-
-        let store = gio::ListStore::new::<SnapshotRow>();
-        store.append(&SnapshotRow::new(root));
-        let mut index = HashMap::new();
-        index_variable_nodes(&store, &mut index);
-        assert_eq!(index.len(), 2);
-        assert_eq!(index["var1.field"].variable.name, "field");
     }
 }

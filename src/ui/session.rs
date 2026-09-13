@@ -25,45 +25,16 @@ impl Ui {
     /// Live target and inferior state is updated from successful GDB commands
     /// and events, so a configured session may legitimately be disconnected.
     pub fn set_current_session(&self, session: DebugSession) {
-        self.close_source_palette();
-        self.source_loaded_cache.borrow_mut().take();
-        self.source_loaded_search.borrow_mut().take();
-
-        self.source_loaded_generation
-            .fetch_add(1, Ordering::Relaxed);
-
-        self.source_tree_render_generation
-            .fetch_add(1, Ordering::Relaxed);
-
-        let session_directory = session.working_directory();
-        let mut resolution_roots = self.source_base_roots.clone();
-        prioritize_source_root(&mut resolution_roots, session_directory);
-
-        if *self.source_roots.borrow() != resolution_roots {
-            self.source_roots.replace(resolution_roots);
-            self.resolved_source_paths.borrow_mut().clear();
-        }
-
-        let mut tree_roots = self.source_tree_base_roots.clone();
-        prioritize_source_root(&mut tree_roots, session_directory);
-
-        if *self.source_tree_roots.borrow() != tree_roots {
-            self.source_tree_roots.replace(tree_roots);
-            self.source_tree_cache.borrow_mut().take();
-            self.source_tree_search.borrow_mut().take();
-            self.source_index.borrow_mut().take();
+        if self.source.configure_session(session.working_directory()) {
             self.refresh_source_breakpoint_index();
-            self.source_tree.file_routes.borrow_mut().clear();
-            self.source_tree_indexing.set(false);
-            self.source_tree_generation.fetch_add(1, Ordering::Relaxed);
         }
 
         self.model.set_current_session(session);
         self.update_session_display();
         self.update_control_sensitivity();
 
-        if self.source_tree_initialized.get() {
-            let refresh = self.source_tree.refresh_handler.borrow().clone();
+        if self.source.tree_initialized.get() {
+            let refresh = self.source.tree.refresh_handler.borrow().clone();
 
             if let Some(refresh) = refresh {
                 refresh();
@@ -223,7 +194,8 @@ impl Ui {
 
         launch_directory.set_text(
             &self
-                .source_roots
+                .source
+                .roots
                 .borrow()
                 .first()
                 .cloned()
@@ -555,18 +527,6 @@ impl Ui {
     }
 }
 
-fn prioritize_source_root(roots: &mut Vec<PathBuf>, priority: Option<&Path>) {
-    let Some(priority) = priority else {
-        return;
-    };
-
-    if let Some(index) = roots.iter().position(|root| root == priority) {
-        roots.remove(index);
-    }
-
-    roots.insert(0, priority.to_path_buf());
-}
-
 fn session_page(hint: Option<&str>) -> gtk::Box {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 8);
     page.set_margin_top(10);
@@ -895,7 +855,8 @@ fn nonempty(value: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_environment, prioritize_source_root};
+    use super::parse_environment;
+    use crate::ui::editor::prioritize_source_root;
     use std::path::PathBuf;
 
     #[test]

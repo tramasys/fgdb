@@ -30,10 +30,12 @@ pub(super) fn run_to_source_line(ui: Weak<Ui>, client: &MiClient, path: PathBuf,
     // Let GDB's location resolver decide where execution can stop, just as it
     // does for source breakpoints. Absence from a line-table query is not a
     // reason to reject a location before GDB has tried to resolve it.
-    crate::ui::controls::issue_execution_command(
+    crate::app::execution::issue_execution_command(
         &current_ui,
         client,
         &run_to_source_command(&location),
+        ExecutionTarget::SelectedThread,
+        false,
         &format!("Running to {location}"),
     );
 }

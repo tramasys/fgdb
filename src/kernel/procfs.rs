@@ -10,7 +10,7 @@ const MAX_TARGET_ABI_CACHE_ENTRIES: usize = 32;
 type TargetAbi = (
     crate::debugger::TargetArchitecture,
     crate::debugger::TargetEndian,
-    u32,
+    crate::debugger::PointerWidth,
 );
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -327,7 +327,7 @@ mod tests {
         (
             crate::debugger::TargetArchitecture::X86_64,
             crate::debugger::TargetEndian::Little,
-            64,
+            crate::debugger::PointerWidth::Bits64,
         )
     }
 

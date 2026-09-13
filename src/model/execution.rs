@@ -3,7 +3,54 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CommandOperationId(u64);
 
+pub(crate) struct ExecutionOrigin {
+    thread: Option<String>,
+    inferior: Option<String>,
+    exit_candidate: Option<String>,
+}
+
 impl DebuggerModel {
+    pub(crate) fn prepare_execution(
+        &self,
+        target: ExecutionTarget<'_>,
+        interrupt: bool,
+    ) -> ExecutionOrigin {
+        let origin = ExecutionOrigin {
+            thread: self.active_thread_execution(),
+            inferior: self.pending_execution_inferior(),
+            exit_candidate: self.thread_execution_exit_candidate(),
+        };
+        let (inferior, thread) = match target {
+            ExecutionTarget::SelectedInferior => (self.selected_inferior_id(), None),
+            ExecutionTarget::SelectedThread => (None, self.current_thread_id()),
+            ExecutionTarget::Inferior(id) => (Some(id.to_owned()), None),
+            ExecutionTarget::Thread(id) => (None, Some(id.to_owned())),
+            ExecutionTarget::All => (None, None),
+        };
+        self.set_pending_execution_inferior(inferior);
+
+        if !interrupt || origin.thread.is_none() {
+            self.set_active_thread_execution(thread);
+        }
+
+        if !interrupt {
+            self.set_thread_execution_exit_candidate(None);
+        }
+
+        origin
+    }
+
+    pub(crate) fn reject_execution(&self, origin: ExecutionOrigin) {
+        self.set_active_thread_execution(origin.thread);
+        self.set_pending_execution_inferior(origin.inferior);
+        self.set_thread_execution_exit_candidate(origin.exit_candidate);
+    }
+
+    pub(crate) fn accept_execution(&self) -> u64 {
+        self.set_command_pending(true);
+        self.begin_execution_transition()
+    }
+
     pub(crate) fn gdb_recovery_required(&self) -> bool {
         self.execution.gdb_recovery_available.get()
     }

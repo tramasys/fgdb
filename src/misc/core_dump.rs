@@ -55,13 +55,13 @@ pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
     read_exact_at(&file, &mut header, 0)
         .map_err(|error| format!("Cannot read ELF header from {}: {error}", path.display()))?;
 
-    let (architecture, endian, pointer_bits) = TargetArchitecture::from_elf_ident(&header)
+    let (architecture, endian, pointer_width) = TargetArchitecture::from_elf_ident(&header)
         .ok_or_else(|| format!("{} is not a supported ELF core file", path.display()))?;
 
     let abi = Abi {
         architecture,
         endian,
-        pointer_bits,
+        pointer_width,
     };
 
     let elf_type = read_u16(&header[16..18], endian).unwrap_or(0);
@@ -70,7 +70,7 @@ pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
         return Err(format!("{} is ELF but not an ET_CORE file", path.display()));
     }
 
-    let (phoff, phentsize, phnum) = if pointer_bits == 64 {
+    let (phoff, phentsize, phnum) = if pointer_width == crate::debugger::PointerWidth::Bits64 {
         (
             read_u64(&header[32..40], endian).unwrap_or(0),
             u64::from(read_u16(&header[54..56], endian).unwrap_or(0)),
@@ -89,7 +89,12 @@ pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
         .saturating_mul(phentsize);
 
     if phnum > MAX_CORE_PROGRAM_HEADERS
-        || phentsize < if pointer_bits == 64 { 56 } else { 32 }
+        || phentsize
+            < if pointer_width == crate::debugger::PointerWidth::Bits64 {
+                56
+            } else {
+                32
+            }
         || phentsize > 4096
         || program_header_bytes > MAX_CORE_PROGRAM_HEADER_BYTES
     {
@@ -102,7 +107,7 @@ pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
         path: path.to_owned(),
         size,
         architecture: architecture.display_name().to_owned(),
-        class: format!("ELF{pointer_bits}"),
+        class: format!("ELF{pointer_width}"),
         endian: match endian {
             TargetEndian::Little => String::from("little endian"),
             TargetEndian::Big => String::from("big endian"),
@@ -128,19 +133,20 @@ pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
             continue;
         }
 
-        let (note_offset, note_size, alignment) = if pointer_bits == 64 {
-            (
-                read_u64(&program[8..16], endian).unwrap_or(0),
-                read_u64(&program[32..40], endian).unwrap_or(0),
-                read_u64(&program[48..56], endian).unwrap_or(4),
-            )
-        } else {
-            (
-                u64::from(read_u32(&program[4..8], endian).unwrap_or(0)),
-                u64::from(read_u32(&program[16..20], endian).unwrap_or(0)),
-                u64::from(read_u32(&program[28..32], endian).unwrap_or(4)),
-            )
-        };
+        let (note_offset, note_size, alignment) =
+            if pointer_width == crate::debugger::PointerWidth::Bits64 {
+                (
+                    read_u64(&program[8..16], endian).unwrap_or(0),
+                    read_u64(&program[32..40], endian).unwrap_or(0),
+                    read_u64(&program[48..56], endian).unwrap_or(4),
+                )
+            } else {
+                (
+                    u64::from(read_u32(&program[4..8], endian).unwrap_or(0)),
+                    u64::from(read_u32(&program[16..20], endian).unwrap_or(0)),
+                    u64::from(read_u32(&program[28..32], endian).unwrap_or(4)),
+                )
+            };
 
         parse_note_segment(&file, note_offset, note_size, alignment, abi, &mut snapshot)?;
     }
@@ -241,7 +247,11 @@ fn push_core_warning_once(snapshot: &mut CoreDumpSnapshot, warning: &str) {
 fn parse_core_note(kind: u32, bytes: &[u8], abi: Abi, snapshot: &mut CoreDumpSnapshot) {
     match kind {
         1 => {
-            let pid_offset = if abi.pointer_bits == 64 { 32 } else { 24 };
+            let pid_offset = if abi.pointer_width == crate::debugger::PointerWidth::Bits64 {
+                32
+            } else {
+                24
+            };
 
             if let Some(pid) = bytes
                 .get(pid_offset..pid_offset + 4)
@@ -251,11 +261,12 @@ fn parse_core_note(kind: u32, bytes: &[u8], abi: Abi, snapshot: &mut CoreDumpSna
             }
         }
         3 => {
-            let (pid_offset, name_offset, command_offset) = if abi.pointer_bits == 64 {
-                (24, 40, 56)
-            } else {
-                (16, 32, 48)
-            };
+            let (pid_offset, name_offset, command_offset) =
+                if abi.pointer_width == crate::debugger::PointerWidth::Bits64 {
+                    (24, 40, 56)
+                } else {
+                    (16, 32, 48)
+                };
 
             snapshot.pid = bytes
                 .get(pid_offset..pid_offset + 4)
@@ -278,8 +289,12 @@ fn parse_core_note(kind: u32, bytes: &[u8], abi: Abi, snapshot: &mut CoreDumpSna
                 .signal
                 .is_some_and(|signal| matches!(signal, 4 | 5 | 7 | 8 | 11))
             {
-                let address_offset = if abi.pointer_bits == 64 { 16 } else { 12 };
-                let word = usize::try_from(abi.pointer_bits / 8).unwrap_or(8);
+                let address_offset = if abi.pointer_width == crate::debugger::PointerWidth::Bits64 {
+                    16
+                } else {
+                    12
+                };
+                let word = abi.pointer_width.bytes();
 
                 snapshot.fault_address = bytes
                     .get(address_offset..address_offset + word)
@@ -292,9 +307,7 @@ fn parse_core_note(kind: u32, bytes: &[u8], abi: Abi, snapshot: &mut CoreDumpSna
 }
 
 fn parse_core_files(bytes: &[u8], abi: Abi, snapshot: &mut CoreDumpSnapshot) {
-    let word = usize::try_from(abi.pointer_bits / 8)
-        .unwrap_or(8)
-        .clamp(4, 8);
+    let word = abi.pointer_width.bytes();
 
     if bytes.len() < word * 2 {
         return;
@@ -380,7 +393,7 @@ mod tests {
         let abi = Abi {
             architecture: TargetArchitecture::X86_64,
             endian: TargetEndian::Little,
-            pointer_bits: 64,
+            pointer_width: crate::debugger::PointerWidth::Bits64,
         };
 
         for count in [u64::MAX, u64::MAX / 24, u64::MAX / 24 + 1] {

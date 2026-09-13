@@ -1,3 +1,4 @@
+use crate::debugger::PointerWidth;
 use std::sync::Arc;
 
 use super::mi::{MiListItem, MiRecord, MiResult, MiValue, result_field};
@@ -288,7 +289,7 @@ pub struct StackEntry {
     pub address: u64,
     pub offset: usize,
     pub index: usize,
-    pub pointer_bits: u32,
+    pub pointer_width: PointerWidth,
     pub endian: TargetEndian,
     pub value: String,
     pub pointer_chain: Vec<String>,

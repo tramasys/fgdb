@@ -14,10 +14,6 @@ pub(super) fn refresh(ui: &Weak<Ui>, client: &MiClient, generation: u64) {
         return;
     };
 
-    for varobj in current.take_deferred_variable_object_deletions() {
-        delete_variable_object(client, &varobj);
-    }
-
     let enabled = current.return_values_enabled();
     let revision = current.model.return_value_revision();
     let discard = current.return_value_capture_setting_dirty();
@@ -167,10 +163,6 @@ pub(super) fn request(ui: Weak<Ui>, client: Rc<MiClient>, variable: Variable, ex
         current.attach_return_value_object(generation, &variable, None);
         return;
     };
-
-    for varobj in current.take_deferred_variable_object_deletions() {
-        delete_variable_object(&client, &varobj);
-    }
 
     drop(current);
     let name = next_variable_object_name();

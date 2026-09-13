@@ -2,6 +2,7 @@ use super::{
     MemoryBlock, MemoryKind, Register, StackEntry, StackFrame, TargetArchitecture, TargetEndian,
     thread_id_argument,
 };
+use crate::debugger::PointerWidth;
 
 /// Immutable identity for data collected at one debugger stop.
 ///
@@ -266,7 +267,11 @@ pub(crate) fn build_stack_entries(
                 address,
                 offset: index * word_size,
                 index,
-                pointer_bits: u32::try_from(word_size * 8).unwrap_or(64),
+                pointer_width: if word_size == 4 {
+                    PointerWidth::Bits32
+                } else {
+                    PointerWidth::Bits64
+                },
                 endian,
                 value: format!("0x{value:x}"),
                 pointer_chain: Vec::new(),

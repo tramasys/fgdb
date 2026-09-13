@@ -261,7 +261,7 @@ impl Locations {
             presentation::format(
                 result.as_ref(),
                 current,
-                self.model.target_pointer_bits(),
+                self.model.target_pointer_width(),
                 regions,
             )
         };

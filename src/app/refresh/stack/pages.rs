@@ -26,15 +26,11 @@ impl Inputs {
         let endian = ui.model.target_endian().ok_or(
             "Stack decoding is unavailable because the target byte order could not be determined",
         )?;
-        let word_size = match ui.model.target_pointer_bits() {
-            32 => 4,
-            64 => 8,
-            _ => return Err("Stack decoding requires a supported target pointer width"),
-        };
+        let word_size = ui.model.target_pointer_width().bytes();
         let architecture = match ui.model.target_architecture() {
             TargetArchitecture::Unknown => TargetArchitecture::infer_from_register_names_with_bits(
                 registers.iter().map(|register| register.name.as_str()),
-                Some(ui.model.target_pointer_bits()),
+                Some(ui.model.target_pointer_width()),
             ),
             architecture => architecture,
         };
@@ -190,7 +186,7 @@ fn read_page(
             let Some(ui) = response.upgrade() else {
                 return;
             };
-            if record.class == "superseded" {
+            if record.is_superseded() {
                 ui.show_stack_page_error(page, "The stack-memory request was cancelled");
                 return;
             }
@@ -198,7 +194,7 @@ fn read_page(
             // A core file or remote target may omit bytes inside a mapping.
             // Recover a smaller prefix with at most log2(batch) retries, and
             // never skip a hole or extend the request beyond the mapping.
-            if record.class == "error" && words > 1 {
+            if record.is_gdb_error() && words > 1 {
                 read_page(response, next_requests, page, inputs, words / 2);
                 return;
             }

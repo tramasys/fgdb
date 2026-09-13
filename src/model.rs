@@ -18,6 +18,7 @@ use std::{
 };
 pub(crate) mod actions;
 mod execution;
+pub(crate) mod lifecycle;
 pub(crate) use execution::CommandOperationId;
 pub(crate) mod printers;
 pub(crate) mod processes;
@@ -27,6 +28,7 @@ pub(crate) mod stack;
 mod state;
 mod stopped;
 mod target;
+pub(crate) mod variables;
 #[cfg(test)]
 pub(crate) use execution::execution_event_matches_thread;
 pub(crate) use state::{DebuggerState, DebuggerStateDelta, TargetConnection};
@@ -39,6 +41,7 @@ pub(crate) struct DebuggerModel {
     processes: ProcessState,
     stopped: StoppedState,
     target: Cell<target::TargetAbi>,
+    variables: variables::VariableState,
 }
 
 impl DebuggerModel {
@@ -51,6 +54,7 @@ impl DebuggerModel {
             processes: ProcessState::new(),
             stopped: StoppedState::new(),
             target: Cell::new(target::TargetAbi::default()),
+            variables: variables::VariableState::default(),
         }
     }
 }
@@ -317,7 +321,7 @@ mod tests {
         }
     }
 
-    fn stopped_model() -> DebuggerModel {
+    pub(super) fn stopped_model() -> DebuggerModel {
         let model = DebuggerModel::new(Some(launch_session()));
         model.set_controls_ready(true);
         model.apply_debugger_state_delta(DebuggerStateDelta::establish_stopped_target(

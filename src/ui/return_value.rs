@@ -9,9 +9,8 @@ type CaptureHandler = Rc<dyn Fn()>;
 #[derive(Clone)]
 pub(super) struct ReturnValueView {
     pub(super) root: gtk::Box,
-    pub(super) store: gio::ListStore,
+    pub(super) tree: VariableTree,
     view: gtk::ColumnView,
-    selection: gtk::SingleSelection,
     summary: gtk::Label,
     clear: gtk::Button,
     enabled: Rc<Cell<bool>>,
@@ -77,9 +76,8 @@ impl ReturnValueView {
 
         Self {
             root,
-            store,
+            tree: VariableTree::new(store, selection),
             view,
-            selection,
             summary,
             clear,
             enabled: Rc::new(Cell::new(true)),
@@ -99,9 +97,7 @@ impl ReturnValueView {
             .map(|entry| entry.variable.clone())
             .collect::<Vec<_>>();
 
-        if replace_variable_roots(&self.store, &variables, false) != VariableRootChange::Unchanged {
-            invalidate_variable_filter(&self.selection);
-        }
+        self.tree.replace_roots(&variables, false);
 
         self.summary.set_text(&format!(
             "{} result{}",
@@ -248,7 +244,8 @@ impl Ui {
                 return;
             };
 
-            let Some((row, node)) = variable_node_at(&ui.return_value.selection, position) else {
+            let Some((row, node)) = variable_node_at(&ui.return_value.tree.selection, position)
+            else {
                 return;
             };
 
@@ -259,13 +256,13 @@ impl Ui {
             if node.load_more.is_some() {
                 defer_next_variable_page(
                     &row,
-                    &ui.return_value.selection,
+                    &ui.return_value.tree.selection,
                     &ui.variable_children_handler,
                 );
             } else if row.is_expandable() {
                 defer_variable_toggle(
                     &row,
-                    &ui.return_value.selection,
+                    &ui.return_value.tree.selection,
                     &ui.variable_children_handler,
                 );
             }
@@ -286,7 +283,6 @@ impl Ui {
                 .sync(values, generation, self.model.can_edit_variable(generation))
         {
             self.defer_variable_object_deletions(retired);
-            self.rebuild_variable_node_index();
         }
     }
 
@@ -369,8 +365,8 @@ impl Ui {
     }
 
     pub(super) fn return_variable_node(&self, variable: &Variable) -> Option<VariableNode> {
-        (0..self.return_value.store.n_items()).find_map(|position| {
-            let node = variable_root_node(&self.return_value.store, position as usize)?;
+        (0..self.return_value.tree.store.n_items()).find_map(|position| {
+            let node = variable_root_node(&self.return_value.tree.store, position as usize)?;
 
             (variable.return_value.is_some() && node.variable.has_same_children(variable))
                 .then_some(node)
@@ -417,7 +413,6 @@ impl Ui {
         entry.variable = created;
         drop(state);
         self.return_value.render();
-        self.rebuild_variable_node_index();
         true
     }
 }

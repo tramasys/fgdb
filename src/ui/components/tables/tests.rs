@@ -1,4 +1,5 @@
 use super::*;
+use crate::debugger::PointerWidth;
 use crate::theme::Theme;
 use gtk::glib;
 use std::{cell::Cell, rc::Rc, time::Duration};
@@ -308,7 +309,7 @@ fn instruction_snapshots_reuse_cells_and_release_bindings() {
                 source: None,
             },
             current: index == pc,
-            pointer_bits: 64,
+            pointer_width: PointerWidth::Bits64,
             source_text: None,
         })
     };
@@ -380,7 +381,7 @@ fn instruction_snapshots_reuse_cells_and_release_bindings() {
                 label.text(),
                 format!(
                     "{marker} {}",
-                    crate::ui::full_address(&row.instruction.address, row.pointer_bits)
+                    crate::ui::full_address(&row.instruction.address, row.pointer_width)
                 )
             );
             assert!(label.is_selectable());
@@ -438,7 +439,7 @@ fn centered_scroll_coalesces_and_preserves_focus_and_latest_selection() {
                 source: None,
             },
             current: false,
-            pointer_bits: 64,
+            pointer_width: PointerWidth::Bits64,
             source_text: None,
         })
     };

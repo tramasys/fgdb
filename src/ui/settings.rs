@@ -340,7 +340,7 @@ impl Settings {
         ui.apply_instruction_preferences(&previous, preferences, initial);
 
         if preferences.source_auto_reload && !previous.source_auto_reload {
-            for document in ui.source_documents.borrow().iter() {
+            for document in ui.source.documents.borrow().iter() {
                 document.freshness.check();
             }
         }
@@ -399,7 +399,7 @@ impl Settings {
             || previous.source_wrap != preferences.source_wrap
             || previous.source_highlight_line != preferences.source_highlight_line
         {
-            for document in ui.source_documents.borrow().iter() {
+            for document in ui.source.documents.borrow().iter() {
                 apply_source(&document.view, preferences);
 
                 if font_changed {

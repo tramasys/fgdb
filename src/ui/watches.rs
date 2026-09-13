@@ -2,42 +2,28 @@ use super::*;
 
 impl Ui {
     pub fn expression_watch_expressions(&self) -> Vec<String> {
-        self.expression_watches.borrow().clone()
+        self.model.watch_expressions().clone()
     }
 
     pub fn expression_watches_match(&self, expected: &[String]) -> bool {
-        self.expression_watches.borrow().as_slice() == expected
+        self.model.watch_expressions().as_slice() == expected
     }
 
     pub fn expression_watch_variable_objects(&self) -> Vec<Variable> {
-        root_variables(&self.expression_watches_store)
-    }
-
-    pub(crate) fn expression_watch_variable_objects_for_refresh(&self) -> Vec<Variable> {
-        self.variable_objects_for_symbols(
-            self.expression_watch_variable_objects(),
-            self.watch_symbol_revision.get(),
-        )
+        self.model.watch_variables()
     }
 
     pub fn show_expression_watches_for_refresh(&self, generation: u64, variables: &[Variable]) {
-        if !self.model.is_stop_refresh_current(generation) {
+        if !self.model.publish_watches(generation, variables) {
             return;
         }
 
-        self.watch_symbol_revision
-            .set(self.model.symbols.revision());
-
         let selected = root_variable_at(
-            &self.expression_watches_selection,
-            self.expression_watches_selection.selected(),
+            &self.watches_tree.selection,
+            self.watches_tree.selection.selected(),
         )
         .map(|variable| variable.name);
-        let changed = replace_variable_roots_if_changed(&self.expression_watches_store, variables);
-
-        if changed != VariableRootChange::Unchanged {
-            self.rebuild_variable_node_index();
-        }
+        let changed = self.watches_tree.replace_roots(variables, true);
 
         self.expression_watches_empty
             .set_visible(variables.is_empty());
@@ -48,17 +34,18 @@ impl Ui {
         }
 
         if changed == VariableRootChange::Rebuilt && !variables.is_empty() {
-            self.expression_watches_selection
+            self.watches_tree
+                .selection
                 .set_selected(gtk::INVALID_LIST_POSITION);
 
             let selected = selected
                 .as_deref()
                 .and_then(|name| {
-                    root_variable_position(&self.expression_watches_selection, name, false, None)
+                    root_variable_position(&self.watches_tree.selection, name, false, None)
                 })
                 .unwrap_or(0);
 
-            self.expression_watches_selection.set_selected(selected);
+            self.watches_tree.selection.set_selected(selected);
         }
 
         self.update_control_sensitivity();
@@ -70,21 +57,17 @@ impl Ui {
         index: usize,
         variable: &Variable,
     ) {
-        if !self.model.is_stop_refresh_current(generation) {
+        if !self.model.update_watch_root(generation, index, variable) {
             return;
         }
 
-        let previous = variable_root_node(&self.expression_watches_store, index);
-
-        if replace_variable_root(&self.expression_watches_store, index, variable, false) {
-            self.reindex_variable_root(&self.expression_watches_store, index, previous.as_ref());
-        }
+        self.watches_tree.replace_root(index, variable, false);
     }
 
     pub fn show_expression_watches_unavailable(&self, value: &str) {
         let variables = self
-            .expression_watches
-            .borrow()
+            .model
+            .watch_expressions()
             .iter()
             .map(|expression| Variable {
                 local_index: None,
@@ -117,7 +100,6 @@ impl Ui {
         });
 
         let button = self.expression_watch_add_button.clone();
-        let expressions = Rc::clone(&self.expression_watches);
         let model = Rc::clone(&self.model);
 
         self.expression_watch_entry.connect_changed(move |entry| {
@@ -127,33 +109,21 @@ impl Ui {
                 model.execution().ready
                     && !model.execution().state.inferior_running()
                     && !model.execution().command_pending
-                    && !expression.trim().is_empty()
-                    && expressions.borrow().len() < MAX_EXPRESSION_WATCHES
-                    && !expressions
-                        .borrow()
-                        .iter()
-                        .any(|existing| existing == expression.trim()),
+                    && model.can_add_watch(&expression),
             );
         });
 
         let entry = self.expression_watch_entry.clone();
-        let expressions = Rc::clone(&self.expression_watches);
+        let model = Rc::clone(&self.model);
         let refresh = Rc::clone(&self.expression_watch_refresh_handler);
 
         self.expression_watch_add_button.connect_clicked(move |_| {
             let expression = entry.text().trim().to_owned();
 
-            if expression.is_empty()
-                || expressions.borrow().len() >= MAX_EXPRESSION_WATCHES
-                || expressions
-                    .borrow()
-                    .iter()
-                    .any(|existing| existing == &expression)
-            {
+            if !model.add_watch(&expression) {
                 return;
             }
 
-            expressions.borrow_mut().push(expression);
             entry.set_text("");
             let refresh = refresh.borrow().clone();
 
@@ -165,7 +135,8 @@ impl Ui {
         let remove_button = self.expression_watch_remove_button.clone();
         let model = Rc::clone(&self.model);
 
-        self.expression_watches_selection
+        self.watches_tree
+            .selection
             .connect_selected_notify(move |selection| {
                 remove_button.set_sensitive(
                     model.execution().ready
@@ -175,8 +146,8 @@ impl Ui {
                 );
             });
 
-        let selection = self.expression_watches_selection.clone();
-        let expressions = Rc::clone(&self.expression_watches);
+        let selection = self.watches_tree.selection.clone();
+        let model = Rc::clone(&self.model);
         let refresh = Rc::clone(&self.expression_watch_refresh_handler);
 
         self.expression_watch_remove_button
@@ -185,9 +156,7 @@ impl Ui {
                     return;
                 };
 
-                expressions
-                    .borrow_mut()
-                    .retain(|expression| expression != &variable.name);
+                model.remove_watch(&variable.name);
 
                 let refresh = refresh.borrow().clone();
 
@@ -196,7 +165,7 @@ impl Ui {
                 }
             });
 
-        let selection = self.expression_watches_selection.clone();
+        let selection = self.watches_tree.selection.clone();
         let handler = Rc::clone(&self.variable_assignment_handler);
         let float_handler = Rc::clone(&self.float_assignment_handler);
         let editor_handler = Rc::clone(&self.variable_editor_handler);
@@ -247,7 +216,7 @@ impl Ui {
                             let editor = open_variable_editor(
                                 &window,
                                 variable,
-                                model.target_pointer_bits(),
+                                model.target_pointer_width(),
                                 model.target_architecture(),
                                 current_source_language.get(),
                                 None,

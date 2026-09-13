@@ -1,5 +1,6 @@
 use super::lifecycle::{TreeRowBinding, connect_bound_expansion};
 use super::*;
+use crate::debugger::PointerWidth;
 
 pub(super) fn enable_stable_text_selection(label: &gtk::Label) {
     label.set_selectable(true);
@@ -190,26 +191,6 @@ pub(super) fn build_locals_view(
     locations.watch_scrolling(&view);
 
     (view, store, selection)
-}
-
-pub(super) fn variable_search_text(variable: &Variable) -> String {
-    let mut text = format!(
-        "{} {} {} {} {}",
-        variable.name,
-        variable.type_name.as_deref().unwrap_or_default(),
-        compact_variable_type(variable.type_name.as_deref().unwrap_or_default()),
-        variable.value,
-        if variable.return_value.is_some() {
-            "return result"
-        } else if variable.argument {
-            "argument arg"
-        } else {
-            "local"
-        },
-    );
-
-    text.make_ascii_lowercase();
-    text
 }
 
 /// Refilter once after a complete payload batch, keeping unchanged tree rows.
@@ -418,9 +399,7 @@ pub(super) fn memory_region_column(
         let region = data.borrow::<MemoryRegion>();
         set_semantic_css(&label, Some(memory_kind_css(region.kind)));
 
-        let address_width = usize::try_from(model.target_pointer_bits() / 4)
-            .unwrap_or(16)
-            .clamp(8, 16);
+        let address_width = model.target_pointer_width().bytes() * 2;
 
         let text = match column {
             MemoryColumn::Start => format!("0x{:0address_width$x}", region.start),
@@ -1287,13 +1266,13 @@ pub(super) fn variable_display_value(
     variable: &Variable,
     value: &str,
     details: &str,
-    target_pointer_bits: u32,
+    target_pointer_width: PointerWidth,
     format: crate::config::settings::IntegerDisplay,
 ) -> String {
     if format != crate::config::settings::IntegerDisplay::Automatic
         && details.is_empty()
         && let Some(display) =
-            value::formatted_integer(variable, value, target_pointer_bits, format)
+            value::formatted_integer(variable, value, target_pointer_width, format)
     {
         return display;
     }
@@ -1306,7 +1285,7 @@ pub(super) fn variable_display_value(
         };
     }
 
-    let decimal = integer_decimal_value(variable, value, target_pointer_bits);
+    let decimal = integer_decimal_value(variable, value, target_pointer_width);
 
     match (details.is_empty(), decimal) {
         (true, Some(decimal)) if decimal != value => format!("{value}  ({decimal})"),
@@ -1335,62 +1314,6 @@ fn compact_pretty_value(variable: &Variable, value: &str) -> String {
         .and_then(|value| value.strip_prefix("::"))
         .unwrap_or(value)
         .to_owned()
-}
-
-pub(crate) fn compact_variable_type(type_name: &str) -> String {
-    let mut compact = type_name
-        .trim()
-        .replace("std::__cxx11::", "std::")
-        .replace("std::__1::", "std::")
-        .replace("std::__debug::", "std::");
-
-    for (qualified, short) in [
-        ("alloc::string::String", "String"),
-        ("alloc::vec::Vec<", "Vec<"),
-        ("alloc::boxed::Box<", "Box<"),
-        ("alloc::rc::Rc<", "Rc<"),
-        ("alloc::sync::Arc<", "Arc<"),
-        ("std::boxed::Box<", "Box<"),
-        ("std::rc::Rc<", "Rc<"),
-        ("std::sync::Arc<", "Arc<"),
-        ("std::vec::Vec<", "Vec<"),
-        ("core::cell::RefCell<", "RefCell<"),
-        ("std::cell::RefCell<", "RefCell<"),
-        ("core::cell::Cell<", "Cell<"),
-        ("std::cell::Cell<", "Cell<"),
-        ("core::option::Option<", "Option<"),
-        ("std::option::Option<", "Option<"),
-        ("core::result::Result<", "Result<"),
-        ("std::result::Result<", "Result<"),
-        ("alloc::collections::vec_deque::VecDeque<", "VecDeque<"),
-        ("alloc::collections::btree::map::BTreeMap<", "BTreeMap<"),
-        ("std::collections::hash::map::HashMap<", "HashMap<"),
-    ] {
-        compact = compact.replace(qualified, short);
-    }
-
-    compact = compact.replace(
-        "std::basic_string<char, std::char_traits<char>, std::allocator<char> >",
-        "std::string",
-    );
-
-    compact = compact.replace(
-        "std::basic_string<char, std::char_traits<char>, std::allocator<char>>",
-        "std::string",
-    );
-
-    compact = compact.replace(
-        ", std::hash::random::RandomState, alloc::alloc::Global>",
-        ">",
-    );
-
-    compact = compact.replace(", alloc::alloc::Global>", ">");
-
-    while compact.contains("> >") {
-        compact = compact.replace("> >", ">>");
-    }
-
-    compact
 }
 
 pub(super) fn variable_value_parts(value: &str) -> (&str, &str) {
@@ -1426,9 +1349,9 @@ pub(super) fn variable_details(
     variable: &Variable,
     value: &str,
     details: &str,
-    target_pointer_bits: u32,
+    target_pointer_width: PointerWidth,
 ) -> String {
-    let Some(decimal) = integer_decimal_value(variable, value, target_pointer_bits) else {
+    let Some(decimal) = integer_decimal_value(variable, value, target_pointer_width) else {
         return details.to_owned();
     };
     if details.is_empty() {
@@ -1467,7 +1390,7 @@ pub(super) fn build_instruction_view(
                 let marker = if row.current { "›" } else { " " };
                 Cow::Owned(format!(
                     "{marker} {}",
-                    full_address(&row.instruction.address, row.pointer_bits)
+                    full_address(&row.instruction.address, row.pointer_width)
                 ))
             }),
         ),
@@ -1652,7 +1575,7 @@ pub(super) fn register_column(
                     &data.register,
                     data.architecture,
                     data.endian,
-                    data.pointer_bits,
+                    data.pointer_width,
                 )
             };
             tooltip.set_text(Some(&format!(
@@ -1681,7 +1604,7 @@ pub(super) fn register_column(
                             &data.register,
                             data.architecture,
                             data.endian,
-                            data.pointer_bits,
+                            data.pointer_width,
                         ))
                     },
                 );
@@ -1706,7 +1629,7 @@ pub(super) fn register_column(
                                 &data.register,
                                 data.architecture,
                                 data.endian,
-                                data.pointer_bits,
+                                data.pointer_width,
                             ));
                         }
                     }
@@ -1826,9 +1749,7 @@ impl StackWordInspector {
     }
 
     fn show(&self, entry: &StackEntry) {
-        let width = usize::try_from(entry.pointer_bits / 4)
-            .unwrap_or(16)
-            .clamp(8, 16);
+        let width = entry.pointer_width.bytes() * 2;
         self.address.set_text(&format!(
             "0x{:0width$x}  SP+0x{:x}  word {}",
             entry.address,
@@ -1924,9 +1845,7 @@ pub(super) fn stack_column(
                         .collect::<Vec<_>>()
                         .join(","),
                     StackColumn::Address => {
-                        let width = usize::try_from(entry.pointer_bits / 4)
-                            .unwrap_or(16)
-                            .clamp(8, 16);
+                        let width = entry.pointer_width.bytes() * 2;
                         format!("0x{:0width$x}", entry.address, width = width)
                     }
                     StackColumn::Value => stack_entry_text(entry),
@@ -1958,7 +1877,7 @@ fn register_cell_equal(
             old.register == new.register
                 && old.architecture == new.architecture
                 && old.endian == new.endian
-                && old.pointer_bits == new.pointer_bits
+                && old.pointer_width == new.pointer_width
                 && (!matches!(column, RegisterColumn::Details) || old.ring == new.ring)
         }
     }
@@ -1967,11 +1886,13 @@ fn register_cell_equal(
 fn stack_cell_equal(column: StackColumn, old: &StackEntry, new: &StackEntry) -> bool {
     match column {
         StackColumn::Anchor => old.address_registers == new.address_registers,
-        StackColumn::Address => old.address == new.address && old.pointer_bits == new.pointer_bits,
+        StackColumn::Address => {
+            old.address == new.address && old.pointer_width == new.pointer_width
+        }
         StackColumn::Value => {
             old.value == new.value
                 && old.pointer_chain == new.pointer_chain
-                && old.pointer_bits == new.pointer_bits
+                && old.pointer_width == new.pointer_width
                 && old.endian == new.endian
                 && old.memory_kind == new.memory_kind
         }
@@ -1988,7 +1909,7 @@ fn instruction_cell_equal(class: &str, old: &InstructionRowData, new: &Instructi
     match class {
         "instruction-address" => {
             old.instruction.address == new.instruction.address
-                && old.pointer_bits == new.pointer_bits
+                && old.pointer_width == new.pointer_width
                 && old.current == new.current
                 && (old.instruction.function != "??" && old.instruction.offset == "0")
                     == (new.instruction.function != "??" && new.instruction.offset == "0")

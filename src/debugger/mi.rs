@@ -11,6 +11,7 @@ use std::{
 use gtk::glib;
 
 mod input;
+mod objects;
 mod parser;
 mod protocol;
 mod requests;
@@ -23,6 +24,8 @@ pub use parser::{parse_record, quote};
 pub use protocol::{
     GdbCapabilities, MiEvent, MiListItem, MiRecord, MiResult, MiValue, ReturnValue, result_field,
 };
+
+use protocol::RequestFailure;
 
 use crate::performance::{
     BudgetOutcome, MI_SCOPED_QUEUE_BUDGET, PerformanceNotice, duration_notice,
@@ -76,6 +79,8 @@ pub struct MiClient {
     initializing: Cell<bool>,
     capabilities: RefCell<GdbCapabilities>,
     pending: RefCell<HashMap<u64, PendingRequest>>,
+    owned_variable_objects: RefCell<objects::OwnedObjects>,
+    variable_cleanup_allowed: RefCell<Rc<dyn Fn() -> bool>>,
     deferred_variable_deletions: RefCell<BTreeSet<String>>,
     flushing_variable_deletions: Cell<bool>,
     scoped_request: RefCell<Option<ScopedMiRequest>>,
@@ -123,6 +128,8 @@ impl MiClient {
             initializing: Cell::new(false),
             capabilities: RefCell::new(GdbCapabilities::default()),
             pending: RefCell::new(HashMap::new()),
+            owned_variable_objects: RefCell::default(),
+            variable_cleanup_allowed: RefCell::new(Rc::new(|| true)),
             deferred_variable_deletions: RefCell::new(BTreeSet::new()),
             flushing_variable_deletions: Cell::new(false),
             scoped_request: RefCell::new(None),
@@ -281,12 +288,12 @@ impl MiClient {
                 .unwrap_or("GDB rejected the command")
                 .to_owned();
 
-            match record.class.as_str() {
-                "timeout" => client.report_unusable(format!(
+            match record.request_failure() {
+                Some(RequestFailure::Timeout) => client.report_unusable(format!(
                     "GDB did not answer an execution command within {} seconds. Its target state is unknown.",
                     REQUEST_TIMEOUT.as_secs()
                 )),
-                "superseded" | "unavailable" => {}
+                Some(RequestFailure::Superseded | RequestFailure::Unavailable) => {}
                 _ => (client.event_handler)(client, MiEvent::Error(message)),
             }
         }))
@@ -410,7 +417,10 @@ impl MiClient {
         for request in cancelled {
             request.complete(
                 self,
-                synthetic_error_record("superseded", "request superseded by a newer stop"),
+                synthetic_error_record(
+                    RequestFailure::Superseded,
+                    "request superseded by a newer stop",
+                ),
             );
         }
 
@@ -426,7 +436,10 @@ impl MiClient {
                 if let Some(request) = request {
                     request.complete(
                         self,
-                        synthetic_error_record("superseded", "request superseded by a newer stop"),
+                        synthetic_error_record(
+                            RequestFailure::Superseded,
+                            "request superseded by a newer stop",
+                        ),
                     );
                 }
 
@@ -455,7 +468,7 @@ impl MiClient {
             let token = self.allocate_token();
             handler(
                 self,
-                synthetic_error_record("superseded", "request superseded"),
+                synthetic_error_record(RequestFailure::Superseded, "request superseded"),
             );
             return Ok(token);
         }
@@ -674,7 +687,7 @@ impl MiClient {
                 if let Some(request) = request {
                     request.complete(
                         self,
-                        synthetic_error_record("unavailable", &error.to_string()),
+                        synthetic_error_record(RequestFailure::Unavailable, &error.to_string()),
                     );
                 }
 
@@ -687,17 +700,48 @@ impl MiClient {
         self.flush_variable_deletions();
     }
 
+    pub(crate) fn variable_object_owned_root<'a>(
+        &self,
+        roots: &'a HashSet<String>,
+        candidate: &str,
+    ) -> Option<&'a String> {
+        self.owned_variable_objects
+            .borrow()
+            .owned_root(roots, candidate)
+    }
+
+    pub(crate) fn register_owned_variable_object(&self, owner: &str, child: &str) {
+        let retired = self
+            .owned_variable_objects
+            .borrow_mut()
+            .register(owner, child);
+
+        if let Some(retired) = retired {
+            self.delete_variable_object(retired);
+        }
+    }
+
+    pub(crate) fn set_variable_cleanup_guard(&self, allowed: impl Fn() -> bool + 'static) {
+        self.variable_cleanup_allowed.replace(Rc::new(allowed));
+    }
+
     pub(crate) fn delete_variable_object(&self, name: String) {
         if !self.connected.get() || self.quarantined.get() {
             return;
         }
 
-        self.deferred_variable_deletions.borrow_mut().insert(name);
+        let objects = self.owned_variable_objects.borrow_mut().take(&name);
+        self.deferred_variable_deletions
+            .borrow_mut()
+            .extend(objects);
         self.flush_variable_deletions();
     }
 
-    fn flush_variable_deletions(&self) {
-        if !self.connected.get()
+    pub(crate) fn flush_variable_deletions(&self) {
+        let allowed = self.variable_cleanup_allowed.borrow().clone();
+
+        if !allowed()
+            || !self.connected.get()
             || self.quarantined.get()
             || self.flushing_variable_deletions.replace(true)
         {
@@ -725,8 +769,10 @@ impl MiClient {
                     Box::new(move |client, record| {
                         // GDB's own errors usually mean a parent already removed this
                         // child. Transport rejection before execution needs a retry.
-                        if matches!(record.class.as_str(), "unavailable" | "timeout")
-                            && client.transport_epoch.get() == epoch
+                        if matches!(
+                            record.request_failure(),
+                            Some(RequestFailure::Unavailable | RequestFailure::Timeout)
+                        ) && client.transport_epoch.get() == epoch
                             && client.connected.get()
                             && !client.quarantined.get()
                         {
@@ -802,7 +848,7 @@ impl MiClient {
         if let Some(handler) = handler {
             handler(
                 self,
-                synthetic_error_record("superseded", "request superseded"),
+                synthetic_error_record(RequestFailure::Superseded, "request superseded"),
             );
         }
     }
@@ -1029,7 +1075,7 @@ impl MiClient {
         if !(request.is_current)() {
             request.complete(
                 self,
-                synthetic_error_record("superseded", "request superseded"),
+                synthetic_error_record(RequestFailure::Superseded, "request superseded"),
             );
 
             return Ok(());
@@ -1086,7 +1132,7 @@ impl MiClient {
         for request in stale {
             request.complete(
                 self,
-                synthetic_error_record("superseded", "request superseded"),
+                synthetic_error_record(RequestFailure::Superseded, "request superseded"),
             );
         }
     }
@@ -1161,7 +1207,7 @@ impl MiClient {
             if !(request.is_current)() {
                 request.complete(
                     self,
-                    synthetic_error_record("superseded", "request superseded"),
+                    synthetic_error_record(RequestFailure::Superseded, "request superseded"),
                 );
 
                 continue;
@@ -1172,7 +1218,7 @@ impl MiClient {
 
                 request.complete(
                     self,
-                    synthetic_error_record("unavailable", &error.to_string()),
+                    synthetic_error_record(RequestFailure::Unavailable, &error.to_string()),
                 );
             } else {
                 return;
@@ -1306,7 +1352,10 @@ impl MiClient {
                     if let Some(request) = request {
                         request.complete(
                             &client,
-                            synthetic_error_record("superseded", "request superseded"),
+                            synthetic_error_record(
+                                RequestFailure::Superseded,
+                                "request superseded",
+                            ),
                         );
                     }
 
@@ -1462,21 +1511,32 @@ impl MiClient {
     }
 
     fn fail_pending_requests(&self, reason: &str) {
+        self.owned_variable_objects
+            .replace(objects::OwnedObjects::default());
         self.deferred_variable_deletions.borrow_mut().clear();
         let pending = std::mem::take(&mut *self.pending.borrow_mut());
         let scoped = self.scoped_request.borrow_mut().take();
         let queued = self.scoped_queue.borrow_mut().drain(..).collect::<Vec<_>>();
 
         for request in pending.into_values() {
-            request.complete(self, synthetic_error_record("unavailable", reason));
+            request.complete(
+                self,
+                synthetic_error_record(RequestFailure::Unavailable, reason),
+            );
         }
 
         if let Some(request) = scoped {
-            request.complete(self, synthetic_error_record("unavailable", reason));
+            request.complete(
+                self,
+                synthetic_error_record(RequestFailure::Unavailable, reason),
+            );
         }
 
         for request in queued {
-            request.complete(self, synthetic_error_record("unavailable", reason));
+            request.complete(
+                self,
+                synthetic_error_record(RequestFailure::Unavailable, reason),
+            );
         }
     }
 
@@ -1631,7 +1691,10 @@ impl MiClient {
                     detail: detail.to_owned(),
                 });
 
-                request.complete(self, synthetic_error_record("resource-limit", detail));
+                request.complete(
+                    self,
+                    synthetic_error_record(RequestFailure::ResourceLimit, detail),
+                );
 
                 self.dispatch_pending_requests();
             }
@@ -1655,7 +1718,10 @@ impl MiClient {
                 detail: detail.to_owned(),
             });
 
-            request.complete(self, synthetic_error_record("resource-limit", detail));
+            request.complete(
+                self,
+                synthetic_error_record(RequestFailure::ResourceLimit, detail),
+            );
             self.dispatch_pending_requests();
         } else {
             self.report_performance(PerformanceNotice {
@@ -1738,7 +1804,7 @@ impl MiClient {
 
                 request.complete(
                     self,
-                    synthetic_error_record("timeout", "GDB request timed out"),
+                    synthetic_error_record(RequestFailure::Timeout, "GDB request timed out"),
                 );
 
                 if self.transport_epoch.get() != epoch {
@@ -1797,11 +1863,17 @@ impl MiClient {
                 let command_class = request.class;
 
                 let (class, reason) = if lifetime_timed_out {
-                    ("timeout", "GDB request exceeded its maximum lifetime")
+                    (
+                        RequestFailure::Timeout,
+                        "GDB request exceeded its maximum lifetime",
+                    )
                 } else if idle_timed_out {
-                    ("timeout", "GDB request stopped making progress")
+                    (
+                        RequestFailure::Timeout,
+                        "GDB request stopped making progress",
+                    )
                 } else {
-                    ("superseded", "request superseded")
+                    (RequestFailure::Superseded, "request superseded")
                 };
 
                 request.complete(self, synthetic_error_record(class, reason));
@@ -1865,7 +1937,7 @@ impl MiClient {
             .request(
                 "-fix-multi-location-breakpoint-output",
                 move |client, record| {
-                    if client.transport_epoch.get() == epoch && record.class != "superseded" {
+                    if client.transport_epoch.get() == epoch && !record.is_superseded() {
                         client.detect_gdb_version();
                     }
                 },
@@ -2027,7 +2099,7 @@ impl MiClient {
             .request(
                 &crate::language::python::install_command(),
                 move |client, record| {
-                    if client.transport_epoch.get() != epoch || record.class == "superseded" {
+                    if client.transport_epoch.get() != epoch || record.is_superseded() {
                         return;
                     }
 
@@ -2223,7 +2295,7 @@ impl MiClient {
                     };
 
                     let mut response = if request.cancelled || !(request.is_current)() {
-                        synthetic_error_record("superseded", "request superseded")
+                        synthetic_error_record(RequestFailure::Superseded, "request superseded")
                     } else if request.expect_nested_mi {
                         request.response.take().unwrap_or_else(|| {
                             if record.is_done() {

@@ -386,12 +386,6 @@ impl Ui {
         }
     }
 
-    pub(crate) fn finish_thread_execution_action(&self) {
-        if self.model.execution().thread_action_pending == Some(ThreadActionPending::Execution) {
-            self.set_thread_action_pending(None);
-        }
-    }
-
     pub(crate) fn clear_thread_action_pending(&self) {
         self.set_thread_action_pending(None);
     }
@@ -408,7 +402,7 @@ impl Ui {
         true
     }
 
-    pub(super) fn reset_thread_analysis(&self) {
+    pub(crate) fn reset_thread_analysis(&self) {
         self.model.begin_thread_analysis();
 
         if self.model.execution().thread_action_pending == Some(ThreadActionPending::Analysis) {
@@ -429,9 +423,13 @@ impl Ui {
         non_stop: Option<bool>,
     ) {
         self.model.set_thread_control_policy(scheduler, non_stop);
+        self.render_thread_control_policy();
+    }
+
+    pub(crate) fn render_thread_control_policy(&self) {
         self.restore_thread_policy_controls();
 
-        let mode_note = match non_stop {
+        let mode_note = match self.model.non_stop_mode() {
             Some(true) => "Non-stop mode: individual threads can be frozen and thawed",
             Some(false) => {
                 "All-stop mode: Run only uses scheduler locking. Freeze and thaw require a new non-stop session"

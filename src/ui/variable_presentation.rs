@@ -33,7 +33,7 @@ impl VariablePresentation {
             variable,
             value,
             details,
-            self.model.target_pointer_bits(),
+            self.model.target_pointer_width(),
             self.format.get(),
         )
     }

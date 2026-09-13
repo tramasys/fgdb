@@ -4,11 +4,11 @@ mod breakpoints;
 mod build;
 mod debug_data;
 mod disassembly;
+mod execution;
 mod inferiors;
 mod investigation;
 mod kernel;
 mod lifecycle;
-mod lifecycle_reducer;
 mod memory_search;
 mod misc;
 mod refresh;
@@ -63,8 +63,8 @@ use crate::{
         launch_gdb,
     },
     model::actions::{
-        ForkFollowMode, InferiorAction, InferiorActionPending, SchedulerLockingMode, SessionAction,
-        ThreadAction, ThreadActionPending,
+        ExecutionTarget, ForkFollowMode, InferiorAction, InferiorActionPending,
+        SchedulerLockingMode, SessionAction, ThreadAction, ThreadActionPending,
     },
     theme::Theme,
     ui::{
@@ -123,7 +123,7 @@ mod tests {
             address: 0x7fff_0000,
             offset: 0,
             index: 0,
-            pointer_bits: 64,
+            pointer_width: crate::debugger::PointerWidth::Bits64,
             endian: TargetEndian::Little,
             value: String::from("0x7fff1000"),
             pointer_chain: vec![
@@ -172,7 +172,7 @@ mod tests {
                 word,
                 2,
                 TargetEndian::Little,
-                64,
+                crate::debugger::PointerWidth::Bits64,
                 TargetArchitecture::X86_64,
             ),
             Some(0x7fff_f7fe_edf6)
@@ -186,7 +186,7 @@ mod tests {
                 word,
                 2,
                 TargetEndian::Little,
-                64,
+                crate::debugger::PointerWidth::Bits64,
                 TargetArchitecture::X86_64,
             ),
             None

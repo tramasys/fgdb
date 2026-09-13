@@ -29,7 +29,7 @@ pub(super) fn prepare_linked_root(traversal: Rc<RefCell<LinkedTraversal>>) {
         .unscoped(&command)
         .when(move || linked_is_current(&guard))
         .request(move |_, record| {
-            if !linked_is_current(&response) || record.class == "superseded" {
+            if !linked_is_current(&response) || record.is_superseded() {
                 finish_linked(&response, Some(String::from(STALE_VIEWER_MESSAGE)));
                 return;
             }
@@ -72,13 +72,13 @@ fn create_linked_root(traversal: Rc<RefCell<LinkedTraversal>>, expression: Strin
         .frame(&command)
         .when(move || linked_is_current(&guard))
         .inspect(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
-            if !linked_is_current(&response) || record.class == "superseded" {
-                let (ui, client) = {
+            if !linked_is_current(&response) || record.is_superseded() {
+                let client = {
                     let traversal = response.borrow();
-                    (traversal.ui.clone(), Rc::clone(&traversal.client))
+                    Rc::clone(&traversal.client)
                 };
 
-                cleanup_viewer_variable_objects(&ui, &client, Some(name));
+                cleanup_viewer_variable_objects(&client, Some(name));
                 finish_linked(&response, Some(String::from(STALE_VIEWER_MESSAGE)));
                 return;
             }
@@ -94,7 +94,7 @@ fn create_linked_root(traversal: Rc<RefCell<LinkedTraversal>>, expression: Strin
                 return;
             };
 
-            let (ui, client, retired) = {
+            let (client, retired) = {
                 let mut traversal = response.borrow_mut();
                 traversal.current_address = variable.pointer_address();
                 traversal.address_source = None;
@@ -106,10 +106,10 @@ fn create_linked_root(traversal: Rc<RefCell<LinkedTraversal>>, expression: Strin
                     .collect::<Vec<_>>();
                 traversal.owned_variable_objects.insert(name);
 
-                (traversal.ui.clone(), Rc::clone(&traversal.client), retired)
+                (Rc::clone(&traversal.client), retired)
             };
 
-            cleanup_viewer_variable_objects(&ui, &client, retired);
+            cleanup_viewer_variable_objects(&client, retired);
             seed_linked_root_address(response);
         })
     {
@@ -162,7 +162,7 @@ fn seed_linked_root_address(traversal: Rc<RefCell<LinkedTraversal>>) {
         .unscoped(&command)
         .when(move || linked_is_current(&traversal_for_guard))
         .request(move |_, record| {
-            if record.class == "superseded" || !linked_is_current(&traversal_for_response) {
+            if record.is_superseded() || !linked_is_current(&traversal_for_response) {
                 finish_linked(
                     &traversal_for_response,
                     Some(String::from(STALE_VIEWER_MESSAGE)),
@@ -194,7 +194,7 @@ fn seed_linked_root_address(traversal: Rc<RefCell<LinkedTraversal>>) {
                 .frame(&command)
                 .when(move || linked_is_current(&traversal_for_guard))
                 .inspect(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
-                    if record.class == "superseded" || !linked_is_current(&traversal_for_address) {
+                    if record.is_superseded() || !linked_is_current(&traversal_for_address) {
                         finish_linked(
                             &traversal_for_address,
                             Some(String::from(STALE_VIEWER_MESSAGE)),
@@ -264,7 +264,7 @@ pub(super) fn resolve_linked_node_address(traversal: Rc<RefCell<LinkedTraversal>
         .frame(&command)
         .when(move || linked_is_current(&guard))
         .capture(move |_, record, output| {
-            if record.class == "superseded" || !linked_is_current(&response) {
+            if record.is_superseded() || !linked_is_current(&response) {
                 finish_linked(&response, Some(String::from(STALE_VIEWER_MESSAGE)));
                 return;
             }
@@ -326,7 +326,7 @@ pub(super) fn request_linked_raw_wrapper(
         .unscoped(&command)
         .when(move || linked_is_current(&guard))
         .request(move |_, record| {
-            if record.class == "superseded" || !linked_is_current(&response) {
+            if record.is_superseded() || !linked_is_current(&response) {
                 finish_linked(&response, Some(String::from(STALE_VIEWER_MESSAGE)));
                 return;
             }
@@ -374,7 +374,7 @@ pub(super) fn request_linked_dereference(
         .unscoped(&command)
         .when(move || linked_is_current(&traversal_for_guard))
         .request(move |_client, record| {
-            if record.class == "superseded" || !linked_is_current(&traversal_for_response) {
+            if record.is_superseded() || !linked_is_current(&traversal_for_response) {
                 finish_linked(
                     &traversal_for_response,
                     Some(String::from(STALE_VIEWER_MESSAGE)),
@@ -417,15 +417,13 @@ pub(super) fn request_linked_dereference(
                 .frame(&command)
                 .when(move || linked_is_current(&traversal_for_guard))
                 .inspect(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
-                    if record.class == "superseded"
-                        || !linked_is_current(&traversal_for_dereference)
-                    {
-                        let (ui, client) = {
+                    if record.is_superseded() || !linked_is_current(&traversal_for_dereference) {
+                        let client = {
                             let traversal = traversal_for_dereference.borrow();
-                            (traversal.ui.clone(), Rc::clone(&traversal.client))
+                            Rc::clone(&traversal.client)
                         };
 
-                        cleanup_viewer_variable_objects(&ui, &client, Some(dereference_varobj));
+                        cleanup_viewer_variable_objects(&client, Some(dereference_varobj));
 
                         finish_linked(
                             &traversal_for_dereference,

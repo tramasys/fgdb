@@ -366,10 +366,12 @@ fn resume_thread(ui: Weak<Ui>, client: Rc<MiClient>, id: String, detail: &'stati
 
     current_ui.set_thread_action_pending(Some(ThreadActionPending::Execution));
 
-    if !crate::ui::controls::issue_execution_command(
+    if !crate::app::execution::issue_execution_command(
         &current_ui,
         &client,
         &format!("-exec-continue --thread {id}"),
+        ExecutionTarget::Thread(&id),
+        false,
         detail,
     ) {
         current_ui.clear_thread_action_pending();
@@ -412,10 +414,12 @@ fn control_non_stop_thread(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resum
         }
     );
 
-    if !crate::ui::controls::issue_execution_command(
+    if !crate::app::execution::issue_execution_command(
         &current_ui,
         &client,
         &command,
+        ExecutionTarget::Thread(thread),
+        !resume,
         if resume {
             "Thawing the selected thread"
         } else {

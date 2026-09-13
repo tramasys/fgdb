@@ -6,6 +6,7 @@ mod bounded;
 mod config;
 mod debug_info;
 mod debugger;
+mod hex;
 mod investigation;
 mod kernel;
 mod language;

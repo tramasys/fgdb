@@ -1,15 +1,5 @@
 use super::*;
 
-fn local_snapshot_is_inspectable(
-    model: &crate::model::DebuggerModel,
-    generation: Option<u64>,
-) -> bool {
-    generation.is_some_and(|generation| model.is_stop_refresh_current(generation))
-        && model.stopped_inspection_available()
-        && model.execution().inferior_action_pending.is_none()
-        && model.execution().thread_action_pending.is_none()
-}
-
 pub(super) fn locals_summary_text(
     locals: usize,
     arguments: usize,
@@ -34,42 +24,9 @@ pub(super) fn locals_summary_text(
     summary
 }
 
-pub(super) fn apply_variable_children_page_error(
-    node: &VariableNode,
-    parent: &Variable,
-    from: usize,
-    error: &str,
-) {
-    if from == 0 {
-        node.children.splice(
-            0,
-            node.children.n_items(),
-            &[SnapshotRow::new(VariableNode::retry_expansion(
-                parent.clone(),
-                error,
-            ))],
-        );
-    } else {
-        remove_load_more_rows(&node.children);
-
-        node.children
-            .append(&SnapshotRow::new(VariableNode::load_more_error(
-                parent.clone(),
-                from,
-                error,
-            )));
-    }
-
-    node.children_loading.set(false);
-    node.children_loaded.set(true);
-}
-
 impl Ui {
     pub fn show_locals(&self, variables: &[Variable]) {
-        self.local_symbol_revision
-            .set(self.model.symbols.revision());
-
-        self.locals_generation.set(None);
+        self.model.publish_locals(None, variables);
         self.locals_view.set_tooltip_text(None);
         self.locals_summary.set_tooltip_text(None);
 
@@ -79,7 +36,6 @@ impl Ui {
             64,
         ));
 
-        self.local_variables.borrow_mut().replace(variables);
         self.render_locals();
     }
 
@@ -89,7 +45,7 @@ impl Ui {
         let limit = self.locals_render_limit.get();
 
         let (rendered, matching_total, root_count, arguments) = {
-            let variables = self.local_variables.borrow();
+            let variables = self.model.locals();
             let (rendered, matching_total) = variables.filtered(&query, limit);
 
             (
@@ -102,18 +58,16 @@ impl Ui {
 
         let shown = rendered.len();
 
-        let selected_name = variable_at(&self.locals_selection, self.locals_selection.selected())
-            .map(|variable| (variable.name, variable.argument, variable.local_index));
+        let selected_name = variable_at(
+            &self.locals_tree.selection,
+            self.locals_tree.selection.selected(),
+        )
+        .map(|variable| (variable.name, variable.argument, variable.local_index));
 
-        let changed = replace_variable_roots_if_changed(&self.locals_store, &rendered);
-
-        if changed != VariableRootChange::Unchanged {
-            self.rebuild_variable_node_index();
-            invalidate_variable_filter(&self.locals_selection);
-        }
+        let changed = self.locals_tree.replace_roots(&rendered, true);
 
         let locals = root_count.saturating_sub(arguments);
-        let changed_count = changed_variable_roots(&self.locals_store);
+        let changed_count = changed_variable_roots(&self.locals_tree.store);
 
         self.locals_summary.set_text(&locals_summary_text(
             locals,
@@ -151,17 +105,18 @@ impl Ui {
             self.locals_empty.set_visible(false);
 
             if changed == VariableRootChange::Rebuilt {
-                self.locals_selection
+                self.locals_tree
+                    .selection
                     .set_selected(gtk::INVALID_LIST_POSITION);
 
                 let selected = selected_name
                     .as_ref()
                     .and_then(|(name, argument, index)| {
-                        root_variable_position(&self.locals_selection, name, *argument, *index)
+                        root_variable_position(&self.locals_tree.selection, name, *argument, *index)
                     })
                     .unwrap_or(0);
 
-                self.locals_selection.set_selected(selected);
+                self.locals_tree.selection.set_selected(selected);
             }
         }
 
@@ -170,11 +125,8 @@ impl Ui {
     }
 
     pub fn show_locals_for_refresh(&self, generation: u64, variables: &[Variable]) {
-        if self.model.is_stop_refresh_current(generation) {
-            self.local_symbol_revision
-                .set(self.model.symbols.revision());
-
-            if self.locals_generation.replace(Some(generation)) != Some(generation) {
+        if let Some(new_snapshot) = self.model.publish_locals(Some(generation), variables) {
+            if new_snapshot {
                 self.locals_render_limit.set(self.adaptive_render_limit(
                     "locals pane",
                     crate::performance::LOCALS_ROOT_PAGE_SIZE,
@@ -182,7 +134,6 @@ impl Ui {
                 ));
             }
 
-            self.local_variables.borrow_mut().replace(variables);
             self.render_locals();
             self.locals_view.set_tooltip_text(None);
             self.locals_summary.set_tooltip_text(None);
@@ -201,7 +152,7 @@ impl Ui {
         self.locals_summary.set_text("Locals refresh failed");
         self.locals_summary.set_tooltip_text(Some(error));
 
-        if self.locals_store.n_items() == 0 {
+        if self.locals_tree.store.n_items() == 0 {
             self.locals_empty.set_text(error);
             self.locals_empty.set_visible(true);
         }
@@ -209,41 +160,26 @@ impl Ui {
         self.update_control_sensitivity();
     }
 
-    pub(in crate::ui) fn locals_are_current(&self) -> bool {
-        self.locals_generation
-            .get()
-            .is_some_and(|generation| self.model.is_stop_refresh_current(generation))
-    }
-
     pub(in crate::ui) fn locals_inspection_available(&self) -> bool {
-        local_snapshot_is_inspectable(&self.model, self.locals_generation.get())
+        self.model.locals_inspection_available()
     }
 
     pub fn show_local_root_for_refresh(&self, generation: u64, index: usize, variable: &Variable) {
         // Automatic root creation is staged by the refresh owner until the
         // complete snapshot arrives. Do not patch a previous stop's rows.
-        if self.locals_generation.get() != Some(generation)
-            || !self.model.is_stop_refresh_current(generation)
-        {
+        if !self.model.update_local_root(generation, index, variable) {
             return;
         }
 
-        self.local_variables.borrow_mut().update(index, variable);
-
-        let position = (0..self.locals_store.n_items() as usize).find(|position| {
-            variable_root_node(&self.locals_store, *position)
+        let position = (0..self.locals_tree.store.n_items() as usize).find(|position| {
+            variable_root_node(&self.locals_tree.store, *position)
                 .is_some_and(|node| node.variable.local_index == Some(index))
         });
 
         if let Some(position) = position {
-            let previous = variable_root_node(&self.locals_store, position);
             let mut variable = variable.clone();
             variable.local_index = Some(index);
-
-            if replace_variable_root(&self.locals_store, position, &variable, false) {
-                self.reindex_variable_root(&self.locals_store, position, previous.as_ref());
-                invalidate_variable_filter(&self.locals_selection);
-            }
+            self.locals_tree.replace_root(position, &variable, false);
         }
     }
 
@@ -256,27 +192,18 @@ impl Ui {
             return;
         }
 
-        // Update only affected index entries. Value-only changes can retire a
-        // pointer subtree even when GDB keeps the same type and child count.
-        let reindex = |previous: &VariableNode, updated: &VariableNode| {
-            self.variable_node_index
-                .borrow_mut()
-                .replace(previous, updated);
-        };
-
-        let locals_updated = apply_variable_updates(&self.locals_store, updates, reindex);
-        apply_variable_updates(&self.expression_watches_store, updates, reindex);
+        let locals_updated = self.locals_tree.apply_updates(updates);
+        self.watches_tree.apply_updates(updates);
 
         if locals_updated > 0 {
-            invalidate_variable_filter(&self.locals_selection);
-            let roots = self.local_variables.borrow();
+            let roots = self.model.locals();
             let arguments = roots.argument_count();
 
             self.locals_summary.set_text(&locals_summary_text(
                 roots.len().saturating_sub(arguments),
                 arguments,
-                changed_variable_roots(&self.locals_store),
-                self.locals_store.n_items() as usize,
+                changed_variable_roots(&self.locals_tree.store),
+                self.locals_tree.store.n_items() as usize,
                 roots.len(),
             ));
         }
@@ -301,39 +228,8 @@ impl Ui {
             return false;
         }
 
-        if from == 0 {
-            self.variable_node_index
-                .borrow_mut()
-                .remove_store(&node.children);
-        }
-
-        if from != 0 {
-            remove_load_more_rows(&node.children);
-        }
-
-        let mut additions = Vec::with_capacity(variables.len() + usize::from(has_more));
-
-        for variable in variables {
-            let child = node.child(variable.clone());
-            self.variable_node_index.borrow_mut().insert(child.clone());
-            additions.push(SnapshotRow::new(child));
-        }
-
-        if has_more {
-            additions.push(SnapshotRow::new(VariableNode::load_more(
-                parent.clone(),
-                from.saturating_add(variables.len()),
-            )));
-        }
-
-        if from == 0 {
-            node.children.splice(0, node.children.n_items(), &additions);
-        } else {
-            node.children.extend_from_slice(&additions);
-        }
-
-        node.children_loading.set(false);
-        node.children_loaded.set(true);
+        self.variable_tree_for(parent)
+            .replace_children(&node, parent, from, variables, has_more);
 
         true
     }
@@ -380,7 +276,9 @@ impl Ui {
     }
 
     pub fn has_variable_object(&self, varobj: &str) -> bool {
-        self.variable_node_index.borrow().contains(varobj)
+        self.variable_trees()
+            .iter()
+            .any(|tree| tree.contains(varobj))
     }
 
     pub fn show_variable_children_page_error(&self, parent: &Variable, from: usize, error: &str) {
@@ -396,13 +294,8 @@ impl Ui {
             return;
         }
 
-        if from == 0 {
-            self.variable_node_index
-                .borrow_mut()
-                .remove_store(&node.children);
-        }
-
-        apply_variable_children_page_error(&node, parent, from, error);
+        self.variable_tree_for(parent)
+            .children_error(&node, parent, from, error);
         self.application_log
             .record(LogLevel::Error, &format!("Expand {}", parent.name), error);
     }
@@ -416,17 +309,15 @@ impl Ui {
             return;
         };
 
-        self.variable_node_index
-            .borrow_mut()
-            .remove_store(&node.children);
-
-        apply_variable_children_page_error(&node, variable, 0, error);
+        self.variable_tree_for(variable)
+            .children_error(&node, variable, 0, error);
         self.application_log
             .record(LogLevel::Error, &format!("Expand {}", variable.name), error);
     }
 
     pub(crate) fn has_local_variable_identity(&self, variable: &Variable) -> bool {
-        self.locals_are_current() && self.local_variable_node(variable).is_some()
+        self.model.has_local_variable_identity(variable)
+            && self.local_variable_node(variable).is_some()
     }
 
     /// The model authorizes the stop. Displayed variables must additionally
@@ -472,7 +363,7 @@ impl Ui {
             let loading = node.children_loading.replace(false);
 
             if loading && !node.children_loaded.get() {
-                apply_variable_children_page_error(
+                self.variable_tree_for(variable).children_error(
                     &node,
                     variable,
                     0,
@@ -493,24 +384,13 @@ impl Ui {
     }
 
     pub(crate) fn claim_local_variable_object(&self, generation: u64, variable: &Variable) -> bool {
-        let Some(index) = variable.local_index else {
-            return false;
-        };
-
-        self.model.is_stop_refresh_current(generation)
-            && self.has_local_variable_identity(variable)
-            && self
-                .pending_local_variable_objects
-                .borrow_mut()
-                .insert((generation, index))
+        self.local_variable_node(variable).is_some()
+            && self.model.claim_local_variable_object(generation, variable)
     }
 
     pub(crate) fn finish_local_variable_object(&self, generation: u64, variable: &Variable) {
-        if let Some(index) = variable.local_index {
-            self.pending_local_variable_objects
-                .borrow_mut()
-                .remove(&(generation, index));
-        }
+        self.model
+            .finish_local_variable_object(generation, variable);
     }
 
     pub(crate) fn attach_local_variable_object(
@@ -531,59 +411,19 @@ impl Ui {
             return false;
         };
 
-        self.local_variables.borrow_mut().update(index, variable);
-
-        let previous = variable_root_node(
-            &self.locals_store,
-            usize::try_from(position).unwrap_or(usize::MAX),
-        );
-
-        let replaced = replace_variable_root(
-            &self.locals_store,
-            usize::try_from(position).unwrap_or(usize::MAX),
-            variable,
-            false,
-        );
-
-        if replaced {
-            self.reindex_variable_root(
-                &self.locals_store,
-                usize::try_from(position).unwrap_or(usize::MAX),
-                previous.as_ref(),
-            );
-            invalidate_variable_filter(&self.locals_selection);
+        if !self.model.has_local_variable_identity(original)
+            || !self.model.update_local_root(generation, index, variable)
+        {
+            return false;
         }
 
-        replaced
+        self.locals_tree
+            .replace_root(position as usize, variable, false)
+            .is_some()
     }
 
     pub fn local_variable_objects(&self) -> Vec<Variable> {
-        self.local_variables.borrow().to_vec()
-    }
-
-    pub(crate) fn local_variable_objects_for_refresh(&self) -> Vec<Variable> {
-        self.variable_objects_for_symbols(
-            self.local_variable_objects(),
-            self.local_symbol_revision.get(),
-        )
-    }
-
-    pub(in crate::ui) fn variable_objects_for_symbols(
-        &self,
-        variables: Vec<Variable>,
-        revision: u64,
-    ) -> Vec<Variable> {
-        if revision == self.model.symbols.revision() {
-            return variables;
-        }
-
-        // Keep the old display, but never reuse its objects after symbols
-        // change. Only publishing a refreshed snapshot advances its revision.
-        self.defer_variable_object_deletions(
-            variables.into_iter().filter_map(|variable| variable.varobj),
-        );
-
-        Vec::new()
+        self.model.locals().to_vec()
     }
 
     pub(crate) fn local_variable_refresh_indices(&self, variables: &[Variable]) -> HashSet<usize> {
@@ -598,48 +438,42 @@ impl Ui {
     }
 
     pub(in crate::ui) fn find_variable_node(&self, varobj: &str) -> Option<VariableNode> {
-        self.variable_node_index.borrow().get(varobj)
+        self.variable_trees()
+            .iter()
+            .find_map(|tree| tree.get(varobj))
     }
 
-    pub(in crate::ui) fn rebuild_variable_node_index(&self) {
-        let mut index = self.variable_node_index.borrow_mut();
-        index.rebuild(&self.locals_store, &self.expression_watches_store);
-        index.index_store(&self.return_value.store);
+    fn variable_trees(&self) -> [&VariableTree; 3] {
+        [
+            &self.locals_tree,
+            &self.watches_tree,
+            &self.return_value.tree,
+        ]
     }
 
-    pub(in crate::ui) fn reindex_variable_root(
-        &self,
-        store: &gio::ListStore,
-        position: usize,
-        previous: Option<&VariableNode>,
-    ) {
-        let Ok(position) = u32::try_from(position) else {
-            return;
-        };
-
-        let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
-            return;
-        };
-
-        let node = item.borrow::<VariableNode>().clone();
-        let mut index = self.variable_node_index.borrow_mut();
-
-        if let Some(previous) = previous {
-            index.replace(previous, &node);
-
-            if previous.children != node.children {
-                index.index_store(&node.children);
-            }
+    fn variable_tree_for(&self, variable: &Variable) -> &VariableTree {
+        if variable.local_index.is_some() {
+            &self.locals_tree
+        } else if variable.return_value.is_some() {
+            &self.return_value.tree
         } else {
-            index.insert(node.clone());
-            index.index_store(&node.children);
+            self.variable_trees()
+                .into_iter()
+                .find(|tree| {
+                    variable
+                        .varobj
+                        .as_deref()
+                        .is_some_and(|varobj| tree.contains(varobj))
+                })
+                .unwrap_or(&self.watches_tree)
         }
     }
 
     pub(super) fn local_variable_node(&self, variable: &Variable) -> Option<(u32, VariableNode)> {
-        (0..self.locals_store.n_items()).find_map(|position| {
+        (0..self.locals_tree.store.n_items()).find_map(|position| {
             let item = self
-                .locals_store
+                .locals_tree
+                .store
                 .item(position)
                 .and_downcast::<SnapshotRow>()?;
 
@@ -653,11 +487,13 @@ impl Ui {
     pub(crate) fn connect_local_paging(self: &Rc<Self>) {
         let weak_ui = Rc::downgrade(self);
 
-        self.locals_selection.connect_selected_notify(move |_| {
-            if let Some(ui) = weak_ui.upgrade() {
-                ui.update_control_sensitivity();
-            }
-        });
+        self.locals_tree
+            .selection
+            .connect_selected_notify(move |_| {
+                if let Some(ui) = weak_ui.upgrade() {
+                    ui.update_control_sensitivity();
+                }
+            });
 
         let weak_ui = Rc::downgrade(self);
 
@@ -703,7 +539,6 @@ impl Ui {
             let events = gtk::EventControllerLegacy::new();
             events.set_propagation_phase(gtk::PropagationPhase::Capture);
             let model = Rc::clone(&self.model);
-            let locals_generation = Rc::clone(&self.locals_generation);
 
             events.connect_event(move |_, event| {
                 let starts_interaction = match event.event_type() {
@@ -723,9 +558,7 @@ impl Ui {
                     _ => false,
                 };
 
-                if starts_interaction
-                    && !local_snapshot_is_inspectable(&model, locals_generation.get())
-                {
+                if starts_interaction && !model.locals_inspection_available() {
                     glib::Propagation::Stop
                 } else {
                     glib::Propagation::Proceed
@@ -735,7 +568,7 @@ impl Ui {
             widget.add_controller(events);
         }
 
-        let selection = self.locals_selection.clone();
+        let selection = self.locals_tree.selection.clone();
         let handler = Rc::clone(&self.variable_assignment_handler);
         let float_handler = Rc::clone(&self.float_assignment_handler);
         let editor_handler = Rc::clone(&self.variable_editor_handler);
@@ -743,12 +576,11 @@ impl Ui {
         let children_handler = Rc::clone(&self.variable_children_handler);
         let current_source_language = Rc::clone(&self.current_source_language);
         let model = Rc::clone(&self.model);
-        let locals_generation = Rc::clone(&self.locals_generation);
 
         let panels = Rc::clone(&self.panels);
 
         self.locals_view.connect_activate(move |view, position| {
-            if !local_snapshot_is_inspectable(&model, locals_generation.get()) {
+            if !model.locals_inspection_available() {
                 return;
             }
 
@@ -788,7 +620,7 @@ impl Ui {
                         let editor = open_variable_editor(
                             &window,
                             variable,
-                            model.target_pointer_bits(),
+                            model.target_pointer_width(),
                             model.target_architecture(),
                             current_source_language.get(),
                             None,
@@ -806,19 +638,18 @@ impl Ui {
             }
         });
 
-        let selection = self.locals_selection.clone();
+        let selection = self.locals_tree.selection.clone();
         let handler = Rc::clone(&self.variable_assignment_handler);
         let float_handler = Rc::clone(&self.float_assignment_handler);
         let editor_handler = Rc::clone(&self.variable_editor_handler);
         let string_handler = Rc::clone(&self.string_assignment_handler);
         let current_source_language = Rc::clone(&self.current_source_language);
         let model = Rc::clone(&self.model);
-        let locals_generation = Rc::clone(&self.locals_generation);
 
         let panels = Rc::clone(&self.panels);
 
         self.locals_edit_button.connect_clicked(move |button| {
-            if !local_snapshot_is_inspectable(&model, locals_generation.get()) {
+            if !model.locals_inspection_available() {
                 return;
             }
 
@@ -833,7 +664,7 @@ impl Ui {
                     let editor = open_variable_editor(
                         &window,
                         variable,
-                        model.target_pointer_bits(),
+                        model.target_pointer_width(),
                         model.target_architecture(),
                         current_source_language.get(),
                         None,

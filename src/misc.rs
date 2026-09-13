@@ -1,3 +1,4 @@
+use crate::debugger::PointerWidth;
 use std::{
     collections::{HashMap, HashSet},
     fmt::Write as _,
@@ -104,7 +105,7 @@ fn plural(count: usize) -> &'static str {
 struct Abi {
     architecture: TargetArchitecture,
     endian: TargetEndian,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,7 +151,7 @@ fn read_live_misc_at(
     let abi = read_abi(&root.join("exe")).unwrap_or(Abi {
         architecture: TargetArchitecture::Unknown,
         endian: TargetEndian::Little,
-        pointer_bits: usize::BITS,
+        pointer_width: PointerWidth::HOST,
     });
 
     let (maps, maps_capped) = read_maps(&root.join("maps"))?;
@@ -246,12 +247,12 @@ fn read_process_address_space_at(root: &Path) -> Result<ProcessAddressSpace, Str
 
 fn read_abi(path: &Path) -> Option<Abi> {
     let bytes = crate::bounded::read_prefix(path, 40).ok()?;
-    let (architecture, endian, pointer_bits) = TargetArchitecture::from_elf_ident(&bytes)?;
+    let (architecture, endian, pointer_width) = TargetArchitecture::from_elf_ident(&bytes)?;
 
     Some(Abi {
         architecture,
         endian,
-        pointer_bits,
+        pointer_width,
     })
 }
 
@@ -301,9 +302,7 @@ fn read_maps(path: &Path) -> Result<(Vec<ProcessMapping>, bool), String> {
 }
 
 fn parse_auxv(bytes: &[u8], abi: Abi, maps: &[ProcessMapping]) -> Vec<AuxvEntry> {
-    let word = usize::try_from(abi.pointer_bits / 8)
-        .unwrap_or(8)
-        .clamp(4, 8);
+    let word = abi.pointer_width.bytes();
 
     bytes
         .chunks_exact(word * 2)
@@ -323,9 +322,7 @@ fn parse_auxv(bytes: &[u8], abi: Abi, maps: &[ProcessMapping]) -> Vec<AuxvEntry>
 }
 
 fn auxv_value(bytes: &[u8], abi: Abi, wanted_kind: u64) -> Option<u64> {
-    let word = usize::try_from(abi.pointer_bits / 8)
-        .unwrap_or(8)
-        .clamp(4, 8);
+    let word = abi.pointer_width.bytes();
 
     bytes.chunks_exact(word * 2).take(512).find_map(|pair| {
         let kind = read_word(&pair[..word], abi.endian)?;
@@ -399,7 +396,7 @@ fn interpret_auxv(kind: u64, value: u64, abi: Abi, maps: &[ProcessMapping]) -> S
         16 | 26 => format_hwcap(abi.architecture, kind == 26, value),
         23 => if value == 0 { "disabled" } else { "enabled" }.to_owned(),
         3 | 7 | 9 | 15 | 24 | 25 | 31 | 32 | 33 => mapping_containing(maps, value).map_or_else(
-            || format!("{}-bit pointer", abi.pointer_bits),
+            || format!("{}-bit pointer", abi.pointer_width),
             |mapping| {
                 let path = if mapping.path.is_empty() {
                     "anonymous"
@@ -642,7 +639,7 @@ mod tests {
         Abi {
             architecture: TargetArchitecture::X86_64,
             endian: TargetEndian::Little,
-            pointer_bits: 64,
+            pointer_width: PointerWidth::Bits64,
         }
     }
 

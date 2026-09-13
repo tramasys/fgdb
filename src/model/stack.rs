@@ -191,7 +191,7 @@ impl DebuggerModel {
                 entry.index != page.index + index
                     || entry.address != page.address + (index * page.word_size) as u64
                     || entry.offset != (page.index + index) * page.word_size
-                    || entry.pointer_bits != (page.word_size * 8) as u32
+                    || entry.pointer_width.bytes() != page.word_size
             })
         {
             return false;

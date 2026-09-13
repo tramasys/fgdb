@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{MiClient, MiRecord, MiResult, MiValue, quote};
+use super::{MiClient, MiRecord, MiResult, MiValue, RequestFailure, quote};
 use crate::performance::{MI_BACKGROUND_BUDGET, MI_CONTROL_BUDGET, MI_INSPECTION_BUDGET};
 
 pub(super) type ResponseHandler = Box<dyn FnOnce(&MiClient, MiRecord)>;
@@ -119,7 +119,7 @@ impl PendingRequest {
     pub(super) fn complete(self, client: &MiClient, record: MiRecord) {
         if let Some(handler) = self.handler {
             let record = if self.is_current.is_some_and(|is_current| !is_current()) {
-                synthetic_error_record("superseded", "request superseded")
+                synthetic_error_record(RequestFailure::Superseded, "request superseded")
             } else {
                 record
             };
@@ -225,8 +225,8 @@ pub(super) struct ScopedMiRequest {
 
 impl ScopedMiRequest {
     pub(super) fn complete(self, client: &MiClient, record: MiRecord) {
-        let record = if record.class != "superseded" && (self.cancelled || !(self.is_current)()) {
-            synthetic_error_record("superseded", "request superseded")
+        let record = if !record.is_superseded() && (self.cancelled || !(self.is_current)()) {
+            synthetic_error_record(RequestFailure::Superseded, "request superseded")
         } else {
             record
         };
@@ -236,14 +236,15 @@ impl ScopedMiRequest {
 }
 
 pub(super) fn error_record(message: &str) -> MiRecord {
-    synthetic_error_record("error", message)
+    synthetic_error_record(RequestFailure::Protocol, message)
 }
 
-pub(super) fn synthetic_error_record(class: &str, message: &str) -> MiRecord {
+pub(super) fn synthetic_error_record(failure: RequestFailure, message: &str) -> MiRecord {
     MiRecord {
+        failure: Some(failure),
         token: None,
         kind: '^',
-        class: class.to_owned(),
+        class: failure.class().to_owned(),
         results: vec![MiResult {
             name: String::from("msg"),
             value: MiValue::Const(message.to_owned()),

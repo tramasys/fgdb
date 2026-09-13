@@ -1,4 +1,5 @@
 use super::*;
+use crate::debugger::PointerWidth;
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -45,7 +46,7 @@ struct CfgSnapshot {
     instructions: Vec<Instruction>,
     pc: String,
     architecture: TargetArchitecture,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
 }
 
 struct CfgBlockWidgets {
@@ -93,7 +94,7 @@ struct CfgBlock {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ControlFlowGraph {
     architecture: TargetArchitecture,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
     signature: u64,
     input_instruction_count: usize,
     function: String,
@@ -430,7 +431,7 @@ pub(super) fn build_cfg_view(theme: &Theme) -> Rc<CfgView> {
                     &snapshot.instructions,
                     &snapshot.pc,
                     snapshot.architecture,
-                    snapshot.pointer_bits,
+                    snapshot.pointer_width,
                 );
             }
         }
@@ -445,7 +446,7 @@ impl CfgView {
         instructions: &[Instruction],
         pc: &str,
         architecture: TargetArchitecture,
-        pointer_bits: u32,
+        pointer_width: PointerWidth,
     ) {
         if !self.root.is_mapped() {
             // Keep only the newest bounded disassembly snapshot. Building
@@ -454,7 +455,7 @@ impl CfgView {
                 instructions: instructions.to_vec(),
                 pc: pc.to_owned(),
                 architecture,
-                pointer_bits,
+                pointer_width,
             }));
             return;
         }
@@ -465,7 +466,7 @@ impl CfgView {
         }
 
         let current_address = hex_value(pc);
-        let signature = cfg_signature(instructions, architecture, pointer_bits);
+        let signature = cfg_signature(instructions, architecture, pointer_width);
 
         let reused = {
             let mut slot = self.graph.borrow_mut();
@@ -473,7 +474,7 @@ impl CfgView {
             slot.as_mut().is_some_and(|graph| {
                 if graph.signature != signature
                     || graph.architecture != architecture
-                    || graph.pointer_bits != pointer_bits
+                    || graph.pointer_width != pointer_width
                     || graph.input_instruction_count != instructions.len()
                     || current_address
                         .is_some_and(|address| !graph.contains_rendered_address(address))
@@ -492,7 +493,7 @@ impl CfgView {
                 instructions,
                 current_address,
                 architecture,
-                pointer_bits,
+                pointer_width,
                 signature,
             ));
         }
@@ -526,7 +527,7 @@ impl CfgView {
                 |block| {
                     let address = graph
                         .current_address
-                        .map(|address| cfg_address(address, graph.pointer_bits))
+                        .map(|address| cfg_address(address, graph.pointer_width))
                         .unwrap_or_else(|| String::from("unknown PC"));
 
                     (format!("PC {address}"), Some(format!("Block B{block}")))
@@ -668,11 +669,11 @@ impl ControlFlowGraph {
 fn cfg_signature(
     instructions: &[Instruction],
     architecture: TargetArchitecture,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     (architecture as u8).hash(&mut hasher);
-    pointer_bits.hash(&mut hasher);
+    pointer_width.hash(&mut hasher);
     instructions.len().hash(&mut hasher);
 
     for instruction in instructions {
@@ -689,7 +690,7 @@ fn build_control_flow_graph(
     instructions: &[Instruction],
     current_address: Option<u64>,
     architecture: TargetArchitecture,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
     signature: u64,
 ) -> Option<ControlFlowGraph> {
     let mut parsed = instructions
@@ -892,7 +893,7 @@ fn build_control_flow_graph(
 
     let mut graph = ControlFlowGraph {
         architecture,
-        pointer_bits,
+        pointer_width,
         signature,
         input_instruction_count: instructions.len(),
         function,
@@ -1144,8 +1145,8 @@ fn rebuild_cfg_blocks(
 
         let title = format!(
             "B{block_index}  {} – {}",
-            cfg_address(first, graph.pointer_bits),
-            cfg_address(last, graph.pointer_bits)
+            cfg_address(first, graph.pointer_width),
+            cfg_address(last, graph.pointer_width)
         );
 
         let header = gtk::Label::new(Some(&truncate_cfg_text(&title, 76)));
@@ -1247,10 +1248,7 @@ fn cfg_block_body_markup(
     palette: CfgTextPalette,
     block_width: f64,
 ) -> String {
-    let address_columns = usize::try_from(graph.pointer_bits / 4)
-        .unwrap_or(16)
-        .clamp(8, 16)
-        + 6;
+    let address_columns = (graph.pointer_width.bytes() * 2) + 6;
 
     let available_columns = ((block_width - 16.0) / 7.0).floor().max(24.0) as usize;
 
@@ -1259,7 +1257,7 @@ fn cfg_block_body_markup(
         .map(|rendered| match rendered {
             RenderedInstruction::Instruction(index) => {
                 let instruction = &graph.instructions[index];
-                let address = cfg_address(instruction.address, graph.pointer_bits);
+                let address = cfg_address(instruction.address, graph.pointer_width);
                 let padded_address = format!("  {address}  ");
 
                 let text = gtk::glib::markup_escape_text(&truncate_cfg_text(
@@ -1500,8 +1498,8 @@ fn truncate_cfg_text(text: &str, max_chars: usize) -> String {
     truncated
 }
 
-fn cfg_address(address: u64, pointer_bits: u32) -> String {
-    let width = usize::try_from(pointer_bits / 4).unwrap_or(16).clamp(8, 16);
+fn cfg_address(address: u64, pointer_width: PointerWidth) -> String {
+    let width = pointer_width.bytes() * 2;
 
     format!("0x{address:0width$x}")
 }
@@ -1552,7 +1550,12 @@ mod tests {
         theme.install();
         let view = build_cfg_view(&theme);
         let instructions = [instruction(0x1000, "nop"), instruction(0x1001, "ret")];
-        view.show(&instructions, "0x1000", TargetArchitecture::X86_64, 64);
+        view.show(
+            &instructions,
+            "0x1000",
+            TargetArchitecture::X86_64,
+            crate::debugger::PointerWidth::Bits64,
+        );
         let window = gtk::Window::builder()
             .default_width(1100)
             .default_height(750)
@@ -1614,7 +1617,12 @@ mod tests {
             .map(|index| instruction(0x1000 + index * 2, "jne 0x1000 <worker>"))
             .collect::<Vec<_>>();
 
-        view.show(&instructions, "0x1000", TargetArchitecture::X86_64, 64);
+        view.show(
+            &instructions,
+            "0x1000",
+            TargetArchitecture::X86_64,
+            crate::debugger::PointerWidth::Bits64,
+        );
         settle();
         let viewport = view.scrolled.child().unwrap();
         let bounds = view.canvas.compute_bounds(&viewport).unwrap();
@@ -1650,8 +1658,18 @@ mod tests {
         gtk::init().unwrap();
         let view = build_cfg_view(&Theme::graphite());
         let instructions = [instruction(0x1000, "nop"), instruction(0x1001, "ret")];
-        view.show(&instructions, "0x1000", TargetArchitecture::X86_64, 64);
-        view.show(&instructions, "0x1001", TargetArchitecture::X86_64, 64);
+        view.show(
+            &instructions,
+            "0x1000",
+            TargetArchitecture::X86_64,
+            crate::debugger::PointerWidth::Bits64,
+        );
+        view.show(
+            &instructions,
+            "0x1001",
+            TargetArchitecture::X86_64,
+            crate::debugger::PointerWidth::Bits64,
+        );
         assert!(view.graph.borrow().is_none());
         assert!(view.block_widgets.borrow().is_empty());
         assert_eq!(view.pending.borrow().as_ref().unwrap().pc, "0x1001");
@@ -1669,7 +1687,12 @@ mod tests {
         );
         assert!(!view.block_widgets.borrow().is_empty());
         window.set_child(None::<&gtk::Widget>);
-        view.show(&instructions, "0x1000", TargetArchitecture::X86_64, 64);
+        view.show(
+            &instructions,
+            "0x1000",
+            TargetArchitecture::X86_64,
+            crate::debugger::PointerWidth::Bits64,
+        );
         view.clear();
         assert!(view.pending.borrow().is_none());
         assert!(view.graph.borrow().is_none());
@@ -1703,8 +1726,12 @@ mod tests {
             instructions,
             Some(pc),
             architecture,
-            64,
-            cfg_signature(instructions, architecture, 64),
+            crate::debugger::PointerWidth::Bits64,
+            cfg_signature(
+                instructions,
+                architecture,
+                crate::debugger::PointerWidth::Bits64,
+            ),
         )
         .expect("test disassembly must produce a CFG")
     }
@@ -1734,7 +1761,12 @@ mod tests {
             .enumerate()
             .map(|(index, text)| instruction(0x100 + index as u64 * 2, text))
             .collect::<Vec<_>>();
-        view.show(&instructions, "0x102", TargetArchitecture::X86_64, 64);
+        view.show(
+            &instructions,
+            "0x102",
+            TargetArchitecture::X86_64,
+            crate::debugger::PointerWidth::Bits64,
+        );
         let window = gtk::Window::builder()
             .default_width(960)
             .default_height(650)
@@ -1805,7 +1837,12 @@ mod tests {
             check_alignment();
             misc.pages.set_visible_child_name("startup-vectors");
             settle();
-            view.show(&instructions, "0x106", TargetArchitecture::X86_64, 64);
+            view.show(
+                &instructions,
+                "0x106",
+                TargetArchitecture::X86_64,
+                crate::debugger::PointerWidth::Bits64,
+            );
             misc.pages.set_visible_child_name("cfg");
             settle();
             check_alignment();

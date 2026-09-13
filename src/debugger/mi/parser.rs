@@ -98,6 +98,7 @@ impl<'a> Parser<'a> {
         }
 
         Ok(MiRecord {
+            failure: None,
             token,
             kind,
             class,

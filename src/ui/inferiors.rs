@@ -167,11 +167,8 @@ impl Ui {
         }
     }
 
-    pub(crate) fn apply_gdb_selection(&self, thread_id: Option<&str>, group_id: Option<&str>) {
-        let previous = self.model.selected_inferior_id();
-        self.model.apply_gdb_selection(thread_id, group_id);
-
-        if previous != self.model.selected_inferior_id() {
+    pub(crate) fn render_gdb_selection(&self, changed: bool) {
+        if changed {
             self.invalidate_inferior_selection();
         }
 
@@ -217,13 +214,6 @@ impl Ui {
         true
     }
 
-    pub(crate) fn mark_inferior_running(&self, thread_id: Option<&str>) -> (bool, bool) {
-        let affected = self.model.mark_inferior_running(thread_id);
-        self.update_thread_control_sensitivity();
-
-        affected
-    }
-
     /// Defer the running presentation long enough to avoid flashing it during
     /// a normal step. The process and thread models have already changed, so
     /// command validation remains immediate and only painting is delayed.
@@ -265,40 +255,25 @@ impl Ui {
         self.execution_context_visual_pending.set(false);
     }
 
-    pub(crate) fn mark_inferior_stopped(&self, thread_id: Option<&str>, all_stopped: bool) -> bool {
+    pub(crate) fn render_observed_stop(&self) {
         self.cancel_running_context_render();
-        let affected = self.model.mark_inferior_stopped(thread_id, all_stopped);
+        self.select_frame_in_view(self.model.selected_frame_level());
 
-        // Internal Until stops update authority without repainting every step.
-        // The final stopped-state refresh publishes the completed operation.
-        if self.model.native_until_active() {
-            return affected;
-        }
-
-        if !self.model.inferiors().is_empty() {
+        if !self.model.native_until_active() && !self.model.inferiors().is_empty() {
             self.render_selected_inferior_state();
         }
 
-        self.render_inferior_controls();
-        affected
+        self.refresh_execution_controls();
     }
 
-    pub(crate) fn record_inferior_exited(&self, id: &str) {
+    pub(crate) fn render_inferior_exit(&self, selected_exited: bool) {
         self.cancel_running_context_render();
-        let selected_exited = self.model.selected_inferior_id().as_deref() == Some(id);
-        self.model.record_inferior_exited(id);
 
         if selected_exited {
             self.render_selected_inferior_state();
         }
 
-        self.render_inferior_controls();
-    }
-
-    pub(crate) fn clear_inferiors(&self) {
-        self.cancel_running_context_render();
-        self.model.clear_inferiors();
-        self.render_inferior_controls();
+        self.refresh_execution_controls();
     }
 
     pub(crate) fn set_fork_follow_mode(&self, mode: Option<ForkFollowMode>) {
@@ -321,14 +296,6 @@ impl Ui {
             self.render_inferior_controls();
             self.update_control_sensitivity();
             self.update_thread_control_sensitivity();
-        }
-    }
-
-    pub(crate) fn finish_inferior_execution_action(&self) {
-        if self.model.finish_inferior_execution_action() {
-            self.update_control_sensitivity();
-            self.update_thread_control_sensitivity();
-            self.render_inferior_controls();
         }
     }
 

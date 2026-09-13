@@ -1,4 +1,5 @@
 use super::*;
+use crate::debugger::PointerWidth;
 
 mod navigation;
 pub(super) use navigation::Controls as MemoryNavigation;
@@ -25,11 +26,11 @@ struct MemoryRowData {
     pointer: Option<u64>,
     changed: bool,
     kind: MemoryKind,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
 }
 
 struct MemoryRenderContext<'a> {
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
     endian: TargetEndian,
     previous_begin: Option<u64>,
     previous: &'a [u8],
@@ -448,14 +449,14 @@ pub(super) fn show_memory_watch_data(
     watch: &MemoryWatchView,
     memory: MemoryBlock,
     regions: &[MemoryRegion],
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
     endian: TargetEndian,
 ) {
     let previous_begin = watch.previous_begin.get();
     let previous = watch.previous_bytes.borrow();
 
     let context = MemoryRenderContext {
-        pointer_bits,
+        pointer_width,
         endian,
         previous_begin,
         regions,
@@ -474,7 +475,7 @@ pub(super) fn show_memory_watch_data(
     let byte_count = memory.bytes.len();
     watch.previous_begin.set(Some(memory.begin));
     watch.previous_bytes.replace(memory.bytes);
-    let width = usize::try_from(pointer_bits / 4).unwrap_or(16).clamp(8, 16);
+    let width = pointer_width.bytes() * 2;
     let end = memory.begin.saturating_add(byte_count as u64);
 
     let region = memory_region_for_address(regions, memory.begin)
@@ -612,9 +613,7 @@ fn memory_watch_column(
                     label.remove_css_class("memory-row-changed");
                 }
 
-                let width = usize::try_from(row.pointer_bits / 4)
-                    .unwrap_or(16)
-                    .clamp(8, 16);
+                let width = row.pointer_width.bytes() * 2;
 
                 let text = match column {
                     MemoryRowColumn::Address => format!("0x{:0width$x}", row.address),
@@ -637,7 +636,7 @@ fn memory_cell_equal(column: MemoryRowColumn, old: &MemoryRowData, new: &MemoryR
         && old.changed == new.changed
         && match column {
             MemoryRowColumn::Address => {
-                old.address == new.address && old.pointer_bits == new.pointer_bits
+                old.address == new.address && old.pointer_width == new.pointer_width
             }
             MemoryRowColumn::Offset => old.offset == new.offset,
             MemoryRowColumn::Value => old.value == new.value,
@@ -659,9 +658,7 @@ fn format_memory_rows(
         MemoryWatchFormat::U64 => 8,
         MemoryWatchFormat::F32 => 4,
         MemoryWatchFormat::F64 => 8,
-        MemoryWatchFormat::Pointers => usize::try_from(context.pointer_bits / 8)
-            .unwrap_or(8)
-            .clamp(4, 8),
+        MemoryWatchFormat::Pointers => context.pointer_width.bytes(),
     };
 
     bytes
@@ -706,7 +703,7 @@ fn format_memory_rows(
                 pointer,
                 changed,
                 kind,
-                pointer_bits: context.pointer_bits,
+                pointer_width: context.pointer_width,
             }
         })
         .collect()
@@ -937,7 +934,7 @@ mod tests {
                 bytes: vec![0x5a; 128],
             },
             &[],
-            64,
+            crate::debugger::PointerWidth::Bits64,
             TargetEndian::Little,
         );
 
@@ -1080,7 +1077,7 @@ mod tests {
             &bytes,
             MemoryWatchFormat::Bytes,
             &MemoryRenderContext {
-                pointer_bits: 64,
+                pointer_width: PointerWidth::Bits64,
                 endian: TargetEndian::Little,
                 previous_begin: None,
                 previous: &[],
@@ -1097,7 +1094,7 @@ mod tests {
             &[0xff, 0xff, 0xff, 0xff],
             MemoryWatchFormat::U32,
             &MemoryRenderContext {
-                pointer_bits: 64,
+                pointer_width: PointerWidth::Bits64,
                 endian: TargetEndian::Little,
                 previous_begin: None,
                 previous: &[],
@@ -1113,7 +1110,7 @@ mod tests {
             &1.5_f32.to_bits().to_le_bytes(),
             MemoryWatchFormat::F32,
             &MemoryRenderContext {
-                pointer_bits: 64,
+                pointer_width: PointerWidth::Bits64,
                 endian: TargetEndian::Little,
                 previous_begin: None,
                 previous: &[],
@@ -1134,7 +1131,7 @@ mod tests {
             &current,
             MemoryWatchFormat::U16,
             &MemoryRenderContext {
-                pointer_bits: 64,
+                pointer_width: PointerWidth::Bits64,
                 endian: TargetEndian::Little,
                 previous_begin: Some(0x1000),
                 previous: &previous,
@@ -1150,7 +1147,7 @@ mod tests {
             &current,
             MemoryWatchFormat::U16,
             &MemoryRenderContext {
-                pointer_bits: 64,
+                pointer_width: PointerWidth::Bits64,
                 endian: TargetEndian::Little,
                 previous_begin: Some(0x1000),
                 previous: &previous,

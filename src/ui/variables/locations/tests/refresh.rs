@@ -38,7 +38,7 @@ fn locals_refresh_keeps_verified_text_until_the_replacement_address_arrives() {
 
     locations.set_context(Some((1, 0)));
 
-    let (view, store, _) = views::build_locals_view(
+    let (view, store, selection) = views::build_locals_view(
         &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::Locals),
         &Rc::new(RefCell::new(None)),
         &Rc::new(RefCell::new(None)),
@@ -69,8 +69,9 @@ fn locals_refresh_keeps_verified_text_until_the_replacement_address_arrives() {
         label.connect_label_notify(move |label| observed.borrow_mut().push(label.text()));
     });
 
+    let tree = crate::ui::variables::VariableTree::new(store, selection);
     let mut root = variable(0);
-    crate::ui::dialogs::replace_variable_roots_if_changed(&store, &[root.clone()]);
+    tree.replace_roots(std::slice::from_ref(&root), true);
     let scrolled = gtk::ScrolledWindow::builder().child(&view).build();
 
     let window = gtk::Window::builder()
@@ -108,7 +109,7 @@ fn locals_refresh_keeps_verified_text_until_the_replacement_address_arrives() {
         locations.set_context(Some((generation, 0)));
         root.varobj = Some(varobj.into());
         root.value = generation.to_string();
-        crate::ui::dialogs::replace_variable_roots_if_changed(&store, &[root.clone()]);
+        tree.replace_roots(std::slice::from_ref(&root), true);
         settle();
         assert_eq!(label(&locations).text(), "0x0000000000001000");
         assert!(locations.cached(&root).is_none());

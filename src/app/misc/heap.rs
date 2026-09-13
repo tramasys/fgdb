@@ -1,4 +1,5 @@
 use super::*;
+use crate::debugger::PointerWidth;
 use crate::ui::HeapInspectionId;
 
 static HEAP_READER_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -33,7 +34,7 @@ struct HeapDiscoveryState {
     debugger_pid: u32,
     architecture: TargetArchitecture,
     endian: TargetEndian,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
     action: HeapInspectionAction,
     next: usize,
     probes: Vec<HeapProbeSpec>,
@@ -173,7 +174,7 @@ pub(in crate::app) fn request_heap_inspection(
                 return;
             };
 
-            let pointer_bits = current_ui.model.target_pointer_bits();
+            let pointer_width = current_ui.model.target_pointer_width();
             drop(current_ui);
 
             let mut probes = vec![
@@ -213,7 +214,7 @@ pub(in crate::app) fn request_heap_inspection(
                 debugger_pid,
                 architecture,
                 endian,
-                pointer_bits,
+                pointer_width,
                 action: request_action,
                 next: 0,
                 probes,
@@ -443,7 +444,7 @@ fn start_native_heap_reader(state: std::cell::RefMut<'_, HeapDiscoveryState>) {
         debugger_pid: state.debugger_pid,
         architecture: state.architecture,
         endian: state.endian,
-        pointer_bits: state.pointer_bits,
+        pointer_width: state.pointer_width,
         query,
         discovery: state.discovery.clone(),
         budget: budget.clone(),

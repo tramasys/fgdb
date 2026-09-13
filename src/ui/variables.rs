@@ -7,6 +7,16 @@ use gtk::{gio, prelude::*};
 use std::{cell::Cell, rc::Rc};
 
 pub(in crate::ui) mod locations;
+mod tree;
+#[cfg(test)]
+pub(super) use tree::{
+    VariableNodeIndex, apply_variable_children_page_error, clear_variable_change_markers,
+    replace_variable_root,
+};
+pub(super) use tree::{
+    VariableRootChange, VariableTree, changed_variable_roots, root_variable_at,
+    root_variable_position, variable_at, variable_node_at, variable_root_node,
+};
 
 #[derive(Clone)]
 pub(super) struct VariableNode {

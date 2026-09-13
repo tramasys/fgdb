@@ -1,4 +1,5 @@
 use super::*;
+use crate::debugger::PointerWidth;
 
 #[test]
 #[ignore = "GTK timing, requires a display and an otherwise idle system"]
@@ -23,7 +24,7 @@ fn benchmark_memory_refresh() {
     for round in 0..5 {
         let bytes = vec![0x41 + round; 2048];
         let context = MemoryRenderContext {
-            pointer_bits: 64,
+            pointer_width: PointerWidth::Bits64,
             endian: TargetEndian::Little,
             previous_begin: None,
             previous: &[],

@@ -92,12 +92,12 @@ impl Ui {
                     .push(path_for_result.display().to_string());
             }
             let weak = ui.self_weak.borrow().clone();
-            let generation = ui.source_open_generation.load(Ordering::Relaxed);
+            let generation = ui.source.open_generation.load(Ordering::Relaxed);
             let paths = Rc::clone(&paths);
             let outcome = Rc::clone(&outcome);
             glib::idle_add_local_once(move || {
                 if let Some(ui) = weak.upgrade()
-                    && ui.source_open_generation.load(Ordering::Relaxed) == generation
+                    && ui.source.open_generation.load(Ordering::Relaxed) == generation
                 {
                     ui.open_source_batch(paths, outcome);
                 }
@@ -111,43 +111,29 @@ impl Ui {
 
     pub(crate) fn connect_source_loading(self: &Rc<Self>) {
         self.self_weak.replace(Rc::downgrade(self));
-        for document in self.source_documents.borrow().iter() {
+        for document in self.source.documents.borrow().iter() {
             document.freshness.bind(self);
         }
 
-        let generation = Arc::clone(&self.source_open_generation);
-        self.source_notebook.connect_switch_page(move |_, _, _| {
+        let generation = Arc::clone(&self.source.open_generation);
+        self.source.notebook.connect_switch_page(move |_, _, _| {
             generation.fetch_add(1, Ordering::Relaxed);
         });
     }
 
-    pub(in crate::ui) fn invalidate_source_io(&self) {
-        self.source_open_generation.fetch_add(1, Ordering::Relaxed);
-        self.invalidate_source_annotations();
-    }
-
-    fn invalidate_source_annotations(&self) {
-        self.source_annotation_epoch.fetch_add(1, Ordering::Relaxed);
-        self.disassembly_source_cache.borrow_mut().clear();
-
-        for live in self.disassembly_source_pending.borrow().values() {
-            live.store(false, Ordering::Relaxed);
-        }
-
-        self.disassembly_source_pending.borrow_mut().clear();
-    }
-
     pub(super) fn reload_source_annotations(&self, path: &Path, snapshot: source::CachedSource) {
-        let index = self.source_index_snapshot();
+        let index = self.source.index_snapshot();
         let mut paths: HashSet<_> = self
-            .disassembly_source_cache
+            .source
+            .annotation_cache
             .borrow()
             .keys()
-            .chain(self.disassembly_source_pending.borrow().keys())
+            .chain(self.source.annotation_pending.borrow().keys())
             .filter(|reported| {
                 reported.as_path() == path
                     || self
-                        .resolved_source_paths
+                        .source
+                        .resolved_paths
                         .borrow_mut()
                         .get_cloned(reported.to_string_lossy().as_ref())
                         .as_deref()
@@ -165,7 +151,7 @@ impl Ui {
 
         // Retire only the edited file's jobs. Other files keep their cache entries and pending reads.
         for path in &paths {
-            if let Some(live) = self.disassembly_source_pending.borrow_mut().remove(path) {
+            if let Some(live) = self.source.annotation_pending.borrow_mut().remove(path) {
                 live.store(false, Ordering::Relaxed);
             }
 
@@ -232,23 +218,26 @@ impl Ui {
         ready: impl FnOnce(&Ui, Option<SourceDocument>) + 'static,
     ) -> bool {
         let generation = self
-            .source_open_generation
+            .source
+            .open_generation
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
         let cached_path = self
-            .resolved_source_paths
+            .source
+            .resolved_paths
             .borrow_mut()
             .get_cloned(reported.to_string_lossy().as_ref());
         let document = self
-            .source_documents
+            .source
+            .documents
             .borrow()
             .iter()
             .find(|doc| doc.path == reported || cached_path.as_ref() == Some(&doc.path))
             .cloned();
 
         if let Some(document) = document {
-            if let Some(page) = self.source_notebook.page_num(&document.page) {
-                self.source_notebook.set_current_page(Some(page));
+            if let Some(page) = self.source.notebook.page_num(&document.page) {
+                self.source.notebook.set_current_page(Some(page));
             }
 
             ready(self, Some(document));
@@ -256,9 +245,9 @@ impl Ui {
         }
 
         let path = reported.to_path_buf();
-        let roots = self.source_roots.borrow().clone();
-        let index = self.source_index_snapshot();
-        let current = Arc::clone(&self.source_open_generation);
+        let roots = self.source.roots.borrow().clone();
+        let index = self.source.index_snapshot();
+        let current = Arc::clone(&self.source.open_generation);
 
         let receiver = match submit_cancellable_result(
             Priority::Interactive,
@@ -283,7 +272,7 @@ impl Ui {
         glib::spawn_future_local(async move {
             let result = receive_current(receiver, SOURCE_TIMEOUT, || {
                 weak.upgrade().is_some_and(|ui| {
-                    ui.source_open_generation.load(Ordering::Relaxed) == generation
+                    ui.source.open_generation.load(Ordering::Relaxed) == generation
                 })
             })
             .await;
@@ -305,29 +294,12 @@ impl Ui {
 
             match result {
                 Ok((path, snapshot)) => {
-                    ui.resolved_source_paths
-                        .borrow_mut()
-                        .insert(reported.to_string_lossy().into_owned(), path.clone());
-                    let context = SourceOpenContext {
-                        notebook: &ui.source_notebook,
-                        documents: &ui.source_documents,
-                        theme: &ui.source_theme,
-                        style_scheme: ui.source_style_scheme.as_ref(),
-                        breakpoints: &ui.breakpoints,
-                        breakpoint_index: &ui.source_breakpoint_index,
-                        insert_handler: &ui.breakpoint_insert_handler,
-                        jump_handler: &ui.source_jump_handler,
-                        delete_handler: &ui.breakpoint_delete_handler,
-                        enabled_handler: &ui.breakpoint_enabled_handler,
-                        symbol_handler: &ui.source_symbol_handler,
-                        closed_tabs: &ui.closed_source_tabs,
-                        reopen_closed: &ui.source_navigation.reopen_closed,
+                    let document = ui
+                        .source
+                        .publish_document(generation, &reported, &path, &snapshot, &ui);
+                    let Some(document) = document else {
+                        return;
                     };
-
-                    let document = open_source_document(&path, &snapshot.contents, context);
-                    ui.settings.apply_source(&document.view);
-                    document.freshness.bind(&ui);
-
                     ready(&ui, Some(document));
                 }
                 Err(error) => {
@@ -352,7 +324,7 @@ impl Ui {
         let index = usize::try_from(location.line).ok()?.checked_sub(1)?;
         let stop_generation = self.model.current_stop_refresh_generation();
         if let Some((failed_at, snapshot)) =
-            self.disassembly_source_cache.borrow_mut().get_cloned(&path)
+            self.source.annotation_cache.borrow_mut().get_cloned(&path)
         {
             if let Some(snapshot) = snapshot {
                 return snapshot.line(index);
@@ -362,18 +334,19 @@ impl Ui {
             }
         }
 
-        if self.disassembly_source_pending.borrow().contains_key(&path) {
+        if self.source.annotation_pending.borrow().contains_key(&path) {
             return None;
         }
 
         let live = Arc::new(AtomicBool::new(true));
-        self.disassembly_source_pending
+        self.source
+            .annotation_pending
             .borrow_mut()
             .insert(path.clone(), Arc::clone(&live));
         let queued = Arc::clone(&live);
-        let roots = self.source_roots.borrow().clone();
-        let source_index = self.source_index_snapshot();
-        let current = Arc::clone(&self.source_annotation_epoch);
+        let roots = self.source.roots.borrow().clone();
+        let source_index = self.source.index_snapshot();
+        let current = Arc::clone(&self.source.annotation_epoch);
         let epoch = current.load(Ordering::Relaxed);
         let load_path = path.clone();
 
@@ -388,7 +361,7 @@ impl Ui {
         ) {
             Ok(receiver) => receiver,
             Err(_) => {
-                self.disassembly_source_pending.borrow_mut().remove(&path);
+                self.source.annotation_pending.borrow_mut().remove(&path);
                 self.cache_disassembly_source(path, stop_generation, None);
                 return None;
             }
@@ -399,7 +372,7 @@ impl Ui {
             let result = receive_current(receiver, SOURCE_TIMEOUT, || {
                 live.load(Ordering::Relaxed)
                     && weak.upgrade().is_some_and(|ui| {
-                        ui.source_annotation_epoch.load(Ordering::Relaxed) == epoch
+                        ui.source.annotation_epoch.load(Ordering::Relaxed) == epoch
                     })
             })
             .await;
@@ -409,12 +382,12 @@ impl Ui {
             };
 
             if !live.load(Ordering::Relaxed)
-                || ui.source_annotation_epoch.load(Ordering::Relaxed) != epoch
+                || ui.source.annotation_epoch.load(Ordering::Relaxed) != epoch
             {
                 return;
             }
 
-            ui.disassembly_source_pending.borrow_mut().remove(&path);
+            ui.source.annotation_pending.borrow_mut().remove(&path);
 
             match result {
                 Ok(snapshot) => {
@@ -440,7 +413,8 @@ impl Ui {
         snapshot: Option<source::CachedSource>,
     ) {
         let evicted = self
-            .disassembly_source_cache
+            .source
+            .annotation_cache
             .borrow_mut()
             .insert(path, (generation, snapshot));
         if evicted {
@@ -452,5 +426,62 @@ impl Ui {
                 ),
             });
         }
+    }
+}
+
+impl SourceWorkspace {
+    fn publish_document(
+        &self,
+        generation: u64,
+        reported: &Path,
+        path: &Path,
+        snapshot: &source::CachedSource,
+        ui: &Rc<Ui>,
+    ) -> Option<SourceDocument> {
+        if self.open_generation.load(Ordering::Relaxed) != generation {
+            return None;
+        }
+
+        self.resolved_paths
+            .borrow_mut()
+            .insert(reported.to_string_lossy().into_owned(), path.to_path_buf());
+
+        let context = SourceOpenContext {
+            notebook: &self.notebook,
+            documents: &self.documents,
+            theme: &self.theme,
+            style_scheme: self.style_scheme.as_ref(),
+            breakpoints: &ui.breakpoints,
+            breakpoint_index: &self.breakpoint_index,
+            insert_handler: &ui.breakpoint_insert_handler,
+            jump_handler: &ui.source_jump_handler,
+            delete_handler: &ui.breakpoint_delete_handler,
+            enabled_handler: &ui.breakpoint_enabled_handler,
+            symbol_handler: &ui.source_symbol_handler,
+            closed_tabs: &self.closed_tabs,
+            reopen_closed: &self.navigation.reopen_closed,
+        };
+
+        let document = open_source_document(path, &snapshot.contents, context);
+        ui.settings.apply_source(&document.view);
+        document.freshness.bind(ui);
+
+        Some(document)
+    }
+
+    pub(in crate::ui) fn invalidate_io(&self) {
+        self.open_generation.fetch_add(1, Ordering::Relaxed);
+        self.invalidate_annotations();
+    }
+
+    pub(in crate::ui) fn invalidate_annotations(&self) {
+        self.annotation_epoch.fetch_add(1, Ordering::Relaxed);
+        self.annotation_cache.borrow_mut().clear();
+
+        for live in self.annotation_pending.borrow().values() {
+            live.store(false, Ordering::Relaxed);
+        }
+
+        self.annotation_pending.borrow_mut().clear();
     }
 }

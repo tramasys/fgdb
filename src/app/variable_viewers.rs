@@ -49,15 +49,14 @@ pub(super) fn open_variable_viewer(
     drop(current_ui);
 
     if request.variable.varobj.is_none() {
-        create_viewer_root(ui, client, requests, session, request);
+        create_viewer_root(client, requests, session, request);
         return;
     }
 
-    start_variable_viewer_plan(ui, client, requests, session, request, None);
+    start_variable_viewer_plan(client, requests, session, request, None);
 }
 
 fn create_viewer_root(
-    ui: Weak<Ui>,
     client: Rc<MiClient>,
     requests: StopRequests,
     session: Rc<VariableViewerSession>,
@@ -72,7 +71,6 @@ fn create_viewer_root(
 
     let requests_for_response = requests.clone();
     let session_for_guard = Rc::clone(&session);
-    let ui_for_response = ui;
     let session_for_response = Rc::clone(&session);
     let client_for_response = Rc::clone(&client);
     let varobj_for_response = varobj_name;
@@ -81,12 +79,8 @@ fn create_viewer_root(
         .frame(&command)
         .when(move || session_for_guard.is_open())
         .inspect(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
-            if record.class == "superseded" {
-                cleanup_viewer_variable_objects(
-                    &ui_for_response,
-                    &client_for_response,
-                    Some(varobj_for_response),
-                );
+            if record.is_superseded() {
+                cleanup_viewer_variable_objects(&client_for_response, Some(varobj_for_response));
 
                 if session_for_response.is_open() {
                     session_for_response.finish(STALE_VIEWER_MESSAGE);
@@ -100,11 +94,7 @@ fn create_viewer_root(
                 .then(|| crate::debugger::variable_object(&record, &request.variable.name))
                 .flatten()
             else {
-                cleanup_viewer_variable_objects(
-                    &ui_for_response,
-                    &client_for_response,
-                    Some(varobj_for_response),
-                );
+                cleanup_viewer_variable_objects(&client_for_response, Some(varobj_for_response));
 
                 if session_for_response.is_open() {
                     session_for_response.fail(
@@ -121,7 +111,7 @@ fn create_viewer_root(
             let owned = Some(varobj_for_response);
 
             if !viewer_is_current(&requests_for_response, &session_for_response) {
-                cleanup_viewer_variable_objects(&ui_for_response, &client_for_response, owned);
+                cleanup_viewer_variable_objects(&client_for_response, owned);
 
                 if session_for_response.is_open() {
                     session_for_response.finish(STALE_VIEWER_MESSAGE);
@@ -136,7 +126,6 @@ fn create_viewer_root(
             };
 
             start_variable_viewer_plan(
-                ui_for_response,
                 client_for_response,
                 requests_for_response,
                 session_for_response,
@@ -150,7 +139,6 @@ fn create_viewer_root(
 }
 
 fn start_variable_viewer_plan(
-    ui: Weak<Ui>,
     client: Rc<MiClient>,
     requests: StopRequests,
     session: Rc<VariableViewerSession>,
@@ -163,14 +151,13 @@ fn start_variable_viewer_plan(
     ) && !request.variable.is_available()
     {
         session.finish(&request.variable.value);
-        cleanup_viewer_variable_objects(&ui, &client, owned_root);
+        cleanup_viewer_variable_objects(&client, owned_root);
         return;
     }
 
     match request.descriptor.plan.clone() {
         VariableViewerPlan::NativeArray { limit }
         | VariableViewerPlan::IndexedChildren { limit } => array::request_array(
-            ui,
             client,
             requests,
             session,
@@ -182,7 +169,6 @@ fn start_variable_viewer_plan(
             next_members,
             limit,
         } => start_linked_list(
-            ui,
             client,
             requests,
             session,

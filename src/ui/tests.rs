@@ -1,4 +1,5 @@
 use super::SnapshotRow;
+use gtk::{glib, prelude::*};
 use std::{collections::HashSet, path::Path};
 
 use super::{
@@ -23,6 +24,25 @@ use crate::debugger::{
     Breakpoint, Instruction, Register, SourceLocation, TargetArchitecture, TargetEndian, Variable,
 };
 use crate::misc::CallAbiPhase;
+
+pub(super) fn descendants<T: IsA<glib::Object> + IsA<gtk::Widget> + Clone + 'static>(
+    root: &impl IsA<gtk::Widget>,
+) -> Vec<T> {
+    let mut found = Vec::new();
+    let mut child = root.as_ref().first_child();
+
+    while let Some(widget) = child {
+        child = widget.next_sibling();
+
+        if let Ok(value) = widget.clone().downcast::<T>() {
+            found.push(value);
+        }
+
+        found.extend(descendants::<T>(&widget));
+    }
+
+    found
+}
 
 #[test]
 #[ignore = "requires a GTK display, run separately from other GTK tests"]
@@ -278,7 +298,12 @@ fn separates_raw_variable_values_from_gdb_details() {
     };
 
     let details = |variable: &Variable, value: &str, annotation: &str| {
-        variable_details(variable, value, annotation, 64)
+        variable_details(
+            variable,
+            value,
+            annotation,
+            crate::debugger::PointerWidth::Bits64,
+        )
     };
 
     assert_eq!(details(&integer("int", "0x2a"), "0x2a", ""), "42");
@@ -405,7 +430,7 @@ fn pointer_updates_retire_children_when_the_object_is_no_longer_readable() {
     pointer.children_loaded.set(true);
     pointer.expanded.set(true);
 
-    let mut index = super::domain::VariableNodeIndex::default();
+    let mut index = super::variables::VariableNodeIndex::default();
     index.insert(pointer.clone());
     index.index_store(&pointer.children);
     assert!(index.contains("var1.tailward.value"));
@@ -438,7 +463,7 @@ fn pointer_updates_retire_children_when_the_object_is_no_longer_readable() {
 
 #[test]
 fn decodes_rust_c_and_cpp_integer_types() {
-    let decimal = |type_name: &str, value: &str, pointer_bits| {
+    let decimal = |type_name: &str, value: &str, pointer_width| {
         let variable = Variable {
             local_index: None,
             return_value: None,
@@ -453,62 +478,112 @@ fn decodes_rust_c_and_cpp_integer_types() {
             dynamic: false,
         };
 
-        integer_decimal_value(&variable, value, pointer_bits)
+        integer_decimal_value(&variable, value, pointer_width)
     };
 
     assert_eq!(
-        decimal("i128", "0xffffffffffffffffffffffffffffffff", 64),
+        decimal(
+            "i128",
+            "0xffffffffffffffffffffffffffffffff",
+            crate::debugger::PointerWidth::Bits64
+        ),
         Some("-1".into())
     );
 
     assert_eq!(
-        decimal("u128", "0xffffffffffffffffffffffffffffffff", 64),
+        decimal(
+            "u128",
+            "0xffffffffffffffffffffffffffffffff",
+            crate::debugger::PointerWidth::Bits64
+        ),
         Some("340282366920938463463374607431768211455".into())
     );
 
     assert_eq!(
-        decimal("usize", "0xffffffffffffffff", 64),
+        decimal(
+            "usize",
+            "0xffffffffffffffff",
+            crate::debugger::PointerWidth::Bits64
+        ),
         Some("18446744073709551615".into())
     );
 
-    assert_eq!(decimal("isize", "0xffffffff", 32), Some("-1".into()));
-
     assert_eq!(
-        decimal("const signed short int", "0xffff", 64),
+        decimal("isize", "0xffffffff", crate::debugger::PointerWidth::Bits32),
         Some("-1".into())
     );
 
     assert_eq!(
-        decimal("long unsigned int", "0xffffffffffffffff", 64),
+        decimal(
+            "const signed short int",
+            "0xffff",
+            crate::debugger::PointerWidth::Bits64
+        ),
+        Some("-1".into())
+    );
+
+    assert_eq!(
+        decimal(
+            "long unsigned int",
+            "0xffffffffffffffff",
+            crate::debugger::PointerWidth::Bits64
+        ),
         Some("18446744073709551615".into())
     );
 
     assert_eq!(
-        decimal("std::uint_least16_t", "0xffff", 64),
+        decimal(
+            "std::uint_least16_t",
+            "0xffff",
+            crate::debugger::PointerWidth::Bits64
+        ),
         Some("65535".into())
     );
 
     assert_eq!(
-        decimal("int_fast16_t", "0xffffffffffffffff", 64),
+        decimal(
+            "int_fast16_t",
+            "0xffffffffffffffff",
+            crate::debugger::PointerWidth::Bits64
+        ),
         Some("-1".into())
     );
 
     assert_eq!(
-        decimal("unsigned __int64", "0xffffffffffffffff", 64),
+        decimal(
+            "unsigned __int64",
+            "0xffffffffffffffff",
+            crate::debugger::PointerWidth::Bits64
+        ),
         Some("18446744073709551615".into())
     );
 
     assert_eq!(
-        decimal("__int128", "0xffffffffffffffffffffffffffffffff", 64),
+        decimal(
+            "__int128",
+            "0xffffffffffffffffffffffffffffffff",
+            crate::debugger::PointerWidth::Bits64
+        ),
         Some("-1".into())
     );
 
     assert_eq!(
-        decimal("unsigned _BitInt(17)", "0x1ffff", 64),
+        decimal(
+            "unsigned _BitInt(17)",
+            "0x1ffff",
+            crate::debugger::PointerWidth::Bits64
+        ),
         Some("131071".into())
     );
 
-    assert_eq!(decimal("_BitInt(17)", "0x1ffff", 64), Some("-1".into()));
+    assert_eq!(
+        decimal(
+            "_BitInt(17)",
+            "0x1ffff",
+            crate::debugger::PointerWidth::Bits64
+        ),
+        Some("-1".into())
+    );
 }
 
 #[test]
@@ -580,14 +655,18 @@ fn chooses_safe_editor_semantics_from_type_and_register_role() {
     );
 
     assert_eq!(
-        variable_integer_format(&variable("count", "std::uint32_t", "0x2a"), 64, None),
+        variable_integer_format(
+            &variable("count", "std::uint32_t", "0x2a"),
+            crate::debugger::PointerWidth::Bits64,
+            None
+        ),
         Some(IntegerFormat::unsigned(32))
     );
 
     assert_eq!(
         variable_character_format(
             &variable("separator", "char16_t", "65 'A'"),
-            64,
+            crate::debugger::PointerWidth::Bits64,
             crate::language::Language::Cpp,
             None,
         ),
@@ -597,7 +676,7 @@ fn chooses_safe_editor_semantics_from_type_and_register_role() {
     assert_eq!(
         variable_character_format(
             &variable("letter", "char", "'🦀'"),
-            64,
+            crate::debugger::PointerWidth::Bits64,
             crate::language::Language::Rust,
             None
         ),
@@ -609,20 +688,49 @@ fn chooses_safe_editor_semantics_from_type_and_register_role() {
         TargetArchitecture::X86_64,
     ));
 
-    assert!(register_integer_format("$rax", 64, TargetArchitecture::X86_64).is_some());
+    assert!(
+        register_integer_format(
+            "$rax",
+            crate::debugger::PointerWidth::Bits64,
+            TargetArchitecture::X86_64
+        )
+        .is_some()
+    );
 
     assert_eq!(
-        register_integer_format("$rax", 32, TargetArchitecture::X86_64),
+        register_integer_format(
+            "$rax",
+            crate::debugger::PointerWidth::Bits32,
+            TargetArchitecture::X86_64
+        ),
         Some(IntegerFormat::unsigned(64))
     );
 
     assert_eq!(
-        register_integer_format("$a0", 32, TargetArchitecture::Mips64),
+        register_integer_format(
+            "$a0",
+            crate::debugger::PointerWidth::Bits32,
+            TargetArchitecture::Mips64
+        ),
         Some(IntegerFormat::unsigned(64))
     );
 
-    assert!(register_integer_format("$rsp", 64, TargetArchitecture::X86_64).is_none());
-    assert!(register_integer_format("$r29", 32, TargetArchitecture::Mips32).is_none());
+    assert!(
+        register_integer_format(
+            "$rsp",
+            crate::debugger::PointerWidth::Bits64,
+            TargetArchitecture::X86_64
+        )
+        .is_none()
+    );
+    assert!(
+        register_integer_format(
+            "$r29",
+            crate::debugger::PointerWidth::Bits32,
+            TargetArchitecture::Mips32
+        )
+        .is_none()
+    );
 
     assert_eq!(
         variable_boolean_value(&variable("enabled", "bool", "true"), None),
@@ -681,7 +789,7 @@ fn formats_pretty_printed_vector_registers_as_u64_lanes() {
             },
             TargetArchitecture::X86_64,
             Some(TargetEndian::Little),
-            64,
+            crate::debugger::PointerWidth::Bits64,
         ),
         "register-zero"
     );
@@ -697,7 +805,7 @@ fn formats_pretty_printed_vector_registers_as_u64_lanes() {
             },
             TargetArchitecture::X86_64,
             Some(TargetEndian::Little),
-            64,
+            crate::debugger::PointerWidth::Bits64,
         ),
         "memory-none"
     );
@@ -741,8 +849,14 @@ fn emphasizes_only_active_flags() {
 
 #[test]
 fn keeps_full_addresses_and_colors_register_roles() {
-    assert_eq!(full_address("0x55555555516f", 64), "0x000055555555516f");
-    assert_eq!(full_address("0x8048123", 32), "0x08048123");
+    assert_eq!(
+        full_address("0x55555555516f", crate::debugger::PointerWidth::Bits64),
+        "0x000055555555516f"
+    );
+    assert_eq!(
+        full_address("0x8048123", crate::debugger::PointerWidth::Bits32),
+        "0x08048123"
+    );
 
     let register = |name: &str, chain: &[&str]| Register {
         name: name.to_owned(),
@@ -755,7 +869,7 @@ fn keeps_full_addresses_and_colors_register_roles() {
             &register("rip", &[]),
             TargetArchitecture::X86_64,
             Some(TargetEndian::Little),
-            64,
+            crate::debugger::PointerWidth::Bits64,
         ),
         "memory-code"
     );
@@ -765,7 +879,7 @@ fn keeps_full_addresses_and_colors_register_roles() {
             &register("rsp", &[]),
             TargetArchitecture::X86_64,
             Some(TargetEndian::Little),
-            64,
+            crate::debugger::PointerWidth::Bits64,
         ),
         "memory-stack"
     );
@@ -775,7 +889,7 @@ fn keeps_full_addresses_and_colors_register_roles() {
             &register("rsi", &["0x1", "0x61732f656d6f682f"]),
             TargetArchitecture::X86_64,
             Some(TargetEndian::Little),
-            64,
+            crate::debugger::PointerWidth::Bits64,
         ),
         "memory-string"
     );
@@ -785,7 +899,7 @@ fn keeps_full_addresses_and_colors_register_roles() {
             &register("rax", &["0x123456789", "0x8048123"]),
             TargetArchitecture::X86_64,
             Some(TargetEndian::Little),
-            32,
+            crate::debugger::PointerWidth::Bits32,
         ),
         "0x08048123"
     );
@@ -1261,7 +1375,7 @@ fn formats_non_native_register_values_without_host_assumptions() {
             true,
             TargetArchitecture::PowerPc32,
             Some(TargetEndian::Big),
-            32,
+            crate::debugger::PointerWidth::Bits32,
         ),
         "0x54455854 'TEXT…'"
     );
@@ -1272,7 +1386,7 @@ fn formats_non_native_register_values_without_host_assumptions() {
         false,
         TargetArchitecture::AArch64,
         Some(TargetEndian::Little),
-        64,
+        crate::debugger::PointerWidth::Bits64,
     );
 
     assert!(vector.contains("uint128 = 0x1"));

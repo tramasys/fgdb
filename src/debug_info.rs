@@ -654,7 +654,7 @@ fn gnu_build_id(data: &[u8], little_endian: bool, alignment: usize) -> Option<St
 
         if note_type == NT_GNU_BUILD_ID && name == b"GNU" && (2..=128).contains(&description.len())
         {
-            return Some(hexadecimal(description));
+            return Some(crate::hex::encode(description));
         }
 
         offset = align_up(description_end, alignment)?;
@@ -1042,16 +1042,6 @@ fn distribution_id() -> &'static str {
                 .unwrap_or_default()
         })
         .as_str()
-}
-
-fn hexadecimal(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut output = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        let _ = write!(output, "{byte:02x}");
-    }
-
-    output
 }
 
 #[cfg(test)]

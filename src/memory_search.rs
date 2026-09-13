@@ -1,5 +1,6 @@
 //! Bounded streaming search over explicitly supplied memory, independent of GTK and GDB.
 
+use crate::debugger::PointerWidth;
 mod pattern;
 
 #[cfg(test)]
@@ -72,7 +73,7 @@ pub(crate) struct Scan {
 impl Scan {
     pub(crate) fn new(
         query: Query,
-        pointer_bits: Option<u32>,
+        pointer_width: Option<PointerWidth>,
         endian: Option<TargetEndian>,
     ) -> Result<Self, String> {
         if !(1..=MAX_RESULTS).contains(&query.max_results)
@@ -83,7 +84,7 @@ impl Scan {
             return Err(String::from("Invalid memory search limits or range count"));
         }
 
-        let pattern = Pattern::parse(query.kind, &query.value, pointer_bits, endian)?;
+        let pattern = Pattern::parse(query.kind, &query.value, pointer_width, endian)?;
 
         let mut ranges = query.ranges;
 
@@ -528,7 +529,7 @@ mod tests {
             (
                 SearchKind::Pointer,
                 "0x12345678",
-                Some(32),
+                Some(PointerWidth::Bits32),
                 TargetEndian::Little,
                 vec![0x78, 0x56, 0x34, 0x12],
             ),

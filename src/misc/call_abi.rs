@@ -1,12 +1,13 @@
 //! Calling-convention facts and the current instruction transfer.
 
+use crate::debugger::PointerWidth;
 use crate::debugger::{Register, StackFrame, TargetArchitecture};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CallAbiSnapshot {
     pub architecture: String,
     pub calling_convention: String,
-    pub pointer_bits: u32,
+    pub pointer_width: PointerWidth,
     pub current_frame: Option<CallAbiFrame>,
     pub contract: Vec<CallAbiFact>,
 }
@@ -48,7 +49,7 @@ pub(crate) struct CallAbiTransfer {
 
 pub(crate) fn call_abi_snapshot(
     architecture: TargetArchitecture,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
     selected_level: u32,
     frames: &[StackFrame],
 ) -> CallAbiSnapshot {
@@ -63,8 +64,8 @@ pub(crate) fn call_abi_snapshot(
 
     CallAbiSnapshot {
         architecture: architecture.display_name().to_owned(),
-        calling_convention: linux_calling_convention(architecture, pointer_bits).to_owned(),
-        pointer_bits,
+        calling_convention: linux_calling_convention(architecture, pointer_width).to_owned(),
+        pointer_width,
         current_frame: frames
             .iter()
             .find(|frame| frame.level == selected_level)
@@ -247,17 +248,22 @@ fn call_stack_contract(architecture: TargetArchitecture) -> &'static str {
     }
 }
 
-fn linux_calling_convention(architecture: TargetArchitecture, pointer_bits: u32) -> &'static str {
-    match (architecture, pointer_bits) {
+fn linux_calling_convention(
+    architecture: TargetArchitecture,
+    pointer_width: PointerWidth,
+) -> &'static str {
+    match (architecture, pointer_width) {
         (TargetArchitecture::X86, _) => "System V i386 ABI",
-        (TargetArchitecture::X86_64, 32) => "System V AMD64 x32 ABI",
+        (TargetArchitecture::X86_64, crate::debugger::PointerWidth::Bits32) => {
+            "System V AMD64 x32 ABI"
+        }
         (TargetArchitecture::X86_64, _) => "System V AMD64 ABI",
         (TargetArchitecture::Arm, _) => "AAPCS32",
-        (TargetArchitecture::AArch64, 32) => "AAPCS64 ILP32",
+        (TargetArchitecture::AArch64, crate::debugger::PointerWidth::Bits32) => "AAPCS64 ILP32",
         (TargetArchitecture::AArch64, _) => "AAPCS64",
         (TargetArchitecture::RiscV32 | TargetArchitecture::RiscV64, _) => "RISC-V ELF psABI",
         (TargetArchitecture::Mips32, _) => "MIPS o32 ABI",
-        (TargetArchitecture::Mips64, 32) => "MIPS n32 ABI",
+        (TargetArchitecture::Mips64, crate::debugger::PointerWidth::Bits32) => "MIPS n32 ABI",
         (TargetArchitecture::Mips64, _) => "MIPS n64 ABI",
         (TargetArchitecture::PowerPc32 | TargetArchitecture::PowerPc64, _) => "PowerPC ELF ABI",
         (TargetArchitecture::S390 | TargetArchitecture::S390x, _) => "zSeries ELF ABI",
@@ -300,7 +306,12 @@ mod tests {
             },
         ];
 
-        let snapshot = call_abi_snapshot(TargetArchitecture::X86_64, 64, 0, &frames);
+        let snapshot = call_abi_snapshot(
+            TargetArchitecture::X86_64,
+            crate::debugger::PointerWidth::Bits64,
+            0,
+            &frames,
+        );
         assert_eq!(snapshot.current_frame.unwrap().function, "main");
 
         assert_eq!(

@@ -44,7 +44,7 @@ pub(super) fn refresh_inferiors(ui: &Weak<Ui>, client: &MiClient) {
                     selection_changed = previous != ui.model.selected_inferior_id();
                     refresh_selected =
                         selection_changed && ui.model.selected_inferior_context_stopped();
-                } else if record.class != "superseded" {
+                } else if !record.is_superseded() {
                     ui.set_status(
                         "Inferior refresh failed",
                         record
@@ -380,7 +380,7 @@ fn execute_inferior(ui: Weak<Ui>, client: Rc<MiClient>, id: String, resume: bool
                 return;
             };
 
-            if record.class == "timeout" {
+            if record.is_timed_out() {
                 client.quarantine(
                     "GDB did not answer the process-level execution command within 30 seconds. The inferior state can no longer be determined safely.",
                 );

@@ -1,7 +1,6 @@
 use super::*;
 
 pub(super) fn request_indexed_children(
-    ui: Weak<Ui>,
     client: Rc<MiClient>,
     requests: StopRequests,
     session: Rc<VariableViewerSession>,
@@ -11,18 +10,17 @@ pub(super) fn request_indexed_children(
 ) {
     if variable.varobj.is_none() {
         session.fail("This value has no GDB variable object to inspect");
-        cleanup_viewer_variable_objects(&ui, &client, owned_root);
+        cleanup_viewer_variable_objects(&client, owned_root);
         return;
     }
 
     if limit == 0 {
         session.finish("This viewer is configured with a zero item limit");
-        cleanup_viewer_variable_objects(&ui, &client, owned_root);
+        cleanup_viewer_variable_objects(&client, owned_root);
         return;
     }
 
     request_indexed_level(
-        ui,
         client,
         requests,
         session,
@@ -37,7 +35,6 @@ pub(super) fn request_indexed_children(
 
 #[allow(clippy::too_many_arguments)]
 fn request_indexed_level(
-    ui: Weak<Ui>,
     client: Rc<MiClient>,
     requests: StopRequests,
     session: Rc<VariableViewerSession>,
@@ -52,7 +49,6 @@ fn request_indexed_level(
 
     let Some(varobj) = current.varobj.as_deref() else {
         finish_indexed(
-            &ui,
             &client,
             &session,
             Some(String::from(
@@ -67,7 +63,6 @@ fn request_indexed_level(
 
     if !visited.insert(varobj.to_owned()) {
         finish_indexed(
-            &ui,
             &client,
             &session,
             Some(String::from("GDB exposed a cyclic collection wrapper")),
@@ -87,14 +82,12 @@ fn request_indexed_level(
     let session_for_guard = Rc::clone(&session);
     let session_for_response = Rc::clone(&session);
     let client_for_response = Rc::clone(&client);
-    let ui_for_response = ui.clone();
     let owned_for_response = owned_root.clone();
 
     if let Err(error) = requests.unscoped(&command).when(move || session_for_guard.is_open()).inspect(limit.max(AUTOMATIC_PRINT_ELEMENTS),
         move |_, record| {
             if !session_for_response.is_open() {
                 finish_indexed(
-                    &ui_for_response,
                     &client_for_response,
                     &session_for_response,
                     None,
@@ -105,9 +98,8 @@ fn request_indexed_level(
                 return;
             }
 
-            if record.class == "superseded" {
+            if record.is_superseded() {
                 finish_indexed(
-                    &ui_for_response,
                     &client_for_response,
                     &session_for_response,
                     Some(String::from(STALE_VIEWER_MESSAGE)),
@@ -120,7 +112,6 @@ fn request_indexed_level(
 
             if !record.is_done() {
                 finish_indexed(
-                    &ui_for_response,
                     &client_for_response,
                     &session_for_response,
                     Some(
@@ -148,7 +139,6 @@ fn request_indexed_level(
                 && let Some(wrapper) = transparent_index_wrapper(&children)
             {
                 request_indexed_level(
-                    ui_for_response,
                     client_for_response,
                     requests_for_response,
                     session_for_response,
@@ -165,7 +155,6 @@ fn request_indexed_level(
 
             if indexed.is_empty() {
                 finish_indexed(
-                    &ui_for_response,
                     &client_for_response,
                     &session_for_response,
                     Some(String::from(
@@ -207,7 +196,6 @@ fn request_indexed_level(
             };
 
             finish_indexed(
-                &ui_for_response,
                 &client_for_response,
                 &session_for_response,
                 Some(message),
@@ -217,7 +205,6 @@ fn request_indexed_level(
         },
     ) {
         finish_indexed(
-            &ui,
             &client,
             &session,
             Some(format!("Could not queue the viewer request: {error}")),
@@ -228,7 +215,6 @@ fn request_indexed_level(
 }
 
 fn finish_indexed(
-    ui: &Weak<Ui>,
     client: &MiClient,
     session: &VariableViewerSession,
     message: Option<String>,
@@ -247,5 +233,5 @@ fn finish_indexed(
         }
     }
 
-    cleanup_viewer_variable_objects(ui, client, owned_root);
+    cleanup_viewer_variable_objects(client, owned_root);
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::debugger::PointerWidth;
 
 #[test]
 #[ignore = "requires a GTK display, run separately from other GTK tests"]
@@ -35,7 +36,7 @@ fn memory_snapshots_refresh_selected_pointers_and_copyable_cells() {
     for pointer in [0x1234_u64, 0x5678, 0] {
         let bytes = pointer.to_le_bytes();
         let context = MemoryRenderContext {
-            pointer_bits: 64,
+            pointer_width: PointerWidth::Bits64,
             endian: TargetEndian::Little,
             previous_begin: Some(0x1000),
             previous: &previous,

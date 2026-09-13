@@ -9,7 +9,7 @@ use children::variable_child_page_end;
 
 mod ownership;
 pub(in crate::app) use ownership::delete_variable_object;
-use ownership::{register_owned_variable_object, variable_object_owned_root};
+use ownership::register_owned_variable_object;
 
 const VARIABLE_CHILD_PAGE_SIZE: usize = 128;
 const MAX_VARIABLE_CHILDREN: usize = 4096;
@@ -60,6 +60,20 @@ pub(in crate::app) fn variable_update_batch(
     })
 }
 
+fn reusable_variable_objects(
+    model: &crate::model::DebuggerModel,
+    client: &MiClient,
+    watches: bool,
+) -> Vec<Variable> {
+    let (variables, retired) = model.variable_objects_for_refresh(watches);
+
+    for varobj in retired {
+        delete_variable_object(client, &varobj);
+    }
+
+    variables
+}
+
 pub(in crate::app) fn refresh_variable_objects(
     ui: Weak<Ui>,
     client: &MiClient,
@@ -69,7 +83,7 @@ pub(in crate::app) fn refresh_variable_objects(
 ) {
     let existing = ui
         .upgrade()
-        .map(|ui| ui.local_variable_objects_for_refresh())
+        .map(|ui| reusable_variable_objects(&ui.model, client, false))
         .unwrap_or_default();
 
     refresh_persistent_variable_objects(
@@ -92,7 +106,7 @@ pub(in crate::app) fn refresh_expression_variable_objects(
 ) {
     let existing = ui
         .upgrade()
-        .map(|ui| ui.expression_watch_variable_objects_for_refresh())
+        .map(|ui| reusable_variable_objects(&ui.model, client, true))
         .unwrap_or_default();
 
     let fallbacks = expressions
@@ -132,12 +146,6 @@ fn refresh_persistent_variable_objects(
     target: VariableRefreshTarget,
     update_batch: Rc<VariableUpdateBatch>,
 ) {
-    if let Some(ui) = ui.upgrade() {
-        for varobj in ui.take_deferred_variable_object_deletions() {
-            delete_variable_object(client, &varobj);
-        }
-    }
-
     if matches!(target, VariableRefreshTarget::Locals) {
         for (index, variable) in fallbacks.iter_mut().enumerate() {
             variable.local_index = Some(index);
@@ -557,15 +565,23 @@ fn apply_bulk_variable_updates(
     let changed_variants = updates
         .iter()
         .filter(|update| update.invalidates_variant_children())
-        .filter_map(|update| variable_object_owned_root(&roots, &update.varobj).cloned())
+        .filter_map(|update| {
+            client
+                .variable_object_owned_root(&roots, &update.varobj)
+                .cloned()
+        })
         .collect::<HashSet<_>>();
 
     let descendants = updates
         .iter()
         .filter(|update| {
             !roots.contains(&update.varobj)
-                && variable_object_has_owned_ancestor(&roots, &update.varobj)
-                && variable_object_owned_root(&changed_variants, &update.varobj).is_none()
+                && client
+                    .variable_object_owned_root(&roots, &update.varobj)
+                    .is_some()
+                && client
+                    .variable_object_owned_root(&changed_variants, &update.varobj)
+                    .is_none()
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -655,10 +671,6 @@ fn variable_object_owns_update(root: &str, candidate: &str) -> bool {
         || candidate
             .strip_prefix(root)
             .is_some_and(|suffix| suffix.starts_with('.'))
-}
-
-fn variable_object_has_owned_ancestor(roots: &HashSet<String>, candidate: &str) -> bool {
-    !roots.contains(candidate) && variable_object_owned_root(roots, candidate).is_some()
 }
 
 fn finish_variable_refresh(client: &MiClient, state: Rc<RefCell<VariableRefresh>>) {

@@ -84,7 +84,10 @@ impl Ui {
         mut failures: Vec<String>,
         complete: RestoreResult,
     ) {
-        self.expression_watches.replace(workspace.watches.clone());
+        if let Err(error) = self.model.replace_watch_expressions(&workspace.watches) {
+            failures.push(error.to_owned());
+        }
+
         // The regular refresh owns varobj deletion and reconstruction.
         let refresh = self.expression_watch_refresh_handler.borrow().clone();
 
@@ -117,7 +120,7 @@ impl Ui {
             sources: RefCell::new(workspace.sources.clone().into()),
             failures: RefCell::new(failures),
             complete: RefCell::new(Some(complete)),
-            generation: Cell::new(self.source_open_generation.load(Ordering::Relaxed)),
+            generation: Cell::new(self.source.open_generation.load(Ordering::Relaxed)),
         });
 
         let weak = Rc::downgrade(&restore);
@@ -142,7 +145,7 @@ struct SourceRestore {
 impl SourceRestore {
     fn schedule(self: &Rc<Self>, ui: &Ui) {
         self.generation
-            .set(ui.source_open_generation.load(Ordering::Relaxed));
+            .set(ui.source.open_generation.load(Ordering::Relaxed));
 
         let restore = Rc::clone(self);
         glib::idle_add_local_once(move || {
@@ -150,7 +153,7 @@ impl SourceRestore {
                 return;
             };
 
-            if ui.source_open_generation.load(Ordering::Relaxed) != restore.generation.get() {
+            if ui.source.open_generation.load(Ordering::Relaxed) != restore.generation.get() {
                 restore.finish(Some("Source restoration was interrupted by navigation"));
                 return;
             }
@@ -184,7 +187,7 @@ impl SourceRestore {
         });
 
         self.generation
-            .set(ui.source_open_generation.load(Ordering::Relaxed));
+            .set(ui.source.open_generation.load(Ordering::Relaxed));
 
         if !accepted {
             self.failures.borrow_mut().push(format!(
@@ -203,9 +206,9 @@ impl SourceRestore {
             self.failures.borrow_mut().push(error.to_owned());
 
             if let Some(ui) = self.ui.upgrade()
-                && ui.source_open_generation.load(Ordering::Relaxed) == self.generation.get()
+                && ui.source.open_generation.load(Ordering::Relaxed) == self.generation.get()
             {
-                ui.source_open_generation.fetch_add(1, Ordering::Relaxed);
+                ui.source.open_generation.fetch_add(1, Ordering::Relaxed);
             }
         }
 
@@ -295,7 +298,8 @@ impl Workspace {
             .collect();
 
         let sources = ui
-            .source_documents
+            .source
+            .documents
             .borrow()
             .iter()
             .map(|document| {

@@ -9,7 +9,7 @@ pub(super) use stop_points::organization::StopPointOrganization;
 
 #[cfg(test)]
 use {
-    locals::apply_variable_children_page_error,
+    crate::ui::variables::apply_variable_children_page_error,
     stop_points::{breakpoint_layout_matches, breakpoint_status_text},
 };
 
@@ -44,7 +44,7 @@ pub(super) fn preserve_stack_render_details(entries: &mut [StackEntry], previous
 
         if previous.pointer_chain.is_empty()
             || previous.value != entry.value
-            || previous.pointer_bits != entry.pointer_bits
+            || previous.pointer_width != entry.pointer_width
             || previous.endian != entry.endian
             || previous.region != entry.region
         {
@@ -336,7 +336,7 @@ impl Ui {
                             display_hint: None,
                             dynamic: false,
                         },
-                        model.target_pointer_bits(),
+                        model.target_pointer_width(),
                         model.target_architecture(),
                         current_source_language.get(),
                         None,
@@ -605,7 +605,7 @@ impl Ui {
 
             let architecture = self.model.target_architecture();
             let endian = self.model.target_endian();
-            let pointer_bits = self.model.target_pointer_bits();
+            let pointer_width = self.model.target_pointer_width();
             let previous = self.model.previous_registers();
 
             let ring = registers
@@ -638,7 +638,7 @@ impl Ui {
                     },
                     architecture,
                     endian,
-                    pointer_bits,
+                    pointer_width,
                     vector_display: group
                         .vector_controls
                         .as_ref()
@@ -660,18 +660,16 @@ impl Ui {
             .clear();
 
         update_memory_container_state(&self.memory_watch_container, false);
-        self.pending_local_variable_objects.borrow_mut().clear();
-        clear_variable_change_markers(&self.locals_store);
-        clear_variable_change_markers(&self.expression_watches_store);
-        invalidate_variable_filter(&self.locals_selection);
-        let roots = self.local_variables.borrow();
+        self.locals_tree.clear_change_markers();
+        self.watches_tree.clear_change_markers();
+        let roots = self.model.locals();
         let arguments = roots.argument_count();
 
         self.locals_summary.set_text(&locals_summary_text(
             roots.len().saturating_sub(arguments),
             arguments,
             0,
-            self.locals_store.n_items() as usize,
+            self.locals_tree.store.n_items() as usize,
             roots.len(),
         ));
 
@@ -694,7 +692,7 @@ impl Ui {
         self.locals_view.set_tooltip_text(Some(tooltip));
         self.locals_summary.set_tooltip_text(Some(tooltip));
 
-        if self.locals_store.n_items() == 0 {
+        if self.locals_tree.store.n_items() == 0 {
             self.locals_empty.set_text("Loading locals and arguments…");
         }
 
@@ -1003,7 +1001,7 @@ impl Ui {
                     &watch,
                     memory,
                     &self.model.memory_regions(),
-                    self.model.target_pointer_bits(),
+                    self.model.target_pointer_width(),
                     endian,
                 );
             }
@@ -1178,6 +1176,83 @@ pub(super) fn performance_partial_label(text: &str) -> gtk::Label {
     label
 }
 
+impl Ui {
+    pub fn clear_debugger_state(&self) {
+        self.model.clear_return_value();
+        self.reset_thread_analysis();
+        self.clear_thread_action_pending();
+        self.defer_displayed_variable_object_deletions();
+        let disassembly_handler = self.disassembly_handler.borrow().clone();
+
+        if let Some(handler) = disassembly_handler {
+            handler(DisassemblyRequest::Clear);
+        }
+
+        self.start_stop_refresh();
+        self.model.start_thread_refresh();
+        self.clear_execution_location();
+        self.show_frames(&[]);
+        self.show_threads(&[]);
+        self.show_modules(&[]);
+        self.show_locals(&[]);
+        self.show_expression_watches_unavailable("<inferior exited>");
+        self.show_registers(&[]);
+        self.show_stack(&[]);
+        self.model.clear_previous_registers();
+        self.source.invalidate_io();
+        self.show_instructions(Vec::new(), "", "", None, false);
+        self.show_signal(None, None);
+        self.memory_region_store.remove_all();
+        self.model.clear_memory_regions();
+        self.memory_regions_empty.set_visible(true);
+
+        self.memory_watch_container
+            .refresh_batch
+            .borrow_mut()
+            .clear();
+
+        update_memory_container_state(&self.memory_watch_container, false);
+        self.clear_kernel_snapshot();
+        self.clear_misc_snapshot();
+
+        for watch in self.memory_watches.borrow().iter() {
+            watch.status.remove_css_class("memory-watch-error");
+            watch.status.set_text("target is not paused");
+            watch.range.set_text("");
+            watch.store.remove_all();
+            watch.selection.set_selected(gtk::INVALID_LIST_POSITION);
+            watch.follow_button.set_sensitive(false);
+            watch.previous_begin.set(None);
+            watch.previous_bytes.borrow_mut().clear();
+        }
+    }
+
+    fn defer_displayed_variable_object_deletions(&self) {
+        self.defer_variable_object_deletions(
+            self.local_variable_objects()
+                .into_iter()
+                .chain(self.expression_watch_variable_objects())
+                .filter_map(|variable| variable.varobj),
+        );
+    }
+
+    pub(crate) fn set_variable_retirement_handler(&self, retire: impl Fn(Vec<String>) + 'static) {
+        self.variable_retirement_handler
+            .replace(Some(Rc::new(retire)));
+    }
+
+    pub(crate) fn defer_variable_object_deletions(
+        &self,
+        variable_objects: impl IntoIterator<Item = String>,
+    ) {
+        let retire = self.variable_retirement_handler.borrow().clone();
+
+        if let Some(retire) = retire {
+            retire(variable_objects.into_iter().collect());
+        }
+    }
+}
+
 #[cfg(test)]
 mod render_tests {
     use super::*;
@@ -1212,7 +1287,7 @@ mod render_tests {
             address: 0x1000,
             offset: 0,
             index: 0,
-            pointer_bits: 64,
+            pointer_width: crate::debugger::PointerWidth::Bits64,
             endian: TargetEndian::Little,
             value: value.to_owned(),
             pointer_chain: chain.iter().map(|value| (*value).to_owned()).collect(),
@@ -1301,7 +1376,7 @@ mod render_tests {
             ring: None,
             architecture: TargetArchitecture::X86_64,
             endian: Some(TargetEndian::Little),
-            pointer_bits: 64,
+            pointer_width: crate::debugger::PointerWidth::Bits64,
             vector_display: VectorDisplay::default(),
         };
         let mut raw = previous.clone();
@@ -1326,7 +1401,7 @@ mod render_tests {
             match change {
                 0 => different.register.value = String::from("0x2008"),
                 1 => different.register.name = String::from("rbx"),
-                2 => different.pointer_bits = 32,
+                2 => different.pointer_width = crate::debugger::PointerWidth::Bits32,
                 3 => different.endian = Some(TargetEndian::Big),
                 _ => different.architecture = TargetArchitecture::AArch64,
             }

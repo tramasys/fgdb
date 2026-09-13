@@ -1,3 +1,4 @@
+use crate::debugger::PointerWidth;
 use crate::debugger::{TargetArchitecture, ValueTypeKind, ValueTypeMetadata, Variable};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,7 +101,7 @@ pub(super) fn format_float_value(
     representation: FloatRepresentation,
 ) -> String {
     if representation == FloatRepresentation::RawBits {
-        return format!("0x{}", encode_hex(raw_bytes));
+        return format!("0x{}", crate::hex::encode(raw_bytes));
     }
 
     match bits {
@@ -356,19 +357,6 @@ fn format_hex_float(
     format!("{sign}0x{leading}.{fraction}p{power:+}")
 }
 
-fn encode_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-
-    bytes.iter().fold(
-        String::with_capacity(bytes.len() * 2),
-        |mut output, byte| {
-            let _ = write!(output, "{byte:02x}");
-
-            output
-        },
-    )
-}
-
 impl IntegerRadix {
     pub(super) const ALL: [Self; 4] = [Self::Hexadecimal, Self::Decimal, Self::Binary, Self::Octal];
 
@@ -423,7 +411,7 @@ impl IntegerRadix {
 
 pub(super) fn variable_integer_format(
     variable: &Variable,
-    target_pointer_bits: u32,
+    target_pointer_width: PointerWidth,
     metadata: Option<&ValueTypeMetadata>,
 ) -> Option<IntegerFormat> {
     let type_name = variable.type_name.as_deref()?.trim().to_ascii_lowercase();
@@ -438,7 +426,7 @@ pub(super) fn variable_integer_format(
         return None;
     }
 
-    target_integer_format(metadata).or_else(|| integer_format(&type_name, target_pointer_bits))
+    target_integer_format(metadata).or_else(|| integer_format(&type_name, target_pointer_width))
 }
 
 pub(super) fn variable_boolean_value(
@@ -495,7 +483,7 @@ fn parse_boolean_integer(value: &str) -> Option<u128> {
 
 pub(super) fn variable_character_format(
     variable: &Variable,
-    target_pointer_bits: u32,
+    target_pointer_width: PointerWidth,
     source_language: crate::language::Language,
     metadata: Option<&ValueTypeMetadata>,
 ) -> Option<IntegerFormat> {
@@ -527,7 +515,7 @@ pub(super) fn variable_character_format(
         final_component,
         "c_char" | "c_schar" | "c_uchar" | "char8_t" | "char16_t" | "char32_t" | "wchar_t"
     ) {
-        target_integer_format(metadata).or_else(|| integer_format(&type_name, target_pointer_bits))
+        target_integer_format(metadata).or_else(|| integer_format(&type_name, target_pointer_width))
     } else if metadata.is_some_and(|metadata| metadata.kind == ValueTypeKind::Character) {
         target_integer_format(metadata)
     } else {
@@ -550,7 +538,7 @@ fn target_integer_format(metadata: Option<&ValueTypeMetadata>) -> Option<Integer
 
 pub(super) fn register_integer_format(
     register_expression: &str,
-    target_pointer_bits: u32,
+    target_pointer_width: PointerWidth,
     architecture: TargetArchitecture,
 ) -> Option<IntegerFormat> {
     let name = register_expression.strip_prefix('$')?;
@@ -563,7 +551,7 @@ pub(super) fn register_integer_format(
         return None;
     }
 
-    let bits = architecture.scalar_register_bits(name, target_pointer_bits);
+    let bits = architecture.scalar_register_bits(name, target_pointer_width);
 
     Some(IntegerFormat::unsigned(bits))
 }
@@ -1029,7 +1017,7 @@ fn decode_gdb_string(value: &str) -> Option<Vec<u8>> {
 pub(super) fn integer_decimal_value(
     variable: &Variable,
     value: &str,
-    target_pointer_bits: u32,
+    target_pointer_width: PointerWidth,
 ) -> Option<String> {
     let type_name = variable.type_name.as_deref()?.trim().to_ascii_lowercase();
     if variable.is_pointer()
@@ -1041,7 +1029,7 @@ pub(super) fn integer_decimal_value(
         return None;
     }
 
-    let format = integer_format(&type_name, target_pointer_bits)?;
+    let format = integer_format(&type_name, target_pointer_width)?;
     let value = value.trim();
     let (negative, magnitude) = value
         .strip_prefix('-')
@@ -1096,7 +1084,7 @@ pub(super) fn integer_decimal_value(
 pub(super) fn formatted_integer(
     variable: &Variable,
     value: &str,
-    target_pointer_bits: u32,
+    target_pointer_width: PointerWidth,
     display: crate::config::settings::IntegerDisplay,
 ) -> Option<String> {
     use crate::config::settings::IntegerDisplay;
@@ -1107,7 +1095,7 @@ pub(super) fn formatted_integer(
         return None;
     }
 
-    let format = variable_integer_format(variable, target_pointer_bits, None)?;
+    let format = variable_integer_format(variable, target_pointer_width, None)?;
     let raw = parse_integer_input(value, format, IntegerRadix::Decimal).ok()?;
 
     match display {
@@ -1121,11 +1109,7 @@ pub(super) fn formatted_integer(
     }
 }
 
-fn integer_format(type_name: &str, target_pointer_bits: u32) -> Option<IntegerFormat> {
-    let target_pointer_bits = match target_pointer_bits {
-        16 | 32 | 64 | 128 => target_pointer_bits,
-        _ => 64,
-    };
+fn integer_format(type_name: &str, target_pointer_width: PointerWidth) -> Option<IntegerFormat> {
     let final_component = type_name.rsplit("::").next().unwrap_or(type_name);
     let unqualified = final_component
         .split_whitespace()
@@ -1150,8 +1134,8 @@ fn integer_format(type_name: &str, target_pointer_bits: u32) -> Option<IntegerFo
         "u64" => Some(IntegerFormat::unsigned(64)),
         "i128" => Some(IntegerFormat::signed(128)),
         "u128" => Some(IntegerFormat::unsigned(128)),
-        "isize" => Some(IntegerFormat::signed(target_pointer_bits)),
-        "usize" => Some(IntegerFormat::unsigned(target_pointer_bits)),
+        "isize" => Some(IntegerFormat::signed(target_pointer_width.bits())),
+        "usize" => Some(IntegerFormat::unsigned(target_pointer_width.bits())),
         "bool" | "_bool" => Some(IntegerFormat::unsigned(8)),
         "char8_t" => Some(IntegerFormat::unsigned(8)),
         "char16_t" => Some(IntegerFormat::unsigned(16)),
@@ -1166,10 +1150,10 @@ fn integer_format(type_name: &str, target_pointer_bits: u32) -> Option<IntegerFo
         "int" | "signed" | "signed int" | "c_int" => Some(IntegerFormat::signed(32)),
         "unsigned" | "unsigned int" | "c_uint" => Some(IntegerFormat::unsigned(32)),
         "long" | "long int" | "signed long" | "signed long int" | "c_long" => {
-            Some(IntegerFormat::signed(target_pointer_bits))
+            Some(IntegerFormat::signed(target_pointer_width.bits()))
         }
         "unsigned long" | "unsigned long int" | "c_ulong" => {
-            Some(IntegerFormat::unsigned(target_pointer_bits))
+            Some(IntegerFormat::unsigned(target_pointer_width.bits()))
         }
 
         "long long"
@@ -1183,10 +1167,10 @@ fn integer_format(type_name: &str, target_pointer_bits: u32) -> Option<IntegerFo
         _ => None,
     };
     primitive
-        .or_else(|| c_builtin_integer_format(&unqualified, target_pointer_bits))
-        .or_else(|| fixed_width_integer_format(&compact, target_pointer_bits))
+        .or_else(|| c_builtin_integer_format(&unqualified, target_pointer_width))
+        .or_else(|| fixed_width_integer_format(&compact, target_pointer_width))
         .or_else(|| c_bit_int_format(type_name))
-        .or_else(|| c_integer_typedef_format(&compact, target_pointer_bits))
+        .or_else(|| c_integer_typedef_format(&compact, target_pointer_width))
         .or_else(|| {
             if compact.contains("unsignedint128") {
                 Some(IntegerFormat::unsigned(128))
@@ -1198,7 +1182,10 @@ fn integer_format(type_name: &str, target_pointer_bits: u32) -> Option<IntegerFo
         })
 }
 
-fn fixed_width_integer_format(name: &str, target_pointer_bits: u32) -> Option<IntegerFormat> {
+fn fixed_width_integer_format(
+    name: &str,
+    target_pointer_width: PointerWidth,
+) -> Option<IntegerFormat> {
     let name = name.trim_start_matches('_');
     let (forced_signedness, name) = if let Some(name) = name.strip_prefix("unsigned") {
         (Some(false), name)
@@ -1223,7 +1210,7 @@ fn fixed_width_integer_format(name: &str, target_pointer_bits: u32) -> Option<In
     }
 
     let bits = if fast && bits != 8 {
-        bits.max(target_pointer_bits)
+        bits.max(target_pointer_width.bits())
     } else {
         bits
     };
@@ -1235,7 +1222,10 @@ fn fixed_width_integer_format(name: &str, target_pointer_bits: u32) -> Option<In
     })
 }
 
-fn c_builtin_integer_format(name: &str, target_pointer_bits: u32) -> Option<IntegerFormat> {
+fn c_builtin_integer_format(
+    name: &str,
+    target_pointer_width: PointerWidth,
+) -> Option<IntegerFormat> {
     let words = name.split_whitespace().collect::<Vec<_>>();
     if words.is_empty()
         || words.iter().any(|word| {
@@ -1257,7 +1247,7 @@ fn c_builtin_integer_format(name: &str, target_pointer_bits: u32) -> Option<Inte
     } else if words.iter().filter(|word| **word == "long").count() >= 2 {
         64
     } else if words.contains(&"long") {
-        target_pointer_bits
+        target_pointer_width.bits()
     } else {
         32
     };
@@ -1285,14 +1275,21 @@ fn c_bit_int_format(type_name: &str) -> Option<IntegerFormat> {
     })
 }
 
-fn c_integer_typedef_format(name: &str, target_pointer_bits: u32) -> Option<IntegerFormat> {
+fn c_integer_typedef_format(
+    name: &str,
+    target_pointer_width: PointerWidth,
+) -> Option<IntegerFormat> {
     match name.trim_start_matches('_') {
-        "sizet" | "rsizet" | "uintptrt" => Some(IntegerFormat::unsigned(target_pointer_bits)),
-        "ssizet" | "ptrdifft" | "intptrt" => Some(IntegerFormat::signed(target_pointer_bits)),
+        "sizet" | "rsizet" | "uintptrt" => {
+            Some(IntegerFormat::unsigned(target_pointer_width.bits()))
+        }
+        "ssizet" | "ptrdifft" | "intptrt" => {
+            Some(IntegerFormat::signed(target_pointer_width.bits()))
+        }
         "intmaxt" => Some(IntegerFormat::signed(64)),
         "uintmaxt" => Some(IntegerFormat::unsigned(64)),
         "sigatomict" | "pidt" => Some(IntegerFormat::signed(32)),
-        "clockt" => Some(IntegerFormat::signed(target_pointer_bits)),
+        "clockt" => Some(IntegerFormat::signed(target_pointer_width.bits())),
         "wintt" | "uidt" | "gidt" | "modet" | "socklent" => Some(IntegerFormat::unsigned(32)),
         // time_t/off_t/dev_t/ino_t/nlink_t vary across Linux time64, LFS and
         // libc ABIs. GDB type metadata is authoritative. Do not guess here.
@@ -1442,7 +1439,11 @@ mod float_tests {
             enum_variants: Vec::new(),
         };
         assert_eq!(
-            variable_integer_format(&variable, 64, Some(&metadata)),
+            variable_integer_format(
+                &variable,
+                crate::debugger::PointerWidth::Bits64,
+                Some(&metadata)
+            ),
             Some(IntegerFormat::signed(32))
         );
     }
@@ -1493,6 +1494,7 @@ mod float_tests {
                 "0x80000000000000000000000000000000",
             ),
         ] {
+            let bits = PointerWidth::try_from(bits).unwrap();
             variable.type_name = Some(ty.into());
             assert_eq!(
                 formatted_integer(&variable, input, bits, IntegerDisplay::Decimal).as_deref(),
@@ -1524,7 +1526,12 @@ mod float_tests {
         ] {
             variable.type_name = Some(ty.into());
             assert_eq!(
-                formatted_integer(&variable, input, 64, IntegerDisplay::Decimal),
+                formatted_integer(
+                    &variable,
+                    input,
+                    crate::debugger::PointerWidth::Bits64,
+                    IntegerDisplay::Decimal
+                ),
                 None,
                 "{ty}: {input}"
             );
@@ -1533,13 +1540,23 @@ mod float_tests {
         variable.type_name = Some("int".into());
         variable.dynamic = true;
         assert_eq!(
-            formatted_integer(&variable, "42", 64, IntegerDisplay::Both),
+            formatted_integer(
+                &variable,
+                "42",
+                crate::debugger::PointerWidth::Bits64,
+                IntegerDisplay::Both
+            ),
             None
         );
         variable.dynamic = false;
         variable.display_hint = Some("string".into());
         assert_eq!(
-            formatted_integer(&variable, "42", 64, IntegerDisplay::Both),
+            formatted_integer(
+                &variable,
+                "42",
+                crate::debugger::PointerWidth::Bits64,
+                IntegerDisplay::Both
+            ),
             None
         );
 
@@ -1549,7 +1566,7 @@ mod float_tests {
                 &variable,
                 "0x2a",
                 "",
-                64,
+                crate::debugger::PointerWidth::Bits64,
                 IntegerDisplay::Automatic
             ),
             "0x2a  (42)"
@@ -1559,7 +1576,7 @@ mod float_tests {
                 &variable,
                 "0x2a",
                 "'x'",
-                64,
+                crate::debugger::PointerWidth::Bits64,
                 IntegerDisplay::Decimal
             ),
             "0x2a  'x'"

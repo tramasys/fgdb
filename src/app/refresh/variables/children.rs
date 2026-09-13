@@ -116,7 +116,7 @@ impl ChildrenRequest {
             .unscoped(&command)
             .when(move || guard.is_current())
             .with_print_limit(to, move |client, record| {
-                if record.class == "superseded" || !response.is_current() {
+                if record.is_superseded() || !response.is_current() {
                     response.cancel();
                     return;
                 }
@@ -183,7 +183,7 @@ impl ChildrenRequest {
             .unscoped(&command)
             .when(move || guard.is_current())
             .request(move |_, record| {
-                if record.class == "superseded" || !response.is_current() {
+                if record.is_superseded() || !response.is_current() {
                     response.cancel();
                     return;
                 }
@@ -219,7 +219,7 @@ impl ChildrenRequest {
             .frame(&command)
             .when(move || guard.is_current())
             .with_print_limit(AUTOMATIC_PRINT_ELEMENTS, move |client, record| {
-                if record.class == "superseded" || !response.is_current() {
+                if record.is_superseded() || !response.is_current() {
                     delete_variable_object(client, &varobj);
                     response.cancel();
                     return;

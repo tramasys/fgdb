@@ -1478,40 +1478,12 @@ fn misc_column<T: 'static>(
     width: i32,
     value: impl Fn(&T) -> String + Copy + 'static,
 ) -> gtk::ColumnViewColumn {
-    let factory = gtk::SignalListItemFactory::new();
-
-    factory.connect_setup(|_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-
-        let label = gtk::Label::new(None);
-        label.add_css_class("debug-table-cell");
-        label.set_halign(gtk::Align::Start);
-        label.set_ellipsize(pango::EllipsizeMode::Middle);
-        enable_stable_text_selection(&label);
-        item.set_child(Some(&label));
-    });
-
-    factory.connect_bind(move |_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-
-        let (Some(label), Some(data)) = (
-            item.child().and_downcast::<gtk::Label>(),
-            item.item().and_downcast::<glib::BoxedAnyObject>(),
-        ) else {
-            return;
-        };
-
-        clear_label_selection(&label);
+    label_column(title, width, move |data, label| {
+        clear_label_selection(label);
         let text = value(&data.borrow::<T>());
         label.set_text(&text);
         label.set_tooltip_text(Some(&text));
-    });
-
-    components::table_column(title, width, factory)
+    })
 }
 
 fn build_startup_summary() -> (gtk::Grid, MiscStartupSummary) {
@@ -1572,21 +1544,27 @@ fn set_startup_summary_value(label: &gtk::Label, value: &str) {
     label.set_tooltip_text(Some(value));
 }
 
-fn build_arguments_section(
-    columns: &ColumnLayouts,
+fn build_vector_section<T: 'static>(
+    title: &str,
+    empty_text: &str,
     query: Rc<RefCell<String>>,
-) -> (gtk::Box, gio::ListStore, gtk::Label, gtk::CustomFilter) {
+    matches: impl Fn(&T, &str) -> bool + 'static,
+) -> (
+    gtk::Box,
+    gio::ListStore,
+    gtk::Label,
+    gtk::CustomFilter,
+    gtk::ColumnView,
+) {
     let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
     section.add_css_class("misc-vector-section");
-    section.append(&section_title("ARGV"));
+    section.append(&section_title(title));
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
 
     let filter = gtk::CustomFilter::new(move |object| {
-        let Some(data) = object.downcast_ref::<glib::BoxedAnyObject>() else {
-            return false;
-        };
-
-        argument_matches(&data.borrow::<ProcessArgument>(), &query.borrow())
+        object
+            .downcast_ref::<glib::BoxedAnyObject>()
+            .is_some_and(|data| matches(&data.borrow::<T>(), &query.borrow()))
     });
 
     let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
@@ -1598,13 +1576,44 @@ fn build_arguments_section(
     view.add_css_class("misc-vector-table");
     view.set_vexpand(true);
     view.set_reorderable(true);
+    let empty = empty_label(empty_text);
+    let empty_for_filter = empty.clone();
+
+    filtered.connect_items_changed(move |model, _, _, _| {
+        empty_for_filter.set_visible(model.n_items() == 0);
+    });
+
+    let scrolled = gtk::ScrolledWindow::builder()
+        .child(&view)
+        .vexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .overlay_scrolling(false)
+        .build();
+
+    configure_misc_scroller(&scrolled);
+    section.append(&empty);
+    section.append(&scrolled);
+
+    (section, store, empty, filter, view)
+}
+
+fn build_arguments_section(
+    columns: &ColumnLayouts,
+    query: Rc<RefCell<String>>,
+) -> (gtk::Box, gio::ListStore, gtk::Label, gtk::CustomFilter) {
+    let (section, store, empty, filter, view) = build_vector_section(
+        "ARGV",
+        "No argument entries are available",
+        query,
+        argument_matches,
+    );
 
     let layout = columns.table(TableId::Arguments);
 
     layout.append(
         &view,
         "entry",
-        &argument_column("ENTRY", 100, |row, label| {
+        &vector_column::<ProcessArgument>("ENTRY", 100, |row, label| {
             label.set_text(&argument_label(row.index));
             label.add_css_class("misc-vector-name");
         }),
@@ -1613,7 +1622,7 @@ fn build_arguments_section(
     layout.append(
         &view,
         "address",
-        &argument_column("ADDRESS", 180, |row, label| {
+        &vector_column::<ProcessArgument>("ADDRESS", 180, |row, label| {
             label.set_text(&format_address(row.address));
             label.add_css_class("kernel-numeric");
         }),
@@ -1622,7 +1631,7 @@ fn build_arguments_section(
     layout.append(
         &view,
         "bytes",
-        &argument_column("BYTES", 70, |row, label| {
+        &vector_column::<ProcessArgument>("BYTES", 70, |row, label| {
             label.set_text(&row.byte_len.to_string());
         }),
     );
@@ -1630,28 +1639,10 @@ fn build_arguments_section(
     layout.append(
         &view,
         "value",
-        &argument_column("VALUE", 420, |row, label| {
+        &vector_column::<ProcessArgument>("VALUE", 420, |row, label| {
             label.set_text(&row.value);
         }),
     );
-
-    let empty = empty_label("No argument entries are available");
-    let empty_for_filter = empty.clone();
-
-    filtered.connect_items_changed(move |model, _, _, _| {
-        empty_for_filter.set_visible(model.n_items() == 0);
-    });
-
-    let scrolled = gtk::ScrolledWindow::builder()
-        .child(&view)
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Automatic)
-        .overlay_scrolling(false)
-        .build();
-
-    configure_misc_scroller(&scrolled);
-    section.append(&empty);
-    section.append(&scrolled);
 
     (section, store, empty, filter)
 }
@@ -1660,35 +1651,19 @@ fn build_environment_section(
     columns: &ColumnLayouts,
     query: Rc<RefCell<String>>,
 ) -> (gtk::Box, gio::ListStore, gtk::Label, gtk::CustomFilter) {
-    let section = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    section.add_css_class("misc-vector-section");
-    section.append(&section_title("ENVP / ENV"));
-    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-
-    let filter = gtk::CustomFilter::new(move |object| {
-        let Some(data) = object.downcast_ref::<glib::BoxedAnyObject>() else {
-            return false;
-        };
-
-        environment_matches(&data.borrow::<ProcessEnvironment>(), &query.borrow())
-    });
-
-    let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
-    let selection = gtk::SingleSelection::new(Some(filtered.clone()));
-    selection.set_autoselect(false);
-    selection.set_can_unselect(true);
-    let view = components::column_view(selection);
-    view.add_css_class("debug-table");
-    view.add_css_class("misc-vector-table");
-    view.set_vexpand(true);
-    view.set_reorderable(true);
+    let (section, store, empty, filter, view) = build_vector_section(
+        "ENVP / ENV",
+        "No env entries are available",
+        query,
+        environment_matches,
+    );
 
     let layout = columns.table(TableId::Environment);
 
     layout.append(
         &view,
         "entry",
-        &environment_column("ENTRY", 100, |row, label| {
+        &vector_column::<ProcessEnvironment>("ENTRY", 100, |row, label| {
             label.set_text(&format!("envp[{}]", row.index));
         }),
     );
@@ -1696,7 +1671,7 @@ fn build_environment_section(
     layout.append(
         &view,
         "address",
-        &environment_column("ADDRESS", 180, |row, label| {
+        &vector_column::<ProcessEnvironment>("ADDRESS", 180, |row, label| {
             label.set_text(&format_address(row.address));
             label.add_css_class("kernel-numeric");
         }),
@@ -1705,7 +1680,7 @@ fn build_environment_section(
     layout.append(
         &view,
         "bytes",
-        &environment_column("BYTES", 70, |row, label| {
+        &vector_column::<ProcessEnvironment>("BYTES", 70, |row, label| {
             label.set_text(&row.byte_len.to_string());
         }),
     );
@@ -1713,7 +1688,7 @@ fn build_environment_section(
     layout.append(
         &view,
         "name",
-        &environment_column("NAME", 210, |row, label| {
+        &vector_column::<ProcessEnvironment>("NAME", 210, |row, label| {
             label.set_text(&row.name);
             label.add_css_class("misc-vector-name");
         }),
@@ -1722,28 +1697,10 @@ fn build_environment_section(
     layout.append(
         &view,
         "value",
-        &environment_column("VALUE", 420, |row, label| {
+        &vector_column::<ProcessEnvironment>("VALUE", 420, |row, label| {
             label.set_text(&row.value);
         }),
     );
-
-    let empty = empty_label("No env entries are available");
-    let empty_for_filter = empty.clone();
-
-    filtered.connect_items_changed(move |model, _, _, _| {
-        empty_for_filter.set_visible(model.n_items() == 0);
-    });
-
-    let scrolled = gtk::ScrolledWindow::builder()
-        .child(&view)
-        .vexpand(true)
-        .hscrollbar_policy(gtk::PolicyType::Automatic)
-        .overlay_scrolling(false)
-        .build();
-
-    configure_misc_scroller(&scrolled);
-    section.append(&empty);
-    section.append(&scrolled);
 
     (section, store, empty, filter)
 }
@@ -1777,27 +1734,21 @@ fn environment_matches(entry: &ProcessEnvironment, query: &str) -> bool {
             .is_some_and(|address| format!("0x{address:x}").contains(query))
 }
 
-fn argument_column(
+fn vector_column<T: 'static>(
     title: &str,
     width: i32,
-    bind: impl Fn(&ProcessArgument, &gtk::Label) + Copy + 'static,
+    bind: impl Fn(&T, &gtk::Label) + Copy + 'static,
 ) -> gtk::ColumnViewColumn {
-    vector_column(title, width, move |data, label| {
-        bind(&data.borrow::<ProcessArgument>(), label);
+    label_column(title, width, move |data, label| {
+        label.remove_css_class("misc-vector-name");
+        label.remove_css_class("kernel-numeric");
+        clear_label_selection(label);
+        bind(&data.borrow::<T>(), label);
+        label.set_tooltip_text(Some(&label.text()));
     })
 }
 
-fn environment_column(
-    title: &str,
-    width: i32,
-    bind: impl Fn(&ProcessEnvironment, &gtk::Label) + Copy + 'static,
-) -> gtk::ColumnViewColumn {
-    vector_column(title, width, move |data, label| {
-        bind(&data.borrow::<ProcessEnvironment>(), label);
-    })
-}
-
-fn vector_column(
+fn label_column(
     title: &str,
     width: i32,
     bind: impl Fn(&glib::BoxedAnyObject, &gtk::Label) + Copy + 'static,
@@ -1829,11 +1780,7 @@ fn vector_column(
             return;
         };
 
-        label.remove_css_class("misc-vector-name");
-        label.remove_css_class("kernel-numeric");
-        clear_label_selection(&label);
         bind(&data, &label);
-        label.set_tooltip_text(Some(&label.text()));
     });
 
     components::table_column(title, width, factory)
@@ -1852,43 +1799,6 @@ fn format_range(range: Option<(u64, u64)>) -> String {
         || String::from("range unavailable"),
         |(start, end)| format!("0x{start:016x}-0x{end:016x}"),
     )
-}
-
-fn linux_signal_name(signal: i32) -> &'static str {
-    match signal {
-        1 => "SIGHUP",
-        2 => "SIGINT",
-        3 => "SIGQUIT",
-        4 => "SIGILL",
-        5 => "SIGTRAP",
-        6 => "SIGABRT",
-        7 => "SIGBUS",
-        8 => "SIGFPE",
-        9 => "SIGKILL",
-        10 => "SIGUSR1",
-        11 => "SIGSEGV",
-        12 => "SIGUSR2",
-        13 => "SIGPIPE",
-        14 => "SIGALRM",
-        15 => "SIGTERM",
-        16 => "SIGSTKFLT",
-        17 => "SIGCHLD",
-        18 => "SIGCONT",
-        19 => "SIGSTOP",
-        20 => "SIGTSTP",
-        21 => "SIGTTIN",
-        22 => "SIGTTOU",
-        23 => "SIGURG",
-        24 => "SIGXCPU",
-        25 => "SIGXFSZ",
-        26 => "SIGVTALRM",
-        27 => "SIGPROF",
-        28 => "SIGWINCH",
-        29 => "SIGIO",
-        30 => "SIGPWR",
-        31 => "SIGSYS",
-        _ => "signal",
-    }
 }
 
 pub(super) fn connect_misc_tab_visibility(
@@ -2183,7 +2093,7 @@ impl MiscView {
 
         self.call_abi_summary.set_text(&format!(
             "{}  {}  {}-bit pointers  {current}",
-            snapshot.architecture, snapshot.calling_convention, snapshot.pointer_bits
+            snapshot.architecture, snapshot.calling_convention, snapshot.pointer_width
         ));
 
         replace_boxed_store_if_changed(&self.call_abi_contract_store, snapshot.contract);
@@ -2226,7 +2136,10 @@ impl MiscView {
                     .fault_address
                     .map_or_else(String::new, |address| format!(" at 0x{address:016x}"));
 
-                format!("{} ({signal}){code}{address}", linux_signal_name(signal))
+                format!(
+                    "{} ({signal}){code}{address}",
+                    crate::kernel::standard_signal_name(signal).unwrap_or("signal")
+                )
             },
         );
 
@@ -2607,7 +2520,7 @@ impl Ui {
 
         self.misc_view.show_call_abi(crate::misc::call_abi_snapshot(
             self.model.target_architecture(),
-            self.model.target_pointer_bits(),
+            self.model.target_pointer_width(),
             self.model.selected_frame_level(),
             frames,
         ));
@@ -2637,7 +2550,7 @@ impl Ui {
 
         let registers = self.model.registers();
         let mut transfer = crate::misc::call_abi_transfer(architecture, phase, &registers);
-        let address = full_address(&context.current.address, self.model.target_pointer_bits());
+        let address = full_address(&context.current.address, self.model.target_pointer_width());
         transfer.context = format!("{}  instruction {address}", transfer.context);
         let transfer_context = transfer.context.clone();
         self.misc_view.show_call_abi_transfer(transfer);
@@ -2812,5 +2725,96 @@ fn replace_call_abi_phase_target(phase: &mut CallAbiPhase, resolution: &CallAbiT
 
     if target.as_deref() == Some(resolution.expression.as_str()) {
         *target = Some(resolution.display.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::tests::descendants;
+
+    #[test]
+    #[ignore = "requires a GTK display, run separately from other GTK tests"]
+    fn startup_tables_preserve_filter_selection_and_cell_presentation() {
+        gtk::init().unwrap();
+        let columns = ColumnLayouts::default();
+        let query = Rc::new(RefCell::new(String::new()));
+        let arguments = build_arguments_section(&columns, Rc::clone(&query));
+        let environment = build_environment_section(&columns, Rc::clone(&query));
+
+        arguments
+            .1
+            .append(&glib::BoxedAnyObject::new(ProcessArgument {
+                index: 0,
+                address: Some(0x1000),
+                byte_len: 6,
+                value: "needle".into(),
+            }));
+
+        environment
+            .1
+            .append(&glib::BoxedAnyObject::new(ProcessEnvironment {
+                index: 0,
+                address: Some(0x2000),
+                byte_len: 11,
+                name: "MODE".into(),
+                value: "needle".into(),
+            }));
+
+        let (plain, store, _, view) = build_misc_table("empty");
+        view.append_column(&misc_column("VALUE", 200, |value: &String| value.clone()));
+        store.append(&glib::BoxedAnyObject::new(String::from("plain")));
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        content.append(&arguments.0);
+        content.append(&environment.0);
+        content.append(&plain);
+        let window = gtk::Window::builder()
+            .child(&content)
+            .default_width(1200)
+            .default_height(800)
+            .build();
+        window.present();
+        glib::MainContext::default().block_on(glib::timeout_future(Duration::from_millis(100)));
+
+        for ((section, _, empty, filter), name, address) in [
+            (arguments, "argv[0]", "0x0000000000001000"),
+            (environment, "MODE", "0x0000000000002000"),
+        ] {
+            query.replace(String::new());
+            let table = descendants::<gtk::ColumnView>(&section).remove(0);
+            let selection = table
+                .model()
+                .and_downcast::<gtk::SingleSelection>()
+                .unwrap();
+            let labels = descendants::<gtk::Label>(&table);
+            assert!(!empty.is_visible());
+            assert_eq!(selection.selected(), gtk::INVALID_LIST_POSITION);
+            assert!(
+                labels
+                    .iter()
+                    .any(|label| label.text() == name && label.has_css_class("misc-vector-name"))
+            );
+
+            assert!(labels.iter().any(|label| label.text() == address
+                && label.has_css_class("kernel-numeric")
+                && label.tooltip_text().as_deref() == Some(address)));
+            selection.set_selected(0);
+            query.replace("absent".into());
+            filter.changed(gtk::FilterChange::Different);
+            assert!(empty.is_visible());
+            assert_eq!(selection.n_items(), 0);
+            assert_eq!(selection.selected(), gtk::INVALID_LIST_POSITION);
+            query.replace("needle".into());
+            filter.changed(gtk::FilterChange::Different);
+            assert!(!empty.is_visible());
+            assert_eq!(selection.n_items(), 1);
+            assert_eq!(selection.selected(), gtk::INVALID_LIST_POSITION);
+        }
+
+        assert!(descendants::<gtk::Label>(&view).iter().any(
+            |label| label.text() == "plain" && label.tooltip_text().as_deref() == Some("plain")
+        ));
+
+        window.close();
     }
 }

@@ -12,7 +12,7 @@ pub(super) use heap::request_heap_inspection;
 fn allocator_python_expression(script: &str) -> String {
     format!(
         "python exec(bytes.fromhex(\"{}\").decode(), {{}})",
-        super::type_metadata::hex(script.as_bytes())
+        crate::hex::encode(script.as_bytes())
     )
 }
 

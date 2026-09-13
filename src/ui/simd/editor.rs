@@ -474,7 +474,7 @@ mod tests {
                 ring: None,
                 architecture: TargetArchitecture::X86_64,
                 endian: Some(TargetEndian::Little),
-                pointer_bits: 64,
+                pointer_width: crate::debugger::PointerWidth::Bits64,
                 vector_display: VectorDisplay::default(),
             })
             .collect::<Vec<_>>();

@@ -49,8 +49,7 @@ pub(super) fn request_value_type_metadata(
                 .is_some_and(|ui| ui.variable_editor_request_is_current(request))
         })
         .request(move |_, record| {
-            if record.class == "superseded" || !editor_request_is_current(&ui_for_response, request)
-            {
+            if record.is_superseded() || !editor_request_is_current(&ui_for_response, request) {
                 return;
             }
 
@@ -128,7 +127,7 @@ pub(super) fn assign_float_bytes(
     if requests
         .unscoped(&command)
         .request(move |_, record| {
-            if record.class == "superseded" {
+            if record.is_superseded() {
                 return;
             }
 
@@ -175,12 +174,12 @@ assert v.address is not None, "value has no writable memory address"
 little="little endian" in gdb.execute("show endian",to_string=True).lower()
 gdb.selected_inferior().write_memory(v.address,b[::-1] if little else b)"#,
         value_python(&expression, members.as_deref()),
-        hex(&raw_bytes),
+        crate::hex::encode(&raw_bytes),
     );
 
     let command = crate::debugger::console_command(&format!(
         "python exec(bytes.fromhex(\"{}\").decode())",
-        hex(python.as_bytes())
+        crate::hex::encode(python.as_bytes())
     ));
 
     let ui_for_response = ui.clone();
@@ -198,7 +197,7 @@ gdb.selected_inferior().write_memory(v.address,b[::-1] if little else b)"#,
             );
 
             refresh_stopped_state(&ui_for_response, client);
-        } else if record.class != "superseded" {
+        } else if !record.is_superseded() {
             ui.set_status(
                 "Assignment failed",
                 record.error_message().unwrap_or(
@@ -234,7 +233,7 @@ fn request_resolved_metadata(
 
     let command = crate::debugger::console_command(&format!(
         "python exec(bytes.fromhex(\"{}\").decode(), {{}})",
-        hex(python.as_bytes())
+        crate::hex::encode(python.as_bytes())
     ));
 
     let ui_for_response = ui.clone();
@@ -245,7 +244,7 @@ fn request_resolved_metadata(
         .frame(&command)
         .when(move || editor_request_is_current(&ui_for_guard, request))
         .capture(move |_, record, output| {
-            if record.class == "superseded" {
+            if record.is_superseded() {
                 return;
             }
 
@@ -411,19 +410,6 @@ pub(super) fn parse_metadata_output(output: &str) -> Option<ValueTypeMetadata> {
     records.next().is_none().then_some(metadata)
 }
 
-pub(super) fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-
-    bytes.iter().fold(
-        String::with_capacity(bytes.len() * 2),
-        |mut output, byte| {
-            let _ = write!(output, "{byte:02x}");
-
-            output
-        },
-    )
-}
-
 pub(super) fn decode_hex(value: &str) -> Option<Vec<u8>> {
     if !value.len().is_multiple_of(2) {
         return None;
@@ -475,7 +461,7 @@ mod tests {
             .map(|index| {
                 format!(
                     "{}={index}",
-                    hex(format!("Mode::Variant{index}").as_bytes())
+                    crate::hex::encode(format!("Mode::Variant{index}").as_bytes())
                 )
             })
             .collect::<Vec<_>>()

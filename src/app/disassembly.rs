@@ -342,7 +342,7 @@ impl DisassemblyController {
                     .is_some_and(|controller| controller.generation.get() == generation)
             })
             .request(move |_, record| {
-                if record.class == "superseded" || controller.generation.get() != generation {
+                if record.is_superseded() || controller.generation.get() != generation {
                     return;
                 }
 
@@ -436,7 +436,7 @@ impl DisassemblyController {
                     .is_some_and(|controller| controller.generation.get() == generation)
             })
             .request(move |_, record| {
-                if record.class == "superseded" || controller.generation.get() != generation {
+                if record.is_superseded() || controller.generation.get() != generation {
                     return;
                 }
 
@@ -507,7 +507,7 @@ impl DisassemblyController {
         });
 
         let response = move |_: &MiClient, record: MiRecord| {
-            if record.class == "superseded" || controller.generation.get() != generation {
+            if record.is_superseded() || controller.generation.get() != generation {
                 return;
             }
 
@@ -591,7 +591,7 @@ impl DisassemblyController {
         });
 
         let response = move |_: &MiClient, record: MiRecord| {
-            if record.class == "superseded" || controller.generation.get() != generation {
+            if record.is_superseded() || controller.generation.get() != generation {
                 return;
             }
 
@@ -704,7 +704,7 @@ impl DisassemblyController {
         if requests
             .frame(&command)
             .request(move |_, record| {
-                if record.class == "superseded" {
+                if record.is_superseded() {
                     return;
                 }
 

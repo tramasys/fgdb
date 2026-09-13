@@ -57,7 +57,7 @@ impl Ui {
         &self,
         read: impl FnOnce(&[Breakpoint]) -> T,
     ) -> T {
-        let refresh = self.source_breakpoint_refresh.borrow();
+        let refresh = self.source.breakpoint_refresh.borrow();
         let rendered = self.breakpoints.borrow();
 
         let breakpoints = refresh
@@ -83,8 +83,8 @@ impl Ui {
         breakpoints: Vec<Breakpoint>,
         force: bool,
     ) {
-        let sources = self.source_index_snapshot();
-        let mut state = self.source_breakpoint_refresh.borrow_mut();
+        let sources = self.source.index_snapshot();
+        let mut state = self.source.breakpoint_refresh.borrow_mut();
 
         if !force
             && let Some(pending) = state.pending.as_mut()
@@ -118,7 +118,7 @@ impl Ui {
             state.published_sources = sources;
             drop(state);
             if !has_source_locations {
-                self.source_breakpoint_index.replace(Default::default());
+                self.source.breakpoint_index.replace(Default::default());
             }
 
             self.render_breakpoints(breakpoints, false);
@@ -149,14 +149,14 @@ impl Ui {
             if ui.poll_source_breakpoint_index() {
                 glib::ControlFlow::Continue
             } else {
-                ui.source_breakpoint_refresh.borrow_mut().polling = false;
+                ui.source.breakpoint_refresh.borrow_mut().polling = false;
                 glib::ControlFlow::Break
             }
         });
     }
 
     fn poll_source_breakpoint_index(&self) -> bool {
-        let mut state = self.source_breakpoint_refresh.borrow_mut();
+        let mut state = self.source.breakpoint_refresh.borrow_mut();
         let revision = Arc::clone(&state.revision);
         let Some(pending) = state.pending.as_mut() else {
             return false;
@@ -173,15 +173,15 @@ impl Ui {
                     drop(state);
                     let breakpoints = Arc::try_unwrap(pending.breakpoints)
                         .unwrap_or_else(|shared| (*shared).clone());
-                    self.source_breakpoint_index.replace(index);
+                    self.source.breakpoint_index.replace(index);
                     self.render_breakpoints(breakpoints, false);
                     // Source roots can change without changing any breakpoint.
-                    for document in self.source_documents.borrow().iter() {
+                    for document in self.source.documents.borrow().iter() {
                         document.breakpoint_renderer.queue_draw();
                     }
 
                     // Rendering may re-enter a callback that requests a newer index.
-                    return self.source_breakpoint_refresh.borrow().pending.is_some();
+                    return self.source.breakpoint_refresh.borrow().pending.is_some();
                 }
                 Err(TryRecvError::Empty) => return true,
                 Err(TryRecvError::Disconnected) => {

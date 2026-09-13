@@ -67,7 +67,7 @@ pub(super) fn assign_vector(
                     &format!("Updated ${}", write.register),
                     Some("status-ready"),
                 ),
-                Err(error) if record.class != "superseded" => ui.set_status(
+                Err(error) if !record.is_superseded() => ui.set_status(
                     "Register assignment failed", error, Some("status-error"),
                 ),
                 Err(_) => {}
@@ -136,7 +136,7 @@ pub(super) fn assign_string(
         let requests_for_response = requests.clone();
 
         if let Err(error) = requests.unscoped(&command).request(move |_, record| {
-            if record.class == "superseded" {
+            if record.is_superseded() {
                 return;
             }
 
@@ -204,33 +204,16 @@ fn assign_rust_string(
     let python = rust_string_assignment_python(&expression, &bytes);
     let command = crate::debugger::console_command(&format!(
         "python exec(bytes.fromhex(\"{}\").decode(), {{}})",
-        type_metadata::hex(python.as_bytes())
+        crate::hex::encode(python.as_bytes())
     ));
 
-    let ui_for_response = ui.clone();
-
-    if let Err(error) = requests.frame(&command).control(move |client, record| {
-        if record.is_done() {
-            if let Some(ui) = ui_for_response.upgrade() {
-                ui.set_status(
-                    "Paused",
-                    &format!("Updated the contents of {}", variable.name),
-                    Some("status-ready"),
-                );
-            }
-
-            refresh_stopped_state(&ui_for_response, client);
-        } else if record.class != "superseded" {
-            show_string_assignment_error(
-                &ui_for_response,
-                record
-                    .error_message()
-                    .unwrap_or("GDB could not write the Rust String buffer"),
-            );
-        }
-    }) {
-        show_string_assignment_error(&ui, &error.to_string());
-    }
+    submit_string_assignment(
+        ui,
+        requests,
+        &command,
+        variable.name,
+        "GDB could not write the Rust String buffer",
+    );
 }
 
 fn rust_string_assignment_python(expression: &str, bytes: &[u8]) -> String {
@@ -248,8 +231,8 @@ p=gdb.default_visualizer(v)
 assert p is not None and hasattr(p,"_data_ptr"), "Rust pretty-printer cannot expose this String buffer"
 assert getattr(p,"_length",None) == len(b), "Rust String length changed"
 if b: gdb.selected_inferior().write_memory(p._data_ptr,b)"#,
-        type_metadata::hex(expression.as_bytes()),
-        type_metadata::hex(bytes),
+        crate::hex::encode(expression.as_bytes()),
+        crate::hex::encode(bytes),
     )
 }
 
@@ -279,34 +262,13 @@ fn assign_cpp_string(
         crate::debugger::quote(&assignment)
     );
 
-    let name = variable.name;
-    let ui_for_response = ui.clone();
-
-    if let Err(error) = requests.frame(&command).control(move |client, record| {
-        let Some(ui) = ui_for_response.upgrade() else {
-            return;
-        };
-
-        if record.is_done() {
-            ui.set_status(
-                "Paused",
-                &format!("Updated the contents of {name}"),
-                Some("status-ready"),
-            );
-
-            refresh_stopped_state(&ui_for_response, client);
-        } else if record.class != "superseded" {
-            ui.set_status(
-                "String assignment failed",
-                record
-                    .error_message()
-                    .unwrap_or("GDB could not call std::string::assign"),
-                Some("status-error"),
-            );
-        }
-    }) {
-        show_string_assignment_error(&ui, &error.to_string());
-    }
+    submit_string_assignment(
+        ui,
+        requests,
+        &command,
+        variable.name,
+        "GDB could not call std::string::assign",
+    );
 }
 
 fn gdb_byte_string_literal(bytes: &[u8]) -> String {
@@ -346,7 +308,7 @@ fn resolve_string_address(
     let requests_for_response = requests.clone();
 
     if let Err(error) = requests.frame(&command).request(move |_, record| {
-        if record.class == "superseded" {
+        if record.is_superseded() {
             return;
         }
 
@@ -389,19 +351,30 @@ fn write_string_bytes(
         bytes.push(0);
     }
 
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    let command = format!(
+        "-data-write-memory-bytes 0x{address:x} {}",
+        crate::hex::encode(&bytes),
+    );
 
-    for byte in bytes {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
+    submit_string_assignment(
+        ui,
+        requests,
+        &command,
+        name,
+        "GDB could not write the string buffer",
+    );
+}
 
-    let command = format!("-data-write-memory-bytes 0x{address:x} {encoded}");
-
+fn submit_string_assignment(
+    ui: Weak<Ui>,
+    requests: StopRequests,
+    command: &str,
+    name: String,
+    failure_message: &'static str,
+) {
     let ui_for_response = ui.clone();
 
-    if let Err(error) = requests.frame(&command).control(move |client, record| {
+    if let Err(error) = requests.frame(command).control(move |client, record| {
         let Some(ui) = ui_for_response.upgrade() else {
             return;
         };
@@ -414,13 +387,10 @@ fn write_string_bytes(
             );
 
             refresh_stopped_state(&ui_for_response, client);
-        } else if record.class != "superseded" {
-            ui.set_status(
-                "String assignment failed",
-                record
-                    .error_message()
-                    .unwrap_or("GDB could not write the string buffer"),
-                Some("status-error"),
+        } else if !record.is_superseded() {
+            show_string_assignment_error(
+                &ui_for_response,
+                record.error_message().unwrap_or(failure_message),
             );
         }
     }) {
@@ -465,7 +435,7 @@ mod tests {
         let scoped_python = |script: String| {
             let command = crate::debugger::console_command(&format!(
                 "python exec(bytes.fromhex(\"{}\").decode(), {{}})",
-                type_metadata::hex(script.as_bytes())
+                crate::hex::encode(script.as_bytes())
             ));
             format!(
                 "interpreter-exec mi {}",
@@ -523,7 +493,7 @@ mod tests {
  exec(bytes.fromhex("{}").decode(), {{}})
 except (UnicodeDecodeError, AssertionError): pass
 else: raise AssertionError("invalid Rust string edit was accepted")"#,
-                type_metadata::hex(script.as_bytes())
+                crate::hex::encode(script.as_bytes())
             )));
         }
 
@@ -539,7 +509,7 @@ argument=gdb.default_visualizer(gdb.parse_and_eval("*string_arg"))
 assert bytes(gdb.selected_inferior().read_memory(local._data_ptr,local._length)) == bytes.fromhex("{}")
 assert bytes(gdb.selected_inferior().read_memory(argument._data_ptr,argument._length)) == bytes.fromhex("{}")
 assert "fgdb_rs_string" not in gdb.execute("show convenience",to_string=True)
-gdb.write("FGDB_EDIT_ROUNDTRIP_OK\n")"#, type_metadata::hex(&local_bytes), type_metadata::hex(&argument_bytes))));
+gdb.write("FGDB_EDIT_ROUNDTRIP_OK\n")"#, crate::hex::encode(&local_bytes), crate::hex::encode(&argument_bytes))));
         let output =
             crate::language::toolchain::probe::output(&mut command, Duration::from_secs(15))
                 .expect("live GDB smoke test failed or timed out");

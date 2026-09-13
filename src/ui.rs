@@ -1,3 +1,5 @@
+use crate::debugger::PointerWidth;
+use crate::model::lifecycle::stop_reason_label;
 mod actions;
 mod build;
 mod cfg_view;
@@ -62,14 +64,16 @@ use components::{
 };
 pub(crate) use debug_data::DebugDataAction;
 use debug_state::update_selected_frame_buttons;
-use domain::{
-    LocalVariableCatalog, MemoryRefreshBatch, TerminalSynchronization, VariableNodeIndex,
-    local_refresh_indices,
-};
+use domain::{MemoryRefreshBatch, TerminalSynchronization};
 use log_view::{ApplicationLog, LogLevel};
 pub(crate) use misc_view::locks::LockSymbolRequest;
 pub(crate) use syscall_view::SyscallAction;
-use variables::VariableNode;
+#[cfg(test)]
+use variables::VariableNodeIndex;
+use variables::{
+    VariableNode, VariableRootChange, VariableTree, changed_variable_roots, root_variable_at,
+    root_variable_position, variable_at, variable_node_at, variable_root_node,
+};
 pub(crate) use workspace::PanelId;
 
 use crate::model::DebuggerStateDelta;
@@ -95,9 +99,9 @@ use crate::{
     debug_info::ModuleDebugMetadata,
     debugger::{
         Breakpoint, GdbCapabilities, InferiorInfo, InferiorState, Instruction, MemoryBlock,
-        MemoryFormat as MemoryWatchFormat, MemoryKind, MiClient, Register, SharedLibrary,
-        SourceFile, SourceLocation, StackEntry, StackFrame, TargetArchitecture, TargetEndian,
-        ThreadInfo, ValueTypeKind, ValueTypeMetadata, Variable, VariableUpdate,
+        MemoryFormat as MemoryWatchFormat, MemoryKind, Register, SharedLibrary, SourceFile,
+        SourceLocation, StackEntry, StackFrame, TargetArchitecture, TargetEndian, ThreadInfo,
+        ValueTypeKind, ValueTypeMetadata, Variable, VariableUpdate,
         context::{MemoryRegion, memory_region_for_address},
     },
     kernel::{
@@ -115,11 +119,12 @@ use crate::{
     theme::Theme,
 };
 
+pub(crate) use crate::model::variables::compact_variable_type;
+use crate::model::variables::{local_refresh_indices, variable_search_text};
 pub(crate) use variable_viewers::{
     VariableViewerPlan, VariableViewerRegistry, VariableViewerRequest, VariableViewerRow,
     VariableViewerSession,
 };
-pub(crate) use views::compact_variable_type;
 
 use build::*;
 use cfg_view::*;
@@ -137,7 +142,6 @@ use threads::*;
 use views::*;
 
 const EXECUTION_CATEGORY: &str = "execution";
-const MAX_EXPRESSION_WATCHES: usize = 256;
 const MAX_MEMORY_WATCHES: usize = 256;
 const DISCLOSURE_EXPANDED_ICON: &str = "▾";
 const DISCLOSURE_COLLAPSED_ICON: &str = "›";
@@ -297,6 +301,7 @@ type FloatAssignmentHandler = Rc<dyn Fn(Variable, Vec<u8>)>;
 type VariableChildrenHandler = Rc<dyn Fn(Variable, usize)>;
 type VariableViewerHandler = Rc<dyn Fn(VariableViewerRequest, gtk::Widget)>;
 type ExpressionWatchRefreshHandler = Rc<dyn Fn()>;
+type VariableRetirementHandler = Rc<dyn Fn(Vec<String>)>;
 type StringAssignmentHandler = Rc<dyn Fn(Variable, Vec<u8>, StringAssignmentKind)>;
 pub(crate) type VectorWriteCompletion = Box<dyn FnOnce(Result<(), String>)>;
 type VectorAssignmentHandler =
@@ -320,8 +325,6 @@ type FilteredCatchpointHandler = Rc<dyn Fn(FilteredCatchpointRequest)>;
 type MemoryWatchHandler = Rc<dyn Fn(MemoryWatchRequest)>;
 type InstructionMemoryHandler = Rc<dyn Fn(String)>;
 type DisassemblyHandler = Rc<dyn Fn(DisassemblyRequest)>;
-type DisassemblySourceCache =
-    Rc<RefCell<crate::performance::BoundedLruCache<PathBuf, (u64, Option<source::CachedSource>)>>>;
 type KernelRefreshHandler = Rc<dyn Fn()>;
 type MiscRefreshHandler = Rc<dyn Fn()>;
 type HeapInspectionHandler = Rc<dyn Fn(HeapInspectionRequest)>;
@@ -563,7 +566,7 @@ struct FilteredCatchpointControls {
 struct InstructionRowData {
     instruction: Instruction,
     current: bool,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
     source_text: Option<source::SourceLine>,
 }
 
@@ -638,7 +641,7 @@ struct RegisterRowData {
     ring: Option<u64>,
     architecture: TargetArchitecture,
     endian: Option<TargetEndian>,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
     vector_display: VectorDisplay,
 }
 
@@ -1039,7 +1042,7 @@ struct KernelTlsRuntime {
     thread: Option<String>,
     architecture: TargetArchitecture,
     endian: Option<TargetEndian>,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
     register: Option<String>,
     base: Option<u64>,
     mapping: Option<String>,
@@ -1283,9 +1286,6 @@ pub struct Ui {
     replay_controls: replay::ReplayControls,
     pub(crate) model: Rc<crate::model::DebuggerModel>,
     self_weak: Rc<RefCell<std::rc::Weak<Ui>>>,
-    source_open_generation: Arc<AtomicU64>,
-    source_annotation_epoch: Arc<AtomicU64>,
-    disassembly_source_pending: Rc<RefCell<HashMap<PathBuf, Arc<AtomicBool>>>>,
     pub window: gtk::ApplicationWindow,
     pub terminal: vte4::Terminal,
     application_log: ApplicationLog,
@@ -1325,36 +1325,7 @@ pub struct Ui {
     pause_visual_generation: Rc<Cell<u64>>,
     panels: Rc<workspace::Panels>,
     panel_hosts: Rc<workspace::Hosts>,
-    source_notebook: gtk::Notebook,
-    source_documents: Rc<RefCell<Vec<SourceDocument>>>,
-    source_navigation: SourceNavigationControls,
-    source_tree: SourceTreeControls,
-    source_back_history: Rc<RefCell<Vec<SourceNavigationLocation>>>,
-    source_forward_history: Rc<RefCell<Vec<SourceNavigationLocation>>>,
-    closed_source_tabs: Rc<RefCell<Vec<ClosedSourceTab>>>,
-    source_find_state: Rc<RefCell<Option<SourceFindState>>>,
-    source_palette: Rc<RefCell<Option<SourcePalette>>>,
-    source_palette_generation: Arc<AtomicU64>,
-    source_loaded_generation: Arc<AtomicU64>,
-    source_loaded_cache: Rc<RefCell<Option<Arc<Vec<PathBuf>>>>>,
-    source_loaded_search: Rc<RefCell<Option<Arc<source::SourceSearchIndex>>>>,
-    loaded_source_files: Rc<RefCell<Vec<SourceFile>>>,
-    source_tree_base_roots: Vec<PathBuf>,
-    source_tree_roots: Rc<RefCell<Vec<PathBuf>>>,
-    source_tree_cache: Rc<RefCell<Option<Arc<Vec<PathBuf>>>>>,
-    source_tree_search: Rc<RefCell<Option<Arc<source::SourceSearchIndex>>>>,
-    source_index: Rc<RefCell<Option<Arc<source::SourceIndex>>>>,
-    source_breakpoint_index: Rc<RefCell<source::SourceBreakpointIndex>>,
-    source_breakpoint_refresh: Rc<RefCell<editor::SourceBreakpointRefresh>>,
-    source_tree_indexing: Rc<Cell<bool>>,
-    source_tree_generation: Arc<AtomicU64>,
-    source_tree_render_generation: Arc<AtomicU64>,
-    source_tree_initialized: Rc<Cell<bool>>,
-    execution_source_path: Rc<RefCell<Option<PathBuf>>>,
-    execution_source_line: Rc<Cell<Option<u32>>>,
-    source_theme: Theme,
-    source_style_scheme: Option<sourceview5::StyleScheme>,
-    resolved_source_paths: Rc<RefCell<crate::performance::BoundedLruCache<String, PathBuf>>>,
+    source: Rc<editor::SourceWorkspace>,
     call_stack_list: gtk::Box,
     frame_buttons: Rc<RefCell<Vec<(u32, gtk::Button)>>>,
     displayed_frames: Rc<RefCell<Rc<[StackFrame]>>>,
@@ -1371,12 +1342,8 @@ pub struct Ui {
     inferior_controls: InferiorControls,
     execution_context_visual_generation: Rc<Cell<u64>>,
     execution_context_visual_pending: Rc<Cell<bool>>,
-    locals_store: gio::ListStore,
-    locals_selection: gtk::SingleSelection,
-    variable_node_index: Rc<RefCell<VariableNodeIndex>>,
-    local_variables: Rc<RefCell<LocalVariableCatalog>>,
+    locals_tree: VariableTree,
     locals_render_limit: Rc<Cell<usize>>,
-    locals_generation: Rc<Cell<Option<u64>>>,
     locals_view: gtk::ColumnView,
     locals_empty: gtk::Label,
     locals_summary: gtk::Label,
@@ -1384,15 +1351,10 @@ pub struct Ui {
     locals_edit_button: gtk::Button,
     locals_more_button: gtk::Button,
     locals_filter: gtk::Entry,
-    expression_watches_store: gio::ListStore,
-    expression_watches_selection: gtk::SingleSelection,
+    watches_tree: VariableTree,
     expression_watches_view: gtk::ColumnView,
     expression_watches_empty: gtk::Label,
-    expression_watches: Rc<RefCell<Vec<String>>>,
-    deferred_variable_object_deletions: Rc<RefCell<HashSet<String>>>,
-    local_symbol_revision: Cell<u64>,
-    watch_symbol_revision: Cell<u64>,
-    pending_local_variable_objects: Rc<RefCell<HashSet<(u64, usize)>>>,
+    variable_retirement_handler: RefCell<Option<VariableRetirementHandler>>,
     expression_watch_entry: gtk::Entry,
     expression_watch_add_button: gtk::Button,
     expression_watch_remove_button: gtk::Button,
@@ -1404,7 +1366,6 @@ pub struct Ui {
     current_instruction_memory_expression: Rc<RefCell<Option<String>>>,
     instruction_memory_handler: Rc<RefCell<Option<InstructionMemoryHandler>>>,
     disassembly_handler: Rc<RefCell<Option<DisassemblyHandler>>>,
-    disassembly_source_cache: DisassemblySourceCache,
     register_groups: Vec<RegisterGroupView>,
     register_render_context: Rc<RefCell<Option<crate::debugger::StopContext>>>,
     registers_empty: gtk::Label,
@@ -1465,8 +1426,6 @@ pub struct Ui {
     gef_context_visible: bool,
     gef_context_hidden_by_fgdb: Rc<Cell<bool>>,
     heap_inspection_handler: Rc<RefCell<Option<HeapInspectionHandler>>>,
-    source_roots: Rc<RefCell<Vec<PathBuf>>>,
-    source_base_roots: Vec<PathBuf>,
     configuration_report: ConfigurationReport,
     settings: Rc<settings::Settings>,
     variable_presentation: Rc<variable_presentation::VariablePresentation>,

@@ -295,8 +295,8 @@ impl SourceFreshness {
         if let Some(ui) = self.ui.borrow().upgrade() {
             // Gutter locations already use source line numbers. No filesystem
             // work is needed to redraw them after replacing the text.
-            if ui.execution_source_path.borrow().as_ref() == Some(&self.path)
-                && let Some(line) = ui.execution_source_line.get()
+            if ui.source.execution_path.borrow().as_ref() == Some(&self.path)
+                && let Some(line) = ui.source.execution_line.get()
                 && let Ok(line) = i32::try_from(line.saturating_sub(1))
                 && let Some(iter) = self.buffer.iter_at_line(line)
             {

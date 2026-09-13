@@ -1,4 +1,5 @@
 use super::*;
+use crate::ui::tests::descendants;
 
 fn at_cursor(marked: &str) -> Input {
     let (before, after) = marked.split_once('|').unwrap();
@@ -59,25 +60,6 @@ fn metadata_completion_keeps_free_form_input_and_handles_tag_boundaries() {
     assert!(Query::new(&selected, Field::Tags).is_none());
     selected.selection = Some((8, 5));
     assert!(Query::new(&selected, Field::Tags).is_some());
-}
-
-fn descendants<T: IsA<glib::Object> + IsA<gtk::Widget> + Clone + 'static>(
-    root: &impl IsA<gtk::Widget>,
-) -> Vec<T> {
-    let mut found = Vec::new();
-    let mut child = root.as_ref().first_child();
-
-    while let Some(widget) = child {
-        child = widget.next_sibling();
-
-        if let Ok(value) = widget.clone().downcast::<T>() {
-            found.push(value);
-        }
-
-        found.extend(descendants::<T>(&widget));
-    }
-
-    found
 }
 
 fn press(window: &gtk::Window, key: gtk::gdk::Key) -> bool {

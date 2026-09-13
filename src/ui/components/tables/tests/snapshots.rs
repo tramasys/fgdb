@@ -1,4 +1,5 @@
 use super::*;
+use crate::debugger::PointerWidth;
 use crate::debugger::{Register, TargetArchitecture, TargetEndian};
 use crate::ui::{
     ColumnLayouts, RegisterColumn, RegisterRowData, TableId, VectorDisplay, components,
@@ -18,7 +19,7 @@ fn row(value: &str) -> RegisterRowData {
         ring: None,
         architecture: TargetArchitecture::X86_64,
         endian: Some(TargetEndian::Little),
-        pointer_bits: 64,
+        pointer_width: PointerWidth::Bits64,
         vector_display: VectorDisplay::default(),
     }
 }

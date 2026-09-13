@@ -1,4 +1,5 @@
 use super::MAX_PATTERN;
+use crate::debugger::PointerWidth;
 use crate::debugger::TargetEndian;
 
 #[cfg(test)]
@@ -51,7 +52,7 @@ impl Pattern {
     pub(crate) fn parse(
         kind: SearchKind,
         input: &str,
-        pointer_bits: Option<u32>,
+        pointer_width: Option<PointerWidth>,
         endian: Option<TargetEndian>,
     ) -> Result<Self, String> {
         if input.len() > MAX_PATTERN * 3 {
@@ -82,9 +83,16 @@ impl Pattern {
             }
             _ => {
                 let bits = match kind {
-                    SearchKind::Pointer => pointer_bits
-                        .filter(|bits| matches!(bits, 32 | 64))
-                        .ok_or("Target pointer width is not known yet")?,
+                    SearchKind::Pointer => pointer_width
+                        .filter(|bits| {
+                            matches!(
+                                bits,
+                                crate::debugger::PointerWidth::Bits32
+                                    | crate::debugger::PointerWidth::Bits64
+                            )
+                        })
+                        .ok_or("Target pointer width is not known yet")?
+                        .bits(),
                     SearchKind::Unsigned(bits)
                     | SearchKind::Signed(bits)
                     | SearchKind::Float(bits) => bits,

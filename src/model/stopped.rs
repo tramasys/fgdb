@@ -164,6 +164,7 @@ impl DebuggerModel {
     }
 
     pub(crate) fn start_stop_refresh(&self) -> u64 {
+        self.variables.pending_locals.borrow_mut().clear();
         self.stopped.active_stop_context.borrow_mut().take();
         self.stopped.stack_paging.borrow_mut().take();
         let generation = self.stopped.stop_refresh_generation.get().wrapping_add(1);

@@ -7,7 +7,6 @@ mod protocol;
 use protocol::{parse_batch, parse_error, parse_shape};
 
 pub(super) fn request_array(
-    ui: Weak<Ui>,
     client: Rc<MiClient>,
     requests: StopRequests,
     session: Rc<VariableViewerSession>,
@@ -16,7 +15,6 @@ pub(super) fn request_array(
     owned_root: Option<String>,
 ) {
     Rc::new(ArrayRequest {
-        ui,
         client,
         requests,
         session,
@@ -28,7 +26,6 @@ pub(super) fn request_array(
 }
 
 struct ArrayRequest {
-    ui: Weak<Ui>,
     client: Rc<MiClient>,
     requests: StopRequests,
     session: Rc<VariableViewerSession>,
@@ -39,7 +36,7 @@ struct ArrayRequest {
 
 impl Drop for ArrayRequest {
     fn drop(&mut self) {
-        cleanup_viewer_variable_objects(&self.ui, &self.client, self.owned_root.get_mut().take());
+        cleanup_viewer_variable_objects(&self.client, self.owned_root.get_mut().take());
     }
 }
 
@@ -71,8 +68,7 @@ impl ArrayRequest {
             .unscoped(&command)
             .when(move || session.is_open())
             .request(move |_, record| {
-                if !viewer_is_current(&request.requests, &request.session)
-                    || record.class == "superseded"
+                if !viewer_is_current(&request.requests, &request.session) || record.is_superseded()
                 {
                     request.session.finish(STALE_VIEWER_MESSAGE);
                 } else if let Some(expression) = crate::debugger::variable_path_expression(&record)
@@ -98,8 +94,7 @@ impl ArrayRequest {
             .frame(&command)
             .when(move || session.is_open())
             .capture(move |_, record, output| {
-                if record.class == "superseded"
-                    || !viewer_is_current(&request.requests, &request.session)
+                if record.is_superseded() || !viewer_is_current(&request.requests, &request.session)
                 {
                     request.session.finish(STALE_VIEWER_MESSAGE);
                     return;
@@ -158,7 +153,6 @@ impl ArrayRequest {
         // Preserve the MI-only viewer for backends without Python and for
         // collection wrappers which do not expose a resolvable expression.
         request_indexed_children(
-            self.ui.clone(),
             Rc::clone(&self.client),
             self.requests.clone(),
             Rc::clone(&self.session),
@@ -268,7 +262,7 @@ impl PageRequest {
                     return;
                 };
 
-                if record.class == "superseded" || !response.pager.requests.is_current() {
+                if record.is_superseded() || !response.pager.requests.is_current() {
                     session.finish_page(STALE_VIEWER_MESSAGE, true);
                     return;
                 }

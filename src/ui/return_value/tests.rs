@@ -93,8 +93,8 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
         captured.borrow_mut().push(variable)
     })));
     assert!(view.sync(model.return_values(), 1, true).is_some());
-    assert_eq!(view.store.n_items(), 2);
-    assert_eq!(view.selection.n_items(), 2);
+    assert_eq!(view.tree.store.n_items(), 2);
+    assert_eq!(view.tree.selection.n_items(), 2);
     assert_eq!(view.view.columns().n_items(), 4);
     assert!(view.root.is_visible());
 
@@ -108,11 +108,11 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
         .unwrap();
 
     filter.set_text("$1");
-    assert_eq!(view.selection.n_items(), 1);
-    assert_eq!(view.store.n_items(), 2);
-    assert_eq!(variable_at(&view.selection, 0).unwrap().name, "$1");
+    assert_eq!(view.tree.selection.n_items(), 1);
+    assert_eq!(view.tree.store.n_items(), 2);
+    assert_eq!(variable_at(&view.tree.selection, 0).unwrap().name, "$1");
     filter.set_text("");
-    assert_eq!(view.selection.n_items(), 2);
+    assert_eq!(view.tree.selection.n_items(), 2);
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.add_css_class("debugger-root");
     root.append(&view.root);
@@ -126,15 +126,15 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
     let main = glib::MainContext::default();
     main.block_on(glib::timeout_future(Duration::from_millis(100)));
     assert_eq!(requested.borrow().len(), 2);
-    let original = view.store.item(0).unwrap();
+    let original = view.tree.store.item(0).unwrap();
     assert!(view.sync(model.return_values(), 1, true).is_none());
-    assert_eq!(view.store.item(0).unwrap(), original);
+    assert_eq!(view.tree.store.item(0).unwrap(), original);
     assert!(
         view.sync(model.return_values(), 1, false)
             .unwrap()
             .is_empty()
     );
-    assert_eq!(view.store.item(0).unwrap(), original);
+    assert_eq!(view.tree.store.item(0).unwrap(), original);
 
     {
         let mut state = view.state.borrow_mut();
@@ -145,7 +145,7 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
     }
 
     view.render();
-    let node = variable_root_node(&view.store, 0).unwrap();
+    let node = variable_root_node(&view.tree.store, 0).unwrap();
     assert!(node.variable.can_expand());
     let mut field = node.variable.clone();
     field.name = "x".into();
@@ -180,6 +180,6 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
     view.enabled.set(false);
     view.sync(Vec::new(), 2, true);
     assert!(!view.root.is_visible());
-    assert_eq!(view.store.n_items(), 0);
+    assert_eq!(view.tree.store.n_items(), 0);
     window.close();
 }

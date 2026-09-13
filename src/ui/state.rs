@@ -103,8 +103,6 @@ impl Ui {
 
         window.set_child(Some(&root));
         kernel_section_handler.replace(Some(layout.disclosure_handler()));
-        let source_base_roots = source::roots(config);
-        let source_tree_base_roots = source::search_roots(config);
 
         let ui = Self {
             column_layouts,
@@ -112,9 +110,7 @@ impl Ui {
             replay_controls: topbar.replay_controls,
             model,
             self_weak: Rc::new(RefCell::new(std::rc::Weak::new())),
-            source_open_generation: Arc::new(AtomicU64::new(0)),
-            source_annotation_epoch: Arc::new(AtomicU64::new(0)),
-            disassembly_source_pending: Rc::new(RefCell::new(HashMap::new())),
+
             window,
             terminal,
             application_log: workspace.application_log,
@@ -154,38 +150,15 @@ impl Ui {
             pause_visual_generation: Rc::new(Cell::new(0)),
             panels,
             panel_hosts,
-            source_notebook,
-            source_documents,
-            source_navigation: workspace.source_navigation,
-            source_tree: workspace.source_tree,
-            source_back_history: Rc::new(RefCell::new(Vec::new())),
-            source_forward_history: Rc::new(RefCell::new(Vec::new())),
-            closed_source_tabs: Rc::new(RefCell::new(Vec::new())),
-            source_find_state: Rc::new(RefCell::new(None)),
-            source_palette: Rc::new(RefCell::new(None)),
-            source_palette_generation: Arc::new(AtomicU64::new(0)),
-            source_loaded_generation: Arc::new(AtomicU64::new(0)),
-            source_loaded_cache: Rc::new(RefCell::new(None)),
-            source_loaded_search: Rc::new(RefCell::new(None)),
-            loaded_source_files: Rc::new(RefCell::new(Vec::new())),
-            source_tree_roots: Rc::new(RefCell::new(source_tree_base_roots.clone())),
-            source_tree_base_roots,
-            source_tree_cache: Rc::new(RefCell::new(None)),
-            source_tree_search: Rc::new(RefCell::new(None)),
-            source_index: Rc::new(RefCell::new(None)),
-            source_breakpoint_index: Rc::new(RefCell::new(Default::default())),
-            source_breakpoint_refresh: Rc::new(RefCell::new(Default::default())),
-            source_tree_indexing: Rc::new(Cell::new(false)),
-            source_tree_generation: Arc::new(AtomicU64::new(0)),
-            source_tree_render_generation: Arc::new(AtomicU64::new(0)),
-            source_tree_initialized: Rc::new(Cell::new(false)),
-            execution_source_path: Rc::new(RefCell::new(None)),
-            execution_source_line: Rc::new(Cell::new(None)),
-            source_theme: theme.clone(),
-            source_style_scheme,
-            resolved_source_paths: Rc::new(RefCell::new(crate::performance::BoundedLruCache::new(
-                crate::performance::RESOLVED_SOURCE_PATH_CACHE_BUDGET,
-            ))),
+            source: Rc::new(editor::SourceWorkspace::new(
+                (source::roots(config), source::search_roots(config)),
+                theme,
+                source_style_scheme,
+                source_notebook,
+                source_documents,
+                workspace.source_navigation,
+                workspace.source_tree,
+            )),
             call_stack_list: workspace.call_stack_list,
             frame_buttons: Rc::new(RefCell::new(Vec::new())),
             displayed_frames: Rc::new(RefCell::new(Rc::from([]))),
@@ -202,12 +175,8 @@ impl Ui {
             inferior_controls: workspace.inferior_controls,
             execution_context_visual_generation: Rc::new(Cell::new(0)),
             execution_context_visual_pending: Rc::new(Cell::new(false)),
-            locals_store: workspace.locals_store,
-            locals_selection: workspace.locals_selection,
-            variable_node_index: Rc::new(RefCell::new(VariableNodeIndex::default())),
-            local_variables: Rc::new(RefCell::new(LocalVariableCatalog::default())),
+            locals_tree: VariableTree::new(workspace.locals_store, workspace.locals_selection),
             locals_render_limit: Rc::new(Cell::new(crate::performance::LOCALS_ROOT_PAGE_SIZE)),
-            locals_generation: Rc::new(Cell::new(None)),
             locals_view: workspace.locals_view,
             locals_empty: workspace.locals_empty,
             locals_summary: workspace.locals_summary,
@@ -215,15 +184,13 @@ impl Ui {
             locals_edit_button: workspace.locals_edit_button,
             locals_more_button: workspace.locals_more_button,
             locals_filter: workspace.locals_filter,
-            expression_watches_store: workspace.expression_watches_store,
-            expression_watches_selection: workspace.expression_watches_selection,
+            watches_tree: VariableTree::new(
+                workspace.expression_watches_store,
+                workspace.expression_watches_selection,
+            ),
             expression_watches_view: workspace.expression_watches_view,
             expression_watches_empty: workspace.expression_watches_empty,
-            expression_watches: Rc::new(RefCell::new(Vec::new())),
-            deferred_variable_object_deletions: Rc::new(RefCell::new(HashSet::new())),
-            local_symbol_revision: Cell::new(0),
-            watch_symbol_revision: Cell::new(0),
-            pending_local_variable_objects: Rc::new(RefCell::new(HashSet::new())),
+            variable_retirement_handler: RefCell::default(),
             expression_watch_entry: workspace.expression_watch_entry,
             expression_watch_add_button: workspace.expression_watch_add_button,
             expression_watch_remove_button: workspace.expression_watch_remove_button,
@@ -235,11 +202,7 @@ impl Ui {
             current_instruction_memory_expression: Rc::new(RefCell::new(None)),
             instruction_memory_handler: Rc::new(RefCell::new(None)),
             disassembly_handler: Rc::new(RefCell::new(None)),
-            disassembly_source_cache: Rc::new(RefCell::new(
-                crate::performance::BoundedLruCache::new(
-                    crate::performance::DISASSEMBLY_SOURCE_CACHE_BUDGET,
-                ),
-            )),
+
             register_groups: workspace.register_groups,
             register_render_context: Rc::new(RefCell::new(None)),
             registers_empty: workspace.registers_empty,
@@ -300,8 +263,7 @@ impl Ui {
             gef_context_visible: config.gef_context_visible,
             gef_context_hidden_by_fgdb: Rc::new(Cell::new(false)),
             heap_inspection_handler: Rc::new(RefCell::new(None)),
-            source_roots: Rc::new(RefCell::new(source_base_roots.clone())),
-            source_base_roots,
+
             configuration_report: config.configuration_report().clone(),
             settings: settings::Settings::new(config),
             variable_presentation,
@@ -397,7 +359,15 @@ impl Ui {
         self.update_control_sensitivity();
     }
 
-    pub fn set_gdb_capabilities(&self, capabilities: GdbCapabilities) {
+    pub(crate) fn render_gdb_capabilities(&self, capabilities: Option<&GdbCapabilities>) {
+        let Some(capabilities) = capabilities else {
+            self.gdb_capabilities_label
+                .set_text("GDB capabilities unavailable");
+
+            self.gdb_capabilities_label.set_tooltip_text(None);
+            return;
+        };
+
         let summary = capabilities.compatibility_summary();
 
         let feature_detail = if capabilities.features_known {
@@ -421,16 +391,11 @@ impl Ui {
         let tooltip = format!("{printer_detail}. {feature_detail}");
         self.gdb_capabilities_label.set_text(&summary);
         self.gdb_capabilities_label.set_tooltip_text(Some(&tooltip));
-        self.model.set_gdb_capabilities(capabilities);
     }
 
     pub fn clear_gdb_capabilities(&self) {
         self.model.set_gdb_capabilities(GdbCapabilities::default());
-
-        self.gdb_capabilities_label
-            .set_text("GDB capabilities unavailable");
-
-        self.gdb_capabilities_label.set_tooltip_text(None);
+        self.render_gdb_capabilities(None);
     }
 
     pub fn prepare_full_resynchronization(&self) {
@@ -439,7 +404,7 @@ impl Ui {
         self.reset_target_abi();
         self.invalidate_allocator_probe_cache();
         self.model.clear_previous_registers();
-        self.invalidate_source_io();
+        self.source.invalidate_io();
         self.start_stop_refresh();
         self.model.start_thread_refresh();
         self.invalidate_kernel_refresh();
@@ -466,9 +431,9 @@ impl Ui {
         self.invalidate_target_caches();
     }
 
-    fn invalidate_target_caches(&self) {
+    pub(crate) fn invalidate_target_caches(&self) {
         crate::kernel::invalidate_local_target_abi_cache();
-        self.resolved_source_paths.borrow_mut().clear();
+        self.source.clear_resolved_paths();
     }
 
     pub fn register_details_visible(&self) -> bool {
@@ -490,12 +455,11 @@ impl Ui {
 
     pub fn connect_debug_controls(
         self: &Rc<Self>,
-        client: &Rc<MiClient>,
-        refresh_details: impl Fn(&Rc<Self>, &MiClient) + 'static,
+        refresh_details: impl Fn(&Rc<Self>) + 'static,
+        execute: impl Fn(&Rc<Self>, ExecutionAction) + 'static,
     ) {
         let pending = Rc::new(Cell::new(false));
         let weak_ui = Rc::downgrade(self);
-        let client_for_details = Rc::clone(client);
         let refresh_details = Rc::new(refresh_details);
 
         let refresh = Rc::new(move || {
@@ -505,7 +469,6 @@ impl Ui {
 
             let pending = Rc::clone(&pending);
             let weak_ui = weak_ui.clone();
-            let client = Rc::clone(&client_for_details);
             let refresh_details = Rc::clone(&refresh_details);
 
             glib::idle_add_local_once(move || {
@@ -514,7 +477,7 @@ impl Ui {
                 if let Some(ui) = weak_ui.upgrade()
                     && ui.model.stopped_inspection_available()
                 {
-                    refresh_details(&ui, &client);
+                    refresh_details(&ui);
                 }
             });
         });
@@ -538,165 +501,32 @@ impl Ui {
             .pages
             .connect_visible_child_name_notify(move |_| refresh());
 
-        let client_for_run = Rc::clone(client);
-        let weak_ui = Rc::downgrade(self);
+        let execute = Rc::new(execute);
 
-        self.run_button.connect_clicked(move |_| {
-            let Some(ui) = weak_ui.upgrade() else {
-                return;
-            };
+        for (button, action) in [
+            (&self.run_button, ExecutionAction::Run),
+            (&self.pause_button, ExecutionAction::Pause),
+            (&self.next_button, ExecutionAction::Next),
+            (&self.step_button, ExecutionAction::Step),
+            (
+                &self.next_instruction_button,
+                ExecutionAction::NextInstruction,
+            ),
+            (
+                &self.step_instruction_button,
+                ExecutionAction::StepInstruction,
+            ),
+            (&self.finish_button, ExecutionAction::Finish),
+        ] {
+            let weak_ui = Rc::downgrade(self);
+            let execute = Rc::clone(&execute);
 
-            let debugger_state = ui.model.execution().state;
-
-            if debugger_state.inferior_running()
-                || ui.model.execution().command_pending
-                || debugger_state.transition_pending()
-                || debugger_state.stopped_context_is_stale()
-                || ui.model.execution().session_pending
-                || ui.model.execution().native_until_active
-                || !ui.model.execution().ready
-            {
-                return;
-            }
-
-            let (command, detail) = {
-                let session = ui.model.session();
-
-                if !debugger_state.inferior_started()
-                    && matches!(session.as_ref(), Some(DebugSession::RrReplay { .. }))
-                    && debugger_state.target_connection() == TargetConnection::Remote
-                {
-                    drop(session);
-                    ui.restart_rr_replay();
-                    return;
+            button.connect_clicked(move |_| {
+                if let Some(ui) = weak_ui.upgrade() {
+                    execute(&ui, action);
                 }
-
-                if debugger_state.inferior_started() {
-                    if session
-                        .as_ref()
-                        .is_some_and(|session| !session.supports_execution())
-                    {
-                        return;
-                    }
-
-                    let command = if let Some(id) = ui.model.selected_inferior_id() {
-                        let Some(id) = crate::debugger::thread_group_argument(&id) else {
-                            ui.set_status(
-                                "Continue unavailable",
-                                "GDB reported an unsupported inferior identifier",
-                                Some("status-error"),
-                            );
-
-                            return;
-                        };
-
-                        format!("-exec-continue --thread-group {id}")
-                    } else {
-                        String::from("-exec-continue")
-                    };
-
-                    (command, "Continuing the selected inferior…")
-                } else if configured_target_can_start(
-                    session.as_ref(),
-                    debugger_state.target_connection(),
-                ) {
-                    (String::from("-exec-run"), "Starting the inferior…")
-                } else {
-                    return;
-                }
-            };
-
-            match ui.model.directional_command(&command) {
-                Ok(command) => {
-                    issue_execution_command(&ui, &client_for_run, &command, detail);
-                }
-                Err(message) => {
-                    ui.set_status("Execution unavailable", message, Some("status-error"))
-                }
-            }
-        });
-
-        let client_for_pause = Rc::clone(client);
-        let weak_ui = Rc::downgrade(self);
-
-        self.pause_button.connect_clicked(move |_| {
-            let Some(ui) = weak_ui.upgrade() else {
-                return;
-            };
-
-            if ui.model.native_until_active() {
-                ui.cancel_native_until();
-            } else if ui.model.execution().ready
-                && ui.model.execution().state.inferior_started()
-                && ui.model.execution().state.inferior_running()
-                && !ui.model.execution().command_pending
-                && !ui.model.execution().state.transition_pending()
-                && !ui.model.execution().session_pending
-            {
-                let command = if let Some(id) = ui.model.selected_inferior_id() {
-                    let Some(id) = crate::debugger::thread_group_argument(&id) else {
-                        ui.set_status(
-                            "Pause unavailable",
-                            "GDB reported an unsupported inferior identifier",
-                            Some("status-error"),
-                        );
-
-                        return;
-                    };
-
-                    format!("-exec-interrupt --thread-group {id}")
-                } else {
-                    String::from("-exec-interrupt")
-                };
-
-                issue_execution_command(
-                    &ui,
-                    &client_for_pause,
-                    &command,
-                    "Interrupting the selected inferior…",
-                );
-            }
-        });
-
-        connect_execution_button(
-            &self.next_button,
-            self,
-            client,
-            "-exec-next",
-            "Stepping over the current source line…",
-        );
-
-        connect_execution_button(
-            &self.step_button,
-            self,
-            client,
-            "-exec-step",
-            "Stepping into the current source line…",
-        );
-
-        connect_execution_button(
-            &self.next_instruction_button,
-            self,
-            client,
-            "-exec-next-instruction",
-            "Stepping over one machine instruction…",
-        );
-
-        connect_execution_button(
-            &self.step_instruction_button,
-            self,
-            client,
-            "-exec-step-instruction",
-            "Stepping into one machine instruction…",
-        );
-
-        connect_execution_button(
-            &self.finish_button,
-            self,
-            client,
-            "-exec-finish",
-            "Running until the current function returns…",
-        );
+            });
+        }
 
         for (button, action) in &self.until_actions {
             let action = action.clone();
@@ -961,6 +791,29 @@ impl Ui {
         }
     }
 
+    pub(crate) fn render_backend_state(&self) {
+        if !self.model.execution().ready {
+            self.terminal_synchronization.borrow_mut().cancel();
+            self.memory_watch_container
+                .refresh_batch
+                .borrow_mut()
+                .clear();
+            self.cancel_running_context_render();
+            self.reset_thread_analysis();
+        }
+
+        self.restart_gdb_button
+            .set_visible(self.model.gdb_recovery_required());
+        self.refresh_execution_controls();
+    }
+
+    pub(crate) fn refresh_execution_controls(&self) {
+        self.update_run_control_label();
+        self.update_control_sensitivity();
+        self.update_thread_control_sensitivity();
+        self.render_inferior_controls();
+    }
+
     pub fn set_controls_running(&self, running: bool) {
         self.model.set_controls_running(running);
         self.update_run_control_label();
@@ -1041,37 +894,16 @@ impl Ui {
         self.render_inferior_controls();
     }
 
-    pub(crate) fn begin_execution_transition(&self) -> u64 {
-        let generation = self.model.begin_execution_transition();
-        self.update_control_sensitivity();
-        self.update_thread_control_sensitivity();
-        self.render_inferior_controls();
-
-        generation
-    }
-
-    pub(crate) fn finish_execution_transition(&self) {
-        if self.model.finish_execution_transition() {
-            self.update_control_sensitivity();
-            self.update_thread_control_sensitivity();
-            self.render_inferior_controls();
-        }
-    }
-
     pub(crate) fn require_gdb_recovery(&self, title: &str, detail: &str) {
-        if self.model.native_until_active() {
+        let until_active = self.model.native_until_active();
+        self.model.enter_recovery();
+
+        if until_active {
             self.abort_native_until();
         }
 
-        self.model.set_active_thread_execution(None);
-        self.model.set_thread_execution_exit_candidate(None);
-        self.model.set_pending_execution_inferior(None);
-        self.clear_inferior_action_pending();
-        self.clear_thread_action_pending();
-        self.set_debug_state_stale(true);
         self.clear_debugger_state();
-        self.set_controls_ready(false);
-        self.set_gdb_recovery_available(true);
+        self.render_backend_state();
         self.set_status(title, detail, Some("status-error"));
     }
 
@@ -1258,22 +1090,18 @@ impl Ui {
                 .fold(0_u64, |mask, (index, (button, _))| {
                     mask | (u64::from(button.is_visible()) << index.min(63))
                 }),
-            edit_local: variable_at(&self.locals_selection, self.locals_selection.selected())
-                .is_some_and(|variable| variable.is_available()),
+            edit_local: variable_at(
+                &self.locals_tree.selection,
+                self.locals_tree.selection.selected(),
+            )
+            .is_some_and(|variable| variable.is_available()),
             inspect_locals: self.locals_inspection_available(),
             manage_watches: can_manage_watches,
-            add_watch: can_manage_watches
-                && self.expression_watches.borrow().len() < MAX_EXPRESSION_WATCHES
-                && !expression.trim().is_empty()
-                && !self
-                    .expression_watches
-                    .borrow()
-                    .iter()
-                    .any(|existing| existing == expression.trim()),
+            add_watch: can_manage_watches && self.model.can_add_watch(&expression),
             remove_watch: can_manage_watches
                 && root_variable_at(
-                    &self.expression_watches_selection,
-                    self.expression_watches_selection.selected(),
+                    &self.watches_tree.selection,
+                    self.watches_tree.selection.selected(),
                 )
                 .is_some(),
             add_memory: can_inspect && !self.memory_address_entry.text().trim().is_empty(),

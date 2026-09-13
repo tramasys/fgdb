@@ -1,3 +1,56 @@
+/// A validated target pointer ABI, independent of ISA and register widths.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PointerWidth {
+    Bits32,
+    Bits64,
+}
+
+impl PointerWidth {
+    pub const HOST: Self = if usize::BITS == 32 {
+        Self::Bits32
+    } else {
+        Self::Bits64
+    };
+
+    pub const fn bits(self) -> u32 {
+        match self {
+            Self::Bits32 => 32,
+            Self::Bits64 => 64,
+        }
+    }
+
+    pub const fn bytes(self) -> usize {
+        match self {
+            Self::Bits32 => 4,
+            Self::Bits64 => 8,
+        }
+    }
+}
+
+impl Default for PointerWidth {
+    fn default() -> Self {
+        Self::HOST
+    }
+}
+
+impl TryFrom<u32> for PointerWidth {
+    type Error = &'static str;
+
+    fn try_from(bits: u32) -> Result<Self, Self::Error> {
+        match bits {
+            32 => Ok(Self::Bits32),
+            64 => Ok(Self::Bits64),
+            _ => Err("Target pointers must be 32 or 64 bits"),
+        }
+    }
+}
+
+impl std::fmt::Display for PointerWidth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.bits().fmt(formatter)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TargetArchitecture {
     X86,
@@ -69,22 +122,22 @@ impl TargetArchitecture {
         }
     }
 
-    pub fn pointer_bits_from_gdb_description(description: &str) -> Option<u32> {
-        Self::explicit_pointer_bits_from_gdb_description(description).or_else(|| {
+    pub fn pointer_width_from_gdb_description(description: &str) -> Option<PointerWidth> {
+        Self::explicit_pointer_width_from_gdb_description(description).or_else(|| {
             let value = description.to_ascii_lowercase();
 
-            Self::from_gdb_description(&value).pointer_bits()
+            Self::from_gdb_description(&value).pointer_width()
         })
     }
 
-    pub fn explicit_pointer_bits_from_gdb_description(description: &str) -> Option<u32> {
+    pub fn explicit_pointer_width_from_gdb_description(description: &str) -> Option<PointerWidth> {
         let value = description.to_ascii_lowercase();
 
         (value.contains("i386:x64-32")
             || value.contains("x64-32")
             || value.contains("ilp32")
             || (value.contains("mips") && value.contains("n32")))
-        .then_some(32)
+        .then_some(crate::debugger::PointerWidth::Bits32)
     }
 
     pub fn from_elf(machine: u16, elf_class: u8) -> Self {
@@ -121,14 +174,14 @@ impl TargetArchitecture {
         }
     }
 
-    pub fn from_elf_ident(bytes: &[u8]) -> Option<(Self, TargetEndian, u32)> {
+    pub fn from_elf_ident(bytes: &[u8]) -> Option<(Self, TargetEndian, PointerWidth)> {
         if bytes.get(..4)? != b"\x7fELF" {
             return None;
         }
 
-        let (elf_class, pointer_bits) = match bytes.get(4)? {
-            1 => (1, 32),
-            2 => (2, 64),
+        let (elf_class, pointer_width) = match bytes.get(4)? {
+            1 => (1, PointerWidth::Bits32),
+            2 => (2, PointerWidth::Bits64),
             _ => return None,
         };
 
@@ -164,14 +217,17 @@ impl TargetArchitecture {
             }
         }
 
-        Some((architecture, endian, pointer_bits))
+        Some((architecture, endian, pointer_width))
     }
 
     pub fn infer_from_register_names<T: AsRef<str>>(names: &[T]) -> Self {
         Self::infer_from_register_names_with_bits(names, None)
     }
 
-    pub fn infer_from_register_names_with_bits<I, T>(names: I, pointer_bits: Option<u32>) -> Self
+    pub fn infer_from_register_names_with_bits<I, T>(
+        names: I,
+        pointer_width: Option<PointerWidth>,
+    ) -> Self
     where
         I: IntoIterator<Item = T>,
         T: AsRef<str>,
@@ -222,17 +278,17 @@ impl TargetArchitecture {
         } else if eip_or_eax {
             Self::X86
         } else if s390 {
-            if pointer_bits == Some(64) {
+            if pointer_width == Some(crate::debugger::PointerWidth::Bits64) {
                 Self::S390x
-            } else if pointer_bits == Some(32) {
+            } else if pointer_width == Some(crate::debugger::PointerWidth::Bits32) {
                 Self::S390
             } else {
                 Self::Unknown
             }
         } else if powerpc {
-            if pointer_bits == Some(64) {
+            if pointer_width == Some(crate::debugger::PointerWidth::Bits64) {
                 Self::PowerPc64
-            } else if pointer_bits == Some(32) {
+            } else if pointer_width == Some(crate::debugger::PointerWidth::Bits32) {
                 Self::PowerPc32
             } else {
                 Self::Unknown
@@ -244,15 +300,15 @@ impl TargetArchitecture {
         } else if orig_a0_or_badv && r31 {
             Self::LoongArch64
         } else if x31 || (a7 && zero && ra && tp) {
-            match pointer_bits {
-                Some(32) => Self::RiscV32,
-                Some(64) => Self::RiscV64,
+            match pointer_width {
+                Some(crate::debugger::PointerWidth::Bits32) => Self::RiscV32,
+                Some(crate::debugger::PointerWidth::Bits64) => Self::RiscV64,
                 _ => Self::Unknown,
             }
         } else if badvaddr && hi && lo {
-            match pointer_bits {
-                Some(64) => Self::Mips64,
-                Some(32) => Self::Mips32,
+            match pointer_width {
+                Some(crate::debugger::PointerWidth::Bits64) => Self::Mips64,
+                Some(crate::debugger::PointerWidth::Bits32) => Self::Mips32,
                 _ => Self::Unknown,
             }
         } else {
@@ -260,10 +316,10 @@ impl TargetArchitecture {
         }
     }
 
-    pub fn pointer_bits(self) -> Option<u32> {
+    pub fn pointer_width(self) -> Option<PointerWidth> {
         match self {
             Self::X86 | Self::Arm | Self::RiscV32 | Self::Mips32 | Self::PowerPc32 | Self::S390 => {
-                Some(32)
+                Some(crate::debugger::PointerWidth::Bits32)
             }
 
             Self::X86_64
@@ -272,7 +328,7 @@ impl TargetArchitecture {
             | Self::Mips64
             | Self::PowerPc64
             | Self::S390x
-            | Self::LoongArch64 => Some(64),
+            | Self::LoongArch64 => Some(crate::debugger::PointerWidth::Bits64),
             Self::Unknown => None,
         }
     }
@@ -280,14 +336,18 @@ impl TargetArchitecture {
     /// Refines architectures whose 32/64-bit ISA variant follows the target
     /// pointer ABI. x86-64, AArch64 and MIPS64 are intentionally not narrowed:
     /// their ILP32 ABIs retain the 64-bit ISA and register file.
-    pub fn refine_for_pointer_bits(self, pointer_bits: u32) -> Self {
-        match (self, pointer_bits) {
-            (Self::RiscV32 | Self::RiscV64, 32) => Self::RiscV32,
-            (Self::RiscV32 | Self::RiscV64, 64) => Self::RiscV64,
-            (Self::PowerPc32 | Self::PowerPc64, 32) => Self::PowerPc32,
-            (Self::PowerPc32 | Self::PowerPc64, 64) => Self::PowerPc64,
-            (Self::S390 | Self::S390x, 32) => Self::S390,
-            (Self::S390 | Self::S390x, 64) => Self::S390x,
+    pub fn refine_for_pointer_width(self, pointer_width: PointerWidth) -> Self {
+        match (self, pointer_width) {
+            (Self::RiscV32 | Self::RiscV64, crate::debugger::PointerWidth::Bits32) => Self::RiscV32,
+            (Self::RiscV32 | Self::RiscV64, crate::debugger::PointerWidth::Bits64) => Self::RiscV64,
+            (Self::PowerPc32 | Self::PowerPc64, crate::debugger::PointerWidth::Bits32) => {
+                Self::PowerPc32
+            }
+            (Self::PowerPc32 | Self::PowerPc64, crate::debugger::PointerWidth::Bits64) => {
+                Self::PowerPc64
+            }
+            (Self::S390 | Self::S390x, crate::debugger::PointerWidth::Bits32) => Self::S390,
+            (Self::S390 | Self::S390x, crate::debugger::PointerWidth::Bits64) => Self::S390x,
             _ => self,
         }
     }
@@ -501,7 +561,7 @@ impl TargetArchitecture {
     /// Width of a scalar register value. This is intentionally independent
     /// from pointer width: x86-64 x32 and MIPS n32 have 64-bit registers but
     /// 32-bit pointers.
-    pub fn scalar_register_bits(self, name: &str, pointer_bits: u32) -> u32 {
+    pub fn scalar_register_bits(self, name: &str, pointer_width: PointerWidth) -> u32 {
         if matches!(name, "cs" | "ss" | "ds" | "es" | "fs" | "gs") {
             return 16;
         }
@@ -543,7 +603,7 @@ impl TargetArchitecture {
             return 32;
         }
 
-        self.pointer_bits().unwrap_or(pointer_bits).clamp(16, 128)
+        self.pointer_width().unwrap_or(pointer_width).bits()
     }
 
     pub fn is_program_counter(self, name: &str) -> bool {
@@ -1106,22 +1166,58 @@ mod tests {
     #[test]
     fn recognizes_major_gdb_architecture_descriptions() {
         for (description, expected, bits) in [
-            ("i386:x86-64", TargetArchitecture::X86_64, 64),
-            ("i386:x64-32", TargetArchitecture::X86_64, 64),
-            ("i386", TargetArchitecture::X86, 32),
-            ("aarch64", TargetArchitecture::AArch64, 64),
-            ("armv7", TargetArchitecture::Arm, 32),
-            ("riscv:rv64", TargetArchitecture::RiscV64, 64),
-            ("riscv:rv32", TargetArchitecture::RiscV32, 32),
-            ("powerpc:common64", TargetArchitecture::PowerPc64, 64),
-            ("powerpc:common", TargetArchitecture::PowerPc32, 32),
-            ("s390:64-bit", TargetArchitecture::S390x, 64),
-            ("mips:isa32", TargetArchitecture::Mips32, 32),
-            ("mips:isa64", TargetArchitecture::Mips64, 64),
+            (
+                "i386:x86-64",
+                TargetArchitecture::X86_64,
+                PointerWidth::Bits64,
+            ),
+            (
+                "i386:x64-32",
+                TargetArchitecture::X86_64,
+                PointerWidth::Bits64,
+            ),
+            ("i386", TargetArchitecture::X86, PointerWidth::Bits32),
+            ("aarch64", TargetArchitecture::AArch64, PointerWidth::Bits64),
+            ("armv7", TargetArchitecture::Arm, PointerWidth::Bits32),
+            (
+                "riscv:rv64",
+                TargetArchitecture::RiscV64,
+                PointerWidth::Bits64,
+            ),
+            (
+                "riscv:rv32",
+                TargetArchitecture::RiscV32,
+                PointerWidth::Bits32,
+            ),
+            (
+                "powerpc:common64",
+                TargetArchitecture::PowerPc64,
+                PointerWidth::Bits64,
+            ),
+            (
+                "powerpc:common",
+                TargetArchitecture::PowerPc32,
+                PointerWidth::Bits32,
+            ),
+            (
+                "s390:64-bit",
+                TargetArchitecture::S390x,
+                PointerWidth::Bits64,
+            ),
+            (
+                "mips:isa32",
+                TargetArchitecture::Mips32,
+                PointerWidth::Bits32,
+            ),
+            (
+                "mips:isa64",
+                TargetArchitecture::Mips64,
+                PointerWidth::Bits64,
+            ),
         ] {
             let architecture = TargetArchitecture::from_gdb_description(description);
             assert_eq!(architecture, expected, "{description}");
-            assert_eq!(architecture.pointer_bits(), Some(bits));
+            assert_eq!(architecture.pointer_width(), Some(bits));
         }
     }
 
@@ -1189,7 +1285,11 @@ mod tests {
 
         assert_eq!(
             TargetArchitecture::from_elf_ident(&i386),
-            Some((TargetArchitecture::X86, TargetEndian::Little, 32))
+            Some((
+                TargetArchitecture::X86,
+                TargetEndian::Little,
+                PointerWidth::Bits32
+            ))
         );
 
         let mut x32 = i386;
@@ -1197,7 +1297,11 @@ mod tests {
 
         assert_eq!(
             TargetArchitecture::from_elf_ident(&x32),
-            Some((TargetArchitecture::X86_64, TargetEndian::Little, 32))
+            Some((
+                TargetArchitecture::X86_64,
+                TargetEndian::Little,
+                PointerWidth::Bits32
+            ))
         );
 
         let mut aarch64_ilp32 = i386;
@@ -1205,7 +1309,11 @@ mod tests {
 
         assert_eq!(
             TargetArchitecture::from_elf_ident(&aarch64_ilp32),
-            Some((TargetArchitecture::AArch64, TargetEndian::Little, 32))
+            Some((
+                TargetArchitecture::AArch64,
+                TargetEndian::Little,
+                PointerWidth::Bits32
+            ))
         );
 
         let mut s390x = [0_u8; 20];
@@ -1216,7 +1324,11 @@ mod tests {
 
         assert_eq!(
             TargetArchitecture::from_elf_ident(&s390x),
-            Some((TargetArchitecture::S390x, TargetEndian::Big, 64))
+            Some((
+                TargetArchitecture::S390x,
+                TargetEndian::Big,
+                PointerWidth::Bits64
+            ))
         );
 
         let mut mips_n32 = [0_u8; 40];
@@ -1228,59 +1340,69 @@ mod tests {
 
         assert_eq!(
             TargetArchitecture::from_elf_ident(&mips_n32),
-            Some((TargetArchitecture::Mips64, TargetEndian::Big, 32))
+            Some((
+                TargetArchitecture::Mips64,
+                TargetEndian::Big,
+                PointerWidth::Bits32
+            ))
         );
     }
 
     #[test]
     fn keeps_register_and_pointer_widths_independent() {
         assert_eq!(
-            TargetArchitecture::pointer_bits_from_gdb_description("i386:x64-32"),
-            Some(32)
+            TargetArchitecture::pointer_width_from_gdb_description("i386:x64-32"),
+            Some(crate::debugger::PointerWidth::Bits32)
         );
 
         assert_eq!(
-            TargetArchitecture::pointer_bits_from_gdb_description("aarch64:ilp32"),
-            Some(32)
+            TargetArchitecture::pointer_width_from_gdb_description("aarch64:ilp32"),
+            Some(crate::debugger::PointerWidth::Bits32)
         );
 
         assert_eq!(
-            TargetArchitecture::pointer_bits_from_gdb_description("mips:isa64:n32"),
-            Some(32)
+            TargetArchitecture::pointer_width_from_gdb_description("mips:isa64:n32"),
+            Some(crate::debugger::PointerWidth::Bits32)
         );
 
         assert_eq!(
-            TargetArchitecture::explicit_pointer_bits_from_gdb_description("aarch64"),
+            TargetArchitecture::explicit_pointer_width_from_gdb_description("aarch64"),
             None
         );
 
         assert_eq!(
-            TargetArchitecture::X86_64.refine_for_pointer_bits(32),
+            TargetArchitecture::X86_64
+                .refine_for_pointer_width(crate::debugger::PointerWidth::Bits32),
             TargetArchitecture::X86_64
         );
 
         assert_eq!(
-            TargetArchitecture::Mips64.refine_for_pointer_bits(32),
+            TargetArchitecture::Mips64
+                .refine_for_pointer_width(crate::debugger::PointerWidth::Bits32),
             TargetArchitecture::Mips64
         );
 
         assert_eq!(
-            TargetArchitecture::X86_64.scalar_register_bits("rax", 32),
+            TargetArchitecture::X86_64
+                .scalar_register_bits("rax", crate::debugger::PointerWidth::Bits32),
             64
         );
 
         assert_eq!(
-            TargetArchitecture::Mips64.scalar_register_bits("a0", 32),
+            TargetArchitecture::Mips64
+                .scalar_register_bits("a0", crate::debugger::PointerWidth::Bits32),
             64
         );
 
         assert_eq!(
-            TargetArchitecture::X86_64.scalar_register_bits("eax", 32),
+            TargetArchitecture::X86_64
+                .scalar_register_bits("eax", crate::debugger::PointerWidth::Bits32),
             32
         );
 
         assert_eq!(
-            TargetArchitecture::X86_64.scalar_register_bits("cs", 32),
+            TargetArchitecture::X86_64
+                .scalar_register_bits("cs", crate::debugger::PointerWidth::Bits32),
             16
         );
     }
@@ -1318,7 +1440,7 @@ mod tests {
         assert_eq!(
             TargetArchitecture::infer_from_register_names_with_bits(
                 ["r0", "r31", "orig_a0", "badv"],
-                Some(64),
+                Some(crate::debugger::PointerWidth::Bits64),
             ),
             TargetArchitecture::LoongArch64
         );
@@ -1331,12 +1453,16 @@ mod tests {
         assert!(TargetArchitecture::AArch64.is_vector_register("p15"));
         assert!(TargetArchitecture::RiscV64.is_vector_register("vtype"));
         assert!(TargetArchitecture::Mips64.is_vector_register("w31"));
-        assert_eq!(TargetArchitecture::S390x.scalar_register_bits("a0", 64), 32);
+        assert_eq!(
+            TargetArchitecture::S390x
+                .scalar_register_bits("a0", crate::debugger::PointerWidth::Bits64),
+            32
+        );
 
         assert_eq!(
             TargetArchitecture::infer_from_register_names_with_bits(
                 ["x0", "x30", "sp", "pc", "pstate"],
-                Some(32),
+                Some(crate::debugger::PointerWidth::Bits32),
             ),
             TargetArchitecture::AArch64
         );

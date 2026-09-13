@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::app::execution::issue_execution_command;
 use crate::debugger::Instruction;
-use crate::ui::controls::issue_execution_command;
 
 mod expression;
 
@@ -129,6 +129,8 @@ impl NativeUntilController {
                     &ui,
                     &self.client,
                     "-exec-until",
+                    ExecutionTarget::SelectedThread,
+                    false,
                     "Running until the current source line is left…",
                 );
 
@@ -139,6 +141,8 @@ impl NativeUntilController {
                     &ui,
                     &self.client,
                     "-exec-finish",
+                    ExecutionTarget::SelectedThread,
+                    false,
                     "Running until the current function returns…",
                 );
 
@@ -258,6 +262,8 @@ impl NativeUntilController {
                 &ui,
                 &self.client,
                 "-exec-interrupt --all",
+                ExecutionTarget::All,
+                true,
                 "Cancelling the active Until operation…",
             ) {
                 if let Some(run) = self.state.borrow_mut().as_mut() {
@@ -1251,20 +1257,16 @@ impl NativeUntilController {
     }
 
     fn recover_timed_out_request(&self, record: &MiRecord) -> bool {
-        match record.class.as_str() {
-            "timeout" => {
-                self.client.quarantine(
-                    "GDB stopped answering while Until was controlling execution. The target state can no longer be determined safely.",
-                );
-
-                true
-            }
-            "unavailable" => {
-                self.abort();
-
-                true
-            }
-            _ => false,
+        if record.is_timed_out() {
+            self.client.quarantine(
+                "GDB stopped answering while Until was controlling execution. The target state can no longer be determined safely.",
+            );
+            true
+        } else if record.is_unavailable() {
+            self.abort();
+            true
+        } else {
+            false
         }
     }
 

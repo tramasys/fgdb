@@ -362,7 +362,7 @@ fn register_row(object: &glib::Object) -> gtk::Widget {
         &row.register,
         row.architecture,
         row.endian,
-        row.pointer_bits,
+        row.pointer_width,
     ));
 
     enable_stable_text_selection(&value);

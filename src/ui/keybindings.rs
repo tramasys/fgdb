@@ -46,16 +46,16 @@ impl Ui {
                     Action::Resynchronize => &self.resynchronize_button,
                     Action::Settings => &self.configuration_button,
                     Action::DebugData => &self.debug_data_button,
-                    Action::SourceBack => &self.source_navigation.back,
-                    Action::SourceForward => &self.source_navigation.forward,
-                    Action::QuickOpen => &self.source_navigation.quick_open,
-                    Action::OpenFile => &self.source_navigation.open_file,
-                    Action::Find => &self.source_navigation.find,
-                    Action::GoToLine => &self.source_navigation.go_to_line,
-                    Action::Symbols => &self.source_navigation.symbols,
-                    Action::LoadedSources => &self.source_navigation.loaded_search,
-                    Action::SourceTree => &self.source_navigation.tree_search,
-                    Action::ReopenSource => &self.source_navigation.reopen_closed,
+                    Action::SourceBack => &self.source.navigation.back,
+                    Action::SourceForward => &self.source.navigation.forward,
+                    Action::QuickOpen => &self.source.navigation.quick_open,
+                    Action::OpenFile => &self.source.navigation.open_file,
+                    Action::Find => &self.source.navigation.find,
+                    Action::GoToLine => &self.source.navigation.go_to_line,
+                    Action::Symbols => &self.source.navigation.symbols,
+                    Action::LoadedSources => &self.source.navigation.loaded_search,
+                    Action::SourceTree => &self.source.navigation.tree_search,
+                    Action::ReopenSource => &self.source.navigation.reopen_closed,
                     Action::Terminal => {
                         return (action, Target::Toggle(self.terminal_toggle_button.clone()));
                     }
@@ -89,8 +89,8 @@ impl Ui {
         let targets = self.shortcut_targets();
         let settings = Rc::clone(&self.settings);
         let terminal = self.terminal.clone();
-        let find_bar = self.source_navigation.find_bar.clone();
-        let find_close = self.source_navigation.find_close.clone();
+        let find_bar = self.source.navigation.find_bar.clone();
+        let find_close = self.source.navigation.find_close.clone();
         let window = host.as_ref().downgrade();
         let log = self.application_log.clone();
         let warned = Cell::new(None);

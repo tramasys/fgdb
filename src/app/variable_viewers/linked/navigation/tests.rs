@@ -31,7 +31,6 @@ fn pager(
     );
 
     LinkedPager {
-        ui: Weak::new(),
         client: Rc::clone(client),
         requests,
         session: Rc::downgrade(session),

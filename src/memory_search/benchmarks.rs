@@ -65,7 +65,12 @@ fn benchmark_memory_scan() {
                 max_bytes: SIZE as u64,
             };
 
-            let mut scan = Scan::new(query, Some(64), Some(TargetEndian::Little)).unwrap();
+            let mut scan = Scan::new(
+                query,
+                Some(crate::debugger::PointerWidth::Bits64),
+                Some(TargetEndian::Little),
+            )
+            .unwrap();
 
             for block in black_box(&blocks) {
                 if scan.limit_reached().is_some() {

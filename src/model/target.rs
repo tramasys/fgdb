@@ -1,14 +1,15 @@
 //! Target ABI observations are published together and owned by the debugger.
 
 use super::DebuggerModel;
+use crate::debugger::PointerWidth;
 use crate::debugger::{TargetArchitecture, TargetEndian};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct TargetAbi {
     architecture: TargetArchitecture,
     endian: Option<TargetEndian>,
-    pointer_bits: u32,
-    pointer_bits_known: bool,
+    pointer_width: PointerWidth,
+    pointer_width_known: bool,
 }
 
 impl Default for TargetAbi {
@@ -16,8 +17,8 @@ impl Default for TargetAbi {
         Self {
             architecture: TargetArchitecture::Unknown,
             endian: None,
-            pointer_bits: usize::BITS,
-            pointer_bits_known: false,
+            pointer_width: PointerWidth::HOST,
+            pointer_width_known: false,
         }
     }
 }
@@ -32,14 +33,14 @@ impl DebuggerModel {
     }
 
     /// Presentation may use an inferred width; memory operations can require
-    /// `known_target_pointer_bits` instead of treating the host as evidence.
-    pub(crate) fn target_pointer_bits(&self) -> u32 {
-        self.target.get().pointer_bits
+    /// `known_target_pointer_width` instead of treating the host as evidence.
+    pub(crate) fn target_pointer_width(&self) -> PointerWidth {
+        self.target.get().pointer_width
     }
 
-    pub(crate) fn known_target_pointer_bits(&self) -> Option<u32> {
+    pub(crate) fn known_target_pointer_width(&self) -> Option<PointerWidth> {
         let target = self.target.get();
-        target.pointer_bits_known.then_some(target.pointer_bits)
+        target.pointer_width_known.then_some(target.pointer_width)
     }
 
     pub(crate) fn set_target_endian(&self, endian: Option<TargetEndian>) {
@@ -52,11 +53,11 @@ impl DebuggerModel {
     pub(crate) fn set_target_architecture(&self, architecture: TargetArchitecture) {
         let mut target = self.target.get();
 
-        target.architecture = if target.pointer_bits_known {
-            architecture.refine_for_pointer_bits(target.pointer_bits)
+        target.architecture = if target.pointer_width_known {
+            architecture.refine_for_pointer_width(target.pointer_width)
         } else {
-            if let Some(bits) = architecture.pointer_bits() {
-                target.pointer_bits = bits;
+            if let Some(bits) = architecture.pointer_width() {
+                target.pointer_width = bits;
             }
 
             architecture
@@ -66,20 +67,22 @@ impl DebuggerModel {
     }
 
     pub(crate) fn set_target_pointer_bits(&self, bits: u32) -> bool {
-        if !matches!(bits, 32 | 64) {
+        let Ok(bits) = PointerWidth::try_from(bits) else {
             return false;
-        }
+        };
+        self.set_target_pointer_width(bits);
+        true
+    }
 
+    pub(crate) fn set_target_pointer_width(&self, bits: PointerWidth) {
         let target = self.target.get();
 
         self.set_target_abi(TargetAbi {
-            pointer_bits: bits,
-            pointer_bits_known: true,
-            architecture: target.architecture.refine_for_pointer_bits(bits),
+            pointer_width: bits,
+            pointer_width_known: true,
+            architecture: target.architecture.refine_for_pointer_width(bits),
             ..target
         });
-
-        true
     }
 
     fn set_target_abi(&self, target: TargetAbi) {
@@ -107,14 +110,20 @@ mod tests {
     #[test]
     fn abi_updates_preserve_explicit_widths_and_reject_invalid_observations() {
         let model = DebuggerModel::new(None);
-        assert_eq!(model.known_target_pointer_bits(), None);
+        assert_eq!(model.known_target_pointer_width(), None);
         model.set_target_architecture(TargetArchitecture::X86);
-        assert_eq!(model.target_pointer_bits(), 32);
-        assert_eq!(model.known_target_pointer_bits(), None);
+        assert_eq!(
+            model.target_pointer_width(),
+            crate::debugger::PointerWidth::Bits32
+        );
+        assert_eq!(model.known_target_pointer_width(), None);
         assert!(model.set_target_pointer_bits(32));
         model.set_target_architecture(TargetArchitecture::X86_64);
         assert_eq!(model.target_architecture(), TargetArchitecture::X86_64);
-        assert_eq!(model.known_target_pointer_bits(), Some(32));
+        assert_eq!(
+            model.known_target_pointer_width(),
+            Some(crate::debugger::PointerWidth::Bits32)
+        );
         model.set_target_endian(Some(TargetEndian::Big));
         let before = model.target.get();
 
@@ -158,12 +167,18 @@ mod tests {
         model.set_selected_inferior("i1");
         model.set_target_pointer_bits(32);
         assert!(model.set_selected_inferior("i1"));
-        assert_eq!(model.known_target_pointer_bits(), Some(32));
+        assert_eq!(
+            model.known_target_pointer_width(),
+            Some(crate::debugger::PointerWidth::Bits32)
+        );
         assert!(model.set_selected_inferior("i2"));
         assert_eq!(model.target.get(), TargetAbi::default());
         model.set_target_pointer_bits(64);
         model.record_inferior_exited("i1");
-        assert_eq!(model.known_target_pointer_bits(), Some(64));
+        assert_eq!(
+            model.known_target_pointer_width(),
+            Some(crate::debugger::PointerWidth::Bits64)
+        );
         model.record_inferior_exited("i2");
         assert_eq!(model.target.get(), TargetAbi::default());
     }

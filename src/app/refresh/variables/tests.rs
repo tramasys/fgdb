@@ -1,9 +1,6 @@
-use std::collections::HashSet;
-
 use super::{
     Variable, VariableRefreshTarget, has_persistent_variable_objects, reuse_variable_objects,
-    variable_child_page_end, variable_object_has_owned_ancestor, variable_object_owned_root,
-    variable_object_owns_update,
+    variable_child_page_end, variable_object_owns_update,
 };
 
 fn variable(name: &str, value: &str, type_name: Option<&str>, varobj: Option<&str>) -> Variable {
@@ -146,27 +143,6 @@ fn bulk_updates_route_only_to_owned_roots_and_descendants() {
     ));
 
     assert!(!variable_object_owns_update("fgdb_var_1", "temporary"));
-    let roots = HashSet::from([String::from("fgdb_var_1"), String::from("fgdb_var_20")]);
-
-    assert_eq!(
-        variable_object_owned_root(&roots, "fgdb_var_1.choice.value").map(String::as_str),
-        Some("fgdb_var_1"),
-    );
-
-    assert_eq!(
-        variable_object_owned_root(&roots, "fgdb_var_20").map(String::as_str),
-        Some("fgdb_var_20"),
-    );
-
-    assert!(variable_object_has_owned_ancestor(
-        &roots,
-        "fgdb_var_1.public.next.value"
-    ));
-
-    assert!(!variable_object_has_owned_ancestor(
-        &roots,
-        "fgdb_var_10.public"
-    ));
 }
 
 #[test]

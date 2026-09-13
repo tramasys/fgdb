@@ -1,6 +1,7 @@
 //! Opt-in GTK refresh measurements, including the first rendered frame.
 
 use super::*;
+use crate::debugger::PointerWidth;
 use crate::ui::{ColumnLayouts, InstructionRowData, TableId, views};
 use gtk::{gio, glib};
 use std::{
@@ -21,7 +22,7 @@ fn rows(start: u64, pc: u64) -> Vec<InstructionRowData> {
                 source: None,
             },
             current: index == pc,
-            pointer_bits: 64,
+            pointer_width: PointerWidth::Bits64,
             source_text: None,
         })
         .collect()
@@ -259,7 +260,7 @@ fn benchmark_register_refresh() {
             ring: None,
             architecture: TargetArchitecture::X86_64,
             endian: Some(TargetEndian::Little),
-            pointer_bits: 64,
+            pointer_width: PointerWidth::Bits64,
             vector_display: VectorDisplay::default(),
         });
         let started = Instant::now();

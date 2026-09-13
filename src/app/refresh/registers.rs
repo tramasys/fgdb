@@ -1,4 +1,5 @@
 use super::*;
+use crate::debugger::PointerWidth;
 
 #[cfg(test)]
 mod tests;
@@ -11,7 +12,7 @@ pub(in crate::app) struct RegisterRefresh {
     active: usize,
     architecture: TargetArchitecture,
     endian: TargetEndian,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
 }
 
 pub(in crate::app) fn refresh_registers(
@@ -34,7 +35,7 @@ pub(in crate::app) fn refresh_registers(
     if requests
         .unscoped("-data-list-register-names")
         .request(move |client, record| {
-            if record.class == "superseded" {
+            if record.is_superseded() {
                 return;
             }
 
@@ -86,7 +87,7 @@ fn request_register_values(
         let detected = if current == TargetArchitecture::Unknown {
             TargetArchitecture::infer_from_register_names_with_bits(
                 names.iter(),
-                Some(ui.model.target_pointer_bits()),
+                Some(ui.model.target_pointer_width()),
             )
         } else {
             current
@@ -128,7 +129,7 @@ fn request_register_values(
     if requests
         .frame(&command)
         .request(move |client, record| {
-            if record.class == "superseded" {
+            if record.is_superseded() {
                 return;
             }
 
@@ -204,7 +205,7 @@ pub(in crate::app) fn enrich_registers(
     };
 
     let architecture = current_ui.model.target_architecture();
-    let pointer_bits = current_ui.model.target_pointer_bits();
+    let pointer_width = current_ui.model.target_pointer_width();
 
     let indices = registers
         .iter()
@@ -233,7 +234,7 @@ pub(in crate::app) fn enrich_registers(
         active: 0,
         architecture,
         endian,
-        pointer_bits,
+        pointer_width,
     }));
 
     schedule_register_chains(client, refresh);
@@ -318,7 +319,7 @@ fn apply_register_chain_value(
         let mut state = refresh.borrow_mut();
         let endian = state.endian;
         let architecture = state.architecture;
-        let pointer_bits = state.pointer_bits;
+        let pointer_width = state.pointer_width;
         let register = &mut state.registers[index];
         let chain = &mut register.pointer_chain;
 
@@ -335,7 +336,7 @@ fn apply_register_chain_value(
                 address,
                 depth,
                 endian,
-                pointer_bits,
+                pointer_width,
                 architecture,
             );
             continue_chain =
@@ -357,16 +358,12 @@ pub(in crate::app) fn register_string_address(
     decoded_word: u64,
     depth: usize,
     endian: TargetEndian,
-    pointer_bits: u32,
+    pointer_width: PointerWidth,
     architecture: TargetArchitecture,
 ) -> Option<u64> {
     if depth == 0
         || architecture.is_program_counter(&register.name)
-        || !looks_like_string_word(
-            decoded_word,
-            endian,
-            usize::try_from(pointer_bits / 8).unwrap_or(8).clamp(4, 8),
-        )
+        || !looks_like_string_word(decoded_word, endian, pointer_width.bytes())
     {
         return None;
     }

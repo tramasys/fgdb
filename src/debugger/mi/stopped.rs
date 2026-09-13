@@ -141,7 +141,7 @@ impl StopRequests {
                 response_key,
                 &response,
                 value,
-                record.is_done() || record.class == "error",
+                record.is_done() || record.is_gdb_error(),
             );
         };
 
@@ -576,7 +576,7 @@ mod tests {
                         .unwrap()
                 })
                 .collect::<Vec<_>>();
-            MiClient::on_write_ready(&client.weak(), glib::IOCondition::OUT);
+            super::super::tests::dispatch_test_write(&client);
             peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
             assert!(peer.read(&mut [0; 4096]).unwrap() > 0);
 

@@ -27,6 +27,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let mi_client = match MiClient::open(move |client, event| {
         let became_ready = matches!(&event, MiEvent::Ready(_));
         handle_mi_event(&weak_ui, client, event);
+        client.flush_variable_deletions();
 
         let ready_handler = became_ready
             .then(|| ready_hook_for_event.borrow().as_ref().cloned())
@@ -49,9 +50,27 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
         }
     };
 
-    ui.connect_debug_controls(&mi_client, |ui, client| {
-        refresh_cached_inspector_details(&Rc::downgrade(ui), client);
+    let authority = Rc::downgrade(&model);
+    mi_client.set_variable_cleanup_guard(move || {
+        authority
+            .upgrade()
+            .is_none_or(|model| !model.inferior_is_running())
     });
+    let cleanup = Rc::downgrade(&mi_client);
+    ui.set_variable_retirement_handler(move |objects| {
+        if let Some(client) = cleanup.upgrade() {
+            for object in objects {
+                client.delete_variable_object(object);
+            }
+        }
+    });
+
+    let detail_client = Rc::clone(&mi_client);
+    let execution_client = Rc::clone(&mi_client);
+    ui.connect_debug_controls(
+        move |ui| refresh_cached_inspector_details(&Rc::downgrade(ui), &detail_client),
+        move |ui, action| execution::handle(ui, &execution_client, action),
+    );
 
     memory_search::connect(&ui, &mi_client);
     return_values::connect(&ui, &mi_client);
@@ -359,7 +378,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                     return;
                 };
 
-                if record.class == "superseded" {
+                if record.is_superseded() {
                     return;
                 }
 
@@ -420,7 +439,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                     return;
                 };
 
-                if record.class == "superseded" {
+                if record.is_superseded() {
                     return;
                 }
 
@@ -793,7 +812,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
                 );
 
                 refresh_stopped_state(&weak_ui_for_response, client);
-            } else if record.class != "superseded" {
+            } else if !record.is_superseded() {
                 ui.set_status(
                     "Assignment failed",
                     record

@@ -1,5 +1,6 @@
 use super::*;
 use crate::app::test_support::{open_debugger, request, wait_until};
+use crate::debugger::PointerWidth;
 use crate::debugger::StopContext;
 
 #[test]
@@ -64,7 +65,7 @@ fn live_shared_register_reads_match_independent_chains() {
                     address,
                     depth,
                     TargetEndian::Little,
-                    64,
+                    crate::debugger::PointerWidth::Bits64,
                     TargetArchitecture::X86_64,
                 ) {
                     independent_reads += 1;
@@ -100,7 +101,7 @@ fn live_shared_register_reads_match_independent_chains() {
             active: 0,
             architecture: TargetArchitecture::X86_64,
             endian: TargetEndian::Little,
-            pointer_bits: 64,
+            pointer_width: PointerWidth::Bits64,
         }));
         schedule_register_chains(&client, Rc::clone(&refresh));
         wait_until(|| {

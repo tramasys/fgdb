@@ -2,12 +2,13 @@ use super::*;
 
 impl Ui {
     pub(crate) fn source_index_snapshot(&self) -> Option<Arc<source::SourceIndex>> {
-        self.source_index.borrow().as_ref().cloned()
+        self.source.index_snapshot()
     }
 
     pub(in crate::ui) fn resolve_source_path(&self, reported_path: &str) -> Option<PathBuf> {
         if let Some(path) = self
-            .resolved_source_paths
+            .source
+            .resolved_paths
             .borrow_mut()
             .get_cloned(reported_path)
         {
@@ -15,7 +16,8 @@ impl Ui {
         }
 
         let indexed = self
-            .source_index
+            .source
+            .index
             .borrow()
             .as_ref()
             .map(|index| index.resolve_indexed(reported_path));
@@ -40,7 +42,7 @@ impl Ui {
             }
         };
 
-        let mut cache = self.resolved_source_paths.borrow_mut();
+        let mut cache = self.source.resolved_paths.borrow_mut();
 
         // Missing files can appear after a build, debuginfod download, or a
         // substitute-path change. Cache successful work, but never make a
@@ -64,13 +66,14 @@ impl Ui {
 
     pub fn show_source_locations(&self, symbol: &str, locations: &[SourceLocation]) {
         let generation = self
-            .source_open_generation
+            .source
+            .open_generation
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
-        let current = Arc::clone(&self.source_open_generation);
+        let current = Arc::clone(&self.source.open_generation);
         let queued = Arc::clone(&current);
-        let roots = self.source_roots.borrow().clone();
-        let index = self.source_index_snapshot();
+        let roots = self.source.roots.borrow().clone();
+        let index = self.source.index_snapshot();
         let locations = locations.to_vec();
         let symbol = symbol.to_owned();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -116,7 +119,7 @@ impl Ui {
             let Some(ui) = weak.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            if ui.source_open_generation.load(Ordering::Relaxed) != generation {
+            if ui.source.open_generation.load(Ordering::Relaxed) != generation {
                 return glib::ControlFlow::Break;
             }
 
@@ -136,14 +139,15 @@ impl Ui {
     }
 
     pub(crate) fn initial_source_generation(&self) -> Option<u64> {
-        self.source_documents
+        self.source
+            .documents
             .borrow()
             .is_empty()
-            .then(|| self.source_open_generation.load(Ordering::Relaxed))
+            .then(|| self.source.open_generation.load(Ordering::Relaxed))
     }
 
     pub fn show_initial_source(&self, source_file: &SourceFile) {
-        if !self.source_documents.borrow().is_empty() {
+        if !self.source.documents.borrow().is_empty() {
             return;
         }
 
@@ -183,9 +187,9 @@ impl Ui {
             }
 
             if let Some(bits) =
-                TargetArchitecture::explicit_pointer_bits_from_gdb_description(description)
+                TargetArchitecture::explicit_pointer_width_from_gdb_description(description)
             {
-                self.model.set_target_pointer_bits(bits);
+                self.model.set_target_pointer_width(bits);
             }
 
             if let Some(endian) = TargetEndian::from_architecture_description(description) {
@@ -196,22 +200,22 @@ impl Ui {
         update_selected_frame_buttons(&self.frame_buttons.borrow(), frame.level);
 
         let (Some(reported_path), Some(line)) = (frame.source_path(), frame.line) else {
-            self.clear_execution_mark();
+            self.source.clear_execution_mark();
             return;
         };
 
         let frame = frame.clone();
         self.open_source_when_ready(Path::new(reported_path), move |ui, document| {
             let Some(document) = document else {
-                ui.clear_execution_mark();
+                ui.source.clear_execution_mark();
                 return;
             };
             let path = document.path.clone();
-            let same_location = ui.execution_source_line.get() == Some(line)
-                && ui.execution_source_path.borrow().as_ref() == Some(&path);
+            let same_location = ui.source.execution_line.get() == Some(line)
+                && ui.source.execution_path.borrow().as_ref() == Some(&path);
 
             if !same_location {
-                ui.clear_execution_mark();
+                ui.source.clear_execution_mark();
             }
 
             document.tab.add_css_class("executing-source-tab");
@@ -247,8 +251,8 @@ impl Ui {
                 .buffer
                 .create_source_mark(None, EXECUTION_CATEGORY, &iter);
 
-            ui.execution_source_path.replace(Some(path));
-            ui.execution_source_line.set(frame.line);
+            ui.source.execution_path.replace(Some(path));
+            ui.source.execution_line.set(frame.line);
             document.breakpoint_renderer.queue_draw();
             document.buffer.place_cursor(&iter);
             let source_view = document.view;
@@ -265,17 +269,17 @@ impl Ui {
     }
 
     pub fn clear_execution_location(&self) {
-        self.source_open_generation.fetch_add(1, Ordering::Relaxed);
+        self.source.open_generation.fetch_add(1, Ordering::Relaxed);
         self.model.select_frame(u32::MAX);
         self.current_source_language
             .set(crate::language::Language::Unknown);
 
         update_selected_frame_buttons(&self.frame_buttons.borrow(), u32::MAX);
-        self.clear_execution_mark();
+        self.source.clear_execution_mark();
     }
 
     pub fn suspend_execution_location(&self) {
-        self.source_open_generation.fetch_add(1, Ordering::Relaxed);
+        self.source.open_generation.fetch_add(1, Ordering::Relaxed);
         // Keep the selected frame row stable across a short execution command.
         // The stopped-state refresh updates it when GDB reports the next frame.
         // Removing and immediately restoring this class made the blue row flash
@@ -283,11 +287,12 @@ impl Ui {
         self.current_source_language
             .set(crate::language::Language::Unknown);
 
-        self.execution_source_line.set(None);
-        let path = self.execution_source_path.borrow();
+        self.source.execution_line.set(None);
+        let path = self.source.execution_path.borrow();
 
         for document in self
-            .source_documents
+            .source
+            .documents
             .borrow()
             .iter()
             .filter(|document| path.as_ref().is_some_and(|path| document.path == *path))
@@ -295,109 +300,12 @@ impl Ui {
             remove_marks(&document.buffer, EXECUTION_CATEGORY);
             document.breakpoint_renderer.queue_draw();
         }
-    }
-
-    fn clear_execution_mark(&self) {
-        let path = self.execution_source_path.borrow_mut().take();
-        self.execution_source_line.set(None);
-
-        for document in self
-            .source_documents
-            .borrow()
-            .iter()
-            .filter(|document| path.as_ref().is_some_and(|path| document.path == *path))
-        {
-            remove_marks(&document.buffer, EXECUTION_CATEGORY);
-            document.breakpoint_renderer.queue_draw();
-            document.tab.remove_css_class("executing-source-tab");
-
-            document
-                .tab_label
-                .set_tooltip_text(Some(&document.path.to_string_lossy()));
-        }
-    }
-
-    pub fn clear_debugger_state(&self) {
-        self.model.clear_return_value();
-        self.reset_thread_analysis();
-        self.clear_thread_action_pending();
-        self.defer_displayed_variable_object_deletions();
-        let disassembly_handler = self.disassembly_handler.borrow().clone();
-
-        if let Some(handler) = disassembly_handler {
-            handler(DisassemblyRequest::Clear);
-        }
-
-        self.start_stop_refresh();
-        self.model.start_thread_refresh();
-        self.clear_execution_location();
-        self.show_frames(&[]);
-        self.show_threads(&[]);
-        self.show_modules(&[]);
-        self.show_locals(&[]);
-        self.show_expression_watches_unavailable("<inferior exited>");
-        self.show_registers(&[]);
-        self.show_stack(&[]);
-        self.model.clear_previous_registers();
-        self.invalidate_source_io();
-        self.show_instructions(Vec::new(), "", "", None, false);
-        self.show_signal(None, None);
-        self.memory_region_store.remove_all();
-        self.model.clear_memory_regions();
-        self.memory_regions_empty.set_visible(true);
-
-        self.memory_watch_container
-            .refresh_batch
-            .borrow_mut()
-            .clear();
-
-        update_memory_container_state(&self.memory_watch_container, false);
-        self.clear_kernel_snapshot();
-        self.clear_misc_snapshot();
-
-        for watch in self.memory_watches.borrow().iter() {
-            watch.status.remove_css_class("memory-watch-error");
-            watch.status.set_text("target is not paused");
-            watch.range.set_text("");
-            watch.store.remove_all();
-            watch.selection.set_selected(gtk::INVALID_LIST_POSITION);
-            watch.follow_button.set_sensitive(false);
-            watch.previous_begin.set(None);
-            watch.previous_bytes.borrow_mut().clear();
-        }
-    }
-
-    fn defer_displayed_variable_object_deletions(&self) {
-        let mut deferred = self.deferred_variable_object_deletions.borrow_mut();
-
-        deferred.extend(
-            self.local_variable_objects()
-                .into_iter()
-                .chain(self.expression_watch_variable_objects())
-                .filter_map(|variable| variable.varobj),
-        );
-    }
-
-    pub(crate) fn take_deferred_variable_object_deletions(&self) -> Vec<String> {
-        self.deferred_variable_object_deletions
-            .borrow_mut()
-            .drain()
-            .collect()
-    }
-
-    pub(crate) fn defer_variable_object_deletions(
-        &self,
-        variable_objects: impl IntoIterator<Item = String>,
-    ) {
-        self.deferred_variable_object_deletions
-            .borrow_mut()
-            .extend(variable_objects);
     }
 
     pub(in crate::ui) fn connect_open_source(self: &Rc<Self>) {
         let weak_ui = Rc::downgrade(self);
 
-        self.source_navigation.open_file.connect_clicked(move |_| {
+        self.source.navigation.open_file.connect_clicked(move |_| {
             let dialog = gtk::FileDialog::builder()
                 .title("Open source files")
                 .modal(true)
@@ -424,7 +332,7 @@ impl Ui {
                 return;
             };
 
-            if let Some(root) = ui.source_roots.borrow().first() {
+            if let Some(root) = ui.source.roots.borrow().first() {
                 dialog.set_initial_folder(Some(&gio::File::for_path(root)));
             }
 
@@ -457,5 +365,31 @@ impl Ui {
                 }
             });
         });
+    }
+}
+
+impl SourceWorkspace {
+    pub(crate) fn index_snapshot(&self) -> Option<Arc<source::SourceIndex>> {
+        self.index.borrow().as_ref().cloned()
+    }
+
+    pub(in crate::ui) fn clear_execution_mark(&self) {
+        let path = self.execution_path.borrow_mut().take();
+        self.execution_line.set(None);
+
+        for document in self
+            .documents
+            .borrow()
+            .iter()
+            .filter(|document| path.as_ref().is_some_and(|path| document.path == *path))
+        {
+            remove_marks(&document.buffer, EXECUTION_CATEGORY);
+            document.breakpoint_renderer.queue_draw();
+            document.tab.remove_css_class("executing-source-tab");
+
+            document
+                .tab_label
+                .set_tooltip_text(Some(&document.path.to_string_lossy()));
+        }
     }
 }

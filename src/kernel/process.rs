@@ -892,7 +892,19 @@ fn executable_architecture(root: &Path) -> TargetArchitecture {
 }
 
 fn signal_name(number: u8) -> String {
+    if let Some(name) = standard_signal_name(i32::from(number)) {
+        return name.to_owned();
+    }
+
     match number {
+        32 | 33 => format!("SIG{number} (reserved)"),
+        34..=64 => format!("SIGRTMIN+{}", number - 34),
+        _ => format!("SIG{number}"),
+    }
+}
+
+pub(crate) fn standard_signal_name(number: i32) -> Option<&'static str> {
+    Some(match number {
         1 => "SIGHUP",
         2 => "SIGINT",
         3 => "SIGQUIT",
@@ -924,11 +936,8 @@ fn signal_name(number: u8) -> String {
         29 => "SIGIO",
         30 => "SIGPWR",
         31 => "SIGSYS",
-        32 | 33 => return format!("SIG{number} (reserved)"),
-        34..=64 => return format!("SIGRTMIN+{}", number - 34),
-        _ => return format!("SIG{number}"),
-    }
-    .to_owned()
+        _ => return None,
+    })
 }
 
 struct ElfIdentity {
@@ -940,8 +949,8 @@ struct ElfIdentity {
 }
 
 fn parse_elf_identity(bytes: &[u8]) -> Option<ElfIdentity> {
-    let (architecture, endian, pointer_bits) = TargetArchitecture::from_elf_ident(bytes)?;
-    let word_size = usize::try_from(pointer_bits / 8).ok()?;
+    let (architecture, endian, pointer_width) = TargetArchitecture::from_elf_ident(bytes)?;
+    let word_size = pointer_width.bytes();
     let little = endian == TargetEndian::Little;
 
     let read_u16 = |offset| {
@@ -1123,7 +1132,16 @@ mod tests {
     #[test]
     fn decodes_signal_and_capability_masks() {
         assert_eq!(signal_name(11), "SIGSEGV");
+        assert_eq!(standard_signal_name(1), Some("SIGHUP"));
+        assert_eq!(standard_signal_name(31), Some("SIGSYS"));
+        assert_eq!(standard_signal_name(32), None);
+        assert_eq!(standard_signal_name(0), None);
+        assert_eq!(standard_signal_name(-1), None);
+        assert_eq!(signal_name(32), "SIG32 (reserved)");
+        assert_eq!(signal_name(33), "SIG33 (reserved)");
         assert_eq!(signal_name(34), "SIGRTMIN+0");
+        assert_eq!(signal_name(64), "SIGRTMIN+30");
+        assert_eq!(signal_name(65), "SIG65");
         assert!(decode_capabilities("0000000000002000").contains("NET_RAW"));
 
         assert_eq!(

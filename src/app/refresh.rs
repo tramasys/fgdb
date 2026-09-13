@@ -33,7 +33,11 @@ struct LazyStopNeeds {
 
 #[derive(Default)]
 struct StopProcessSnapshot {
-    abi: Option<(TargetArchitecture, TargetEndian, u32)>,
+    abi: Option<(
+        TargetArchitecture,
+        TargetEndian,
+        crate::debugger::PointerWidth,
+    )>,
     regions: Vec<MemoryRegion>,
 }
 
@@ -111,7 +115,7 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     if requests
         .thread(frames_command)
         .request(move |client, record| {
-            if record.class == "superseded" {
+            if record.is_superseded() {
                 return;
             }
 
@@ -143,7 +147,7 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
     let frame_command = "-stack-info-frame";
 
     let _ = requests.frame(frame_command).request(move |_, record| {
-        if record.class == "superseded" {
+        if record.is_superseded() {
             return;
         }
 
@@ -180,7 +184,7 @@ pub(crate) fn refresh_stopped_state(ui: &Weak<Ui>, client: &MiClient) {
                     variable_update_batch_for_locals,
                 );
             } else {
-                if record.class != "superseded"
+                if !record.is_superseded()
                     && let Some(ui) = weak_ui.upgrade()
                 {
                     ui.show_locals_refresh_error(
@@ -311,7 +315,7 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
     if requests
         .unscoped("-list-thread-groups")
         .request(move |client, record| {
-            if record.class == "superseded" {
+            if record.is_superseded() {
                 return;
             }
 
@@ -413,13 +417,13 @@ fn finish_stop_process_snapshot(
         return;
     }
 
-    if let Some((architecture, endian, pointer_bits)) = snapshot.abi
+    if let Some((architecture, endian, pointer_width)) = snapshot.abi
         && let Some(current_ui) = ui.upgrade()
     {
         let previous = (
             current_ui.model.target_architecture(),
             current_ui.model.target_endian(),
-            current_ui.model.target_pointer_bits(),
+            current_ui.model.target_pointer_width(),
         );
         // An ELF class and byte order remain useful even when this fgdb build
         // does not recognize e_machine. Do not let a future machine erase a
@@ -429,11 +433,11 @@ fn finish_stop_process_snapshot(
         }
 
         current_ui.model.set_target_endian(Some(endian));
-        current_ui.model.set_target_pointer_bits(pointer_bits);
+        current_ui.model.set_target_pointer_width(pointer_width);
         let current = (
             current_ui.model.target_architecture(),
             current_ui.model.target_endian(),
-            current_ui.model.target_pointer_bits(),
+            current_ui.model.target_pointer_width(),
         );
         // Rebind only when ELF discovery actually refined the target. The
         // former unconditional pass rebuilt every register row on each stop.
@@ -453,7 +457,7 @@ fn finish_stop_process_snapshot(
         let architecture = if architecture == TargetArchitecture::Unknown {
             TargetArchitecture::infer_from_register_names_with_bits(
                 registers.iter().map(|register| register.name.as_str()),
-                Some(current_ui.model.target_pointer_bits()),
+                Some(current_ui.model.target_pointer_width()),
             )
         } else {
             architecture
@@ -489,7 +493,7 @@ fn refresh_visible_stop_details(
     let architecture = if architecture == TargetArchitecture::Unknown {
         TargetArchitecture::infer_from_register_names_with_bits(
             registers.iter().map(|register| register.name.as_str()),
-            Some(current_ui.model.target_pointer_bits()),
+            Some(current_ui.model.target_pointer_width()),
         )
     } else {
         architecture
@@ -524,9 +528,7 @@ fn refresh_visible_stop_details(
         let Some(endian) = current_ui.model.target_endian() else {
             return;
         };
-        let word_size = usize::try_from(current_ui.model.target_pointer_bits() / 8)
-            .unwrap_or(8)
-            .clamp(4, 8);
+        let word_size = current_ui.model.target_pointer_width().bytes();
         drop(current_ui);
         enrich_stack(
             ui,
@@ -593,7 +595,7 @@ fn request_tls_runtime(
     if requests
         .frame(&command)
         .request(move |_, record| {
-            if record.class == "superseded" {
+            if record.is_superseded() {
                 return;
             }
 
@@ -608,7 +610,7 @@ fn request_tls_runtime(
                         (
                             architecture,
                             ui.model.target_endian(),
-                            ui.model.target_pointer_bits(),
+                            ui.model.target_pointer_width(),
                         ),
                         register,
                         base,
@@ -621,7 +623,7 @@ fn request_tls_runtime(
                         (
                             architecture,
                             ui.model.target_endian(),
-                            ui.model.target_pointer_bits(),
+                            ui.model.target_pointer_width(),
                         ),
                         register,
                         base,
@@ -641,7 +643,7 @@ fn request_tls_runtime(
             (
                 architecture,
                 ui.model.target_endian(),
-                ui.model.target_pointer_bits(),
+                ui.model.target_pointer_width(),
             ),
             register,
             base,

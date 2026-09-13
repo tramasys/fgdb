@@ -36,7 +36,12 @@ fn presentation_does_not_confuse_absent_addresses_with_registers_or_pointer_targ
         ValueLocation::Unknown("synthetic child".into()),
     ] {
         assert_eq!(location.address(), None);
-        let display = presentation::format(Some(&location), true, 64, None);
+        let display = presentation::format(
+            Some(&location),
+            true,
+            crate::debugger::PointerWidth::Bits64,
+            None,
+        );
         assert!(!display.text.is_empty());
         assert!(!display.tooltip.is_empty());
         assert!(!display.text.starts_with("0x"));
@@ -49,7 +54,7 @@ fn presentation_does_not_confuse_absent_addresses_with_registers_or_pointer_targ
             referenced: false,
         }),
         true,
-        32,
+        crate::debugger::PointerWidth::Bits32,
         None,
     );
 
@@ -61,14 +66,22 @@ fn presentation_does_not_confuse_absent_addresses_with_registers_or_pointer_targ
             referenced: true,
         }),
         true,
-        64,
+        crate::debugger::PointerWidth::Bits64,
         None,
     );
 
     assert_eq!(display.text, "0x0000000000000010 (referent)");
     assert!(display.tooltip.contains("referenced object"));
-    assert!(presentation::format(None, true, 64, None).text.is_empty());
-    assert!(presentation::format(None, false, 64, None).text.is_empty());
+    assert!(
+        presentation::format(None, true, crate::debugger::PointerWidth::Bits64, None)
+            .text
+            .is_empty()
+    );
+    assert!(
+        presentation::format(None, false, crate::debugger::PointerWidth::Bits64, None)
+            .text
+            .is_empty()
+    );
 }
 
 fn mapping(kind: MemoryKind, path: &str) -> MemoryRegion {
@@ -103,7 +116,12 @@ fn location_colors_reuse_mapping_kinds_and_half_open_bounds() {
                     referenced,
                 };
 
-                let display = presentation::format(Some(&location), true, 64, Some(&regions));
+                let display = presentation::format(
+                    Some(&location),
+                    true,
+                    crate::debugger::PointerWidth::Bits64,
+                    Some(&regions),
+                );
 
                 if regions[0].contains(address) {
                     assert_eq!(display.kind, kind);
@@ -127,14 +145,24 @@ fn unavailable_mappings_and_stale_locations_have_no_region_color() {
     };
 
     for regions in [None, Some([].as_slice())] {
-        let display = presentation::format(Some(&location), true, 32, regions);
+        let display = presentation::format(
+            Some(&location),
+            true,
+            crate::debugger::PointerWidth::Bits32,
+            regions,
+        );
         assert_eq!(display.text, "0x00001000");
         assert_eq!(display.kind, MemoryKind::None);
         assert!(display.tooltip.contains("mappings are unavailable"));
     }
 
     let regions = [mapping(MemoryKind::Stack, "[stack]")];
-    let stale = presentation::format(Some(&location), false, 64, Some(&regions));
+    let stale = presentation::format(
+        Some(&location),
+        false,
+        crate::debugger::PointerWidth::Bits64,
+        Some(&regions),
+    );
     assert!(stale.text.is_empty());
     assert_eq!(stale.kind, MemoryKind::None);
     assert!(!stale.tooltip.contains("[stack]"));
@@ -146,7 +174,12 @@ fn unavailable_mappings_and_stale_locations_have_no_region_color() {
         Some(ValueLocation::Unavailable),
         Some(ValueLocation::Unknown("not available".into())),
     ] {
-        let display = presentation::format(location.as_ref(), true, 64, Some(&regions));
+        let display = presentation::format(
+            location.as_ref(),
+            true,
+            crate::debugger::PointerWidth::Bits64,
+            Some(&regions),
+        );
         assert_eq!(display.kind, MemoryKind::None);
         assert!(!display.tooltip.contains("Mapping:"));
     }

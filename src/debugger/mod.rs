@@ -29,4 +29,4 @@ pub use model::{
     variable_path_expression, variable_updates, variables,
 };
 pub use session::{SessionEvent, launch_gdb};
-pub use target::{TargetArchitecture, TargetEndian};
+pub use target::{PointerWidth, TargetArchitecture, TargetEndian};

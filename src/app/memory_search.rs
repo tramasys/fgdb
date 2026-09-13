@@ -82,7 +82,7 @@ impl Controller {
 
         let scan = Scan::new(
             query,
-            ui.model.known_target_pointer_bits(),
+            ui.model.known_target_pointer_width(),
             ui.model.target_endian(),
         )?;
         let search = Rc::new(Search {
@@ -209,7 +209,7 @@ impl Search {
                         .error_message()
                         .unwrap_or("Memory read did not complete");
 
-                    if record.class == "error"
+                    if record.is_gdb_error()
                         && [
                             "Unable to read memory",
                             "Cannot access memory at address",

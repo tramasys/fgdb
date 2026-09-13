@@ -29,7 +29,6 @@ const LINKED_NODE_FIELD_LIMIT: usize = 256;
 const MAX_LINK_WRAPPER_DEPTH: usize = 16;
 
 struct LinkedTraversal {
-    ui: Weak<Ui>,
     client: Rc<MiClient>,
     requests: StopRequests,
     session: Weak<VariableViewerSession>,
@@ -57,11 +56,7 @@ struct LinkedTraversal {
 
 impl Drop for LinkedTraversal {
     fn drop(&mut self) {
-        cleanup_viewer_variable_objects(
-            &self.ui,
-            &self.client,
-            self.owned_variable_objects.drain(),
-        );
+        cleanup_viewer_variable_objects(&self.client, self.owned_variable_objects.drain());
     }
 }
 
@@ -198,7 +193,7 @@ fn request_linked_children(traversal: Rc<RefCell<LinkedTraversal>>, current: Var
         .unscoped(&command)
         .when(move || linked_is_current(&traversal_for_guard))
         .inspect(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
-            if record.class == "superseded" || !linked_is_current(&traversal_for_response) {
+            if record.is_superseded() || !linked_is_current(&traversal_for_response) {
                 finish_linked(
                     &traversal_for_response,
                     Some(String::from(STALE_VIEWER_MESSAGE)),
@@ -288,7 +283,7 @@ fn request_linked_access_groups(
         .unscoped(&command)
         .when(move || linked_is_current(&traversal_for_guard))
         .inspect(AUTOMATIC_PRINT_ELEMENTS, move |_, record| {
-            if record.class == "superseded" || !linked_is_current(&traversal_for_response) {
+            if record.is_superseded() || !linked_is_current(&traversal_for_response) {
                 finish_linked(
                     &traversal_for_response,
                     Some(String::from(STALE_VIEWER_MESSAGE)),
@@ -621,7 +616,7 @@ fn append_linked_node(
 }
 
 fn finish_linked(traversal: &Rc<RefCell<LinkedTraversal>>, message: Option<String>) {
-    let (client, ui, owned) = {
+    let (client, owned) = {
         let mut traversal = traversal.borrow_mut();
 
         if traversal.finished {
@@ -638,12 +633,11 @@ fn finish_linked(traversal: &Rc<RefCell<LinkedTraversal>>, message: Option<Strin
 
         (
             Rc::clone(&traversal.client),
-            traversal.ui.clone(),
             traversal.owned_variable_objects.drain().collect::<Vec<_>>(),
         )
     };
 
-    cleanup_viewer_variable_objects(&ui, &client, owned);
+    cleanup_viewer_variable_objects(&client, owned);
     render_linked(traversal, false);
 }
 

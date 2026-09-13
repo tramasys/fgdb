@@ -238,10 +238,12 @@ impl SessionController {
         if action == SessionAction::Restart {
             ui.set_session_pending(true);
 
-            crate::ui::controls::issue_execution_command(
+            crate::app::execution::issue_execution_command(
                 &ui,
                 &self.client,
                 "-exec-run",
+                ExecutionTarget::SelectedInferior,
+                false,
                 "Restarting the configured inferior",
             );
 
@@ -695,7 +697,7 @@ fn run_next(sequence: Rc<CommandSequence>) {
                 }
 
                 run_next(sequence_for_response);
-            } else if record.class == "timeout" {
+            } else if record.is_timed_out() {
                 // The transport decides whether a timed-out command reached GDB.
                 // An unsent session request can fail without retiring the backend.
                 sequence_for_response.controller.fail(
