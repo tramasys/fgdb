@@ -1,5 +1,7 @@
 use super::*;
-use std::sync::mpsc::{self, TryRecvError};
+use crate::background::{CompletionError, Priority, receive_current, submit_cancellable_result};
+
+pub(super) const SOURCE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub(super) fn load_source(
     reported: &Path,
@@ -182,9 +184,10 @@ impl Ui {
         paths: &HashSet<PathBuf>,
         snapshot: Option<&source::CachedSource>,
     ) {
-        for position in 0..self.instructions_store.n_items() {
+        for position in 0..self.instructions.store.n_items() {
             let Some(object) = self
-                .instructions_store
+                .instructions
+                .store
                 .item(position)
                 .and_downcast::<components::SnapshotRow>()
             else {
@@ -256,43 +259,52 @@ impl Ui {
         let roots = self.source_roots.borrow().clone();
         let index = self.source_index_snapshot();
         let current = Arc::clone(&self.source_open_generation);
-        let (sender, receiver) = mpsc::sync_channel(1);
 
-        if let Err(error) = crate::background::submit_cancellable_with_priority(
-            crate::background::Priority::Interactive,
+        let receiver = match submit_cancellable_result(
+            Priority::Interactive,
             move || current.load(Ordering::Relaxed) == generation,
-            move || {
-                let _ = sender.send(load_source(
-                    &path,
-                    &roots,
-                    index.as_deref(),
-                    16 * 1024 * 1024,
-                ));
-            },
+            move || load_source(&path, &roots, index.as_deref(), 16 * 1024 * 1024),
         ) {
-            self.set_status(
-                "Source loading deferred",
-                &error.to_string(),
-                Some("status-error"),
-            );
-            return false;
-        }
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.set_status(
+                    "Source loading deferred",
+                    &error.to_string(),
+                    Some("status-error"),
+                );
+
+                return false;
+            }
+        };
 
         self.set_status("Loading source", &reported.to_string_lossy(), None);
         let weak = self.self_weak.borrow().clone();
         let reported = reported.to_path_buf();
-        let mut ready = Some(ready);
+        glib::spawn_future_local(async move {
+            let result = receive_current(receiver, SOURCE_TIMEOUT, || {
+                weak.upgrade().is_some_and(|ui| {
+                    ui.source_open_generation.load(Ordering::Relaxed) == generation
+                })
+            })
+            .await;
 
-        glib::timeout_add_local(Duration::from_millis(10), move || {
             let Some(ui) = weak.upgrade() else {
-                return glib::ControlFlow::Break;
+                return;
             };
-            if ui.source_open_generation.load(Ordering::Relaxed) != generation {
-                return glib::ControlFlow::Break;
-            }
 
-            match receiver.try_recv() {
-                Ok(Ok((path, snapshot))) => {
+            let result = match result {
+                Ok(result) => result,
+                Err(CompletionError::Superseded) => return,
+                Err(CompletionError::TimedOut) => Err(String::from(
+                    "Source loading timed out. Open the file again to retry",
+                )),
+                Err(CompletionError::Disconnected) => {
+                    Err(String::from("Source loading stopped before completing"))
+                }
+            };
+
+            match result {
+                Ok((path, snapshot)) => {
                     ui.resolved_source_paths
                         .borrow_mut()
                         .insert(reported.to_string_lossy().into_owned(), path.clone());
@@ -316,29 +328,11 @@ impl Ui {
                     ui.settings.apply_source(&document.view);
                     document.freshness.bind(&ui);
 
-                    if let Some(ready) = ready.take() {
-                        ready(&ui, Some(document));
-                    }
-                    glib::ControlFlow::Break
+                    ready(&ui, Some(document));
                 }
-                Ok(Err(error)) => {
+                Err(error) => {
                     ui.set_status("Source unavailable", &error, Some("status-error"));
-                    if let Some(ready) = ready.take() {
-                        ready(&ui, None);
-                    }
-                    glib::ControlFlow::Break
-                }
-                Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(TryRecvError::Disconnected) => {
-                    ui.set_status(
-                        "Source unavailable",
-                        "Source loading stopped before completing",
-                        Some("status-error"),
-                    );
-                    if let Some(ready) = ready.take() {
-                        ready(&ui, None);
-                    }
-                    glib::ControlFlow::Break
+                    ready(&ui, None);
                 }
             }
         });
@@ -349,7 +343,7 @@ impl Ui {
         &self,
         instruction: &Instruction,
     ) -> Option<source::SourceLine> {
-        if !self.disassembly_controls.columns.source.is_visible() {
+        if !self.instructions.controls.columns.source.is_visible() {
             return None;
         }
 
@@ -381,53 +375,58 @@ impl Ui {
         let source_index = self.source_index_snapshot();
         let current = Arc::clone(&self.source_annotation_epoch);
         let epoch = current.load(Ordering::Relaxed);
-        let (sender, receiver) = mpsc::sync_channel(1);
         let load_path = path.clone();
 
-        if crate::background::submit_cancellable_with_priority(
-            crate::background::Priority::Background,
+        let receiver = match submit_cancellable_result(
+            Priority::Background,
             move || queued.load(Ordering::Relaxed) && current.load(Ordering::Relaxed) == epoch,
             move || {
-                let snapshot =
-                    load_source(&load_path, &roots, source_index.as_deref(), 2 * 1024 * 1024)
-                        .ok()
-                        .map(|(_, snapshot)| snapshot);
-                let _ = sender.send(snapshot);
+                load_source(&load_path, &roots, source_index.as_deref(), 2 * 1024 * 1024)
+                    .ok()
+                    .map(|(_, snapshot)| snapshot)
             },
-        )
-        .is_err()
-        {
-            self.disassembly_source_pending.borrow_mut().remove(&path);
-            self.cache_disassembly_source(path, stop_generation, None);
-            return None;
-        }
+        ) {
+            Ok(receiver) => receiver,
+            Err(_) => {
+                self.disassembly_source_pending.borrow_mut().remove(&path);
+                self.cache_disassembly_source(path, stop_generation, None);
+                return None;
+            }
+        };
 
         let weak = self.self_weak.borrow().clone();
-        glib::timeout_add_local(Duration::from_millis(25), move || {
+        glib::spawn_future_local(async move {
+            let result = receive_current(receiver, SOURCE_TIMEOUT, || {
+                live.load(Ordering::Relaxed)
+                    && weak.upgrade().is_some_and(|ui| {
+                        ui.source_annotation_epoch.load(Ordering::Relaxed) == epoch
+                    })
+            })
+            .await;
+
             let Some(ui) = weak.upgrade() else {
-                return glib::ControlFlow::Break;
+                return;
             };
+
             if !live.load(Ordering::Relaxed)
                 || ui.source_annotation_epoch.load(Ordering::Relaxed) != epoch
             {
-                return glib::ControlFlow::Break;
+                return;
             }
 
-            match receiver.try_recv() {
+            ui.disassembly_source_pending.borrow_mut().remove(&path);
+
+            match result {
                 Ok(snapshot) => {
-                    ui.disassembly_source_pending.borrow_mut().remove(&path);
                     ui.cache_disassembly_source(path.clone(), stop_generation, snapshot.clone());
 
                     ui.update_source_annotation_rows(
                         &HashSet::from([path.clone()]),
                         snapshot.as_ref(),
                     );
-                    glib::ControlFlow::Break
                 }
-                Err(TryRecvError::Empty) => glib::ControlFlow::Continue,
-                Err(TryRecvError::Disconnected) => {
-                    ui.disassembly_source_pending.borrow_mut().remove(&path);
-                    glib::ControlFlow::Break
+                Err(_) => {
+                    ui.cache_disassembly_source(path, stop_generation, None);
                 }
             }
         });

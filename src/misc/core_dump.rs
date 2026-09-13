@@ -45,13 +45,10 @@ pub(crate) struct CoreNote {
 }
 
 pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
-    let file =
-        File::open(path).map_err(|error| format!("Cannot open {}: {error}", path.display()))?;
+    let (file, metadata) = crate::bounded::open_regular_file(path)
+        .map_err(|error| format!("Cannot open {}: {error}", path.display()))?;
 
-    let size = file
-        .metadata()
-        .map_err(|error| format!("Cannot stat {}: {error}", path.display()))?
-        .len();
+    let size = metadata.len();
 
     let mut header = [0_u8; 64];
 
@@ -314,7 +311,9 @@ fn parse_core_files(bytes: &[u8], abi: Abi, snapshot: &mut CoreDumpSnapshot) {
     }
 
     let page_size = read_word(&bytes[word..word * 2], abi.endian).unwrap_or(1);
-    let table_end = word * 2 + declared_count.saturating_mul(word * 3);
+    let table_end = declared_count
+        .saturating_mul(word * 3)
+        .saturating_add(word * 2);
 
     let Some(table) = bytes.get(word * 2..table_end) else {
         return;
@@ -375,6 +374,42 @@ fn align_up(value: u64, alignment: u64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_overflowing_core_mapping_tables() {
+        let abi = Abi {
+            architecture: TargetArchitecture::X86_64,
+            endian: TargetEndian::Little,
+            pointer_bits: 64,
+        };
+
+        for count in [u64::MAX, u64::MAX / 24, u64::MAX / 24 + 1] {
+            let mut bytes = vec![0; 16];
+            bytes[..8].copy_from_slice(&count.to_le_bytes());
+            let mut snapshot = CoreDumpSnapshot::default();
+            parse_core_files(&bytes, abi, &mut snapshot);
+            assert!(snapshot.files.is_empty());
+        }
+    }
+
+    #[test]
+    fn rejects_special_core_files_without_waiting_for_a_writer() {
+        let root = gtk::glib::mkdtemp(std::env::temp_dir().join("fgdb-core-XXXXXX")).unwrap();
+        let fifo = root.join("core");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+
+        for path in [&fifo, &link, &root] {
+            assert!(
+                read_core_dump(path)
+                    .unwrap_err()
+                    .contains("not a regular file")
+            );
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn reads_signal_metadata_from_a_minimal_streamed_core() {

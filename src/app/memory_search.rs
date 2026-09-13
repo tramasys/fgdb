@@ -80,7 +80,11 @@ impl Controller {
             .filter(StopRequests::is_current)
             .ok_or("A current stopped target is required")?;
 
-        let scan = Scan::new(query, ui.known_target_pointer_bits(), ui.target_endian())?;
+        let scan = Scan::new(
+            query,
+            ui.model.known_target_pointer_bits(),
+            ui.model.target_endian(),
+        )?;
         let search = Rc::new(Search {
             owner: Rc::downgrade(self),
             requests,

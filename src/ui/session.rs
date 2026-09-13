@@ -35,7 +35,7 @@ impl Ui {
         self.source_tree_render_generation
             .fetch_add(1, Ordering::Relaxed);
 
-        let session_directory = session.working_directory().filter(|path| path.is_dir());
+        let session_directory = session.working_directory();
         let mut resolution_roots = self.source_base_roots.clone();
         prioritize_source_root(&mut resolution_roots, session_directory);
 
@@ -496,78 +496,57 @@ impl Ui {
             }
         }
 
-        let handler = Rc::clone(&self.session_handler);
-        let editor_for_launch = editor.clone();
-        let validation_for_launch = validation.clone();
+        let submission = Rc::new(SessionSubmission {
+            model: Rc::clone(&self.model),
+            handler: Rc::clone(&self.session_handler),
+            editor: editor.downgrade(),
+            validation,
+            actions: [&launch, &attach, &open_core, &connect_remote, &open_rr]
+                .map(gtk::Button::downgrade),
+            pending: Cell::new(false),
+        });
+
+        let launch_submission = Rc::clone(&submission);
 
         launch.connect_clicked(move |_| {
-            submit_session(
-                build_launch_session(
-                    &launch_executable,
-                    &launch_arguments,
-                    &launch_directory,
-                    &launch_environment,
-                ),
-                &handler,
-                &editor_for_launch,
-                &validation_for_launch,
-            );
+            launch_submission.submit(build_launch_session(
+                &launch_executable,
+                &launch_arguments,
+                &launch_directory,
+                &launch_environment,
+            ));
         });
 
-        let handler = Rc::clone(&self.session_handler);
-        let editor_for_attach = editor.clone();
-        let validation_for_attach = validation.clone();
+        let attach_submission = Rc::clone(&submission);
 
         attach.connect_clicked(move |_| {
-            submit_session(
+            attach_submission.submit(
                 build_attach_session(&attach_pid, &attach_executable)
-                    .and_then(|session| process_picker.request(session)),
-                &handler,
-                &editor_for_attach,
-                &validation_for_attach,
+                    .map(|session| process_picker.request(session)),
             );
         });
 
-        let handler = Rc::clone(&self.session_handler);
-        let editor_for_core = editor.clone();
-        let validation_for_core = validation.clone();
+        let core_submission = Rc::clone(&submission);
 
         open_core.connect_clicked(move |_| {
-            submit_session(
-                build_core_session(&core_executable, &core_dump),
-                &handler,
-                &editor_for_core,
-                &validation_for_core,
-            );
+            core_submission.submit(build_core_session(&core_executable, &core_dump));
         });
 
-        let handler = Rc::clone(&self.session_handler);
-        let editor_for_remote = editor.clone();
-        let validation_for_remote = validation.clone();
+        let remote_submission = Rc::clone(&submission);
 
         connect_remote.connect_clicked(move |_| {
-            submit_session(
-                build_remote_session(
-                    &remote_endpoint,
-                    &remote_executable,
-                    &remote_protocol,
-                    &remote_run_path,
-                ),
-                &handler,
-                &editor_for_remote,
-                &validation_for_remote,
-            );
+            remote_submission.submit(build_remote_session(
+                &remote_endpoint,
+                &remote_executable,
+                &remote_protocol,
+                &remote_run_path,
+            ));
         });
 
-        let handler = Rc::clone(&self.session_handler);
-        let editor_for_rr = editor.clone();
         open_rr.connect_clicked(move |_| {
-            submit_session(
-                required_directory(rr_trace.text().as_str(), "rr trace directory")
+            submission.submit(
+                required_path(rr_trace.text().as_str(), "rr trace directory")
                     .map(|trace_directory| DebugSession::RrReplay { trace_directory }),
-                &handler,
-                &editor_for_rr,
-                &validation,
             );
         });
 
@@ -624,29 +603,123 @@ fn append_page_actions(page: &gtk::Box, primary: &gtk::Button, editor: &gtk::Win
     page.append(&actions);
 }
 
-fn submit_session(
-    session: Result<impl Into<crate::session_request::SessionRequest>, String>,
-    handler: &Rc<RefCell<Option<DebugSessionHandler>>>,
-    editor: &gtk::Window,
-    validation: &gtk::Label,
-) {
-    match session {
-        Ok(session) => {
-            validation.set_visible(false);
-            let handler = handler.borrow().clone();
+struct SessionSubmission {
+    model: Rc<crate::model::DebuggerModel>,
+    handler: Rc<RefCell<Option<DebugSessionHandler>>>,
+    editor: glib::WeakRef<gtk::Window>,
+    validation: gtk::Label,
+    actions: [glib::WeakRef<gtk::Button>; 5],
+    pending: Cell<bool>,
+}
 
-            if let Some(handler) = handler {
-                handler(session.into());
-                editor.close();
-            } else {
-                validation.set_text("GDB is not ready to create a session");
-                validation.set_visible(true);
+impl SessionSubmission {
+    fn submit(
+        self: &Rc<Self>,
+        session: Result<impl Into<crate::session_request::SessionRequest>, String>,
+    ) {
+        use crate::background::{CompletionError, Priority, receive_current, submit_result};
+
+        if self.pending.get() {
+            return;
+        }
+
+        let request = match session {
+            Ok(session) => session.into(),
+            Err(message) => {
+                self.show_error(&message);
+                return;
             }
+        };
+
+        let debugger_pid = self.model.debugger_pid();
+        let configured = self.model.current_session();
+        let generation = self.model.current_stop_refresh_generation();
+
+        let receiver = match submit_result(Priority::Interactive, move || {
+            let mut request = request.validate_paths()?;
+            request.attach_identity = request.validate_attach(debugger_pid)?;
+            Ok(request)
+        }) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.show_error(&error.to_string());
+                return;
+            }
+        };
+
+        self.set_pending(true);
+        self.validation.set_text("Checking session paths…");
+        self.validation.set_visible(true);
+        let weak = Rc::downgrade(self);
+
+        glib::spawn_future_local(async move {
+            let result = receive_current(receiver, Duration::from_secs(15), || {
+                weak.upgrade().is_some_and(|state| {
+                    state
+                        .editor
+                        .upgrade()
+                        .is_some_and(|editor| editor.is_visible())
+                        && state.model.debugger_pid() == debugger_pid
+                        && state.model.current_session() == configured
+                        && state.model.current_stop_refresh_generation() == generation
+                })
+            })
+            .await;
+
+            let Some(state) = weak.upgrade() else { return };
+            state.set_pending(false);
+
+            let Some(editor) = state.editor.upgrade().filter(|editor| editor.is_visible()) else {
+                return;
+            };
+
+            let result = match result {
+                Ok(result) => result,
+                Err(CompletionError::TimedOut) => Err(String::from(
+                    "Checking session paths timed out. Submit again to retry",
+                )),
+                Err(CompletionError::Superseded) => Err(String::from(
+                    "The debugger session changed while checking paths. Submit again",
+                )),
+                Err(CompletionError::Disconnected) => Err(String::from(
+                    "Session validation stopped. Submit again to retry",
+                )),
+            };
+
+            match result {
+                Ok(request) => {
+                    let handler = state.handler.borrow().clone();
+
+                    if let Some(handler) = handler {
+                        state.validation.set_visible(false);
+                        handler(request);
+                        editor.close();
+                    } else {
+                        state.show_error("GDB is not ready to create a session");
+                    }
+                }
+                Err(message) => state.show_error(&message),
+            }
+        });
+    }
+
+    fn set_pending(&self, pending: bool) {
+        self.pending.set(pending);
+
+        let active_live_target = self.model.inferior_has_started()
+            && !matches!(
+                self.model.current_session(),
+                Some(DebugSession::CoreDump { .. })
+            );
+
+        for button in self.actions.iter().filter_map(glib::WeakRef::upgrade) {
+            button.set_sensitive(!pending && !active_live_target);
         }
-        Err(message) => {
-            validation.set_text(&message);
-            validation.set_visible(true);
-        }
+    }
+
+    fn show_error(&self, message: &str) {
+        self.validation.set_text(message);
+        self.validation.set_visible(true);
     }
 }
 
@@ -713,10 +786,9 @@ fn build_launch_session(
     working_directory: &gtk::Entry,
     environment: &gtk::TextView,
 ) -> Result<DebugSession, String> {
-    let working_directory = required_directory(&working_directory.text(), "Working directory")?;
+    let working_directory = required_path(&working_directory.text(), "Working directory")?;
 
-    let executable =
-        required_executable(&executable.text(), "Executable", Some(&working_directory))?;
+    let executable = required_path(&executable.text(), "Executable")?;
 
     let arguments = shell_words::split(arguments.text().trim())
         .map_err(|error| format!("Arguments are not valid shell words: {error}"))?;
@@ -745,14 +817,14 @@ fn build_attach_session(pid: &gtk::Entry, executable: &gtk::Entry) -> Result<Deb
 
     Ok(DebugSession::Attach {
         pid,
-        executable: optional_executable(&executable.text(), "Executable")?,
+        executable: nonempty(&executable.text()).map(PathBuf::from),
     })
 }
 
 fn build_core_session(executable: &gtk::Entry, core: &gtk::Entry) -> Result<DebugSession, String> {
     Ok(DebugSession::CoreDump {
-        executable: required_executable(&executable.text(), "Executable", None)?,
-        core_dump: required_file(&core.text(), "Core dump")?,
+        executable: required_path(&executable.text(), "Executable")?,
+        core_dump: required_path(&core.text(), "Core dump")?,
     })
 }
 
@@ -776,7 +848,7 @@ fn build_remote_session(
 
     Ok(DebugSession::Remote {
         endpoint,
-        executable: optional_executable(&executable.text(), "Local executable")?,
+        executable: nonempty(&executable.text()).map(PathBuf::from),
         extended: protocol.selected() == 1,
         remote_executable: nonempty(remote_executable.text().as_str()),
     })
@@ -809,48 +881,6 @@ fn parse_environment(text: &str) -> Result<Vec<(String, String)>, String> {
         .collect()
 }
 
-fn required_directory(value: &str, label: &str) -> Result<PathBuf, String> {
-    let path = required_path(value, label)?;
-
-    if !path.is_dir() {
-        return Err(format!("{label} is not a directory: {}", path.display()));
-    }
-
-    path.canonicalize()
-        .map_err(|error| format!("Cannot resolve {label}: {error}"))
-}
-
-fn required_executable(
-    value: &str,
-    label: &str,
-    relative_to: Option<&Path>,
-) -> Result<PathBuf, String> {
-    let mut path = required_path(value, label)?;
-
-    if path.is_relative()
-        && let Some(directory) = relative_to
-    {
-        path = directory.join(path);
-    }
-
-    if !path.is_file() {
-        return Err(format!("{label} is not a file: {}", path.display()));
-    }
-
-    path.canonicalize()
-        .map_err(|error| format!("Cannot resolve {label}: {error}"))
-}
-
-fn optional_executable(value: &str, label: &str) -> Result<Option<PathBuf>, String> {
-    nonempty(value).map_or(Ok(None), |value| {
-        required_executable(&value, label, None).map(Some)
-    })
-}
-
-fn required_file(value: &str, label: &str) -> Result<PathBuf, String> {
-    required_executable(value, label, None)
-}
-
 fn required_path(value: &str, label: &str) -> Result<PathBuf, String> {
     nonempty(value)
         .map(PathBuf::from)
@@ -867,6 +897,82 @@ fn nonempty(value: &str) -> Option<String> {
 mod tests {
     use super::{parse_environment, prioritize_source_root};
     use std::path::PathBuf;
+
+    #[test]
+    #[ignore = "requires a GTK display, run separately from other GTK tests"]
+    fn session_validation_recovers_from_errors_and_discards_stale_submissions() {
+        use super::*;
+
+        gtk::init().unwrap();
+        let directory = glib::mkdtemp(std::env::temp_dir().join("fgdb-session-ui-XXXXXX")).unwrap();
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let validation = gtk::Label::new(None);
+        root.append(&validation);
+        let buttons: [gtk::Button; 5] = std::array::from_fn(|_| gtk::Button::new());
+
+        for button in &buttons {
+            root.append(button);
+        }
+
+        let editor = gtk::Window::builder()
+            .child(&root)
+            .hide_on_close(true)
+            .build();
+        editor.present();
+        let accepted = Rc::new(RefCell::new(Vec::new()));
+        let received = Rc::clone(&accepted);
+        let model = Rc::new(crate::model::DebuggerModel::new(None));
+        let submission = Rc::new(SessionSubmission {
+            model: Rc::clone(&model),
+            handler: Rc::new(RefCell::new(Some(Rc::new(move |request| {
+                received.borrow_mut().push(request);
+            })))),
+            editor: editor.downgrade(),
+            validation,
+            actions: buttons.each_ref().map(gtk::Button::downgrade),
+            pending: Cell::new(false),
+        });
+
+        let wait = || {
+            glib::MainContext::default().block_on(async {
+                let started = std::time::Instant::now();
+
+                while submission.pending.get() {
+                    assert!(started.elapsed() < Duration::from_secs(5));
+                    glib::timeout_future(Duration::from_millis(1)).await;
+                }
+            });
+        };
+
+        submission.submit(Ok(DebugSession::RrReplay {
+            trace_directory: directory.join("missing"),
+        }));
+        assert!(submission.pending.get());
+        assert!(!buttons[0].is_sensitive());
+        wait();
+        assert!(editor.is_visible());
+        assert!(buttons[0].is_sensitive());
+        assert!(submission.validation.text().contains("not a directory"));
+        let session = DebugSession::RrReplay {
+            trace_directory: directory.clone(),
+        };
+        submission.submit(Ok(session.clone()));
+        model.start_stop_refresh();
+        wait();
+        assert!(accepted.borrow().is_empty());
+        assert!(submission.validation.text().contains("session changed"));
+        submission.submit(Ok(session.clone()));
+        editor.close();
+        wait();
+        assert!(accepted.borrow().is_empty());
+        editor.present();
+        submission.submit(Ok(session.clone()));
+        wait();
+        assert_eq!(accepted.borrow().len(), 1);
+        assert_eq!(accepted.borrow()[0].session, session);
+        assert!(!editor.is_visible());
+        std::fs::remove_dir(directory).unwrap();
+    }
 
     #[test]
     fn parses_environment_values_without_losing_spaces_or_equals() {

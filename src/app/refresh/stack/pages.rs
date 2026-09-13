@@ -23,18 +23,18 @@ impl Inputs {
         frames: Vec<StackFrame>,
         regions: Vec<MemoryRegion>,
     ) -> Result<Self, &'static str> {
-        let endian = ui.target_endian().ok_or(
+        let endian = ui.model.target_endian().ok_or(
             "Stack decoding is unavailable because the target byte order could not be determined",
         )?;
-        let word_size = match ui.target_pointer_bits() {
+        let word_size = match ui.model.target_pointer_bits() {
             32 => 4,
             64 => 8,
             _ => return Err("Stack decoding requires a supported target pointer width"),
         };
-        let architecture = match ui.target_architecture() {
+        let architecture = match ui.model.target_architecture() {
             TargetArchitecture::Unknown => TargetArchitecture::infer_from_register_names_with_bits(
                 registers.iter().map(|register| register.name.as_str()),
-                Some(ui.target_pointer_bits()),
+                Some(ui.model.target_pointer_bits()),
             ),
             architecture => architecture,
         };

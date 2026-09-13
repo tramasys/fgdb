@@ -93,6 +93,16 @@ impl DebuggerModel {
         self.processes.selected_inferior_id.borrow().clone()
     }
 
+    fn replace_selected_inferior_id(&self, selected: Option<String>) -> bool {
+        if *self.processes.selected_inferior_id.borrow() == selected {
+            return false;
+        }
+
+        self.reset_target_abi();
+        self.processes.selected_inferior_id.replace(selected);
+        true
+    }
+
     pub(crate) fn selected_inferior_context_stopped(&self) -> bool {
         let selected = self.processes.selected_inferior_id.borrow();
         let current_thread = self.current_thread_id();
@@ -479,15 +489,12 @@ impl DebuggerModel {
             current_thread.as_deref(),
         );
 
-        let selection_changed =
-            self.processes.selected_inferior_id.borrow().as_ref() != selected.as_ref();
+        let selection_changed = self.replace_selected_inferior_id(selected);
         self.processes.inferiors.replace(inferiors);
 
         if selection_changed {
             self.invalidate_stop_context();
         }
-
-        self.processes.selected_inferior_id.replace(selected);
 
         self.apply_selected_inferior_state();
 
@@ -510,9 +517,7 @@ impl DebuggerModel {
         }
 
         self.invalidate_stop_context();
-        self.processes
-            .selected_inferior_id
-            .replace(Some(id.to_owned()));
+        self.replace_selected_inferior_id(Some(id.to_owned()));
         self.apply_selected_inferior_state();
 
         true
@@ -769,9 +774,7 @@ impl DebuggerModel {
             self.processes
                 .stop_owner_inferior_id
                 .replace(Some(group.clone()));
-            self.processes
-                .selected_inferior_id
-                .replace(Some(group.clone()));
+            self.replace_selected_inferior_id(Some(group.clone()));
         } else {
             self.processes.stop_owner_inferior_id.borrow_mut().take();
         }
@@ -843,7 +846,7 @@ impl DebuggerModel {
         let selected_exited = self.processes.selected_inferior_id.borrow().as_deref() == Some(id);
 
         if selected_exited {
-            self.processes.selected_inferior_id.borrow_mut().take();
+            self.replace_selected_inferior_id(None);
             self.apply_selected_inferior_state();
         }
     }
@@ -857,7 +860,7 @@ impl DebuggerModel {
         self.start_inferior_refresh();
         self.processes.inferiors.borrow_mut().clear();
         self.processes.thread_inferior_ids.borrow_mut().clear();
-        self.processes.selected_inferior_id.borrow_mut().take();
+        self.replace_selected_inferior_id(None);
         self.processes.stop_owner_inferior_id.borrow_mut().take();
         self.processes.stop_owner_thread_id.borrow_mut().take();
         self.processes.inferior_parents.borrow_mut().clear();

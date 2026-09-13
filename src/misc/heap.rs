@@ -1999,9 +1999,9 @@ fn version_from_mapping_file(
 fn version_from_file(path: &Path) -> std::io::Result<Option<GlibcVersion>> {
     const CHUNK_BYTES: usize = 64 * 1024;
     const OVERLAP_BYTES: usize = 32;
-    let file = File::open(path)?;
+    let (file, metadata) = crate::bounded::open_regular_file(path)?;
 
-    if file.metadata()?.len() > u64::try_from(MAX_LIBC_BYTES).unwrap_or(u64::MAX) {
+    if metadata.len() > u64::try_from(MAX_LIBC_BYTES).unwrap_or(u64::MAX) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "mapped libc image exceeds the native heap reader's 64 MiB limit",

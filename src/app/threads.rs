@@ -721,7 +721,9 @@ fn start_thread_comparison(
         .borrow()
         .ui
         .upgrade()
-        .map_or(TargetArchitecture::Unknown, |ui| ui.target_architecture());
+        .map_or(TargetArchitecture::Unknown, |ui| {
+            ui.model.target_architecture()
+        });
 
     let numbers = crate::debugger::compact_register_numbers(&names, architecture);
     request_comparison_registers(&client, &collection, names.clone(), numbers.clone(), true);

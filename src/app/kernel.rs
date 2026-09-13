@@ -25,6 +25,7 @@ pub(super) fn request_kernel_refresh(ui: Weak<Ui>, client: Rc<MiClient>) {
     };
 
     let cached_pid = current_ui.model.inferior_pid();
+    let selected_inferior = current_ui.model.selected_inferior_id();
     let debugger_pid = current_ui.model.debugger_pid();
     let include_tls_metadata = current_ui.kernel_tls_requested();
     drop(current_ui);
@@ -50,7 +51,10 @@ pub(super) fn request_kernel_refresh(ui: Weak<Ui>, client: Rc<MiClient>) {
         let include_tls_metadata = current_ui.kernel_tls_requested();
         drop(current_ui);
 
-        let Some(pid) = crate::debugger::inferior_pid(&record) else {
+        let Some(pid) = selected_inferior
+            .as_deref()
+            .and_then(|id| crate::debugger::inferior_pid_for_group(&record, id))
+        else {
             show_kernel_error(
                 &ui_for_response,
                 generation,

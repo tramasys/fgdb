@@ -1,4 +1,5 @@
 use crate::{config::DebugSession, local_process::ProcessIdentity};
+use std::path::{Path, PathBuf};
 
 /// Transient user intent. Process identities are not persisted in session files.
 #[derive(Clone, Debug)]
@@ -17,6 +18,42 @@ impl From<DebugSession> for SessionRequest {
 }
 
 impl SessionRequest {
+    /// Filesystem validation runs on a worker before session submission.
+    pub(crate) fn validate_paths(mut self) -> Result<Self, String> {
+        match &mut self.session {
+            DebugSession::Launch {
+                executable,
+                working_directory,
+                ..
+            } => {
+                *working_directory = canonical_path(working_directory, "Working directory", true)?;
+
+                if executable.is_relative() {
+                    *executable = working_directory.join(&executable);
+                }
+
+                *executable = canonical_path(executable, "Executable", false)?;
+            }
+            DebugSession::CoreDump {
+                executable,
+                core_dump,
+            } => {
+                *executable = canonical_path(executable, "Executable", false)?;
+                *core_dump = canonical_path(core_dump, "Core dump", false)?;
+            }
+            DebugSession::Attach { executable, .. } | DebugSession::Remote { executable, .. } => {
+                if let Some(path) = executable {
+                    *path = canonical_path(path, "Executable", false)?;
+                }
+            }
+            DebugSession::RrReplay { trace_directory } => {
+                *trace_directory = canonical_path(trace_directory, "rr trace directory", true)?;
+            }
+        }
+
+        Ok(self)
+    }
+
     pub(crate) fn validate_attach(
         &self,
         debugger_pid: Option<u32>,
@@ -46,9 +83,81 @@ impl SessionRequest {
     }
 }
 
+fn canonical_path(path: &Path, label: &str, directory: bool) -> Result<PathBuf, String> {
+    let valid = if directory {
+        path.is_dir()
+    } else {
+        path.is_file()
+    };
+
+    if !valid {
+        let kind = if directory { "directory" } else { "file" };
+        return Err(format!("{label} is not a {kind}: {}", path.display()));
+    }
+
+    path.canonicalize()
+        .map_err(|error| format!("Cannot resolve {label}: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_validation_resolves_launch_paths_and_preserves_attach_identity() {
+        let root = gtk::glib::mkdtemp(std::env::temp_dir().join("fgdb-session-XXXXXX")).unwrap();
+        let executable = root.join("program");
+        std::fs::write(&executable, []).unwrap();
+
+        let launch = SessionRequest::from(DebugSession::Launch {
+            executable: PathBuf::from("program"),
+            arguments: vec![String::from("two words")],
+            environment: vec![(String::from("MODE"), String::from("debug build"))],
+            working_directory: root.clone(),
+        })
+        .validate_paths()
+        .unwrap();
+
+        assert_eq!(launch.session.executable(), Some(executable.as_path()));
+        assert_eq!(launch.session.working_directory(), Some(root.as_path()));
+
+        let identity = ProcessIdentity {
+            pid: 42,
+            start_time: 10,
+        };
+        let attach = SessionRequest {
+            session: DebugSession::Attach {
+                pid: 42,
+                executable: Some(executable.clone()),
+            },
+            attach_identity: Some(identity),
+        }
+        .validate_paths()
+        .unwrap();
+
+        assert_eq!(attach.attach_identity, Some(identity));
+        let fifo = root.join("core");
+        nix::unistd::mkfifo(&fifo, nix::sys::stat::Mode::S_IRUSR).unwrap();
+
+        assert!(
+            SessionRequest::from(DebugSession::CoreDump {
+                executable,
+                core_dump: fifo,
+            })
+            .validate_paths()
+            .is_err()
+        );
+
+        assert!(
+            SessionRequest::from(DebugSession::RrReplay {
+                trace_directory: root.join("missing"),
+            })
+            .validate_paths()
+            .is_err()
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn selected_identity_is_preserved_and_not_rebound() {

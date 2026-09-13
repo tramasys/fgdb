@@ -20,7 +20,6 @@ const CACHE_LIMIT: usize = 1024;
 
 pub(in crate::ui) struct Locations {
     enabled: Cell<bool>,
-    pointer_bits: Rc<Cell<u32>>,
     model: Rc<DebuggerModel>,
     context: Cell<Option<(u64, u64)>>,
     epoch: Cell<u64>,
@@ -43,14 +42,9 @@ mod retained;
 use menu::LocationMenu;
 
 impl Locations {
-    pub(in crate::ui) fn new(
-        enabled: bool,
-        pointer_bits: Rc<Cell<u32>>,
-        model: Rc<DebuggerModel>,
-    ) -> Rc<Self> {
+    pub(in crate::ui) fn new(enabled: bool, model: Rc<DebuggerModel>) -> Rc<Self> {
         Rc::new(Self {
             enabled: Cell::new(enabled),
-            pointer_bits,
             model,
             context: Cell::new(None),
             epoch: Cell::new(0),
@@ -263,7 +257,12 @@ impl Locations {
                 .filter(|(generation, _)| self.model.memory_regions_are_current(*generation))
                 .map(|_| regions.as_slice());
 
-            presentation::format(result.as_ref(), current, self.pointer_bits.get(), regions)
+            presentation::format(
+                result.as_ref(),
+                current,
+                self.model.target_pointer_bits(),
+                regions,
+            )
         };
 
         if result.is_some() {

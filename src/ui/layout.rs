@@ -35,7 +35,7 @@ fn layout_path() -> PathBuf {
 }
 
 pub(super) fn remembered_disclosures() -> HashMap<String, bool> {
-    crate::bounded::read_string(&layout_path(), MAX_LAYOUT_BYTES)
+    crate::bounded::read_regular_string(&layout_path(), MAX_LAYOUT_BYTES)
         .map(|contents| parse_layout(&contents).disclosures)
         .unwrap_or_default()
 }
@@ -89,7 +89,7 @@ impl Persistence {
         path: PathBuf,
         columns: &ColumnLayouts,
     ) -> Self {
-        let mut remembered = crate::bounded::read_string(&path, MAX_LAYOUT_BYTES)
+        let mut remembered = crate::bounded::read_regular_string(&path, MAX_LAYOUT_BYTES)
             .map(|contents| parse_layout(&contents))
             .unwrap_or_default();
 

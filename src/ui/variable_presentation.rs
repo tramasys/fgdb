@@ -3,15 +3,15 @@ use crate::config::settings::IntegerDisplay;
 
 pub(super) struct VariablePresentation {
     format: Cell<IntegerDisplay>,
-    pointer_bits: Rc<Cell<u32>>,
+    model: Rc<crate::model::DebuggerModel>,
     items: RefCell<Vec<glib::WeakRef<gtk::ListItem>>>,
 }
 
 impl VariablePresentation {
-    pub fn new(format: IntegerDisplay, pointer_bits: Rc<Cell<u32>>) -> Rc<Self> {
+    pub fn new(format: IntegerDisplay, model: Rc<crate::model::DebuggerModel>) -> Rc<Self> {
         Rc::new(Self {
             format: Cell::new(format),
-            pointer_bits,
+            model,
             items: RefCell::new(Vec::new()),
         })
     }
@@ -33,7 +33,7 @@ impl VariablePresentation {
             variable,
             value,
             details,
-            self.pointer_bits.get(),
+            self.model.target_pointer_bits(),
             self.format.get(),
         )
     }

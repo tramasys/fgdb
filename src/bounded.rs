@@ -17,6 +17,11 @@ pub(crate) fn read_regular_bytes(path: &Path, maximum: usize) -> io::Result<Vec<
     read_file(&file, path, maximum)
 }
 
+pub(crate) fn read_regular_string(path: &Path, maximum: usize) -> io::Result<String> {
+    String::from_utf8(read_regular_bytes(path, maximum)?)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 pub(crate) fn read_file(file: &File, path: &Path, maximum: usize) -> io::Result<Vec<u8>> {
     let mut bytes = Vec::with_capacity(initial_capacity(file, maximum));
 

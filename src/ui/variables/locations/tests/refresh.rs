@@ -16,12 +16,11 @@ fn label(locations: &Locations) -> gtk::Label {
 fn locals_refresh_keeps_verified_text_until_the_replacement_address_arrives() {
     gtk::init().unwrap();
     crate::theme::Theme::graphite().install();
-    let pointer_bits = Rc::new(Cell::new(64));
     let model = Rc::new(DebuggerModel::new(None));
     model.set_current_thread_id(Some("1"));
     model.start_stop_refresh();
     model.bind_stop_context(1).unwrap();
-    let locations = Locations::new(true, Rc::clone(&pointer_bits), Rc::clone(&model));
+    let locations = Locations::new(true, Rc::clone(&model));
     let pending = Rc::new(RefCell::new(VecDeque::new()));
     let queue = Rc::clone(&pending);
 
@@ -44,7 +43,7 @@ fn locals_refresh_keeps_verified_text_until_the_replacement_address_arrives() {
         &Rc::new(RefCell::new(None)),
         &Rc::new(RefCell::new(None)),
         &Rc::new(VariableViewerRegistry::with_builtins()),
-        &VariablePresentation::new(IntegerDisplay::Automatic, pointer_bits),
+        &VariablePresentation::new(IntegerDisplay::Automatic, Rc::clone(&model)),
         &locations,
         None,
     );

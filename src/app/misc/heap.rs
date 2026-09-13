@@ -157,9 +157,10 @@ pub(in crate::app) fn request_heap_inspection(
                 return;
             };
 
-            let architecture = current_ui.target_architecture();
+            let architecture = current_ui.model.target_architecture();
 
             let Some(endian) = current_ui
+                .model
                 .target_endian()
                 .or_else(|| architecture.default_endian())
             else {
@@ -172,7 +173,7 @@ pub(in crate::app) fn request_heap_inspection(
                 return;
             };
 
-            let pointer_bits = current_ui.target_pointer_bits();
+            let pointer_bits = current_ui.model.target_pointer_bits();
             drop(current_ui);
 
             let mut probes = vec![

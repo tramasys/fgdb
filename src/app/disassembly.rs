@@ -148,7 +148,7 @@ impl DisassemblyController {
                 .architecture
                 .as_deref()
                 .map(TargetArchitecture::from_gdb_description)
-                .unwrap_or_else(|| ui.target_architecture());
+                .unwrap_or_else(|| ui.model.target_architecture());
 
             if !matches!(
                 architecture,

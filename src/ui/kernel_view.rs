@@ -3371,9 +3371,9 @@ impl Ui {
         if self.model.is_stop_refresh_current(generation) {
             self.kernel_view.set_tls_runtime(
                 (
-                    self.target_architecture(),
-                    self.target_endian(),
-                    self.target_pointer_bits(),
+                    self.model.target_architecture(),
+                    self.model.target_endian(),
+                    self.model.target_pointer_bits(),
                 ),
                 None,
                 None,

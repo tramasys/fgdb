@@ -164,37 +164,49 @@ impl SourceFreshness {
         let old = Arc::clone(&self.contents.borrow());
         let current = Arc::clone(&self.generation);
         let generation = current.load(Ordering::Relaxed);
-        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
 
-        if let Err(error) = crate::background::submit_cancellable_with_priority(
+        let receiver = match crate::background::submit_cancellable_result(
             crate::background::Priority::Background,
             move || current.load(Ordering::Relaxed) == generation,
             move || {
-                let result = super::loading::load_source(&path, &[], None, 16 * 1024 * 1024)
-                    .map(|(_, source)| (source.contents != old, source));
-
-                let _ = sender.send(result);
+                super::loading::load_source(&path, &[], None, 16 * 1024 * 1024)
+                    .map(|(_, source)| (source.contents != old, source))
             },
         ) {
-            self.busy.set(false);
-            self.force.set(false);
-            self.show(&format!(
-                "Source check deferred: {error}. Use Reload to retry"
-            ));
+            Ok(receiver) => receiver,
+            Err(error) => {
+                self.busy.set(false);
+                self.force.set(false);
+                self.show(&format!(
+                    "Source check deferred: {error}. Use Reload to retry"
+                ));
 
-            return;
-        }
+                return;
+            }
+        };
 
         let weak = Rc::downgrade(self);
-        glib::timeout_add_local(Duration::from_millis(30), move || {
+        glib::spawn_future_local(async move {
+            use crate::background::{CompletionError, receive_current};
+
+            let result = receive_current(receiver, super::loading::SOURCE_TIMEOUT, || {
+                weak.upgrade()
+                    .is_some_and(|state| state.generation.load(Ordering::Relaxed) == generation)
+            })
+            .await;
+
             let Some(state) = weak.upgrade() else {
-                return glib::ControlFlow::Break;
+                return;
             };
 
-            let result = match receiver.try_recv() {
+            let result = match result {
                 Ok(result) => result,
-                Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                Err(_) => Err(String::from("Source check stopped. Use Reload to retry")),
+                Err(CompletionError::TimedOut) => {
+                    Err(String::from("Source check timed out. Use Reload to retry"))
+                }
+                Err(CompletionError::Superseded | CompletionError::Disconnected) => {
+                    Err(String::from("Source check stopped. Use Reload to retry"))
+                }
             };
 
             state.busy.set(false);
@@ -241,8 +253,6 @@ impl SourceFreshness {
             {
                 state.check();
             }
-
-            glib::ControlFlow::Break
         });
     }
 

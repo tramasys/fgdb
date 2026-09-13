@@ -11,7 +11,7 @@ impl Ui {
         preferences: &crate::config::settings::Preferences,
         initial: bool,
     ) {
-        let controls = &self.disassembly_controls;
+        let controls = &self.instructions.controls;
 
         if initial || previous.instruction_bytes != preferences.instruction_bytes {
             controls

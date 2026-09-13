@@ -985,7 +985,7 @@ mod tests {
         let filter = components::delayed_search_entry("Filter mappings");
         let (table, store) = build_memory_region_view(
             &ColumnLayouts::default().table(TableId::MemoryMappings),
-            &Rc::new(Cell::new(64)),
+            &Rc::new(crate::model::DebuggerModel::new(None)),
             &filter,
         );
 
@@ -1112,7 +1112,7 @@ mod tests {
         let filter = components::delayed_search_entry("Filter mappings");
         let (table, store) = build_memory_region_view(
             &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::MemoryMappings),
-            &Rc::new(Cell::new(64)),
+            &Rc::new(crate::model::DebuggerModel::new(None)),
             &filter,
         );
 

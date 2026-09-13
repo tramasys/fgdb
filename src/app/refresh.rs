@@ -317,8 +317,7 @@ pub(super) fn start_stack_refresh_if_ready(refresh: &Rc<RefCell<StackInputs>>, c
 
             let pid = selected_inferior
                 .as_deref()
-                .and_then(|id| crate::debugger::inferior_pid_for_group(&record, id))
-                .or_else(|| crate::debugger::inferior_pid(&record));
+                .and_then(|id| crate::debugger::inferior_pid_for_group(&record, id));
             let debugger_pid = ui.upgrade().and_then(|ui| ui.model.debugger_pid());
             continue_stack_refresh(
                 ui,
@@ -418,23 +417,23 @@ fn finish_stop_process_snapshot(
         && let Some(current_ui) = ui.upgrade()
     {
         let previous = (
-            current_ui.target_architecture(),
-            current_ui.target_endian(),
-            current_ui.target_pointer_bits(),
+            current_ui.model.target_architecture(),
+            current_ui.model.target_endian(),
+            current_ui.model.target_pointer_bits(),
         );
         // An ELF class and byte order remain useful even when this fgdb build
         // does not recognize e_machine. Do not let a future machine erase a
         // more specific GDB result.
         if architecture != TargetArchitecture::Unknown {
-            current_ui.set_target_architecture(architecture);
+            current_ui.model.set_target_architecture(architecture);
         }
 
-        current_ui.set_target_endian(Some(endian));
-        current_ui.set_target_pointer_bits(pointer_bits);
+        current_ui.model.set_target_endian(Some(endian));
+        current_ui.model.set_target_pointer_bits(pointer_bits);
         let current = (
-            current_ui.target_architecture(),
-            current_ui.target_endian(),
-            current_ui.target_pointer_bits(),
+            current_ui.model.target_architecture(),
+            current_ui.model.target_endian(),
+            current_ui.model.target_pointer_bits(),
         );
         // Rebind only when ELF discovery actually refined the target. The
         // former unconditional pass rebuilt every register row on each stop.
@@ -450,11 +449,11 @@ fn finish_stop_process_snapshot(
     }
 
     if let Some(current_ui) = ui.upgrade() {
-        let architecture = current_ui.target_architecture();
+        let architecture = current_ui.model.target_architecture();
         let architecture = if architecture == TargetArchitecture::Unknown {
             TargetArchitecture::infer_from_register_names_with_bits(
                 registers.iter().map(|register| register.name.as_str()),
-                Some(current_ui.target_pointer_bits()),
+                Some(current_ui.model.target_pointer_bits()),
             )
         } else {
             architecture
@@ -486,11 +485,11 @@ fn refresh_visible_stop_details(
         return;
     }
 
-    let architecture = current_ui.target_architecture();
+    let architecture = current_ui.model.target_architecture();
     let architecture = if architecture == TargetArchitecture::Unknown {
         TargetArchitecture::infer_from_register_names_with_bits(
             registers.iter().map(|register| register.name.as_str()),
-            Some(current_ui.target_pointer_bits()),
+            Some(current_ui.model.target_pointer_bits()),
         )
     } else {
         architecture
@@ -522,10 +521,10 @@ fn refresh_visible_stop_details(
         else {
             return;
         };
-        let Some(endian) = current_ui.target_endian() else {
+        let Some(endian) = current_ui.model.target_endian() else {
             return;
         };
-        let word_size = usize::try_from(current_ui.target_pointer_bits() / 8)
+        let word_size = usize::try_from(current_ui.model.target_pointer_bits() / 8)
             .unwrap_or(8)
             .clamp(4, 8);
         drop(current_ui);
@@ -606,7 +605,11 @@ fn request_tls_runtime(
                 if let Some(memory) = memory.as_ref() {
                     ui.show_tls_runtime_for_refresh(
                         generation,
-                        (architecture, ui.target_endian(), ui.target_pointer_bits()),
+                        (
+                            architecture,
+                            ui.model.target_endian(),
+                            ui.model.target_pointer_bits(),
+                        ),
                         register,
                         base,
                         mapping_for_response.as_deref(),
@@ -615,7 +618,11 @@ fn request_tls_runtime(
                 } else {
                     ui.show_tls_runtime_for_refresh(
                         generation,
-                        (architecture, ui.target_endian(), ui.target_pointer_bits()),
+                        (
+                            architecture,
+                            ui.model.target_endian(),
+                            ui.model.target_pointer_bits(),
+                        ),
                         register,
                         base,
                         mapping_for_response.as_deref(),
@@ -631,7 +638,11 @@ fn request_tls_runtime(
     {
         ui.show_tls_runtime_for_refresh(
             generation,
-            (architecture, ui.target_endian(), ui.target_pointer_bits()),
+            (
+                architecture,
+                ui.model.target_endian(),
+                ui.model.target_pointer_bits(),
+            ),
             register,
             base,
             mapping.as_deref(),

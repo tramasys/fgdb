@@ -131,6 +131,10 @@ pub(super) fn parse_float_value(
         return Err("Enter a floating-point value");
     }
 
+    if !matches!(bits, 32 | 64) {
+        return Err("This floating-point width is not editable as a scalar yet");
+    }
+
     if representation == FloatRepresentation::RawBits {
         let digits = input
             .strip_prefix("0x")
@@ -149,13 +153,28 @@ pub(super) fn parse_float_value(
         return Ok(bytes[bytes.len() - bits.div_ceil(8) as usize..].to_vec());
     }
 
-    match bits {
-        32 => parse_float_number(input, representation)
-            .map(|value| (value as f32).to_bits().to_be_bytes().to_vec()),
-        64 => parse_float_number(input, representation)
-            .map(|value| value.to_bits().to_be_bytes().to_vec()),
-        _ => Err("This floating-point width is not editable as a scalar yet"),
+    let normalized = input.to_ascii_lowercase().replace('_', "");
+
+    if representation == FloatRepresentation::HexFloat
+        && !matches!(
+            normalized.trim_start_matches(['+', '-']),
+            "inf" | "infinity" | "nan"
+        )
+    {
+        let raw = parse_hex_float(&normalized, bits)?.to_be_bytes();
+        return Ok(raw[raw.len() - (bits / 8) as usize..].to_vec());
     }
+
+    match bits {
+        32 => normalized
+            .parse::<f32>()
+            .map(|value| value.to_bits().to_be_bytes().to_vec()),
+        64 => normalized
+            .parse::<f64>()
+            .map(|value| value.to_bits().to_be_bytes().to_vec()),
+        _ => unreachable!(),
+    }
+    .map_err(|_| "Enter a number, inf, -inf, or nan")
 }
 
 pub(super) fn canonical_gdb_float(raw_bytes: &[u8], bits: u32) -> String {
@@ -178,35 +197,9 @@ pub(super) fn canonical_gdb_float(raw_bytes: &[u8], bits: u32) -> String {
     }
 }
 
-fn parse_float_number(
-    input: &str,
-    representation: FloatRepresentation,
-) -> Result<f64, &'static str> {
-    let normalized = input.trim().to_ascii_lowercase();
-
-    match normalized.as_str() {
-        "inf" | "+inf" | "infinity" | "+infinity" => return Ok(f64::INFINITY),
-        "-inf" | "-infinity" => return Ok(f64::NEG_INFINITY),
-        "nan" | "+nan" | "-nan" => return Ok(f64::NAN),
-        _ => {}
-    }
-
-    if representation != FloatRepresentation::HexFloat {
-        return normalized
-            .replace('_', "")
-            .parse()
-            .map_err(|_| "Enter a number, inf, -inf, or nan");
-    }
-
-    parse_hex_float(&normalized)
-}
-
-fn parse_hex_float(input: &str) -> Result<f64, &'static str> {
-    let (negative, input) = input
-        .strip_prefix('-')
-        .map_or((false, input), |input| (true, input));
-
-    let input = input.strip_prefix('+').unwrap_or(input);
+fn parse_hex_float(input: &str, bits: u32) -> Result<u64, &'static str> {
+    let negative = input.starts_with('-');
+    let input = input.strip_prefix(['+', '-']).unwrap_or(input);
 
     let input = input
         .strip_prefix("0x")
@@ -221,7 +214,7 @@ fn parse_hex_float(input: &str) -> Result<f64, &'static str> {
         .map_err(|_| "The hexadecimal float exponent is invalid")?;
 
     let (whole, fraction) = significand.split_once('.').unwrap_or((significand, ""));
-    let digits = format!("{whole}{fraction}").replace('_', "");
+    let digits = format!("{whole}{fraction}");
 
     if digits.is_empty() || digits.len() > 28 {
         return Err("The hexadecimal significand is invalid or too long");
@@ -230,13 +223,52 @@ fn parse_hex_float(input: &str) -> Result<f64, &'static str> {
     let magnitude =
         u128::from_str_radix(&digits, 16).map_err(|_| "The hexadecimal significand is invalid")?;
 
-    let binary_exponent = exponent
-        .checked_sub(i32::try_from(fraction.len() * 4).map_err(|_| "Exponent is too large")?)
-        .ok_or("Exponent is too large")?;
+    let sign = u64::from(negative) << (bits - 1);
 
-    let value = (magnitude as f64) * 2_f64.powi(binary_exponent);
+    if magnitude == 0 {
+        return Ok(sign);
+    }
 
-    Ok(if negative { -value } else { value })
+    let (precision, bias) = if bits == 32 { (24, 127) } else { (53, 1023) };
+    let fraction_bits = precision - 1;
+    let infinity = ((1_u64 << (bits - precision)) - 1) << fraction_bits;
+    let power = i64::from(exponent) - (fraction.len() * 4) as i64;
+    let mut exponent = (power + i64::from(magnitude.ilog2())).max(1 - bias);
+
+    if exponent > bias {
+        return Ok(sign | infinity);
+    }
+
+    // Round the integer significand once, directly to the destination's normal
+    // or subnormal precision. Floating intermediate powers can underflow.
+    let shift = exponent - i64::from(fraction_bits) - power;
+
+    let mut rounded = if shift >= 128 {
+        0
+    } else if shift > 0 {
+        let retained = magnitude >> shift;
+        let remainder = magnitude & ((1_u128 << shift) - 1);
+        let halfway = 1_u128 << (shift - 1);
+        retained + u128::from(remainder > halfway || (remainder == halfway && retained & 1 != 0))
+    } else {
+        magnitude << -shift
+    };
+
+    if rounded == 1_u128 << precision {
+        rounded >>= 1;
+        exponent += 1;
+    }
+
+    let raw = if exponent > bias {
+        infinity
+    } else if rounded < 1_u128 << fraction_bits {
+        rounded as u64
+    } else {
+        ((exponent + bias) as u64) << fraction_bits
+            | (rounded as u64 & ((1_u64 << fraction_bits) - 1))
+    };
+
+    Ok(sign | raw)
 }
 
 fn format_float32(value: f32, raw: u32, representation: FloatRepresentation) -> String {
@@ -1274,13 +1306,94 @@ mod float_tests {
 
     #[test]
     fn converts_float_representations_without_changing_the_bits() {
-        let raw = (-13.25_f64).to_bits().to_be_bytes();
-        for representation in FloatRepresentation::ALL {
-            let formatted = format_float_value(&raw, 64, representation);
+        for (bits, values) in [
+            (
+                32,
+                &[
+                    0,
+                    1,
+                    0x007f_ffff,
+                    0x0080_0000,
+                    0x0080_0001,
+                    0x7f7f_ffff,
+                    0x8000_0000,
+                    0xc154_0000,
+                ][..],
+            ),
+            (
+                64,
+                &[
+                    0,
+                    1,
+                    0x000f_ffff_ffff_ffff,
+                    0x0010_0000_0000_0000,
+                    0x0010_0000_0000_0001,
+                    0x7fef_ffff_ffff_ffff,
+                    0x8000_0000_0000_0000,
+                    (-13.25_f64).to_bits(),
+                ][..],
+            ),
+        ] {
+            for value in values {
+                let bytes = value.to_be_bytes();
+                let raw = &bytes[bytes.len() - bits as usize / 8..];
+
+                for representation in FloatRepresentation::ALL {
+                    let formatted = format_float_value(raw, bits, representation);
+
+                    assert_eq!(
+                        parse_float_value(&formatted, bits, representation).unwrap(),
+                        raw,
+                        "{bits}-bit {formatted}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn float_edits_round_once_at_normal_and_subnormal_boundaries() {
+        for input in ["1.0000000596046448", "1.0000000596046447753906250001"] {
+            for representation in [
+                FloatRepresentation::Decimal,
+                FloatRepresentation::Scientific,
+            ] {
+                assert_eq!(
+                    parse_float_value(input, 32, representation).unwrap(),
+                    0x3f80_0001_u32.to_be_bytes()
+                );
+            }
+        }
+
+        for (input, bits, expected) in [
+            ("0x1.8_0p+1", 64, 3.0_f64.to_bits()),
+            ("0x0p+2147483647", 64, 0),
+            ("-0x0p-2147483648", 64, 1_u64 << 63),
+            ("0x1p-2147483648", 64, 0),
+            ("0x1p+2147483647", 64, f64::INFINITY.to_bits()),
+            ("0x1.000001p+0", 32, 0x3f80_0000),
+            ("0x1.00000100000001p+0", 32, 0x3f80_0001),
+            ("0x1.000003p+0", 32, 0x3f80_0002),
+            ("0x1p-150", 32, 0),
+            ("0x1.000001p-150", 32, 1),
+            ("0x1.fffffep-127", 32, 0x0080_0000),
+            ("0x1.ffffffp+127", 32, 0x7f80_0000),
+            ("0x1p-1075", 64, 0),
+            ("0x1.00000000000001p-1075", 64, 1),
+            ("0x1.fffffffffffffp-1023", 64, 0x0010_0000_0000_0000),
+            ("0x1.fffffffffffff8p+1023", 64, f64::INFINITY.to_bits()),
+        ] {
+            let expected = expected.to_be_bytes();
+
             assert_eq!(
-                parse_float_value(&formatted, 64, representation).unwrap(),
-                raw
+                parse_float_value(input, bits, FloatRepresentation::HexFloat).unwrap(),
+                expected[expected.len() - bits as usize / 8..],
+                "{bits}-bit {input}"
             );
+        }
+
+        for input in ["-+0x1p0", "0x1.2.3p0", "0xp0", "0x1p", "0x1"] {
+            assert!(parse_float_value(input, 64, FloatRepresentation::HexFloat).is_err());
         }
     }
 

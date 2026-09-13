@@ -199,11 +199,11 @@ async fn write_inner(
         // Capture our revision before publication, never a concurrent editor's revision.
         let etag = revision(&info)?;
         let source = temporary.path().ok_or("Workspace must be a local file")?;
-        let destination = path.to_owned();
+        let destination = file.path().ok_or("Workspace must be a local file")?;
 
         gio::spawn_blocking(move || {
-            std::fs::File::open(&source)
-                .and_then(|file| file.sync_all())
+            crate::bounded::open_regular_file(&source)
+                .and_then(|(file, _)| file.sync_all())
                 .map_err(message)?;
 
             rustix::fs::renameat_with(
@@ -213,7 +213,15 @@ async fn write_inner(
                 &destination,
                 rustix::fs::RenameFlags::NOREPLACE,
             )
-            .map_err(message)
+            .map_err(message)?;
+
+            let parent = destination
+                .parent()
+                .ok_or("Workspace needs a parent directory")?;
+
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(message)
         })
         .await
         .map_err(|_| String::from("Workspace publication failed"))??;

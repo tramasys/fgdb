@@ -179,17 +179,17 @@ impl Ui {
             let architecture = TargetArchitecture::from_gdb_description(description);
 
             if architecture != TargetArchitecture::Unknown {
-                self.set_target_architecture(architecture);
+                self.model.set_target_architecture(architecture);
             }
 
             if let Some(bits) =
                 TargetArchitecture::explicit_pointer_bits_from_gdb_description(description)
             {
-                self.set_target_pointer_bits(bits);
+                self.model.set_target_pointer_bits(bits);
             }
 
             if let Some(endian) = TargetEndian::from_architecture_description(description) {
-                self.set_target_endian(Some(endian));
+                self.model.set_target_endian(Some(endian));
             }
         }
 

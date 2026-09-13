@@ -26,6 +26,7 @@ pub(crate) mod return_value;
 pub(crate) mod stack;
 mod state;
 mod stopped;
+mod target;
 #[cfg(test)]
 pub(crate) use execution::execution_event_matches_thread;
 pub(crate) use state::{DebuggerState, DebuggerStateDelta, TargetConnection};
@@ -37,6 +38,7 @@ pub(crate) struct DebuggerModel {
     execution: ExecutionState,
     processes: ProcessState,
     stopped: StoppedState,
+    target: Cell<target::TargetAbi>,
 }
 
 impl DebuggerModel {
@@ -48,6 +50,7 @@ impl DebuggerModel {
             execution: ExecutionState::new(initial_session),
             processes: ProcessState::new(),
             stopped: StoppedState::new(),
+            target: Cell::new(target::TargetAbi::default()),
         }
     }
 }

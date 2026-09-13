@@ -83,22 +83,22 @@ fn request_register_values(
     }
 
     let architecture = ui.upgrade().map_or(TargetArchitecture::Unknown, |ui| {
-        let current = ui.target_architecture();
+        let current = ui.model.target_architecture();
 
         let detected = if current == TargetArchitecture::Unknown {
             TargetArchitecture::infer_from_register_names_with_bits(
                 names.iter(),
-                Some(ui.target_pointer_bits()),
+                Some(ui.model.target_pointer_bits()),
             )
         } else {
             current
         };
 
         if detected != TargetArchitecture::Unknown {
-            ui.set_target_architecture(detected);
+            ui.model.set_target_architecture(detected);
 
-            if ui.target_endian().is_none() {
-                ui.set_target_endian(detected.default_endian());
+            if ui.model.target_endian().is_none() {
+                ui.model.set_target_endian(detected.default_endian());
             }
         }
 
@@ -201,12 +201,12 @@ pub(in crate::app) fn enrich_registers(
         return;
     }
 
-    let Some(endian) = current_ui.target_endian() else {
+    let Some(endian) = current_ui.model.target_endian() else {
         return;
     };
 
-    let architecture = current_ui.target_architecture();
-    let pointer_bits = current_ui.target_pointer_bits();
+    let architecture = current_ui.model.target_architecture();
+    let pointer_bits = current_ui.model.target_pointer_bits();
 
     let indices = registers
         .iter()

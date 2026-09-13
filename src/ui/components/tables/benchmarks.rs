@@ -83,7 +83,9 @@ fn benchmark_instruction_refresh() {
             painted.set(None);
             let started = Instant::now();
             update(&store, rows);
+            let updated = Instant::now();
             selection.set_selected((pc - start) as u32);
+            let selected = Instant::now();
             view.scroll_to((pc - start) as u32, None, gtk::ListScrollFlags::FOCUS, None);
             let sync = started.elapsed();
             clock.request_phase(gtk::gdk::FrameClockPhase::AFTER_PAINT);
@@ -94,7 +96,10 @@ fn benchmark_instruction_refresh() {
             }
 
             println!(
-                "BENCH instruction {name}: sync={sync:?} frame={:?} setups={} binds={}",
+                "BENCH instruction {name}: sync={sync:?} update={:?} selection={:?} scroll={:?} frame={:?} setups={} binds={}",
+                updated.duration_since(started),
+                selected.duration_since(updated),
+                sync.saturating_sub(selected.duration_since(started)),
                 painted.get().unwrap().duration_since(started),
                 setups.get(),
                 binds.get()

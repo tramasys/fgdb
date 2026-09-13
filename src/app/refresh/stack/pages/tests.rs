@@ -108,7 +108,9 @@ fn live_stack_reads_stop_at_the_containing_mapping_end() {
     use crate::model::{DebuggerModel, DebuggerStateDelta, TargetConnection};
 
     let (debugger, client) = open_debugger("c-memory-search-target", "search_checkpoint");
-    let pid = crate::debugger::inferior_pid(&request(&client, "-list-thread-groups")).unwrap();
+    let pid =
+        crate::debugger::inferior_pid_for_group(&request(&client, "-list-thread-groups"), "i1")
+            .unwrap();
     let regions = read_memory_regions(pid, debugger.pid());
     let base = pointer_address(
         &crate::debugger::evaluated_value(&request(&client, "-data-evaluate-expression $sp"))

@@ -253,8 +253,16 @@ pub(crate) fn submit_result<T: Send + 'static>(
     priority: Priority,
     job: impl FnOnce() -> T + Send + 'static,
 ) -> Result<futures_channel::oneshot::Receiver<T>, SubmitError> {
+    submit_cancellable_result(priority, || true, job)
+}
+
+pub(crate) fn submit_cancellable_result<T: Send + 'static>(
+    priority: Priority,
+    is_current: impl Fn() -> bool + Send + 'static,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> Result<futures_channel::oneshot::Receiver<T>, SubmitError> {
     let (sender, receiver) = futures_channel::oneshot::channel();
-    submit_with_priority(priority, move || {
+    submit_cancellable_with_priority(priority, is_current, move || {
         if !sender.is_canceled() {
             let _ = sender.send(job());
         }
@@ -318,6 +326,23 @@ mod tests {
                     .unwrap()
                     .is_err()
             );
+
+            let ran = Arc::new(AtomicBool::new(false));
+            let worker_ran = Arc::clone(&ran);
+            let receiver = super::submit_cancellable_result(
+                Priority::Critical,
+                || false,
+                move || worker_ran.store(true, Ordering::Relaxed),
+            )
+            .unwrap();
+
+            assert!(
+                gtk::glib::future_with_timeout(Duration::from_secs(2), receiver)
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            assert!(!ran.load(Ordering::Relaxed));
         });
     }
 

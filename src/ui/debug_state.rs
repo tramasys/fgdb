@@ -303,8 +303,6 @@ impl Ui {
             let string_handler = Rc::clone(&self.string_assignment_handler);
             let vector_handler = Rc::clone(&self.vector_assignment_handler);
             let register_context = Rc::clone(&self.register_render_context);
-            let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
-            let target_architecture = Rc::clone(&self.target_architecture);
             let current_source_language = Rc::clone(&self.current_source_language);
             let model = Rc::clone(&self.model);
 
@@ -362,8 +360,8 @@ impl Ui {
                             display_hint: None,
                             dynamic: false,
                         },
-                        target_pointer_bits.get(),
-                        target_architecture.get(),
+                        model.target_pointer_bits(),
+                        model.target_architecture(),
                         current_source_language.get(),
                         None,
                         ValueEditorHandlers {
@@ -629,9 +627,9 @@ impl Ui {
                 self.registers_empty.set_visible(false);
             }
 
-            let architecture = self.target_architecture();
-            let endian = self.target_endian();
-            let pointer_bits = self.target_pointer_bits();
+            let architecture = self.model.target_architecture();
+            let endian = self.model.target_endian();
+            let pointer_bits = self.model.target_pointer_bits();
             let previous = self.model.previous_registers();
 
             let ring = registers
@@ -1010,7 +1008,7 @@ impl Ui {
 
         match result {
             Ok(memory) => {
-                let endian = self.target_endian().or_else(|| {
+                let endian = self.model.target_endian().or_else(|| {
                     (watch.format == MemoryWatchFormat::Bytes).then_some(TargetEndian::Little)
                 });
 
@@ -1028,7 +1026,7 @@ impl Ui {
                     &watch,
                     memory,
                     &self.model.memory_regions(),
-                    self.target_pointer_bits.get(),
+                    self.model.target_pointer_bits(),
                     endian,
                 );
             }

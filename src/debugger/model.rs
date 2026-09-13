@@ -750,16 +750,6 @@ pub fn evaluated_value(record: &MiRecord) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub fn inferior_pid(record: &MiRecord) -> Option<u32> {
-    record
-        .field("groups")
-        .and_then(MiValue::as_list)
-        .into_iter()
-        .flatten()
-        .filter_map(tuple_from_item)
-        .find_map(|tuple| constant(tuple, "pid").and_then(|pid| pid.parse().ok()))
-}
-
 pub fn inferior_pid_for_group(record: &MiRecord, group_id: &str) -> Option<u32> {
     record
         .field("groups")
@@ -1329,11 +1319,11 @@ fn owned_constant(tuple: &[MiResult], name: &str) -> Option<String> {
 mod tests {
     use super::{
         breakpoints, compact_register_numbers, compare_thread_ids, current_source,
-        has_exact_command_completion, inferior_pid, inferior_pid_for_group, inferiors,
-        inserted_breakpoints, instructions, memory_block, register_names, registers,
-        shared_libraries, source_files, source_locations, stack_frames, thread_id_argument,
-        threads, variable_children, variable_children_have_more, variable_object,
-        variable_path_expression, variable_updates, variables,
+        has_exact_command_completion, inferior_pid_for_group, inferiors, inserted_breakpoints,
+        instructions, memory_block, register_names, registers, shared_libraries, source_files,
+        source_locations, stack_frames, thread_id_argument, threads, variable_children,
+        variable_children_have_more, variable_object, variable_path_expression, variable_updates,
+        variables,
     };
     use crate::debugger::mi::parse_record;
     use crate::debugger::{InferiorState, TargetArchitecture, TargetEndian};
@@ -1519,7 +1509,7 @@ mod tests {
             r#"7^done,groups=[{id="i1",type="process",pid="1234",executable="/tmp/a"}]"#,
         )
         .unwrap();
-        assert_eq!(inferior_pid(&process), Some(1234));
+        assert_eq!(inferior_pid_for_group(&process, "i1"), Some(1234));
 
         let groups = parse_record(
             r#"8^done,groups=[{id="i1",type="process",pid="1234",executable="/tmp/parent",threads=[{id="1",target-id="Thread 1",state="stopped"}]},{id="i2",type="process",pid="1235",executable="/tmp/child",threads=[{id="2",target-id="Thread 2",name="child",state="running"}]},{id="i3",type="process",executable="/tmp/pending"},{id="i4",type="process",exit-code="0"}]"#,
@@ -1534,6 +1524,13 @@ mod tests {
         assert_eq!(parsed[2].state, InferiorState::NotStarted);
         assert_eq!(parsed[3].state, InferiorState::Exited);
         assert_eq!(inferior_pid_for_group(&groups, "i2"), Some(1235));
+        assert_eq!(inferior_pid_for_group(&groups, "i3"), None);
+        assert_eq!(inferior_pid_for_group(&groups, "missing"), None);
+
+        let reordered =
+            parse_record(r#"^done,groups=[{id="i2",pid="1235"},{id="i1",pid="1234"}]"#).unwrap();
+
+        assert_eq!(inferior_pid_for_group(&reordered, "i1"), Some(1234));
         assert_eq!(super::thread_group_argument("i2"), Some("i2"));
         assert_eq!(super::thread_group_argument("process-2"), Some("process-2"));
         assert_eq!(super::thread_group_argument("i 2"), None);

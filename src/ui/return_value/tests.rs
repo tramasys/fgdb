@@ -29,7 +29,6 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
     let theme = Theme::graphite();
     theme.install();
     let columns = ColumnLayouts::default();
-    let pointer_bits = Rc::new(Cell::new(64));
     let model = Rc::new(DebuggerModel::new(None));
     model.set_controls_ready(true);
 
@@ -39,12 +38,11 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
 
     model.set_current_thread_id(Some("1"));
 
-    let locations =
-        variables::locations::Locations::new(false, Rc::clone(&pointer_bits), Rc::clone(&model));
+    let locations = variables::locations::Locations::new(false, Rc::clone(&model));
 
     let presentation = Rc::new(variable_presentation::VariablePresentation::new(
         crate::config::settings::IntegerDisplay::Automatic,
-        Rc::clone(&pointer_bits),
+        Rc::clone(&model),
     ));
 
     let viewers = Rc::new(VariableViewerRegistry::with_builtins());
@@ -61,7 +59,7 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
         variable_children_handler: &children,
         variable_viewer_handler: &viewer_handler,
         variable_viewers: &viewers,
-        target_pointer_bits: &pointer_bits,
+        model: &model,
         variable_presentation: &presentation,
         variable_locations: &locations,
         kernel: KernelViewBindings {

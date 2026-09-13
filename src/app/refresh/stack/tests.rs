@@ -36,7 +36,9 @@ fn live_shared_stack_reads_match_independent_paths_and_do_not_cross_stops() {
         let current = Rc::new(Cell::new(true));
         let authority = Rc::clone(&current);
         let requests = client.bind_stop_requests(context, move |_| authority.get());
-        let pid = crate::debugger::inferior_pid(&request(&client, "-list-thread-groups")).unwrap();
+        let pid =
+            crate::debugger::inferior_pid_for_group(&request(&client, "-list-thread-groups"), "i1")
+                .unwrap();
         let regions = read_memory_regions(pid, debugger.pid());
         let memory =
             crate::debugger::memory_block(&request(&client, "-data-read-memory-bytes $sp 512"))

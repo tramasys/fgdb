@@ -33,16 +33,13 @@ impl Ui {
         let misc_refresh_handler = Rc::new(RefCell::new(None));
         let kernel_section_handler = Rc::new(RefCell::new(None));
         let remembered_disclosures = layout::remembered_disclosures();
-        let target_pointer_bits = Rc::new(Cell::new(usize::BITS));
-        let target_pointer_bits_known = Rc::new(Cell::new(false));
         let variable_presentation = variable_presentation::VariablePresentation::new(
             config.preferences.integer_display,
-            Rc::clone(&target_pointer_bits),
+            Rc::clone(&model),
         );
 
         let variable_locations = variables::locations::Locations::new(
             config.preferences.variable_locations,
-            Rc::clone(&target_pointer_bits),
             Rc::clone(&model),
         );
 
@@ -52,7 +49,7 @@ impl Ui {
             variable_children_handler: &variable_children_handler,
             variable_viewer_handler: &variable_viewer_handler,
             variable_viewers: &variable_viewers,
-            target_pointer_bits: &target_pointer_bits,
+            model: &model,
             variable_presentation: &variable_presentation,
             variable_locations: &variable_locations,
             kernel: KernelViewBindings {
@@ -230,20 +227,8 @@ impl Ui {
             expression_watch_entry: workspace.expression_watch_entry,
             expression_watch_add_button: workspace.expression_watch_add_button,
             expression_watch_remove_button: workspace.expression_watch_remove_button,
-            target_pointer_bits,
-            target_pointer_bits_known,
-            target_architecture: Rc::new(Cell::new(TargetArchitecture::Unknown)),
-            target_endian: Rc::new(Cell::new(None)),
             current_source_language: Rc::new(Cell::new(crate::language::Language::Unknown)),
-            instructions_title: workspace.instructions_title,
-            instructions_store: workspace.instructions_store,
-            instructions_selection: workspace.instructions_selection,
-            instructions_view: workspace.instructions_view,
-            instructions_empty: workspace.instructions_empty,
-            instruction_flow: workspace.instruction_flow,
-            instruction_arguments: workspace.instruction_arguments,
-            instruction_memory: workspace.instruction_memory,
-            disassembly_controls: workspace.disassembly_controls,
+            instructions: workspace.instructions,
             current_instruction: Rc::new(RefCell::new(None)),
             call_abi_instruction: Rc::new(RefCell::new(None)),
             call_abi_instruction_generation: Rc::new(Cell::new(None)),
@@ -476,70 +461,13 @@ impl Ui {
         pending
     }
 
-    pub fn set_target_endian(&self, endian: Option<TargetEndian>) {
-        self.target_endian.set(endian);
-    }
-
-    pub fn set_target_architecture(&self, architecture: TargetArchitecture) {
-        let architecture = if self.target_pointer_bits_known.get() {
-            architecture.refine_for_pointer_bits(self.target_pointer_bits.get())
-        } else {
-            if let Some(bits) = architecture.pointer_bits() {
-                self.target_pointer_bits.set(bits);
-            }
-
-            architecture
-        };
-
-        let previous = self.target_architecture.replace(architecture);
-
-        if previous != TargetArchitecture::Unknown
-            && architecture != TargetArchitecture::Unknown
-            && previous != architecture
-        {
-            self.model.clear_register_names();
-        }
-    }
-
-    pub fn target_architecture(&self) -> TargetArchitecture {
-        self.target_architecture.get()
-    }
-
-    pub fn target_endian(&self) -> Option<TargetEndian> {
-        self.target_endian.get()
-    }
-
-    pub fn target_pointer_bits(&self) -> u32 {
-        self.target_pointer_bits.get()
-    }
-
-    pub(crate) fn known_target_pointer_bits(&self) -> Option<u32> {
-        self.target_pointer_bits_known
-            .get()
-            .then(|| self.target_pointer_bits.get())
-    }
-
-    pub fn set_target_pointer_bits(&self, bits: u32) {
-        if matches!(bits, 32 | 64) {
-            self.target_pointer_bits.set(bits);
-            self.target_pointer_bits_known.set(true);
-            let previous = self.target_architecture.get();
-            let refined = previous.refine_for_pointer_bits(bits);
-            self.target_architecture.set(refined);
-
-            if previous != TargetArchitecture::Unknown && refined != previous {
-                self.model.clear_register_names();
-            }
-        }
-    }
-
     pub fn reset_target_abi(&self) {
+        self.model.reset_target_abi();
+        self.invalidate_target_caches();
+    }
+
+    fn invalidate_target_caches(&self) {
         crate::kernel::invalidate_local_target_abi_cache();
-        self.target_architecture.set(TargetArchitecture::Unknown);
-        self.target_endian.set(None);
-        self.target_pointer_bits.set(usize::BITS);
-        self.target_pointer_bits_known.set(false);
-        self.model.clear_register_names();
         self.resolved_source_paths.borrow_mut().clear();
     }
 
@@ -1053,7 +981,7 @@ impl Ui {
         self.model.apply_debugger_state_delta(delta);
 
         if delta.changes_target() {
-            self.reset_target_abi();
+            self.invalidate_target_caches();
         }
 
         self.invalidate_allocator_probe_cache();
@@ -1074,7 +1002,7 @@ impl Ui {
     /// state, because synchronization is what repairs changes made through the
     /// interactive GDB terminal.
     pub(crate) fn disassembly_commands_available(&self) -> bool {
-        self.model.stopped_inspection_available() && !self.disassembly_controls.loading.get()
+        self.model.stopped_inspection_available() && !self.instructions.controls.loading.get()
     }
 
     pub fn set_command_pending(&self, pending: bool) {
@@ -1319,7 +1247,7 @@ impl Ui {
             move_target: can_move,
             until: can_move && self.model.directional_command("-exec-until").is_ok(),
             inspect: can_inspect,
-            syntax: self.disassembly_controls.syntax_applicable.get(),
+            syntax: self.instructions.controls.syntax_applicable.get(),
             gef_tools: self.gef_available.get() && ready && !running && !pending,
             heap_inspector_in_flight: self.misc_view.heap_inspector_in_flight.get().is_some(),
             heap_action_visibility: self
@@ -1412,11 +1340,13 @@ impl Ui {
 
         set_transient_execution_sensitive(&self.until_button, state.until, state.busy);
 
-        self.disassembly_controls
+        self.instructions
+            .controls
             .syntax_intel
             .set_sensitive(state.syntax);
 
-        self.disassembly_controls
+        self.instructions
+            .controls
             .syntax_att
             .set_sensitive(state.syntax);
 
@@ -1719,7 +1649,7 @@ impl Ui {
         let handler: DisassemblyHandler = Rc::new(handler);
         self.disassembly_handler.replace(Some(Rc::clone(&handler)));
         handler(DisassemblyRequest::Mixed(
-            self.disassembly_controls.mixed.is_active(),
+            self.instructions.controls.mixed.is_active(),
         ));
     }
 

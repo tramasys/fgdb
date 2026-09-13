@@ -170,7 +170,7 @@ fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
 }
 
 fn python_directory_from_hook(path: &Path) -> Option<PathBuf> {
-    let contents = crate::bounded::read_string(path, MAX_AUTO_LOAD_SCRIPT_BYTES).ok()?;
+    let contents = crate::bounded::read_regular_string(path, MAX_AUTO_LOAD_SCRIPT_BYTES).ok()?;
 
     contents.lines().find_map(|line| {
         let value = line.trim().strip_prefix("pythondir")?.trim();

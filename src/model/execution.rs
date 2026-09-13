@@ -200,6 +200,7 @@ impl DebuggerModel {
         let changed = self.execution.debugger_ready.replace(ready) != ready;
 
         if !ready {
+            self.reset_target_abi();
             self.clear_return_value();
             self.symbols.reset();
             self.invalidate_stop_context();
@@ -283,6 +284,10 @@ impl DebuggerModel {
     }
 
     pub(crate) fn apply_debugger_state_delta(&self, delta: DebuggerStateDelta) {
+        if delta.changes_target() {
+            self.reset_target_abi();
+        }
+
         self.clear_return_value();
         self.invalidate_stop_context();
         self.execution

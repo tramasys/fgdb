@@ -673,7 +673,7 @@ fn config_path() -> PathBuf {
 fn read_user_config() -> LoadedConfig {
     let path = config_path();
 
-    match crate::bounded::read_string(&path, MAX_CONFIG_BYTES) {
+    match crate::bounded::read_regular_string(&path, MAX_CONFIG_BYTES) {
         Ok(contents) => loaded_config_from_contents(path, &contents, false),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             match create_default_config(&path) {

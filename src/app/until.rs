@@ -413,6 +413,7 @@ impl NativeUntilController {
     }
 
     fn prepare_address_space(self: &Rc<Self>, generation: u64, required: bool) {
+        let selected_inferior = self.model.selected_inferior_id();
         let cached_process = self
             .ui
             .upgrade()
@@ -436,7 +437,10 @@ impl NativeUntilController {
                     return;
                 }
 
-                let Some(pid) = crate::debugger::inferior_pid(&record) else {
+                let Some(pid) = selected_inferior
+                    .as_deref()
+                    .and_then(|id| crate::debugger::inferior_pid_for_group(&record, id))
+                else {
                     controller.address_space_unavailable(
                         generation,
                         required,
@@ -831,7 +835,9 @@ impl NativeUntilController {
             let architecture = controller
                 .ui
                 .upgrade()
-                .map_or(TargetArchitecture::Unknown, |ui| ui.target_architecture());
+                .map_or(TargetArchitecture::Unknown, |ui| {
+                    ui.model.target_architecture()
+                });
 
             let InstructionWindow {
                 current_matched,

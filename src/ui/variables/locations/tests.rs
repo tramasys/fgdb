@@ -234,12 +234,11 @@ fn locations_are_lazy_visible_bounded_and_invalidated_with_their_stop() {
     gtk::init().unwrap();
     let theme = crate::theme::Theme::graphite();
     theme.install();
-    let pointer_bits = Rc::new(Cell::new(64));
     let model = Rc::new(DebuggerModel::new(None));
     model.set_current_thread_id(Some("1"));
     assert_eq!(model.start_stop_refresh(), 1);
     model.bind_stop_context(1).unwrap();
-    let locations = Locations::new(false, Rc::clone(&pointer_bits), Rc::clone(&model));
+    let locations = Locations::new(false, Rc::clone(&model));
     let pending = Rc::new(RefCell::new(VecDeque::new()));
     let queue = Rc::clone(&pending);
     let calls = Rc::new(Cell::new(0));
@@ -268,7 +267,7 @@ fn locations_are_lazy_visible_bounded_and_invalidated_with_their_stop() {
         &Rc::new(RefCell::new(None)),
         &Rc::new(RefCell::new(None)),
         &Rc::new(VariableViewerRegistry::with_builtins()),
-        &VariablePresentation::new(IntegerDisplay::Automatic, pointer_bits),
+        &VariablePresentation::new(IntegerDisplay::Automatic, Rc::clone(&model)),
         &locations,
         None,
     );

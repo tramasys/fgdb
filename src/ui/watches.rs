@@ -202,8 +202,6 @@ impl Ui {
         let editor_handler = Rc::clone(&self.variable_editor_handler);
         let string_handler = Rc::clone(&self.string_assignment_handler);
         let children_handler = Rc::clone(&self.variable_children_handler);
-        let target_pointer_bits = Rc::clone(&self.target_pointer_bits);
-        let target_architecture = Rc::clone(&self.target_architecture);
         let current_source_language = Rc::clone(&self.current_source_language);
         let model = Rc::clone(&self.model);
 
@@ -249,8 +247,8 @@ impl Ui {
                             let editor = open_variable_editor(
                                 &window,
                                 variable,
-                                target_pointer_bits.get(),
-                                target_architecture.get(),
+                                model.target_pointer_bits(),
+                                model.target_architecture(),
                                 current_source_language.get(),
                                 None,
                                 ValueEditorHandlers {

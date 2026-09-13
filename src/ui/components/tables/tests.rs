@@ -195,14 +195,9 @@ fn debugger_table_dividers_resize_with_optional_instruction_columns() {
 
     gtk::init().unwrap();
     Theme::graphite().install();
-    let pointer_bits = Rc::new(Cell::new(64));
-    let presentation =
-        VariablePresentation::new(IntegerDisplay::Automatic, Rc::clone(&pointer_bits));
-    let locations = crate::ui::variables::locations::Locations::new(
-        false,
-        Rc::clone(&pointer_bits),
-        Rc::new(crate::model::DebuggerModel::new(None)),
-    );
+    let model = Rc::new(crate::model::DebuggerModel::new(None));
+    let presentation = VariablePresentation::new(IntegerDisplay::Automatic, Rc::clone(&model));
+    let locations = crate::ui::variables::locations::Locations::new(false, Rc::clone(&model));
 
     let (locals, _, _) = views::build_locals_view(
         &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::Locals),
@@ -229,7 +224,7 @@ fn debugger_table_dividers_resize_with_optional_instruction_columns() {
     let search = gtk::SearchEntry::new();
     let (mappings, _) = views::build_memory_region_view(
         &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::MemoryMappings),
-        &pointer_bits,
+        &model,
         &search,
     );
 

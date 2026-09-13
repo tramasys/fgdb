@@ -712,18 +712,18 @@ pub(super) fn detect_target_abi(ui: &Weak<Ui>, client: &MiClient) {
                 .unwrap_or_default();
 
             if let Some(ui) = weak_ui.upgrade() {
-                ui.set_target_architecture(architecture);
+                ui.model.set_target_architecture(architecture);
 
                 if let Some(bits) = description.and_then(
                     crate::debugger::TargetArchitecture::pointer_bits_from_gdb_description,
                 ) {
-                    ui.set_target_pointer_bits(bits);
+                    ui.model.set_target_pointer_bits(bits);
                 }
 
                 if let Some(endian) = description
                     .and_then(crate::debugger::TargetEndian::from_architecture_description)
                 {
-                    ui.set_target_endian(Some(endian));
+                    ui.model.set_target_endian(Some(endian));
                 }
             }
 
@@ -732,7 +732,8 @@ pub(super) fn detect_target_abi(ui: &Weak<Ui>, client: &MiClient) {
         .is_err()
     {
         if let Some(ui) = ui.upgrade() {
-            ui.set_target_architecture(TargetArchitecture::Unknown);
+            ui.model
+                .set_target_architecture(TargetArchitecture::Unknown);
         }
 
         detect_target_pointer_width(ui, client);
@@ -753,7 +754,7 @@ fn detect_target_pointer_width(ui: &Weak<Ui>, client: &MiClient) {
                     .and_then(|value| parse_pointer_size(&value));
 
                 if let (Some(ui), Some(bytes)) = (weak_ui.upgrade(), bytes) {
-                    ui.set_target_pointer_bits(bytes.saturating_mul(8));
+                    ui.model.set_target_pointer_bits(bytes.saturating_mul(8));
                 }
 
                 detect_target_endian(&weak_ui, client);
@@ -804,9 +805,9 @@ fn detect_target_endian(ui: &Weak<Ui>, client: &MiClient) {
                 .and_then(crate::debugger::TargetEndian::from_gdb_description);
 
             if let Some(ui) = weak_ui.upgrade()
-                && (endian.is_some() || ui.target_endian().is_none())
+                && (endian.is_some() || ui.model.target_endian().is_none())
             {
-                ui.set_target_endian(endian);
+                ui.model.set_target_endian(endian);
             }
 
             refresh_after_target_abi_detection(&weak_ui, client);

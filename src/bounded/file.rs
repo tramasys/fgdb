@@ -80,6 +80,7 @@ mod tests {
 
             assert!(FileIdentity::read(path).is_err());
             assert!(super::super::read_regular_bytes(path, 128).is_err());
+            assert!(super::super::read_regular_string(path, 128).is_err());
         }
 
         std::fs::remove_file(link).unwrap();

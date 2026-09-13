@@ -24,7 +24,6 @@ pub(super) struct ProcessPicker {
     loaded: Cell<bool>,
     cancelled: Arc<AtomicBool>,
     excluded: Vec<u32>,
-    debugger_pid: Option<u32>,
     skipped: Cell<usize>,
     limited: Cell<bool>,
 }
@@ -136,7 +135,6 @@ impl ProcessPicker {
             loaded: Cell::new(false),
             cancelled: Arc::new(AtomicBool::new(false)),
             excluded,
-            debugger_pid,
             skipped: Cell::new(0),
             limited: Cell::new(false),
         });
@@ -208,14 +206,11 @@ impl ProcessPicker {
         picker
     }
 
-    pub(super) fn request(&self, session: DebugSession) -> Result<SessionRequest, String> {
-        let mut request = SessionRequest {
+    pub(super) fn request(&self, session: DebugSession) -> SessionRequest {
+        SessionRequest {
             session,
             attach_identity: *self.selected.borrow(),
-        };
-
-        request.attach_identity = request.validate_attach(self.debugger_pid)?;
-        Ok(request)
+        }
     }
 
     fn refresh(self: &Rc<Self>) {

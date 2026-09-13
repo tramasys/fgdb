@@ -265,7 +265,7 @@ pub(super) fn insight_label(placeholder: &str) -> gtk::Label {
 
 pub(super) fn build_memory_region_view(
     layout: &TableLayout,
-    target_pointer_bits: &Rc<Cell<u32>>,
+    model: &Rc<crate::model::DebuggerModel>,
     search: &gtk::SearchEntry,
 ) -> (gtk::ColumnView, gio::ListStore) {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
@@ -299,7 +299,7 @@ pub(super) fn build_memory_region_view(
         layout.append(
             &view,
             key,
-            &memory_region_column(title, width, column, Rc::clone(target_pointer_bits)),
+            &memory_region_column(title, width, column, Rc::clone(model)),
         );
     }
 
@@ -337,7 +337,7 @@ pub(super) fn memory_region_column(
     title: &str,
     width: i32,
     column: MemoryColumn,
-    target_pointer_bits: Rc<Cell<u32>>,
+    model: Rc<crate::model::DebuggerModel>,
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
 
@@ -407,10 +407,9 @@ pub(super) fn memory_region_column(
 
         clear_label_selection(&label);
         let region = data.borrow::<MemoryRegion>();
-        reset_semantic_css(&label);
-        label.add_css_class(memory_kind_css(region.kind));
+        set_semantic_css(&label, Some(memory_kind_css(region.kind)));
 
-        let address_width = usize::try_from(target_pointer_bits.get() / 4)
+        let address_width = usize::try_from(model.target_pointer_bits() / 4)
             .unwrap_or(16)
             .clamp(8, 16);
 
@@ -1808,9 +1807,10 @@ impl StackWordInspector {
         let interpretation = stack_entry_text(entry);
         self.interpretation.set_text(&interpretation);
         self.interpretation.set_tooltip_text(Some(&interpretation));
-        reset_semantic_css(&self.interpretation);
-        self.interpretation
-            .add_css_class(memory_kind_css(entry.memory_kind));
+        set_semantic_css(
+            &self.interpretation,
+            Some(memory_kind_css(entry.memory_kind)),
+        );
         let role = stack_word_role(entry);
         self.role.set_text(&role);
         self.role.set_tooltip_text(Some(&role));

@@ -2606,8 +2606,8 @@ impl Ui {
         }
 
         self.misc_view.show_call_abi(crate::misc::call_abi_snapshot(
-            self.target_architecture(),
-            self.target_pointer_bits(),
+            self.model.target_architecture(),
+            self.model.target_pointer_bits(),
             self.model.selected_frame_level(),
             frames,
         ));
@@ -2628,7 +2628,7 @@ impl Ui {
             return;
         };
 
-        let architecture = self.target_architecture();
+        let architecture = self.model.target_architecture();
         let mut phase = call_abi_phase(&context.current, context.previous.as_ref(), architecture);
 
         if let Some(resolution) = context.target_resolution.as_ref() {
@@ -2637,7 +2637,7 @@ impl Ui {
 
         let registers = self.model.registers();
         let mut transfer = crate::misc::call_abi_transfer(architecture, phase, &registers);
-        let address = full_address(&context.current.address, self.target_pointer_bits());
+        let address = full_address(&context.current.address, self.model.target_pointer_bits());
         transfer.context = format!("{}  instruction {address}", transfer.context);
         let transfer_context = transfer.context.clone();
         self.misc_view.show_call_abi_transfer(transfer);
@@ -2657,7 +2657,7 @@ impl Ui {
             return None;
         }
 
-        let architecture = self.target_architecture();
+        let architecture = self.model.target_architecture();
         let mut context = self.call_abi_instruction.borrow_mut();
         let context = context.as_mut()?;
         let phase = call_abi_phase(&context.current, context.previous.as_ref(), architecture);

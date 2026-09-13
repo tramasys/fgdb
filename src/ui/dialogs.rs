@@ -47,8 +47,8 @@ impl Ui {
         let editor = open_variable_editor(
             &parent,
             variable,
-            self.target_pointer_bits.get(),
-            self.target_architecture(),
+            self.model.target_pointer_bits(),
+            self.model.target_architecture(),
             self.current_source_language.get(),
             metadata.as_ref(),
             ValueEditorHandlers {

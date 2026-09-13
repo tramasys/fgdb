@@ -1,7 +1,6 @@
 use std::{
     collections::VecDeque,
     os::unix::fs::MetadataExt,
-    sync::mpsc::{self, TryRecvError},
     time::{Duration, Instant},
 };
 
@@ -645,38 +644,30 @@ impl Job {
     ) -> Result<T, String> {
         let active = Arc::clone(&self.ticket.active);
         let queued = Arc::clone(&active);
-        let (sender, receiver) = mpsc::sync_channel(1);
         let deadline = Instant::now() + Duration::from_secs(15);
 
-        crate::background::submit_cancellable_with_priority(
+        let receiver = crate::background::submit_cancellable_result(
             crate::background::Priority::Interactive,
             move || queued.load(Ordering::Acquire),
             move || {
                 let current =
                     Box::new(move || active.load(Ordering::Acquire) && Instant::now() < deadline);
-                let _ = sender.send(work(current));
+                work(current)
             },
         )
         .map_err(|error| error.to_string())?;
 
-        loop {
-            if !self.current() {
-                return Err(String::from("Symbol request cancelled"));
-            }
+        crate::background::receive_current(receiver, Duration::from_secs(15), || self.current())
+            .await
+            .map_err(|error| {
+                use crate::background::CompletionError;
 
-            match receiver.try_recv() {
-                Ok(result) => return result,
-                Err(TryRecvError::Disconnected) => {
-                    return Err(String::from("Debug-file inspection stopped"));
-                }
-
-                Err(TryRecvError::Empty) if Instant::now() >= deadline => {
-                    return Err(String::from("Debug-file inspection timed out"));
-                }
-
-                Err(TryRecvError::Empty) => glib::timeout_future(Duration::from_millis(20)).await,
-            }
-        }
+                String::from(match error {
+                    CompletionError::Superseded => "Symbol request cancelled",
+                    CompletionError::TimedOut => "Debug-file inspection timed out",
+                    CompletionError::Disconnected => "Debug-file inspection stopped",
+                })
+            })?
     }
 }
 
