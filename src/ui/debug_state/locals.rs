@@ -44,7 +44,7 @@ pub(super) fn apply_variable_children_page_error(
         node.children.splice(
             0,
             node.children.n_items(),
-            &[glib::BoxedAnyObject::new(VariableNode::retry_expansion(
+            &[SnapshotRow::new(VariableNode::retry_expansion(
                 parent.clone(),
                 error,
             ))],
@@ -53,7 +53,7 @@ pub(super) fn apply_variable_children_page_error(
         remove_load_more_rows(&node.children);
 
         node.children
-            .append(&glib::BoxedAnyObject::new(VariableNode::load_more_error(
+            .append(&SnapshotRow::new(VariableNode::load_more_error(
                 parent.clone(),
                 from,
                 error,
@@ -109,6 +109,7 @@ impl Ui {
 
         if changed != VariableRootChange::Unchanged {
             self.rebuild_variable_node_index();
+            invalidate_variable_filter(&self.locals_selection);
         }
 
         let locals = root_count.saturating_sub(arguments);
@@ -241,6 +242,7 @@ impl Ui {
 
             if replace_variable_root(&self.locals_store, position, &variable, false) {
                 self.reindex_variable_root(&self.locals_store, position, previous.as_ref());
+                invalidate_variable_filter(&self.locals_selection);
             }
         }
     }
@@ -266,7 +268,7 @@ impl Ui {
         apply_variable_updates(&self.expression_watches_store, updates, reindex);
 
         if locals_updated > 0 {
-            refresh_changed_variable_roots(&self.locals_store);
+            invalidate_variable_filter(&self.locals_selection);
             let roots = self.local_variables.borrow();
             let arguments = roots.argument_count();
 
@@ -314,11 +316,11 @@ impl Ui {
         for variable in variables {
             let child = node.child(variable.clone());
             self.variable_node_index.borrow_mut().insert(child.clone());
-            additions.push(glib::BoxedAnyObject::new(child));
+            additions.push(SnapshotRow::new(child));
         }
 
         if has_more {
-            additions.push(glib::BoxedAnyObject::new(VariableNode::load_more(
+            additions.push(SnapshotRow::new(VariableNode::load_more(
                 parent.clone(),
                 from.saturating_add(variables.len()),
             )));
@@ -368,7 +370,7 @@ impl Ui {
         // Claim loading now so that rebinding cannot enqueue a duplicate read.
         if from == 0 && node.children.n_items() == 0 {
             node.children
-                .append(&glib::BoxedAnyObject::new(VariableNode::placeholder(
+                .append(&SnapshotRow::new(VariableNode::placeholder(
                     "loading…",
                     "waiting for GDB",
                 )));
@@ -483,7 +485,7 @@ impl Ui {
                 .n_items()
                 .checked_sub(1)
                 .and_then(|index| node.children.item(index))
-                .and_downcast::<glib::BoxedAnyObject>()
+                .and_downcast::<SnapshotRow>()
             {
                 item.borrow::<VariableNode>().children_loading.set(false);
             }
@@ -549,6 +551,7 @@ impl Ui {
                 usize::try_from(position).unwrap_or(usize::MAX),
                 previous.as_ref(),
             );
+            invalidate_variable_filter(&self.locals_selection);
         }
 
         replaced
@@ -614,7 +617,7 @@ impl Ui {
             return;
         };
 
-        let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+        let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
             return;
         };
 
@@ -638,7 +641,7 @@ impl Ui {
             let item = self
                 .locals_store
                 .item(position)
-                .and_downcast::<glib::BoxedAnyObject>()?;
+                .and_downcast::<SnapshotRow>()?;
 
             let node = item.borrow::<VariableNode>();
 

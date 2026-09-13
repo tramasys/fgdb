@@ -2,7 +2,8 @@
 
 use super::variable_search_text;
 use crate::debugger::{Variable, VariableUpdate};
-use gtk::{gio, glib, prelude::*};
+use crate::ui::components::SnapshotRow;
+use gtk::{gio, prelude::*};
 use std::{cell::Cell, rc::Rc};
 
 pub(in crate::ui) mod locations;
@@ -31,7 +32,7 @@ impl VariableNode {
             local: variable.local_index.is_some(),
             variable,
             search_text,
-            children: gio::ListStore::new::<glib::BoxedAnyObject>(),
+            children: gio::ListStore::new::<SnapshotRow>(),
             children_loaded: Rc::new(Cell::new(false)),
             children_loading: Rc::new(Cell::new(false)),
             expanded: Rc::new(Cell::new(false)),
@@ -69,7 +70,7 @@ impl VariableNode {
             local: false,
             search_text: variable_search_text(&variable).into(),
             variable,
-            children: gio::ListStore::new::<glib::BoxedAnyObject>(),
+            children: gio::ListStore::new::<SnapshotRow>(),
             children_loaded: Rc::new(Cell::new(true)),
             children_loading: Rc::new(Cell::new(false)),
             expanded: Rc::new(Cell::new(false)),
@@ -109,7 +110,7 @@ impl VariableNode {
             local: false,
             search_text: variable_search_text(&variable).into(),
             variable,
-            children: gio::ListStore::new::<glib::BoxedAnyObject>(),
+            children: gio::ListStore::new::<SnapshotRow>(),
             children_loaded: Rc::new(Cell::new(true)),
             children_loading: Rc::new(Cell::new(false)),
             expanded: Rc::new(Cell::new(false)),
@@ -174,7 +175,7 @@ impl VariableNode {
             children: if structure_unchanged {
                 self.children.clone()
             } else {
-                gio::ListStore::new::<glib::BoxedAnyObject>()
+                gio::ListStore::new::<SnapshotRow>()
             },
             children_loaded: if structure_unchanged {
                 Rc::clone(&self.children_loaded)
@@ -209,7 +210,7 @@ impl VariableNode {
 
         while let Some(store) = pending.pop() {
             for position in 0..store.n_items() {
-                let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+                let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
                     continue;
                 };
 
@@ -243,10 +244,6 @@ impl VariableNode {
         }
     }
 
-    pub(super) fn rebound(&self) -> Self {
-        self.clone()
-    }
-
     pub(super) fn accepts_child_page(&self, parent: &Variable, from: usize) -> bool {
         if !self.variable.can_expand() || !self.variable.has_same_children(parent) {
             return false;
@@ -260,7 +257,7 @@ impl VariableNode {
             .n_items()
             .checked_sub(1)
             .and_then(|index| self.children.item(index))
-            .and_downcast::<glib::BoxedAnyObject>()
+            .and_downcast::<SnapshotRow>()
             .is_some_and(|item| {
                 item.borrow::<VariableNode>()
                     .load_more

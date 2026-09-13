@@ -1,21 +1,75 @@
 use gtk::{gio, glib, prelude::*};
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 /// Observe only the snapshot currently bound to a recycled list item. The
 /// subscription disconnects on unbind and destruction, without retaining a
-/// row, item, or cell. An update callback must only change cell presentation.
-pub(super) fn connect_snapshot_cell(
+/// row, item, or cell. Hidden tables defer rendering; column comparisons share
+/// immutable payloads. An update callback must only change cell presentation.
+pub(super) fn connect_snapshot_cell<T: 'static>(
     item: &gtk::ListItem,
-    update: impl Fn(&super::components::SnapshotRow) + 'static,
+    label: &gtk::Label,
+    same: impl Fn(&T, &T) -> bool + 'static,
+    update: impl Fn(&T) + 'static,
 ) {
     use super::components::SnapshotRow;
 
     let subscription = RefCell::new(None::<SignalSubscription>);
-    let update = Rc::new(update);
+    let previous = Rc::new(RefCell::new(None::<Rc<T>>));
+    let pending = Rc::new(Cell::new(false));
+    let weak_label = label.downgrade();
+    let rendered = Rc::clone(&previous);
+    let dirty = Rc::clone(&pending);
+
+    let update = Rc::new(move |row: &SnapshotRow| {
+        let Some(label) = weak_label.upgrade() else {
+            return;
+        };
+
+        // Populate new cells for measurement. Existing hidden cells keep only
+        // the latest model payload until they map again.
+        if !label.is_mapped()
+            && rendered.borrow().is_some()
+            && label
+                .ancestor(gtk::ColumnView::static_type())
+                .is_some_and(|view| !view.is_mapped())
+        {
+            dirty.set(true);
+            return;
+        }
+
+        dirty.set(false);
+        super::views::clear_label_selection(&label);
+        let value = row.snapshot::<T>();
+
+        let unchanged = rendered
+            .borrow()
+            .as_ref()
+            .is_some_and(|old| same(old, &value));
+        rendered.replace(Some(Rc::clone(&value)));
+
+        if !unchanged {
+            update(&value);
+        }
+    });
+
+    let on_map = Rc::clone(&update);
+    let weak_item = item.downgrade();
+
+    label.connect_map(move |_| {
+        if pending.replace(false)
+            && let Some(row) = weak_item.upgrade().and_then(|item| snapshot_item(&item))
+        {
+            on_map(&row);
+        }
+    });
 
     item.connect_item_notify(move |item| {
         drop(subscription.borrow_mut().take());
-        let Some(row) = item.item().and_downcast::<SnapshotRow>() else {
+        let Some(row) = snapshot_item(item) else {
+            previous.borrow_mut().take();
             return;
         };
 
@@ -25,7 +79,7 @@ pub(super) fn connect_snapshot_cell(
         let handler = row.connect_updated(move |row| {
             if item
                 .upgrade()
-                .is_some_and(|item| item.item().as_ref() == Some(row.upcast_ref()))
+                .is_some_and(|item| snapshot_item(&item).as_ref() == Some(row))
             {
                 update(row);
             }
@@ -33,6 +87,17 @@ pub(super) fn connect_snapshot_cell(
 
         subscription.replace(Some(SignalSubscription::new(&row, handler)));
     });
+}
+
+fn snapshot_item(item: &gtk::ListItem) -> Option<super::components::SnapshotRow> {
+    let object = item.item()?;
+    let object = if let Some(row) = object.downcast_ref::<gtk::TreeListRow>() {
+        row.item()?
+    } else {
+        object
+    };
+
+    object.downcast().ok()
 }
 
 /// Disconnect on rebinding or teardown without retaining the observed object.
@@ -157,6 +222,86 @@ pub(super) fn connect_bound_expansion(
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    #[test]
+    #[ignore = "requires a GTK display"]
+    fn snapshot_cells_skip_unrelated_changes_and_render_latest_on_map() {
+        use super::super::components::SnapshotRow;
+
+        gtk::init().unwrap();
+        let store = gio::ListStore::new::<SnapshotRow>();
+        let row = SnapshotRow::new((1_u32, 0_u32));
+        store.append(&row);
+        let updates = Rc::new(RefCell::new(Vec::new()));
+        let factory = gtk::SignalListItemFactory::new();
+        let observed = Rc::clone(&updates);
+
+        factory.connect_setup(move |_, object| {
+            let item = object.downcast_ref::<gtk::ListItem>().unwrap();
+            let label = gtk::Label::new(None);
+            label.set_selectable(true);
+            item.set_child(Some(&label));
+            let weak_label = label.downgrade();
+            let observed = Rc::clone(&observed);
+
+            connect_snapshot_cell(
+                item,
+                &label,
+                |old: &(u32, u32), new| old.0 == new.0,
+                move |value| {
+                    observed.borrow_mut().push(value.0);
+                    weak_label.upgrade().unwrap().set_text(&value.0.to_string());
+                },
+            );
+        });
+
+        let view = gtk::ColumnView::new(Some(gtk::SingleSelection::new(Some(store.clone()))));
+        view.append_column(&gtk::ColumnViewColumn::new(Some("Value"), Some(factory)));
+        let window = gtk::Window::builder()
+            .child(&view)
+            .default_width(300)
+            .default_height(200)
+            .build();
+        window.present();
+        let settle = || {
+            glib::MainContext::default()
+                .block_on(glib::timeout_future(std::time::Duration::from_millis(50)))
+        };
+        settle();
+        assert!(!updates.borrow().is_empty());
+        updates.borrow_mut().clear();
+        row.replace((1_u32, 1_u32));
+        assert!(updates.borrow().is_empty());
+        row.replace((2_u32, 1_u32));
+        assert_eq!(*updates.borrow(), [2]);
+        window.set_visible(false);
+        updates.borrow_mut().clear();
+
+        for value in 3..10_u32 {
+            row.replace((value, value));
+        }
+
+        assert_eq!(*row.borrow::<(u32, u32)>(), (9, 9));
+        assert!(updates.borrow().is_empty());
+        window.present();
+        settle();
+        assert_eq!(*updates.borrow(), [9]);
+        updates.borrow_mut().clear();
+        store.remove_all();
+        store.append(&SnapshotRow::new((20_u32, 0_u32)));
+        settle();
+        assert!(updates.borrow().contains(&20));
+        updates.borrow_mut().clear();
+        row.replace((30_u32, 0_u32));
+        assert!(updates.borrow().is_empty());
+        let weak_view = view.downgrade();
+        window.set_child(gtk::Widget::NONE);
+        window.close();
+        drop(view);
+        drop(window);
+        settle();
+        assert!(weak_view.upgrade().is_none());
+    }
 
     #[test]
     #[ignore = "requires a GTK display"]

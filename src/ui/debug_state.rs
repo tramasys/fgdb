@@ -23,30 +23,6 @@ pub(super) fn update_selected_frame_buttons(buttons: &[(u32, gtk::Button)], sele
     }
 }
 
-fn center_scroll_adjustment(scrolled: &gtk::ScrolledWindow, position: u32, item_count: u32) {
-    if item_count == 0 {
-        return;
-    }
-
-    let adjustment = scrolled.vadjustment();
-    let lower = adjustment.lower();
-    let upper = adjustment.upper();
-    let page_size = adjustment.page_size();
-
-    if !lower.is_finite()
-        || !upper.is_finite()
-        || !page_size.is_finite()
-        || upper <= lower + page_size
-    {
-        return;
-    }
-
-    let row_fraction = (f64::from(position) + 0.5) / f64::from(item_count);
-    let row_center = lower + (upper - lower) * row_fraction;
-    let maximum = (upper - page_size).max(lower);
-    adjustment.set_value((row_center - page_size / 2.0).clamp(lower, maximum));
-}
-
 pub(super) fn preserve_stack_render_details(entries: &mut [StackEntry], previous: &[StackEntry]) {
     if previous.is_empty() || entries.iter().all(|entry| !entry.pointer_chain.is_empty()) {
         return;
@@ -687,6 +663,7 @@ impl Ui {
         self.pending_local_variable_objects.borrow_mut().clear();
         clear_variable_change_markers(&self.locals_store);
         clear_variable_change_markers(&self.expression_watches_store);
+        invalidate_variable_filter(&self.locals_selection);
         let roots = self.local_variables.borrow();
         let arguments = roots.argument_count();
 
@@ -1422,7 +1399,7 @@ mod render_tests {
         let node = VariableNode::new(parent.clone());
 
         node.children
-            .append(&glib::BoxedAnyObject::new(VariableNode::new(Variable {
+            .append(&SnapshotRow::new(VariableNode::new(Variable {
                 local_index: None,
                 return_value: None,
                 name: String::from("[0]"),
@@ -1437,7 +1414,7 @@ mod render_tests {
             })));
 
         node.children
-            .append(&glib::BoxedAnyObject::new(VariableNode::load_more(
+            .append(&SnapshotRow::new(VariableNode::load_more(
                 parent.clone(),
                 128,
             )));
@@ -1445,19 +1422,11 @@ mod render_tests {
         apply_variable_children_page_error(&node, &parent, 128, "temporary failure");
         assert_eq!(node.children.n_items(), 2);
 
-        let first = node
-            .children
-            .item(0)
-            .and_downcast::<glib::BoxedAnyObject>()
-            .unwrap();
+        let first = node.children.item(0).and_downcast::<SnapshotRow>().unwrap();
 
         assert_eq!(first.borrow::<VariableNode>().variable.name, "[0]");
 
-        let retry = node
-            .children
-            .item(1)
-            .and_downcast::<glib::BoxedAnyObject>()
-            .unwrap();
+        let retry = node.children.item(1).and_downcast::<SnapshotRow>().unwrap();
 
         let retry = retry.borrow::<VariableNode>();
         assert_eq!(retry.variable.name, "Retry loading more…");
@@ -1484,11 +1453,7 @@ mod render_tests {
         apply_variable_children_page_error(&node, &parent, 0, "temporary failure");
         assert_eq!(node.children.n_items(), 1);
 
-        let retry = node
-            .children
-            .item(0)
-            .and_downcast::<glib::BoxedAnyObject>()
-            .unwrap();
+        let retry = node.children.item(0).and_downcast::<SnapshotRow>().unwrap();
 
         let retry = retry.borrow::<VariableNode>();
         assert_eq!(retry.variable.name, "Retry expansion…");

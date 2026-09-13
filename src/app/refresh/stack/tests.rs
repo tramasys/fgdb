@@ -99,6 +99,7 @@ fn live_shared_stack_reads_match_independent_paths_and_do_not_cross_stops() {
                 if let Some(address) =
                     stack_string_address(entry, address, depth, TargetEndian::Little, 8)
                 {
+                    independent_reads += 1;
                     if let Some(value) =
                         preview(&requests, address).filter(|value| value.contains('"'))
                     {
@@ -137,7 +138,6 @@ fn live_shared_stack_reads_match_independent_paths_and_do_not_cross_stops() {
                 word_size: 8,
                 endian: TargetEndian::Little,
                 progress: progress::Progress::default(),
-                reads: reads::Reads::default(),
             }))
         };
 
@@ -149,10 +149,10 @@ fn live_shared_stack_reads_match_independent_paths_and_do_not_cross_stops() {
         });
 
         assert_eq!(refresh.borrow().entries, expected, "{fixture}");
-        assert!(refresh.borrow().reads.len() <= independent_reads);
+        assert!(refresh.borrow().requests.shared_pointer_read_count() <= independent_reads);
         eprintln!(
             "{fixture}: {} shared reads vs {independent_reads} independent reads",
-            refresh.borrow().reads.len()
+            refresh.borrow().requests.shared_pointer_read_count()
         );
 
         let stale = state();

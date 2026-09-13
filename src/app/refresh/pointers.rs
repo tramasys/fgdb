@@ -6,8 +6,6 @@
 
 use crate::debugger::MiCommandBuilder;
 
-pub(super) mod reads;
-
 pub(super) fn register_command(register: &str, depth: usize) -> String {
     let expression = if depth == 0 {
         format!("(void*)(${register})")

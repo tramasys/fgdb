@@ -60,7 +60,7 @@ impl VariablePresentation {
                 continue;
             };
 
-            let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+            let Some(data) = row.item().and_downcast::<SnapshotRow>() else {
                 continue;
             };
 

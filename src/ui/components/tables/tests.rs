@@ -399,3 +399,140 @@ fn instruction_snapshots_reuse_cells_and_release_bindings() {
     assert!(weak_view.upgrade().is_none());
     assert!(items.borrow().iter().all(|item| item.upgrade().is_none()));
 }
+
+#[test]
+#[ignore = "requires a GTK display, run separately from other GTK tests"]
+fn centered_scroll_coalesces_and_preserves_focus_and_latest_selection() {
+    use crate::ui::{ColumnLayouts, InstructionRowData, TableId, views};
+
+    gtk::init().unwrap();
+    Theme::graphite().install();
+    let (view, store, selection, _) =
+        views::build_instruction_view(&ColumnLayouts::default().table(TableId::Instructions));
+
+    let items = Rc::new(std::cell::RefCell::new(Vec::<
+        gtk::glib::WeakRef<gtk::ListItem>,
+    >::new()));
+
+    for column in columns(&view) {
+        let items = Rc::clone(&items);
+        column
+            .factory()
+            .and_downcast::<gtk::SignalListItemFactory>()
+            .unwrap()
+            .connect_setup(move |_, item| {
+                items
+                    .borrow_mut()
+                    .push(item.downcast_ref::<gtk::ListItem>().unwrap().downgrade())
+            });
+    }
+
+    let rows = |count: u32| {
+        (0..count).map(|index| InstructionRowData {
+            instruction: crate::debugger::Instruction {
+                address: format!("0x{:016x}", 0x1000 + index),
+                function: String::from("test"),
+                offset: index.to_string(),
+                opcodes: None,
+                text: String::from("nop"),
+                source: None,
+            },
+            current: false,
+            pointer_bits: 64,
+            source_text: None,
+        })
+    };
+
+    super::super::replace_snapshot_store(&store, rows(440));
+    let scrolled = gtk::ScrolledWindow::builder()
+        .child(&view)
+        .vexpand(true)
+        .build();
+    let entry = gtk::Entry::new();
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.append(&entry);
+    root.append(&scrolled);
+    let window = gtk::Window::builder()
+        .child(&root)
+        .default_width(1200)
+        .default_height(650)
+        .build();
+    let scroll = Rc::new(CenteredScroll::default());
+    window.present();
+    settle();
+    entry.grab_focus();
+    let focus = gtk::prelude::RootExt::focus(&window);
+    let adjustment = scrolled.vadjustment();
+    let finish_scroll = || {
+        let started = std::time::Instant::now();
+
+        while scroll.scheduled.get() {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            settle();
+        }
+    };
+    for position in [150, 200, 220] {
+        selection.set_selected(position);
+        scroll.request(&view, &scrolled, position);
+    }
+
+    finish_scroll();
+    assert!(!scroll.scheduled.get());
+    assert_eq!(selection.selected(), 220);
+    assert_eq!(gtk::prelude::RootExt::focus(&window), focus);
+    let centered = |position, count| {
+        let expected = ((f64::from(position) + 0.5) / f64::from(count) * adjustment.upper()
+            - adjustment.page_size() / 2.0)
+            .clamp(
+                adjustment.lower(),
+                adjustment.upper() - adjustment.page_size(),
+            );
+        assert!(
+            (adjustment.value() - expected).abs() < 2.0,
+            "{} != {expected}",
+            adjustment.value()
+        );
+    };
+    centered(220, 440);
+    let focused_position = || {
+        let focus = gtk::prelude::RootExt::focus(&window).unwrap();
+
+        items
+            .borrow()
+            .iter()
+            .filter_map(gtk::glib::WeakRef::upgrade)
+            .find_map(|item| {
+                let child = item.child()?;
+                (child == focus || child.is_ancestor(&focus) || focus.is_ancestor(&child))
+                    .then_some(item.position())
+            })
+    };
+    view.grab_focus();
+    selection.set_selected(221);
+    scroll.request(&view, &scrolled, 221);
+    assert_eq!(focused_position(), Some(221));
+    finish_scroll();
+    centered(221, 440);
+    assert!(view.state_flags().contains(gtk::StateFlags::FOCUS_WITHIN));
+    selection.set_selected(350);
+    scroll.request(&view, &scrolled, 350);
+    assert_eq!(focused_position(), Some(350));
+    window.set_visible(false);
+    super::super::replace_snapshot_store(&store, rows(700));
+    selection.set_selected(500);
+    scroll.request(&view, &scrolled, 500);
+    selection.set_selected(550);
+    scroll.request(&view, &scrolled, 550);
+    window.present();
+    finish_scroll();
+    centered(550, 700);
+    let before = adjustment.value();
+    scroll.request(&view, &scrolled, 400);
+    finish_scroll();
+    assert_eq!(adjustment.value(), before);
+    scroll.request(&view, &scrolled, 550);
+    store.remove_all();
+    finish_scroll();
+    assert!(!scroll.scheduled.get());
+    window.close();
+}

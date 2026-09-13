@@ -77,7 +77,7 @@ pub(super) fn root_variable_at(
         row = parent;
     }
 
-    let item = row.item()?.downcast::<glib::BoxedAnyObject>().ok()?;
+    let item = row.item()?.downcast::<SnapshotRow>().ok()?;
     let node = item.borrow::<VariableNode>();
 
     (!node.placeholder).then(|| node.variable.clone())
@@ -101,7 +101,7 @@ pub(super) fn variable_node_at(
         .and_then(|row| {
             let item = row
                 .item()
-                .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())?;
+                .and_then(|item| item.downcast::<SnapshotRow>().ok())?;
 
             let node = item.borrow::<VariableNode>();
 
@@ -117,7 +117,7 @@ pub(super) fn index_variable_nodes(
 
     while let Some(store) = pending.pop() {
         for position in 0..store.n_items() {
-            let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+            let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
                 continue;
             };
 
@@ -142,7 +142,7 @@ pub(super) fn remove_indexed_variable_nodes(
 
     while let Some(store) = pending.pop() {
         for position in 0..store.n_items() {
-            let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+            let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
                 continue;
             };
 
@@ -164,7 +164,7 @@ pub(super) fn root_variables(store: &gio::ListStore) -> Vec<Variable> {
         .filter_map(|position| {
             store
                 .item(position)
-                .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+                .and_then(|item| item.downcast::<SnapshotRow>().ok())
                 .and_then(|item| {
                     let node = item.borrow::<VariableNode>();
 
@@ -177,7 +177,7 @@ pub(super) fn root_variables(store: &gio::ListStore) -> Vec<Variable> {
 pub(super) fn variable_root_node(store: &gio::ListStore, position: usize) -> Option<VariableNode> {
     store
         .item(u32::try_from(position).ok()?)
-        .and_downcast::<glib::BoxedAnyObject>()
+        .and_downcast::<SnapshotRow>()
         .map(|item| item.borrow::<VariableNode>().clone())
 }
 
@@ -204,7 +204,7 @@ pub(super) fn replace_variable_roots(
         && variables.iter().enumerate().all(|(index, variable)| {
             store
                 .item(u32::try_from(index).unwrap_or(u32::MAX))
-                .and_downcast::<glib::BoxedAnyObject>()
+                .and_downcast::<SnapshotRow>()
                 .is_some_and(|item| {
                     let node = item.borrow::<VariableNode>();
 
@@ -217,7 +217,13 @@ pub(super) fn replace_variable_roots(
         });
 
     if !same_roots {
-        replace_boxed_store(store, variables.iter().cloned().map(VariableNode::new));
+        let rows = variables
+            .iter()
+            .cloned()
+            .map(VariableNode::new)
+            .map(SnapshotRow::new)
+            .collect::<Vec<_>>();
+        store.splice(0, store.n_items(), &rows);
         return VariableRootChange::Rebuilt;
     }
 
@@ -226,7 +232,7 @@ pub(super) fn replace_variable_roots(
     for (index, variable) in variables.iter().enumerate() {
         let position = u32::try_from(index).unwrap_or(u32::MAX);
 
-        let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+        let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
             continue;
         };
 
@@ -242,12 +248,10 @@ pub(super) fn replace_variable_roots(
             continue;
         }
 
-        store.splice(
+        update_variable_node(
+            store,
             position,
-            1,
-            &[glib::BoxedAnyObject::new(
-                node.updated(variable.clone(), mark_changed),
-            )],
+            node.updated(variable.clone(), mark_changed),
         );
 
         changed = true;
@@ -270,7 +274,7 @@ pub(super) fn replace_variable_root(
         return false;
     };
 
-    let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+    let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
         return false;
     };
 
@@ -294,15 +298,31 @@ pub(super) fn replace_variable_root(
         return true;
     }
 
-    store.splice(
+    update_variable_node(
+        store,
         position,
-        1,
-        &[glib::BoxedAnyObject::new(
-            node.updated(variable.clone(), mark_changed),
-        )],
+        node.updated(variable.clone(), mark_changed),
     );
 
     true
+}
+
+fn update_variable_node(store: &gio::ListStore, position: u32, node: VariableNode) {
+    let Some(row) = store.item(position).and_downcast::<SnapshotRow>() else {
+        return;
+    };
+
+    let same_structure = {
+        let previous = row.borrow::<VariableNode>();
+        previous.children == node.children
+            && previous.variable.can_expand() == node.variable.can_expand()
+    };
+
+    if same_structure {
+        row.set(node);
+    } else {
+        store.splice(position, 1, &[SnapshotRow::new(node)]);
+    }
 }
 
 pub(super) fn changed_variable_roots(store: &gio::ListStore) -> usize {
@@ -310,7 +330,7 @@ pub(super) fn changed_variable_roots(store: &gio::ListStore) -> usize {
         .filter(|position| {
             store
                 .item(*position)
-                .and_downcast::<glib::BoxedAnyObject>()
+                .and_downcast::<SnapshotRow>()
                 .is_some_and(|item| item.borrow::<VariableNode>().has_changes())
         })
         .count()
@@ -334,7 +354,7 @@ pub(super) fn clear_variable_change_markers(roots: &gio::ListStore) {
     let mut pending = Vec::new();
 
     for position in 0..roots.n_items() {
-        let Some(item) = roots.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+        let Some(item) = roots.item(position).and_downcast::<SnapshotRow>() else {
             continue;
         };
 
@@ -348,7 +368,7 @@ pub(super) fn clear_variable_change_markers(roots: &gio::ListStore) {
 
     while let Some((store, root)) = pending.pop() {
         for position in 0..store.n_items() {
-            let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+            let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
                 continue;
             };
 
@@ -363,7 +383,7 @@ pub(super) fn clear_variable_change_markers(roots: &gio::ListStore) {
 
             if let Some(replacement) = replacement {
                 changed_roots[root as usize] = true;
-                store.splice(position, 1, &[glib::BoxedAnyObject::new(replacement)]);
+                update_variable_node(&store, position, replacement);
             }
         }
     }
@@ -377,25 +397,9 @@ pub(super) fn clear_variable_change_markers(roots: &gio::ListStore) {
 
         let position = position as u32;
 
-        if let Some(item) = roots.item(position).and_downcast::<glib::BoxedAnyObject>() {
+        if let Some(item) = roots.item(position).and_downcast::<SnapshotRow>() {
             let replacement = item.borrow::<VariableNode>().without_change_marker();
-            roots.splice(position, 1, &[glib::BoxedAnyObject::new(replacement)]);
-        }
-    }
-}
-
-pub(super) fn refresh_changed_variable_roots(store: &gio::ListStore) {
-    for position in 0..store.n_items() {
-        let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
-            continue;
-        };
-
-        let node = item.borrow::<VariableNode>();
-
-        if !node.changed && node.has_changes() {
-            let replacement = node.rebound();
-            drop(node);
-            store.splice(position, 1, &[glib::BoxedAnyObject::new(replacement)]);
+            update_variable_node(roots, position, replacement);
         }
     }
 }
@@ -410,7 +414,7 @@ fn apply_variable_updates_to_store(
 
     while let Some(store) = pending.pop() {
         for position in 0..store.n_items() {
-            let Some(item) = store.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+            let Some(item) = store.item(position).and_downcast::<SnapshotRow>() else {
                 continue;
             };
 
@@ -427,7 +431,7 @@ fn apply_variable_updates_to_store(
                 let children = updated.children.clone();
                 on_updated(&node, &updated);
                 drop(node);
-                store.splice(position, 1, &[glib::BoxedAnyObject::new(updated)]);
+                update_variable_node(&store, position, updated);
                 applied += 1;
 
                 children
@@ -466,7 +470,7 @@ pub(super) fn remove_load_more_rows(store: &gio::ListStore) {
     for position in (0..store.n_items()).rev() {
         let is_load_more = store
             .item(position)
-            .and_then(|item| item.downcast::<glib::BoxedAnyObject>().ok())
+            .and_then(|item| item.downcast::<SnapshotRow>().ok())
             .is_some_and(|item| item.borrow::<VariableNode>().load_more.is_some());
 
         if is_load_more {
@@ -2339,7 +2343,7 @@ mod variable_tree_tests {
         let root = VariableNode::new(variable("root", "{...}", Some("var1"), 1));
 
         root.children
-            .append(&glib::BoxedAnyObject::new(VariableNode::new(variable(
+            .append(&SnapshotRow::new(VariableNode::new(variable(
                 "field",
                 "1",
                 Some("var1.field"),
@@ -2348,8 +2352,8 @@ mod variable_tree_tests {
 
         root.children_loaded.set(true);
         root.expanded.set(true);
-        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-        store.append(&glib::BoxedAnyObject::new(root));
+        let store = gio::ListStore::new::<SnapshotRow>();
+        store.append(&SnapshotRow::new(root));
 
         let mut index = super::domain::VariableNodeIndex::default();
         index.index_store(&store);
@@ -2373,30 +2377,20 @@ mod variable_tree_tests {
         assert_eq!(applied, 1);
         assert_eq!(index.get("var1.field").unwrap().variable.value, "2");
 
-        let root = store
-            .item(0)
-            .and_downcast::<glib::BoxedAnyObject>()
-            .unwrap();
+        let root = store.item(0).and_downcast::<SnapshotRow>().unwrap();
 
         let root = root.borrow::<VariableNode>();
         assert!(root.expanded.get());
         assert!(root.has_changes());
 
-        let child = root
-            .children
-            .item(0)
-            .and_downcast::<glib::BoxedAnyObject>()
-            .unwrap();
+        let child = root.children.item(0).and_downcast::<SnapshotRow>().unwrap();
 
         assert_eq!(child.borrow::<VariableNode>().variable.value, "2");
         assert!(child.borrow::<VariableNode>().changed);
         drop(root);
         clear_variable_change_markers(&store);
 
-        let root = store
-            .item(0)
-            .and_downcast::<glib::BoxedAnyObject>()
-            .unwrap();
+        let root = store.item(0).and_downcast::<SnapshotRow>().unwrap();
 
         let root = root.borrow::<VariableNode>();
         assert!(root.expanded.get());
@@ -2405,7 +2399,7 @@ mod variable_tree_tests {
         assert_eq!(
             root.children
                 .item(0)
-                .and_downcast::<glib::BoxedAnyObject>()
+                .and_downcast::<SnapshotRow>()
                 .unwrap()
                 .borrow::<VariableNode>()
                 .variable
@@ -2416,9 +2410,9 @@ mod variable_tree_tests {
 
     #[test]
     fn argument_scope_is_part_of_a_root_identity() {
-        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+        let store = gio::ListStore::new::<SnapshotRow>();
 
-        store.append(&glib::BoxedAnyObject::new(VariableNode::new(variable(
+        store.append(&SnapshotRow::new(VariableNode::new(variable(
             "value", "1", None, 0,
         ))));
 
@@ -2436,15 +2430,15 @@ mod variable_tree_tests {
         let root = VariableNode::new(variable("root", "{...}", Some("var1"), 1));
 
         root.children
-            .append(&glib::BoxedAnyObject::new(VariableNode::new(variable(
+            .append(&SnapshotRow::new(VariableNode::new(variable(
                 "field",
                 "1",
                 Some("var1.field"),
                 0,
             ))));
 
-        let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-        store.append(&glib::BoxedAnyObject::new(root));
+        let store = gio::ListStore::new::<SnapshotRow>();
+        store.append(&SnapshotRow::new(root));
         let mut index = HashMap::new();
         index_variable_nodes(&store, &mut index);
         assert_eq!(index.len(), 2);

@@ -6,6 +6,7 @@ use crate::debugger::{
     location::{BATCH_LIMIT, LocationReply, ValueLocation},
 };
 use crate::model::DebuggerModel;
+use crate::ui::components::SnapshotRow;
 use gtk::{glib, prelude::*};
 use std::{
     cell::{Cell, RefCell},
@@ -450,7 +451,7 @@ fn item_variable(item: &gtk::ListItem) -> Option<Variable> {
         .item()
         .and_downcast::<gtk::TreeListRow>()?
         .item()
-        .and_downcast::<glib::BoxedAnyObject>()?;
+        .and_downcast::<SnapshotRow>()?;
     let node = data.borrow::<VariableNode>();
 
     (!node.placeholder).then(|| node.variable.clone())

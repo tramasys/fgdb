@@ -13,7 +13,7 @@ pub(crate) const MAX_PATTERN: usize = 256;
 pub(crate) const MAX_RESULTS: usize = 10_000;
 pub(crate) const MAX_RANGES: usize = 4096;
 pub(crate) const MAX_SCAN_BYTES: u64 = 4 * 1024 * 1024 * 1024;
-pub(crate) const READ_BYTES: u64 = 64 * 1024;
+pub(crate) const READ_BYTES: u64 = 256 * 1024;
 const RETRY_BYTES: u64 = 4096;
 const MAX_ISSUES: usize = 128;
 
@@ -259,6 +259,76 @@ mod tests {
         };
 
         Scan::new(query, None, None).unwrap()
+    }
+
+    #[test]
+    fn larger_reads_preserve_matches_holes_and_limits() {
+        const SIZE: usize = 600_000;
+        let mut bytes = vec![0; SIZE];
+
+        for start in [65_534, 131_070, 262_142, 524_286] {
+            bytes[start..start + 4].copy_from_slice(b"abcd");
+        }
+
+        for (results, byte_limit) in [(100, SIZE as u64), (2, SIZE as u64), (100, 300_000)] {
+            let run = |read_size: usize| {
+                let mut scan = scan(
+                    "61 ?? 63 64",
+                    std::iter::once(0..SIZE as u64).collect(),
+                    results,
+                    byte_limit,
+                );
+                let mut position = 0;
+
+                while position < byte_limit as usize && scan.limit_reached().is_none() {
+                    let end = (position + read_size).min(byte_limit as usize);
+                    let blocks = [0..200_000, 204_096..SIZE]
+                        .into_iter()
+                        .filter_map(|readable| {
+                            let start = readable.start.max(position);
+                            let end = readable.end.min(end);
+                            (start < end).then(|| MemoryBlock {
+                                begin: start as u64,
+                                bytes: bytes[start..end].to_vec(),
+                            })
+                        })
+                        .collect::<Vec<_>>();
+
+                    scan.accept(position as u64..end as u64, &blocks);
+                    position = end;
+                }
+
+                (
+                    scan.progress.searched,
+                    scan.progress.skipped,
+                    scan.progress
+                        .hits
+                        .into_iter()
+                        .map(|hit| (hit.address, hit.bytes))
+                        .collect::<Vec<_>>(),
+                )
+            };
+
+            assert_eq!(run(64 * 1024), run(READ_BYTES as usize));
+        }
+
+        let mut scan = scan(
+            "ff",
+            std::iter::once(0..READ_BYTES * 2).collect(),
+            100,
+            READ_BYTES * 2,
+        );
+        let range = scan.next_read().unwrap();
+        assert_eq!(range, 0..READ_BYTES);
+        scan.failed(range, "unreadable");
+
+        for _ in 0..READ_BYTES / RETRY_BYTES {
+            let retry = scan.next_read().unwrap();
+            assert_eq!(retry.end - retry.start, RETRY_BYTES);
+            scan.failed(retry, "unreadable");
+        }
+
+        assert_eq!(scan.next_read(), Some(READ_BYTES..READ_BYTES * 2));
     }
 
     #[test]

@@ -12,6 +12,7 @@ use glib::subclass::prelude::*;
 use std::{
     any::Any,
     cell::{Ref, RefCell},
+    rc::Rc,
     sync::OnceLock,
 };
 
@@ -19,13 +20,13 @@ mod imp {
     use super::*;
 
     pub struct SnapshotRow {
-        pub(super) value: RefCell<Box<dyn Any>>,
+        pub(super) value: RefCell<Rc<dyn Any>>,
     }
 
     impl Default for SnapshotRow {
         fn default() -> Self {
             Self {
-                value: RefCell::new(Box::new(())),
+                value: RefCell::new(Rc::new(())),
             }
         }
     }
@@ -51,7 +52,7 @@ glib::wrapper! {
 impl SnapshotRow {
     pub(in crate::ui) fn new<T: 'static>(value: T) -> Self {
         let row: Self = glib::Object::new();
-        row.imp().value.replace(Box::new(value));
+        row.imp().value.replace(Rc::new(value));
         row
     }
 
@@ -61,20 +62,28 @@ impl SnapshotRow {
         })
     }
 
-    pub(in crate::ui) fn replace<T: PartialEq + 'static>(&self, value: T) -> bool {
-        let previous = {
-            let mut data = self.imp().value.borrow_mut();
-            let current = data.downcast_mut::<T>().expect("snapshot row type");
-            if *current == value {
-                return false;
-            }
+    /// Retain a presentation for comparison without copying it for every cell.
+    pub(in crate::ui) fn snapshot<T: 'static>(&self) -> Rc<T> {
+        Rc::clone(&self.imp().value.borrow())
+            .downcast()
+            .expect("snapshot row type")
+    }
 
-            std::mem::replace(current, value)
-        };
+    pub(in crate::ui) fn replace<T: PartialEq + 'static>(&self, value: T) -> bool {
+        if *self.borrow::<T>() == value {
+            return false;
+        }
+
+        self.set(value);
+        true
+    }
+
+    /// Publish an already validated update, including changes in shared child models.
+    pub(in crate::ui) fn set<T: 'static>(&self, value: T) {
+        let previous = self.imp().value.replace(Rc::new(value));
         drop(previous);
         // Never hold a payload borrow across a callback into the UI.
         self.emit_by_name::<()>("updated", &[]);
-        true
     }
 
     pub(in crate::ui) fn connect_updated(

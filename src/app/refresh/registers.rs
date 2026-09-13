@@ -1,5 +1,4 @@
 use super::*;
-use pointers::reads;
 
 #[cfg(test)]
 mod tests;
@@ -13,7 +12,6 @@ pub(in crate::app) struct RegisterRefresh {
     architecture: TargetArchitecture,
     endian: TargetEndian,
     pointer_bits: u32,
-    reads: reads::Reads,
 }
 
 pub(in crate::app) fn refresh_registers(
@@ -236,7 +234,6 @@ pub(in crate::app) fn enrich_registers(
         architecture,
         endian,
         pointer_bits,
-        reads: reads::Reads::default(),
     }));
 
     schedule_register_chains(client, refresh);
@@ -269,7 +266,7 @@ fn schedule_register_chains(client: &MiClient, refresh: Rc<RefCell<RegisterRefre
 }
 
 pub(in crate::app) fn request_register_chain(
-    client: &MiClient,
+    _client: &MiClient,
     refresh: Rc<RefCell<RegisterRefresh>>,
     register_index: usize,
     depth: usize,
@@ -278,10 +275,6 @@ pub(in crate::app) fn request_register_chain(
         return;
     }
 
-    let position = reads::Position {
-        index: register_index,
-        depth,
-    };
     let address = (depth > 0).then(|| {
         let state = refresh.borrow();
         state.registers[register_index]
@@ -290,18 +283,6 @@ pub(in crate::app) fn request_register_chain(
             .and_then(|value| pointer_address(value))
             .expect("a continued register chain has a numeric address")
     });
-
-    if let Some(address) = address {
-        let lookup = refresh.borrow_mut().reads.request(address, position);
-        match lookup {
-            reads::Lookup::Pending => return,
-            reads::Lookup::Ready(value) => {
-                apply_register_chain_value(client, &refresh, position, value);
-                return;
-            }
-            reads::Lookup::Start => {}
-        }
-    }
 
     let command = address.map_or_else(
         || pointers::register_command(&refresh.borrow().registers[register_index].name, 0),
@@ -312,54 +293,22 @@ pub(in crate::app) fn request_register_chain(
 
     let refresh_for_handler = Rc::clone(&refresh);
 
-    if requests
-        .frame(&command)
-        .enrich(move |client, record| {
-            if record.class == "superseded" {
-                return;
-            }
-
-            let value = record
-                .is_done()
-                .then(|| crate::debugger::evaluated_value(&record))
-                .flatten();
-
-            register_chain_reply(client, &refresh_for_handler, address, position, value);
-        })
-        .is_err()
-    {
-        register_chain_reply(client, &refresh, address, position, None);
-    }
-}
-
-fn register_chain_reply(
-    client: &MiClient,
-    refresh: &Rc<RefCell<RegisterRefresh>>,
-    address: Option<u64>,
-    position: reads::Position,
-    value: Option<String>,
-) {
-    if let Some(address) = address {
-        let waiters = refresh.borrow_mut().reads.complete(address, value.clone());
-        for position in waiters {
-            apply_register_chain_value(client, refresh, position, value.clone());
-        }
-    } else {
-        apply_register_chain_value(client, refresh, position, value);
-    }
+    requests.shared_pointer_read(&command, None, move |client, value| {
+        apply_register_chain_value(client, &refresh_for_handler, register_index, depth, value);
+    });
 }
 
 fn apply_register_chain_value(
     client: &MiClient,
     refresh: &Rc<RefCell<RegisterRefresh>>,
-    position: reads::Position,
+    index: usize,
+    depth: usize,
     value: Option<String>,
 ) {
     if !refresh.borrow().requests.is_current() {
         return;
     }
 
-    let reads::Position { index, depth } = position;
     let mut continue_chain = false;
     let mut string_address = None;
 
@@ -432,7 +381,7 @@ pub(in crate::app) fn register_string_address(
 }
 
 pub(in crate::app) fn request_register_string(
-    client: &MiClient,
+    _client: &MiClient,
     refresh: Rc<RefCell<RegisterRefresh>>,
     register_index: usize,
     address: u64,
@@ -447,19 +396,11 @@ pub(in crate::app) fn request_register_string(
 
     let refresh_for_handler = Rc::clone(&refresh);
 
-    if requests
-        .frame(&command)
-        .with_print_limit(POINTER_STRING_PREVIEW_ELEMENTS, move |client, record| {
-            if record.class == "superseded" {
-                return;
-            }
-
-            if let Some(value) = record
-                .is_done()
-                .then(|| crate::debugger::evaluated_value(&record))
-                .flatten()
-                .filter(|value| value.contains('"'))
-            {
+    requests.shared_pointer_read(
+        &command,
+        Some(POINTER_STRING_PREVIEW_ELEMENTS),
+        move |client, value| {
+            if let Some(value) = value.filter(|value| value.contains('"')) {
                 let mut state = refresh_for_handler.borrow_mut();
                 let chain = &mut state.registers[register_index].pointer_chain;
                 chain.pop();
@@ -467,11 +408,8 @@ pub(in crate::app) fn request_register_string(
             }
 
             complete_register_sequence(client, &refresh_for_handler);
-        })
-        .is_err()
-    {
-        complete_register_sequence(client, &refresh);
-    }
+        },
+    );
 }
 
 pub(in crate::app) fn complete_register_sequence(

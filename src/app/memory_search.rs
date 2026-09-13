@@ -262,3 +262,53 @@ impl Search {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires GDB and the C memory-search fixture"]
+    fn live_transfer_sizes_preserve_search_results_and_byte_accounting() {
+        use crate::app::test_support::open_debugger;
+        use crate::memory_search::SearchKind;
+
+        let (_debugger, client) = open_debugger("c-memory-search-target", "search_checkpoint");
+        glib::MainContext::default().block_on(async {
+            async fn request(client: &MiClient, command: &str) -> MiRecord {
+                let (sender, receiver) = futures_channel::oneshot::channel();
+                client.request(command, move |_, record| { let _ = sender.send(record); }).unwrap();
+                glib::future_with_timeout(Duration::from_secs(2), receiver).await.unwrap().unwrap()
+            }
+
+            let address = request(&client, "-data-evaluate-expression \"(unsigned long long)&search_bytes\"").await;
+            let address = crate::debugger::evaluated_value(&address).unwrap().parse::<u64>().unwrap();
+            let length = 131_072_u64;
+            for iteration in 0..6 {
+                for read_bytes in [64 * 1024, crate::memory_search::READ_BYTES] {
+                    let query = Query {
+                        kind: SearchKind::Text, value: "fgdb-needle-42".into(),
+                        ranges: std::iter::once(address..address + length).collect(),
+                        aligned: false, max_results: 100, max_bytes: length,
+                    };
+                    let mut scan = Scan::new(query, None, None).unwrap();
+                    let started = Instant::now();
+                    let mut start = address;
+                    let mut requests = 0;
+                    while start < address + length {
+                        let end = (start + read_bytes).min(address + length);
+                        let record = request(&client, &format!("-data-read-memory-bytes 0x{start:x} {}", end - start)).await;
+                        let blocks = crate::debugger::memory_blocks(&record, start..end).unwrap();
+                        scan.accept(start..end, &blocks);
+                        requests += 1;
+                        start = end;
+                    }
+                    eprintln!("memory-transfer bytes={read_bytes} iteration={iteration} requests={requests} us={}", started.elapsed().as_micros());
+                    assert_eq!(scan.progress.searched, length);
+                    assert_eq!(scan.progress.skipped, 0);
+                    assert_eq!(scan.progress.hits.iter().map(|hit| hit.address - address).collect::<Vec<_>>(), [65533, 65590]);
+                }
+            }
+        });
+    }
+}

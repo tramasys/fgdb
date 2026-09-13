@@ -57,8 +57,8 @@ use sourceview5::prelude::*;
 use vte4::prelude::*;
 
 use components::{
-    clear_box, dynamic_list, empty_label, replace_boxed_store, replace_boxed_store_if_changed,
-    section_title,
+    SnapshotRow, clear_box, dynamic_list, empty_label, replace_boxed_store,
+    replace_boxed_store_if_changed, section_title,
 };
 pub(crate) use debug_data::DebugDataAction;
 use debug_state::update_selected_frame_buttons;
@@ -618,7 +618,7 @@ struct DisassemblyControls {
     range: gtk::Label,
     columns: InstructionColumns,
     scrolled: gtk::ScrolledWindow,
-    scroll_generation: Rc<Cell<u64>>,
+    scroll: Rc<components::CenteredScroll>,
     loading: Rc<Cell<bool>>,
     syntax_applicable: Rc<Cell<bool>>,
     setting_syntax: Rc<Cell<bool>>,
@@ -1267,7 +1267,7 @@ struct GefToolsMenu {
 const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 //
 // Source opens automatically at the first source-backed stop.
-// Use “Open file…” in the source toolbar to keep several files in tabs.
+// Use "Open file…" in the source toolbar to keep several files in tabs.
 //
 // Open Settings > Keybindings to inspect or change shortcuts.
 // Menus and tooltips show the active bindings.

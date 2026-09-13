@@ -36,9 +36,7 @@ fn live_shared_register_reads_match_independent_chains() {
 
         for register in &mut expected {
             for depth in 0..=MAX_POINTER_CHAIN_DEPTH {
-                if depth > 0 {
-                    independent_reads += 1;
-                }
+                independent_reads += 1;
 
                 let value = crate::debugger::evaluated_value(&request(
                     &client,
@@ -69,6 +67,7 @@ fn live_shared_register_reads_match_independent_chains() {
                     64,
                     TargetArchitecture::X86_64,
                 ) {
+                    independent_reads += 1;
                     let result = Rc::new(RefCell::new(None));
                     let response = Rc::clone(&result);
                     requests
@@ -102,7 +101,6 @@ fn live_shared_register_reads_match_independent_chains() {
             architecture: TargetArchitecture::X86_64,
             endian: TargetEndian::Little,
             pointer_bits: 64,
-            reads: reads::Reads::default(),
         }));
         schedule_register_chains(&client, Rc::clone(&refresh));
         wait_until(|| {
@@ -112,10 +110,10 @@ fn live_shared_register_reads_match_independent_chains() {
 
         let state = refresh.borrow();
         assert_eq!(state.registers, expected, "{fixture}");
-        assert!(state.reads.len() <= independent_reads);
+        assert!(state.requests.shared_pointer_read_count() <= independent_reads);
         eprintln!(
-            "{fixture}: {} shared memory probes vs {independent_reads} independent",
-            state.reads.len()
+            "{fixture}: {} shared probes vs {independent_reads} independent",
+            state.requests.shared_pointer_read_count()
         );
         drop(state);
 

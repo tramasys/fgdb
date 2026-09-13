@@ -274,7 +274,7 @@ fn locations_are_lazy_visible_bounded_and_invalidated_with_their_stop() {
 
     store.extend_from_slice(
         &(0..2000)
-            .map(|index| glib::BoxedAnyObject::new(VariableNode::new(variable(index))))
+            .map(|index| SnapshotRow::new(VariableNode::new(variable(index))))
             .collect::<Vec<_>>(),
     );
 

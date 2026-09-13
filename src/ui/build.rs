@@ -1060,7 +1060,7 @@ pub(super) fn build_inspector(
         range: disassembly_range,
         columns: instruction_columns,
         scrolled: instructions_scrolled.clone(),
-        scroll_generation: Rc::new(Cell::new(0)),
+        scroll: Rc::new(components::CenteredScroll::default()),
         loading: Rc::new(Cell::new(false)),
         syntax_applicable: Rc::new(Cell::new(false)),
         setting_syntax: Rc::new(Cell::new(false)),

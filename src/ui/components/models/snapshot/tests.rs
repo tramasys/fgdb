@@ -13,6 +13,7 @@ fn changed_payloads_preserve_slots_and_notify_without_a_live_borrow() {
     let store = gio::ListStore::new::<SnapshotRow>();
     assert!(replace_snapshot_store(&store, [1_u32, 2, 3]));
     let row = store.item(1).and_downcast::<SnapshotRow>().unwrap();
+    let snapshot = row.snapshot::<u32>();
     let updates = Rc::new(Cell::new(0));
     let observed = Rc::clone(&updates);
     row.connect_updated(move |row| {
@@ -25,6 +26,8 @@ fn changed_payloads_preserve_slots_and_notify_without_a_live_borrow() {
     store.connect_items_changed(move |_, _, _, _| changed.set(changed.get() + 1));
     assert!(replace_snapshot_store(&store, [1_u32, 20, 3]));
     assert_eq!(values(&store), [1, 20, 3]);
+    assert_eq!(*snapshot, 2);
+    assert_eq!(*row.snapshot::<u32>(), 20);
     assert_eq!(store.item(1).as_ref(), Some(row.upcast_ref()));
     assert_eq!(updates.get(), 1);
     assert_eq!(structure.get(), 0);

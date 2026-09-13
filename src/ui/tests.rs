@@ -1,3 +1,4 @@
+use super::SnapshotRow;
 use std::{collections::HashSet, path::Path};
 
 use super::{
@@ -368,7 +369,7 @@ fn filters_variables_across_scope_type_and_pretty_value() {
     });
 
     root.children
-        .append(&gtk::glib::BoxedAnyObject::new(VariableNode::new(variable)));
+        .append(&SnapshotRow::new(VariableNode::new(variable)));
 
     assert!(variable_node_matches_filter(&root, "packet payload"));
 }
@@ -393,16 +394,14 @@ fn pointer_updates_retire_children_when_the_object_is_no_longer_readable() {
 
     pointer
         .children
-        .append(&gtk::glib::BoxedAnyObject::new(VariableNode::new(
-            Variable {
-                name: String::from("value"),
-                value: String::from("2004"),
-                type_name: Some(String::from("int")),
-                varobj: Some(String::from("var1.tailward.value")),
-                num_children: 0,
-                ..pointer.variable.clone()
-            },
-        )));
+        .append(&SnapshotRow::new(VariableNode::new(Variable {
+            name: String::from("value"),
+            value: String::from("2004"),
+            type_name: Some(String::from("int")),
+            varobj: Some(String::from("var1.tailward.value")),
+            num_children: 0,
+            ..pointer.variable.clone()
+        })));
     pointer.children_loaded.set(true);
     pointer.expanded.set(true);
 

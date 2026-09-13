@@ -2,7 +2,6 @@ use super::*;
 
 mod pages;
 mod progress;
-use pointers::reads;
 
 #[cfg(test)]
 mod tests;
@@ -19,7 +18,6 @@ pub(in crate::app) struct StackRefresh {
     word_size: usize,
     endian: TargetEndian,
     progress: progress::Progress,
-    reads: reads::Reads,
 }
 
 pub(in crate::app) fn enrich_stack(
@@ -78,7 +76,6 @@ pub(in crate::app) fn enrich_stack(
         word_size,
         endian,
         progress: progress::Progress::default(),
-        reads: reads::Reads::default(),
     }));
     schedule_stack_chains(client, refresh);
 }
@@ -106,7 +103,7 @@ fn schedule_stack_chains(client: &MiClient, refresh: Rc<RefCell<StackRefresh>>) 
 }
 
 pub(in crate::app) fn request_stack_chain(
-    client: &MiClient,
+    _client: &MiClient,
     refresh: Rc<RefCell<StackRefresh>>,
     entry_index: usize,
     depth: usize,
@@ -115,8 +112,8 @@ pub(in crate::app) fn request_stack_chain(
         return;
     }
 
-    let (requests, address, cached) = {
-        let mut state = refresh.borrow_mut();
+    let (requests, address) = {
+        let state = refresh.borrow();
         let entry = &state.entries[entry_index];
         let address = if depth == 0 {
             entry.address
@@ -129,65 +126,15 @@ pub(in crate::app) fn request_stack_chain(
                 .and_then(|value| pointer_address(value))
                 .expect("a continued chain has a decoded address")
         };
-        let cached = state.reads.request(
-            address,
-            reads::Position {
-                index: entry_index,
-                depth,
-            },
-        );
-
-        (state.requests.clone(), address, cached)
+        (state.requests.clone(), address)
     };
-
-    match cached {
-        reads::Lookup::Pending => return,
-        reads::Lookup::Ready(value) => {
-            apply_stack_chain_value(client, refresh, entry_index, depth, value);
-            return;
-        }
-        reads::Lookup::Start => {}
-    }
 
     let command = pointers::read_command(address);
 
     let refresh_for_handler = Rc::clone(&refresh);
-    if requests
-        .frame(&command)
-        .enrich(move |client, record| {
-            if record.class == "superseded" {
-                return;
-            }
-
-            let value = record
-                .is_done()
-                .then(|| crate::debugger::evaluated_value(&record))
-                .flatten();
-            complete_stack_read(client, &refresh_for_handler, address, value);
-        })
-        .is_err()
-    {
-        complete_stack_read(client, &refresh, address, None);
-    }
-}
-
-fn complete_stack_read(
-    client: &MiClient,
-    refresh: &Rc<RefCell<StackRefresh>>,
-    address: u64,
-    value: Option<String>,
-) {
-    let waiters = refresh.borrow_mut().reads.complete(address, value.clone());
-
-    for position in waiters {
-        apply_stack_chain_value(
-            client,
-            Rc::clone(refresh),
-            position.index,
-            position.depth,
-            value.clone(),
-        );
-    }
+    requests.shared_pointer_read(&command, None, move |client, value| {
+        apply_stack_chain_value(client, refresh_for_handler, entry_index, depth, value);
+    });
 }
 
 fn apply_stack_chain_value(
@@ -257,7 +204,7 @@ pub(in crate::app) fn stack_string_address(
 }
 
 pub(in crate::app) fn request_stack_string(
-    client: &MiClient,
+    _client: &MiClient,
     refresh: Rc<RefCell<StackRefresh>>,
     entry_index: usize,
     address: u64,
@@ -270,19 +217,11 @@ pub(in crate::app) fn request_stack_string(
     let requests = refresh.borrow().requests.clone();
     let refresh_for_handler = Rc::clone(&refresh);
 
-    if requests
-        .frame(&command)
-        .with_print_limit(POINTER_STRING_PREVIEW_ELEMENTS, move |client, record| {
-            if record.class == "superseded" {
-                return;
-            }
-
-            if let Some(value) = record
-                .is_done()
-                .then(|| crate::debugger::evaluated_value(&record))
-                .flatten()
-                .filter(|value| value.contains('"'))
-            {
+    requests.shared_pointer_read(
+        &command,
+        Some(POINTER_STRING_PREVIEW_ELEMENTS),
+        move |client, value| {
+            if let Some(value) = value.filter(|value| value.contains('"')) {
                 let mut state = refresh_for_handler.borrow_mut();
                 let entry = &mut state.entries[entry_index];
                 entry.pointer_chain.pop();
@@ -291,11 +230,8 @@ pub(in crate::app) fn request_stack_string(
             }
 
             complete_stack_sequence(client, &refresh_for_handler, entry_index);
-        })
-        .is_err()
-    {
-        complete_stack_sequence(client, &refresh, entry_index);
-    }
+        },
+    );
 }
 
 pub(in crate::app) fn complete_stack_sequence(

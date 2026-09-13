@@ -99,7 +99,9 @@ impl ReturnValueView {
             .map(|entry| entry.variable.clone())
             .collect::<Vec<_>>();
 
-        replace_variable_roots(&self.store, &variables, false);
+        if replace_variable_roots(&self.store, &variables, false) != VariableRootChange::Unchanged {
+            invalidate_variable_filter(&self.selection);
+        }
 
         self.summary.set_text(&format!(
             "{} result{}",

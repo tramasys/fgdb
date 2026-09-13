@@ -415,7 +415,7 @@ mod tests {
 
         first
             .children
-            .append(&glib::BoxedAnyObject::new(VariableNode::new(variable(
+            .append(&SnapshotRow::new(VariableNode::new(variable(
                 "child",
                 "var1.child",
             ))));

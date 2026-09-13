@@ -83,7 +83,7 @@ pub(super) fn build_locals_view(
     locations: &Rc<variables::locations::Locations>,
     filter_controls: Option<(&gtk::Entry, Option<&gtk::ToggleButton>)>,
 ) -> (gtk::ColumnView, gio::ListStore, gtk::SingleSelection) {
-    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
+    let store = gio::ListStore::new::<SnapshotRow>();
 
     let roots: gio::ListModel = if let Some((search, changed_toggle)) = filter_controls {
         let query = Rc::new(RefCell::new(String::new()));
@@ -92,7 +92,7 @@ pub(super) fn build_locals_view(
         let changed_for_filter = Rc::clone(&changed_only);
 
         let filter = gtk::CustomFilter::new(move |object| {
-            let Some(item) = object.downcast_ref::<glib::BoxedAnyObject>() else {
+            let Some(item) = object.downcast_ref::<SnapshotRow>() else {
                 return false;
             };
 
@@ -125,7 +125,7 @@ pub(super) fn build_locals_view(
     };
 
     let tree = gtk::TreeListModel::new(roots, false, false, |item| {
-        let item = item.downcast_ref::<glib::BoxedAnyObject>()?;
+        let item = item.downcast_ref::<SnapshotRow>()?;
         let node = item.borrow::<VariableNode>();
 
         node.variable
@@ -212,6 +212,18 @@ pub(super) fn variable_search_text(variable: &Variable) -> String {
     text
 }
 
+/// Refilter once after a complete payload batch, keeping unchanged tree rows.
+pub(super) fn invalidate_variable_filter(selection: &gtk::SingleSelection) {
+    if let Some(filter) = selection
+        .model()
+        .and_downcast::<gtk::TreeListModel>()
+        .and_then(|tree| tree.model().downcast::<gtk::FilterListModel>().ok())
+        .and_then(|filtered| filtered.filter())
+    {
+        filter.changed(gtk::FilterChange::Different);
+    }
+}
+
 pub(super) fn variable_node_matches_filter(node: &VariableNode, query: &str) -> bool {
     if query.trim().is_empty() {
         return true;
@@ -227,10 +239,7 @@ pub(super) fn variable_node_matches_filter(node: &VariableNode, query: &str) -> 
 
     while let Some(children) = pending.pop() {
         for position in 0..children.n_items() {
-            if let Some(item) = children
-                .item(position)
-                .and_downcast::<glib::BoxedAnyObject>()
-            {
+            if let Some(item) = children.item(position).and_downcast::<SnapshotRow>() {
                 let node = item.borrow::<VariableNode>();
 
                 if terms.iter().all(|term| node.search_text.contains(term)) {
@@ -510,7 +519,7 @@ fn local_name_column(
                 return;
             };
 
-            let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+            let Some(data) = row.item().and_downcast::<SnapshotRow>() else {
                 return;
             };
 
@@ -554,95 +563,26 @@ fn local_name_column(
             &children_handler_for_setup,
         );
         item.set_child(Some(&expander));
-    });
-
-    factory.connect_bind(move |_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-
-        let (Some(expander), Some(row)) = (
-            item.child().and_downcast::<gtk::TreeExpander>(),
-            item.item().and_downcast::<gtk::TreeListRow>(),
-        ) else {
-            return;
-        };
-
-        let Some(content) = expander.child().and_downcast::<gtk::Box>() else {
-            return;
-        };
-
-        let Some(disclosure) = content.first_child().and_downcast::<gtk::Label>() else {
-            return;
-        };
-
-        let Some(scope) = disclosure.next_sibling().and_downcast::<gtk::Label>() else {
-            return;
-        };
-
-        let Some(changed) = scope.next_sibling().and_downcast::<gtk::Label>() else {
-            return;
-        };
-
-        let Some(label) = changed.next_sibling().and_downcast::<gtk::Label>() else {
-            return;
-        };
-
-        let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
-            return;
-        };
-
-        let node = data.borrow::<VariableNode>();
-        let expandable = node.variable.can_expand();
-        let load_more = node.load_more.is_some();
-        expander.set_list_row(Some(&row));
-
-        if expandable && node.expanded.get() != row.is_expanded() {
-            defer_variable_expansion(&expander, &row, &selection_for_bind);
-        }
-
-        disclosure.set_text(if expandable {
-            if node.expanded.get() {
-                DISCLOSURE_EXPANDED_ICON
-            } else {
-                DISCLOSURE_COLLAPSED_ICON
-            }
-        } else if load_more {
-            DISCLOSURE_COLLAPSED_ICON
-        } else {
-            ""
-        });
-
-        scope.set_text(if node.variable.return_value.is_some() {
-            "RETURN"
-        } else if node.variable.argument {
-            "ARG"
-        } else {
-            "LOCAL"
-        });
-
-        scope.set_visible(row.depth() == 0 && !node.placeholder);
-        changed.set_opacity(if node.changed { 1.0 } else { 0.0 });
-        changed.set_visible(!node.placeholder);
-        label.set_text(&node.variable.name);
-        label.remove_css_class("local-load-more");
-        label.remove_css_class("muted");
-        label.add_css_class("local-name");
-        content.remove_css_class("local-expandable");
-        content.set_cursor_from_name(None);
-
-        if expandable || load_more {
-            content.add_css_class("local-expandable");
-            content.set_cursor_from_name(Some("pointer"));
-        }
-
-        if load_more {
-            label.remove_css_class("local-name");
-            label.add_css_class("local-load-more");
-        } else if node.placeholder {
-            label.remove_css_class("local-name");
-            label.add_css_class("muted");
-        }
+        let selection = selection_for_bind.downgrade();
+        let weak_item = item.downgrade();
+        lifecycle::connect_snapshot_cell::<VariableNode>(
+            item,
+            &label,
+            |old, new| {
+                old.variable.name == new.variable.name
+                    && old.variable.argument == new.variable.argument
+                    && old.variable.return_value.is_some() == new.variable.return_value.is_some()
+                    && old.variable.can_expand() == new.variable.can_expand()
+                    && old.changed == new.changed
+                    && old.placeholder == new.placeholder
+                    && old.load_more == new.load_more
+            },
+            move |node| {
+                if let (Some(item), Some(selection)) = (weak_item.upgrade(), selection.upgrade()) {
+                    render_local_name(&item, node, &selection);
+                }
+            },
+        );
     });
 
     factory.connect_unbind(move |_, object| {
@@ -662,6 +602,86 @@ fn local_name_column(
     components::table_column("NAME / EXPRESSION", 230, factory)
 }
 
+fn render_local_name(item: &gtk::ListItem, node: &VariableNode, selection: &gtk::SingleSelection) {
+    let (Some(expander), Some(row)) = (
+        item.child().and_downcast::<gtk::TreeExpander>(),
+        item.item().and_downcast::<gtk::TreeListRow>(),
+    ) else {
+        return;
+    };
+
+    let Some(content) = expander.child().and_downcast::<gtk::Box>() else {
+        return;
+    };
+
+    let Some(disclosure) = content.first_child().and_downcast::<gtk::Label>() else {
+        return;
+    };
+
+    let Some(scope) = disclosure.next_sibling().and_downcast::<gtk::Label>() else {
+        return;
+    };
+
+    let Some(changed) = scope.next_sibling().and_downcast::<gtk::Label>() else {
+        return;
+    };
+
+    let Some(label) = changed.next_sibling().and_downcast::<gtk::Label>() else {
+        return;
+    };
+
+    let expandable = node.variable.can_expand();
+    let load_more = node.load_more.is_some();
+    expander.set_list_row(Some(&row));
+
+    if expandable && node.expanded.get() != row.is_expanded() {
+        defer_variable_expansion(&expander, &row, selection);
+    }
+
+    disclosure.set_text(if expandable {
+        if node.expanded.get() {
+            DISCLOSURE_EXPANDED_ICON
+        } else {
+            DISCLOSURE_COLLAPSED_ICON
+        }
+    } else if load_more {
+        DISCLOSURE_COLLAPSED_ICON
+    } else {
+        ""
+    });
+
+    scope.set_text(if node.variable.return_value.is_some() {
+        "RETURN"
+    } else if node.variable.argument {
+        "ARG"
+    } else {
+        "LOCAL"
+    });
+
+    scope.set_visible(row.depth() == 0 && !node.placeholder);
+    changed.set_opacity(if node.changed { 1.0 } else { 0.0 });
+    changed.set_visible(!node.placeholder);
+    label.set_text(&node.variable.name);
+    label.remove_css_class("local-load-more");
+    label.remove_css_class("muted");
+    label.add_css_class("local-name");
+    content.remove_css_class("local-expandable");
+    content.set_cursor_from_name(None);
+
+    if expandable || load_more {
+        content.add_css_class("local-expandable");
+        content.set_cursor_from_name(Some("pointer"));
+    }
+
+    if load_more {
+        label.remove_css_class("local-name");
+        label.add_css_class("local-load-more");
+    } else if node.placeholder {
+        label.remove_css_class("local-name");
+        label.add_css_class("muted");
+    }
+}
+
 fn connect_variable_expansion(
     expander: &gtk::TreeExpander,
     disclosure: &gtk::Label,
@@ -677,7 +697,7 @@ fn connect_variable_expansion(
         else {
             return;
         };
-        let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+        let Some(data) = row.item().and_downcast::<SnapshotRow>() else {
             return;
         };
         let expanded = row.is_expanded();
@@ -705,7 +725,7 @@ fn defer_variable_expansion(
 }
 
 fn restore_variable_expansion(row: &gtk::TreeListRow) {
-    let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+    let Some(data) = row.item().and_downcast::<SnapshotRow>() else {
         return;
     };
     let expanded = data.borrow::<VariableNode>().expanded.get();
@@ -720,7 +740,7 @@ pub(super) fn defer_variable_toggle(
     let Some(binding) = TreeRowBinding::new(row, selection) else {
         return;
     };
-    let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+    let Some(data) = row.item().and_downcast::<SnapshotRow>() else {
         return;
     };
     let expanded = data.borrow::<VariableNode>().expanded.clone();
@@ -730,7 +750,7 @@ pub(super) fn defer_variable_toggle(
     binding.defer(move |row| {
         restore_variable_expansion(row);
         if row.is_expanded()
-            && let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>()
+            && let Some(data) = row.item().and_downcast::<SnapshotRow>()
         {
             let node = data.borrow::<VariableNode>().clone();
             request_variable_children_if_needed(&node, &children_handler);
@@ -768,7 +788,7 @@ fn connect_current_variable_context_menu(
             return;
         };
 
-        let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+        let Some(data) = row.item().and_downcast::<SnapshotRow>() else {
             return;
         };
 
@@ -1012,7 +1032,7 @@ pub(super) fn request_variable_children_if_needed(
     node.children.splice(
         0,
         node.children.n_items(),
-        &[glib::BoxedAnyObject::new(VariableNode::placeholder(
+        &[SnapshotRow::new(VariableNode::placeholder(
             "loading…",
             "waiting for GDB",
         ))],
@@ -1033,7 +1053,7 @@ pub(super) fn defer_variable_children_if_expanded(
     selection: &gtk::SingleSelection,
     children_handler: &Rc<RefCell<Option<VariableChildrenHandler>>>,
 ) {
-    let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+    let Some(data) = row.item().and_downcast::<SnapshotRow>() else {
         return;
     };
 
@@ -1053,7 +1073,7 @@ pub(super) fn defer_variable_children_if_expanded(
             return;
         }
 
-        let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+        let Some(data) = row.item().and_downcast::<SnapshotRow>() else {
             return;
         };
 
@@ -1097,7 +1117,7 @@ pub(super) fn defer_next_variable_page(
     let children_handler = Rc::clone(children_handler);
 
     binding.defer(move |row| {
-        let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
+        let Some(data) = row.item().and_downcast::<SnapshotRow>() else {
             return;
         };
         let node = data.borrow::<VariableNode>().clone();
@@ -1111,7 +1131,6 @@ fn local_location_column(
 ) -> gtk::ColumnViewColumn {
     let factory = gtk::SignalListItemFactory::new();
     let for_setup = Rc::clone(locations);
-    let for_bind = Rc::clone(locations);
     let for_unbind = Rc::clone(locations);
     let active_popover = Rc::clone(&variable_menu.active_popover);
     let variable_menu = variable_menu.clone();
@@ -1129,12 +1148,18 @@ fn local_location_column(
         connect_current_variable_context_menu(&label, item, &variable_menu);
         for_setup.register(item, &label);
         item.set_child(Some(&label));
-    });
-
-    factory.connect_bind(move |_, object| {
-        if let Some(item) = object.downcast_ref::<gtk::ListItem>() {
-            for_bind.bind(item);
-        }
+        let locations = Rc::clone(&for_setup);
+        let weak_item = item.downgrade();
+        lifecycle::connect_snapshot_cell::<VariableNode>(
+            item,
+            &label,
+            |old, new| old.variable == new.variable && old.placeholder == new.placeholder,
+            move |_| {
+                if let Some(item) = weak_item.upgrade() {
+                    locations.bind(&item);
+                }
+            },
+        );
     });
 
     factory.connect_unbind(move |_, object| {
@@ -1183,58 +1208,26 @@ fn local_text_column(
         enable_recycled_text_selection(&label);
         connect_current_variable_context_menu(&label, item, &variable_menu);
         item.set_child(Some(&label));
+        let weak_label = label.downgrade();
+        let presentation = Rc::clone(&presentation);
+        lifecycle::connect_snapshot_cell::<VariableNode>(
+            item,
+            &label,
+            move |old, new| {
+                old.placeholder == new.placeholder
+                    && old.variable.type_name == new.variable.type_name
+                    && (matches!(column, LocalColumn::Type)
+                        || (old.variable.value == new.variable.value && old.changed == new.changed))
+            },
+            move |node| {
+                if let Some(label) = weak_label.upgrade() {
+                    render_local_text(&label, node, column, &presentation);
+                }
+            },
+        );
 
         if matches!(column, LocalColumn::Value) {
             presentation_for_setup.register(item);
-        }
-    });
-
-    factory.connect_bind(move |_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-
-        let (Some(label), Some(row)) = (
-            item.child().and_downcast::<gtk::Label>(),
-            item.item().and_downcast::<gtk::TreeListRow>(),
-        ) else {
-            return;
-        };
-
-        let Some(data) = row.item().and_downcast::<glib::BoxedAnyObject>() else {
-            return;
-        };
-
-        let node = data.borrow::<VariableNode>();
-        let variable = &node.variable;
-        clear_label_selection(&label);
-        let (value, details) = variable_value_parts(&variable.value);
-        label.remove_css_class("local-details-error");
-        label.remove_css_class("local-changed-value");
-
-        match column {
-            LocalColumn::Type => {
-                label.set_text(&compact_variable_type(
-                    variable.type_name.as_deref().unwrap_or("<unknown>"),
-                ));
-            }
-            LocalColumn::Value => {
-                let display = presentation.display(variable, value, details);
-
-                label.set_text(&display);
-
-                if !variable.is_available() {
-                    label.add_css_class("local-details-error");
-                } else if node.changed {
-                    label.add_css_class("local-changed-value");
-                }
-            }
-        }
-
-        if node.placeholder {
-            label.add_css_class("muted");
-        } else {
-            label.remove_css_class("muted");
         }
     });
 
@@ -1250,6 +1243,44 @@ fn local_text_column(
     });
 
     components::table_column(title, width, factory)
+}
+
+fn render_local_text(
+    label: &gtk::Label,
+    node: &VariableNode,
+    column: LocalColumn,
+    presentation: &variable_presentation::VariablePresentation,
+) {
+    let variable = &node.variable;
+    clear_label_selection(label);
+    let (value, details) = variable_value_parts(&variable.value);
+    label.remove_css_class("local-details-error");
+    label.remove_css_class("local-changed-value");
+
+    match column {
+        LocalColumn::Type => {
+            label.set_text(&compact_variable_type(
+                variable.type_name.as_deref().unwrap_or("<unknown>"),
+            ));
+        }
+        LocalColumn::Value => {
+            let display = presentation.display(variable, value, details);
+
+            label.set_text(&display);
+
+            if !variable.is_available() {
+                label.add_css_class("local-details-error");
+            } else if node.changed {
+                label.add_css_class("local-changed-value");
+            }
+        }
+    }
+
+    if node.placeholder {
+        label.add_css_class("muted");
+    } else {
+        label.remove_css_class("muted");
+    }
 }
 
 pub(super) fn variable_display_value(
@@ -1631,53 +1662,57 @@ pub(super) fn register_column(
         });
 
         item.set_child(Some(&label));
-        let label = label.downgrade();
-        super::lifecycle::connect_snapshot_cell(item, move |data| {
-            let Some(label) = label.upgrade() else {
-                return;
-            };
-            clear_label_selection(&label);
-            let data = data.borrow::<RegisterRowData>();
-            set_semantic_css(
-                &label,
-                if matches!(column, RegisterColumn::Name) {
-                    data.changed.then_some("modified-register")
-                } else {
-                    Some(register_value_css(
-                        &data.register,
-                        data.architecture,
-                        data.endian,
-                        data.pointer_bits,
-                    ))
-                },
-            );
+        let weak_label = label.downgrade();
 
-            match column {
-                RegisterColumn::Name => {
-                    label.set_text(&format!("${}", data.register.name));
-                }
-                RegisterColumn::Value => {
-                    let text = register_primary_value(&data.register, data.architecture);
-                    label.set_text(&text);
-                }
-                RegisterColumn::Details => {
-                    if is_flags_register(&data.register.name) {
-                        label.set_markup(&flags_details_markup(
-                            &data.register.name,
-                            &data.register.value,
-                            data.ring,
-                        ));
+        super::lifecycle::connect_snapshot_cell(
+            item,
+            &label,
+            move |old: &RegisterRowData, new| register_cell_equal(column, old, new),
+            move |data| {
+                let Some(label) = weak_label.upgrade() else {
+                    return;
+                };
+                set_semantic_css(
+                    &label,
+                    if matches!(column, RegisterColumn::Name) {
+                        data.changed.then_some("modified-register")
                     } else {
-                        label.set_text(&register_details(
+                        Some(register_value_css(
                             &data.register,
                             data.architecture,
                             data.endian,
                             data.pointer_bits,
-                        ));
+                        ))
+                    },
+                );
+
+                match column {
+                    RegisterColumn::Name => {
+                        label.set_text(&format!("${}", data.register.name));
+                    }
+                    RegisterColumn::Value => {
+                        let text = register_primary_value(&data.register, data.architecture);
+                        label.set_text(&text);
+                    }
+                    RegisterColumn::Details => {
+                        if is_flags_register(&data.register.name) {
+                            label.set_markup(&flags_details_markup(
+                                &data.register.name,
+                                &data.register.value,
+                                data.ring,
+                            ));
+                        } else {
+                            label.set_text(&register_details(
+                                &data.register,
+                                data.architecture,
+                                data.endian,
+                                data.pointer_bits,
+                            ));
+                        }
                     }
                 }
-            }
-        });
+            },
+        );
     });
 
     components::table_column(title, width, factory)
@@ -1862,45 +1897,115 @@ pub(super) fn stack_column(
         });
         label.add_controller(click);
         item.set_child(Some(&label));
-        let label = label.downgrade();
-        super::lifecycle::connect_snapshot_cell(item, move |data| {
-            let Some(label) = label.upgrade() else {
-                return;
-            };
-            clear_label_selection(&label);
-            let entry = data.borrow::<StackEntry>();
-            set_semantic_css(
-                &label,
-                match column {
-                    StackColumn::Address => Some("memory-stack"),
-                    StackColumn::Value => Some(memory_kind_css(entry.memory_kind)),
-                    _ => None,
-                },
-            );
-            let text = match column {
-                StackColumn::Anchor => entry
-                    .address_registers
-                    .iter()
-                    .map(|name| format!("${name}"))
-                    .collect::<Vec<_>>()
-                    .join(","),
-                StackColumn::Address => {
-                    let width = usize::try_from(entry.pointer_bits / 4)
-                        .unwrap_or(16)
-                        .clamp(8, 16);
-                    format!("0x{:0width$x}", entry.address, width = width)
-                }
-                StackColumn::Value => stack_entry_text(&entry),
-                StackColumn::Offset => format!("+0x{:04x}", entry.offset),
-                StackColumn::Index => format!("+{:03}", entry.index),
-                StackColumn::References => stack_references(&entry),
-                StackColumn::Region => entry.region.clone().unwrap_or_else(|| String::from("—")),
-            };
-            label.set_text(&text);
-        });
+        let weak_label = label.downgrade();
+
+        super::lifecycle::connect_snapshot_cell(
+            item,
+            &label,
+            move |old: &StackEntry, new| stack_cell_equal(column, old, new),
+            move |data| {
+                let Some(label) = weak_label.upgrade() else {
+                    return;
+                };
+                let entry = data;
+                set_semantic_css(
+                    &label,
+                    match column {
+                        StackColumn::Address => Some("memory-stack"),
+                        StackColumn::Value => Some(memory_kind_css(entry.memory_kind)),
+                        _ => None,
+                    },
+                );
+                let text = match column {
+                    StackColumn::Anchor => entry
+                        .address_registers
+                        .iter()
+                        .map(|name| format!("${name}"))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    StackColumn::Address => {
+                        let width = usize::try_from(entry.pointer_bits / 4)
+                            .unwrap_or(16)
+                            .clamp(8, 16);
+                        format!("0x{:0width$x}", entry.address, width = width)
+                    }
+                    StackColumn::Value => stack_entry_text(entry),
+                    StackColumn::Offset => format!("+0x{:04x}", entry.offset),
+                    StackColumn::Index => format!("+{:03}", entry.index),
+                    StackColumn::References => stack_references(entry),
+                    StackColumn::Region => {
+                        entry.region.clone().unwrap_or_else(|| String::from("—"))
+                    }
+                };
+                label.set_text(&text);
+            },
+        );
     });
 
     components::table_column(title, width, factory)
+}
+
+fn register_cell_equal(
+    column: RegisterColumn,
+    old: &RegisterRowData,
+    new: &RegisterRowData,
+) -> bool {
+    match column {
+        RegisterColumn::Name => {
+            old.register.name == new.register.name && old.changed == new.changed
+        }
+        RegisterColumn::Value | RegisterColumn::Details => {
+            old.register == new.register
+                && old.architecture == new.architecture
+                && old.endian == new.endian
+                && old.pointer_bits == new.pointer_bits
+                && (!matches!(column, RegisterColumn::Details) || old.ring == new.ring)
+        }
+    }
+}
+
+fn stack_cell_equal(column: StackColumn, old: &StackEntry, new: &StackEntry) -> bool {
+    match column {
+        StackColumn::Anchor => old.address_registers == new.address_registers,
+        StackColumn::Address => old.address == new.address && old.pointer_bits == new.pointer_bits,
+        StackColumn::Value => {
+            old.value == new.value
+                && old.pointer_chain == new.pointer_chain
+                && old.pointer_bits == new.pointer_bits
+                && old.endian == new.endian
+                && old.memory_kind == new.memory_kind
+        }
+        StackColumn::Offset => old.offset == new.offset,
+        StackColumn::Index => old.index == new.index,
+        StackColumn::References => {
+            old.value_registers == new.value_registers && old.return_frame == new.return_frame
+        }
+        StackColumn::Region => old.region == new.region,
+    }
+}
+
+fn instruction_cell_equal(class: &str, old: &InstructionRowData, new: &InstructionRowData) -> bool {
+    match class {
+        "instruction-address" => {
+            old.instruction.address == new.instruction.address
+                && old.pointer_bits == new.pointer_bits
+                && old.current == new.current
+                && (old.instruction.function != "??" && old.instruction.offset == "0")
+                    == (new.instruction.function != "??" && new.instruction.offset == "0")
+        }
+        "instruction-mnemonic" | "instruction-operands" => {
+            old.instruction.text == new.instruction.text
+        }
+        "instruction-opcodes" => old.instruction.opcodes == new.instruction.opcodes,
+        "instruction-symbol" => {
+            old.instruction.function == new.instruction.function
+                && old.instruction.offset == new.instruction.offset
+        }
+        "instruction-source" => {
+            old.instruction.source == new.instruction.source && old.source_text == new.source_text
+        }
+        _ => old == new,
+    }
 }
 
 pub(super) fn register_column_css(column: RegisterColumn) -> &'static str {
@@ -1998,13 +2103,12 @@ pub(super) fn instruction_column(
         });
         label.add_controller(click);
         item.set_child(Some(&label));
-        let label = label.downgrade();
-        super::lifecycle::connect_snapshot_cell(item, move |row| {
-            let Some(label) = label.upgrade() else {
+        let weak_label = label.downgrade();
+
+        super::lifecycle::connect_snapshot_cell(item, &label, move |old: &InstructionRowData, new| instruction_cell_equal(class, old, new), move |data| {
+            let Some(label) = weak_label.upgrade() else {
                 return;
             };
-            let data = row.borrow::<InstructionRowData>();
-            clear_label_selection(&label);
             if class == "instruction-address"
                 && data.instruction.function != "??"
                 && data.instruction.offset == "0"
@@ -2014,7 +2118,7 @@ pub(super) fn instruction_column(
                 label.remove_css_class("function-boundary-cell");
             }
 
-            label.set_text(&text(&data));
+            label.set_text(&text(data));
         });
     });
 

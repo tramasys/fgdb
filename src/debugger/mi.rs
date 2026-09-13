@@ -67,6 +67,9 @@ pub struct MiClient {
     incoming: RefCell<Vec<u8>>,
     pending_input: RefCell<Option<PendingInput>>,
     input_source: RefCell<Option<glib::SourceId>>,
+    enrichment_revision: Cell<u64>,
+    enrichment_cache:
+        RefCell<Option<(crate::debugger::StopContext, Weak<stopped::EnrichmentCache>)>>,
     next_token: Cell<u64>,
     printer_probe_generation: Cell<u64>,
     ready: Cell<bool>,
@@ -112,6 +115,8 @@ impl MiClient {
             incoming: RefCell::new(Vec::new()),
             pending_input: RefCell::new(None),
             input_source: RefCell::new(None),
+            enrichment_revision: Cell::new(0),
+            enrichment_cache: RefCell::new(None),
             next_token: Cell::new(1),
             printer_probe_generation: Cell::new(0),
             ready: Cell::new(false),
@@ -2191,6 +2196,16 @@ impl MiClient {
             DecodedLine::Ignored => return,
             DecodedLine::Record(record) => record,
         };
+
+        if record.kind == '='
+            && matches!(
+                record.class.as_str(),
+                "cmd-param-changed" | "memory-changed" | "library-loaded" | "library-unloaded"
+            )
+        {
+            self.enrichment_revision
+                .set(self.enrichment_revision.get().wrapping_add(1));
+        }
 
         match record.kind {
             '^' => {

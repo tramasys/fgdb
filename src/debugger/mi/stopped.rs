@@ -13,6 +13,21 @@ struct BoundStop {
     client: Weak<MiClient>,
     context: StopContext,
     is_current: Box<dyn Fn(&StopContext) -> bool>,
+    enrichment: Rc<EnrichmentCache>,
+}
+
+// Only generated, read-only pointer probes use this cache. Separate bindings
+// share work only while their complete stopped context matches. The client keeps
+// a weak reference so finishing the refresh also releases its cached values.
+pub(super) type EnrichmentCache =
+    RefCell<crate::performance::BoundedLruCache<(String, Option<usize>, u64), EnrichmentRead>>;
+
+type EnrichmentReply = Box<dyn FnOnce(&MiClient, Option<String>)>;
+
+#[derive(Clone)]
+pub(super) enum EnrichmentRead {
+    Pending(Weak<RefCell<Vec<EnrichmentReply>>>),
+    Ready(Option<String>),
 }
 
 impl MiClient {
@@ -21,7 +36,22 @@ impl MiClient {
         context: StopContext,
         is_current: impl Fn(&StopContext) -> bool + 'static,
     ) -> StopRequests {
+        let enrichment = {
+            let mut cached = self.enrichment_cache.borrow_mut();
+            let existing = cached
+                .as_ref()
+                .filter(|(previous, _)| *previous == context)
+                .and_then(|(_, cache)| cache.upgrade());
+
+            existing.unwrap_or_else(|| {
+                let cache = Rc::new(RefCell::new(crate::performance::BoundedLruCache::new(1024)));
+                *cached = Some((context.clone(), Rc::downgrade(&cache)));
+                cache
+            })
+        };
+
         StopRequests(Rc::new(BoundStop {
+            enrichment,
             client: self.weak(),
             context,
             is_current: Box::new(is_current),
@@ -40,6 +70,95 @@ impl StopRequests {
                 && client.transport_epoch() == self.0.context.transport_epoch()
                 && (self.0.is_current)(&self.0.context)
         })
+    }
+
+    /// Coalesce internal C pointer reads and bounded string previews, including
+    /// failures and in-flight requests. Never use this for user expressions.
+    pub(crate) fn shared_pointer_read(
+        &self,
+        command: &str,
+        elements: Option<usize>,
+        reply: impl FnOnce(&MiClient, Option<String>) + 'static,
+    ) {
+        let Some(client) = self.0.client.upgrade().filter(|_| self.is_current()) else {
+            return;
+        };
+
+        let revision = client.enrichment_revision.get();
+        let key = (self.0.context.scope_frame(command), elements, revision);
+        let existing = self.0.enrichment.borrow_mut().get_cloned(&key);
+        let authority = self.clone();
+        let reply: EnrichmentReply = Box::new(move |client, value| {
+            if authority.is_current() {
+                reply(client, value);
+            }
+        });
+
+        match existing {
+            Some(EnrichmentRead::Pending(waiters)) => {
+                if let Some(waiters) = waiters.upgrade() {
+                    waiters.borrow_mut().push(reply);
+                    return;
+                }
+            }
+            Some(EnrichmentRead::Ready(value)) => {
+                // Preserve the asynchronous MI contract: a caller may revoke
+                // this stop immediately after scheduling an enrichment.
+                let client = client.weak();
+                let requests = self.clone();
+                let command = command.to_owned();
+                glib::spawn_future_local(async move {
+                    if let Some(client) = client.upgrade() {
+                        if client.enrichment_revision.get() == revision {
+                            reply(&client, value);
+                        } else {
+                            requests.shared_pointer_read(&command, elements, reply);
+                        }
+                    }
+                });
+                return;
+            }
+            None => {}
+        }
+
+        let waiters = Rc::new(RefCell::new(vec![reply]));
+        self.0.enrichment.borrow_mut().insert(
+            key.clone(),
+            EnrichmentRead::Pending(Rc::downgrade(&waiters)),
+        );
+        let response = Rc::clone(&waiters);
+        let cache = Rc::clone(&self.0.enrichment);
+        let response_key = key.clone();
+        let handler = move |client: &MiClient, record: MiRecord| {
+            let value = record
+                .is_done()
+                .then(|| crate::debugger::evaluated_value(&record))
+                .flatten();
+
+            complete_enrichment_read(
+                client,
+                &cache,
+                response_key,
+                &response,
+                value,
+                record.is_done() || record.class == "error",
+            );
+        };
+
+        let result = if let Some(elements) = elements {
+            self.frame(command).with_print_limit(elements, handler)
+        } else {
+            self.frame(command).enrich(handler)
+        };
+
+        if result.is_err() {
+            complete_enrichment_read(&client, &self.0.enrichment, key, &waiters, None, false);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shared_pointer_read_count(&self) -> usize {
+        self.0.enrichment.borrow().keys().count()
     }
 
     pub(crate) fn frame<'a>(&'a self, command: &'a str) -> StopRequest<'a> {
@@ -63,6 +182,31 @@ impl StopRequests {
             scope,
             guard: None,
         }
+    }
+}
+
+fn complete_enrichment_read(
+    client: &MiClient,
+    cache: &EnrichmentCache,
+    key: (String, Option<usize>, u64),
+    waiters: &Rc<RefCell<Vec<EnrichmentReply>>>,
+    value: Option<String>,
+    cacheable: bool,
+) {
+    {
+        let mut cache = cache.borrow_mut();
+        if cacheable
+            && matches!(cache.get_cloned(&key), Some(EnrichmentRead::Pending(pending))
+            if pending.ptr_eq(&Rc::downgrade(waiters)))
+        {
+            cache.insert(key, EnrichmentRead::Ready(value.clone()));
+        }
+    }
+
+    let replies = std::mem::take(&mut *waiters.borrow_mut());
+
+    for reply in replies {
+        reply(client, value.clone());
     }
 }
 
@@ -461,5 +605,92 @@ mod tests {
             assert!(client.pending.borrow().is_empty());
             assert!(client.is_ready());
         });
+    }
+
+    #[test]
+    fn pointer_reads_share_pending_results_and_failures_only_within_their_context() {
+        let _guard = super::super::tests::MI_CLIENT_TEST_LOCK.lock().unwrap();
+        let context = glib::MainContext::new();
+        context
+            .with_thread_default(|| {
+                let (client, _peer) = MiClient::open_with_injected_transport(|_, _| {}).unwrap();
+                client.ready.set(true);
+                let context =
+                    StopContext::new(client.transport_epoch(), 1, None, "1".into(), 0).unwrap();
+                let first = client.bind_stop_requests(context.clone(), |_| true);
+                let second = client.bind_stop_requests(context, |_| true);
+                assert!(Rc::ptr_eq(&first.0.enrichment, &second.0.enrichment));
+                let replies = Rc::new(RefCell::new(Vec::new()));
+                let command = "-data-evaluate-expression --language c \"*(void**)0x1000\"";
+
+                for response in [Some("0x2000"), None] {
+                    replies.borrow_mut().clear();
+                    let command = format!("{command}{}", if response.is_some() { "" } else { " " });
+                    let token = client.next_token.get();
+                    for requests in [&first, &second] {
+                        let replies = Rc::clone(&replies);
+                        requests.shared_pointer_read(&command, None, move |_, value| {
+                            replies.borrow_mut().push(value)
+                        });
+                    }
+                    assert_eq!(client.next_token.get(), token + 1);
+                    let record = response.map_or_else(
+                        || format!("{token}^error,msg=\"unreadable\"\n"),
+                        |value| format!("{token}^done,value=\"{value}\"\n"),
+                    );
+                    client.consume(record.as_bytes());
+                    assert_eq!(
+                        replies.take(),
+                        [response.map(str::to_owned), response.map(str::to_owned)]
+                    );
+                    let replies = Rc::clone(&replies);
+                    first.shared_pointer_read(&command, None, move |_, value| {
+                        replies.borrow_mut().push(value)
+                    });
+                    assert_eq!(client.next_token.get(), token + 1);
+                    while glib::MainContext::ref_thread_default().pending() {
+                        glib::MainContext::ref_thread_default().iteration(false);
+                    }
+                }
+
+                let token = client.next_token.get();
+                let refreshed = Rc::new(RefCell::new(None));
+                let observed = Rc::clone(&refreshed);
+                first.shared_pointer_read(command, None, move |_, value| {
+                    observed.replace(Some(value));
+                });
+                client.consume(b"=cmd-param-changed,param=\"print address\",value=\"off\"\n");
+                while glib::MainContext::ref_thread_default().pending() {
+                    glib::MainContext::ref_thread_default().iteration(false);
+                }
+                assert_eq!(client.next_token.get(), token + 1);
+                assert!(refreshed.borrow().is_none());
+                client.consume(format!("{token}^done,value=\"fresh\"\n").as_bytes());
+                assert_eq!(refreshed.take(), Some(Some("fresh".into())));
+
+                let next = client.bind_stop_requests(
+                    StopContext::new(client.transport_epoch(), 2, None, "1".into(), 0).unwrap(),
+                    |_| true,
+                );
+                assert!(!Rc::ptr_eq(&first.0.enrichment, &next.0.enrichment));
+                let other_frame = client.bind_stop_requests(
+                    StopContext::new(client.transport_epoch(), 2, None, "1".into(), 1).unwrap(),
+                    |_| true,
+                );
+                assert!(!Rc::ptr_eq(&next.0.enrichment, &other_frame.0.enrichment));
+
+                let retained = Rc::new(());
+                let weak = Rc::downgrade(&retained);
+                // A callback may itself retain a binding; dropping the client must
+                // still release it instead of leaving a cache/waiter ownership cycle.
+                let owned = first.clone();
+                first.shared_pointer_read("-data-evaluate-expression 42", None, move |_, _| {
+                    drop((retained, owned));
+                });
+                drop((first, second, next, other_frame));
+                drop(client);
+                assert!(weak.upgrade().is_none());
+            })
+            .unwrap();
     }
 }

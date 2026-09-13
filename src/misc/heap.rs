@@ -478,21 +478,26 @@ impl<'a> MemoryReader<'a> {
             .ok_or_else(|| format!("Cannot decode target word at 0x{address:x}"))
     }
 
-    fn u16(&mut self, address: u64) -> Result<u16, String> {
-        let mut bytes = [0_u8; 2];
-        self.read(address, &mut bytes)?;
+    fn word_pair(&mut self, address: u64) -> Result<(u64, u64), String> {
+        let size = self.pointer_size;
+        let mut bytes = [0_u8; 16];
 
-        Ok(match self.endian {
-            TargetEndian::Little => u16::from_le_bytes(bytes),
-            TargetEndian::Big => u16::from_be_bytes(bytes),
-        })
-    }
+        // Separate fields can straddle two readable mappings. Keep the original
+        // field reads there; the common case needs only one syscall.
+        if !self.readable(address, size * 2) {
+            let next = address
+                .checked_add(size as u64)
+                .ok_or_else(|| String::from("Heap read address overflowed"))?;
 
-    fn u8(&mut self, address: u64) -> Result<u8, String> {
-        let mut byte = [0_u8; 1];
-        self.read(address, &mut byte)?;
+            return Ok((self.word(address)?, self.word(next)?));
+        }
 
-        Ok(byte[0])
+        self.read(address, &mut bytes[..size * 2])?;
+
+        Ok((
+            read_word(&bytes[..size], self.endian).unwrap(),
+            read_word(&bytes[size..size * 2], self.endian).unwrap(),
+        ))
     }
 }
 
@@ -1155,12 +1160,10 @@ impl Inspector<'_> {
     }
 
     fn read_chunk(&mut self, base: u64) -> Result<Chunk, String> {
-        let size_address = base
-            .checked_add(self.layout.pointer_size)
+        base.checked_add(self.layout.pointer_size)
             .ok_or_else(|| String::from("Chunk size address overflowed"))?;
 
-        let previous_size = self.reader.word(base)?;
-        let raw_size = self.reader.word(size_address)?;
+        let (previous_size, raw_size) = self.reader.word_pair(base)?;
 
         let user = base
             .checked_add(self.layout.pointer_size * 2)
@@ -1415,8 +1418,7 @@ impl Inspector<'_> {
                 .checked_sub(self.layout.pointer_size * 2)
                 .ok_or_else(|| String::from("Bin head address underflowed"))?;
 
-            let forward = self.reader.word(pair)?;
-            let backward = self.reader.word(pair + self.layout.pointer_size)?;
+            let (forward, backward) = self.reader.word_pair(pair)?;
             let (chunks, warning) = self.walk_double(forward, backward, head, total_nodes)?;
 
             let kind = if index == 0 {
@@ -1465,28 +1467,31 @@ impl Inspector<'_> {
         let count = self.layout.tcache_bin_count();
         let count_size = self.layout.tcache_count_size();
 
-        let entries = tcache
+        tcache
             .checked_add(u64::try_from(count).unwrap_or(0) * count_size)
             .ok_or_else(|| String::from("Tcache entries address overflowed"))?;
 
-        let mut raw_counts = Vec::with_capacity(count);
-        let mut heads = Vec::with_capacity(count);
+        let mut metadata = [0_u8; 76 * (2 + 8)];
+        let metadata = &mut metadata[..self.layout.tcache_struct_size() as usize];
+        self.reader.read(tcache, metadata)?;
+        let (counts, pointers) = metadata.split_at(count * count_size as usize);
 
-        for index in 0..count {
-            let index = u64::try_from(index).unwrap_or(0);
-            let count_address = tcache + index * count_size;
+        let raw_counts = counts
+            .chunks_exact(count_size as usize)
+            .map(|bytes| match bytes {
+                [count] => usize::from(*count),
+                [first, second] => usize::from(match self.reader.endian {
+                    TargetEndian::Little => u16::from_le_bytes([*first, *second]),
+                    TargetEndian::Big => u16::from_be_bytes([*first, *second]),
+                }),
+                _ => unreachable!("validated tcache count width"),
+            })
+            .collect::<Vec<_>>();
 
-            raw_counts.push(if count_size == 1 {
-                usize::from(self.reader.u8(count_address)?)
-            } else {
-                usize::from(self.reader.u16(count_address)?)
-            });
-
-            heads.push(
-                self.reader
-                    .word(entries + index * self.layout.pointer_size)?,
-            );
-        }
+        let heads = pointers
+            .chunks_exact(self.reader.pointer_size)
+            .map(|bytes| read_word(bytes, self.reader.endian).unwrap())
+            .collect::<Vec<_>>();
 
         let fill_count = if self.version.at_least(42) {
             raw_counts.iter().copied().max().unwrap_or(0)
@@ -2120,6 +2125,61 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn adjacent_word_reads_preserve_target_width_endian_and_mapping_boundaries() {
+        let directory =
+            gtk::glib::mkdtemp(std::env::temp_dir().join("fgdb-heap-pairs-XXXXXX")).unwrap();
+        let path = directory.join("mem");
+
+        for pointer_size in [4, 8] {
+            for endian in [TargetEndian::Little, TargetEndian::Big] {
+                let values = [0x1234_u64, 0x5678];
+                let bytes = values
+                    .into_iter()
+                    .flat_map(|word| match endian {
+                        TargetEndian::Little => word.to_le_bytes()[..pointer_size].to_vec(),
+                        TargetEndian::Big => word.to_be_bytes()[8 - pointer_size..].to_vec(),
+                    })
+                    .collect::<Vec<_>>();
+                std::fs::write(&path, bytes).unwrap();
+
+                for split in [false, true] {
+                    let mappings = if split {
+                        vec![
+                            0..pointer_size as u64,
+                            pointer_size as u64..pointer_size as u64 * 2,
+                        ]
+                    } else {
+                        std::iter::once(0..pointer_size as u64 * 2).collect()
+                    }
+                    .into_iter()
+                    .map(|range| ProcessMapping {
+                        start: range.start,
+                        end: range.end,
+                        permissions: "r--p".into(),
+                        path: String::new(),
+                    })
+                    .collect::<Vec<_>>();
+                    let mut reader = MemoryReader::new(
+                        &directory,
+                        &mappings,
+                        endian,
+                        pointer_size as u32 * 8,
+                        HeapReadBudget::new(),
+                    )
+                    .unwrap();
+                    assert_eq!(reader.word_pair(0).unwrap(), (values[0], values[1]));
+                    assert_eq!(reader.bytes_read, pointer_size * 2);
+                    assert!(reader.word_pair(pointer_size as u64).is_err());
+                    reader.budget.cancel();
+                    assert!(reader.word_pair(0).is_err());
+                }
+            }
+        }
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn native_heap_rows_remain_bounded_and_preserve_explicit_inspection_addresses() {

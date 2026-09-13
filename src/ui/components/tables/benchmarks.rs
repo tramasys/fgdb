@@ -36,6 +36,29 @@ fn update(store: &gio::ListStore, rows: Vec<InstructionRowData>) {
 fn benchmark_instruction_refresh() {
     gtk::init().unwrap();
     crate::theme::Theme::graphite().install();
+    measure_instruction_refresh(ScrollMode::Native);
+}
+
+#[test]
+#[ignore = "GTK timing, requires a display and an otherwise idle system"]
+fn benchmark_centered_instruction_refresh() {
+    gtk::init().unwrap();
+    crate::theme::Theme::graphite().install();
+
+    for mode in [ScrollMode::LegacyCentered, ScrollMode::Centered] {
+        println!("BENCH centering: {mode:?}");
+        measure_instruction_refresh(mode);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ScrollMode {
+    Native,
+    LegacyCentered,
+    Centered,
+}
+
+fn measure_instruction_refresh(mode: ScrollMode) {
     let (view, store, selection, _) =
         views::build_instruction_view(&ColumnLayouts::default().table(TableId::Instructions));
 
@@ -59,6 +82,7 @@ fn benchmark_instruction_refresh() {
         .child(&view)
         .overlay_scrolling(false)
         .build();
+    let centering = Rc::new(CenteredScroll::default());
     let window = gtk::Window::builder()
         .default_width(1200)
         .default_height(650)
@@ -86,7 +110,24 @@ fn benchmark_instruction_refresh() {
             let updated = Instant::now();
             selection.set_selected((pc - start) as u32);
             let selected = Instant::now();
-            view.scroll_to((pc - start) as u32, None, gtk::ListScrollFlags::FOCUS, None);
+            let position = (pc - start) as u32;
+
+            if matches!(mode, ScrollMode::Centered) {
+                centering.request(&view, &scroll, position);
+            } else {
+                view.scroll_to(position, None, gtk::ListScrollFlags::FOCUS, None);
+
+                if matches!(mode, ScrollMode::LegacyCentered) {
+                    // The former production path, retained only for comparison.
+                    center_scroll_adjustment(&scroll, position, store.n_items());
+                    let scroll = scroll.clone();
+                    let count = store.n_items();
+
+                    glib::timeout_add_local_once(Duration::from_millis(16), move || {
+                        center_scroll_adjustment(&scroll, position, count);
+                    });
+                }
+            }
             let sync = started.elapsed();
             clock.request_phase(gtk::gdk::FrameClockPhase::AFTER_PAINT);
 
@@ -131,7 +172,12 @@ fn benchmark_stack_refresh() {
     let main = glib::MainContext::default();
     main.block_on(glib::timeout_future(Duration::from_millis(100)));
 
-    for round in 0..5 {
+    for round in 0..10 {
+        if round == 5 {
+            window.set_visible(false);
+        }
+
+        let visibility = if round < 5 { "" } else { " hidden" };
         let memory = crate::debugger::MemoryBlock {
             begin: 0x7000 + round * 8,
             bytes: vec![0x41; 128 * 8],
@@ -147,7 +193,7 @@ fn benchmark_stack_refresh() {
         );
         let started = Instant::now();
         super::super::replace_snapshot_store(&store, entries.clone());
-        println!("BENCH stack base: {:?}", started.elapsed());
+        println!("BENCH stack{visibility} base: {:?}", started.elapsed());
         main.block_on(glib::timeout_future(Duration::from_millis(50)));
         let started = Instant::now();
 
@@ -160,7 +206,7 @@ fn benchmark_stack_refresh() {
                 .replace(entry);
         }
 
-        println!("BENCH stack details: {:?}", started.elapsed());
+        println!("BENCH stack{visibility} details: {:?}", started.elapsed());
         main.block_on(glib::timeout_future(Duration::from_millis(50)));
     }
 

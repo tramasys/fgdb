@@ -593,39 +593,57 @@ fn memory_watch_column(
 
         label.add_controller(click);
         item.set_child(Some(&label));
-        let label = label.downgrade();
-        super::lifecycle::connect_snapshot_cell(item, move |data| {
-            let Some(label) = label.upgrade() else {
-                return;
-            };
+        let weak_label = label.downgrade();
 
-            clear_label_selection(&label);
-            let row = data.borrow::<MemoryRowData>();
-            set_semantic_css(&label, Some(memory_kind_css(row.kind)));
+        super::lifecycle::connect_snapshot_cell(
+            item,
+            &label,
+            move |old: &MemoryRowData, new| memory_cell_equal(column, old, new),
+            move |row| {
+                let Some(label) = weak_label.upgrade() else {
+                    return;
+                };
 
-            if row.changed {
-                label.add_css_class("memory-row-changed");
-            } else {
-                label.remove_css_class("memory-row-changed");
-            }
+                set_semantic_css(&label, Some(memory_kind_css(row.kind)));
 
-            let width = usize::try_from(row.pointer_bits / 4)
-                .unwrap_or(16)
-                .clamp(8, 16);
+                if row.changed {
+                    label.add_css_class("memory-row-changed");
+                } else {
+                    label.remove_css_class("memory-row-changed");
+                }
 
-            let text = match column {
-                MemoryRowColumn::Address => format!("0x{:0width$x}", row.address),
-                MemoryRowColumn::Offset => format!("+0x{:04x}", row.offset),
-                MemoryRowColumn::Value => row.value.clone(),
-                MemoryRowColumn::Decoded => row.decoded.clone(),
-                MemoryRowColumn::Interpretation => row.interpretation.clone(),
-            };
+                let width = usize::try_from(row.pointer_bits / 4)
+                    .unwrap_or(16)
+                    .clamp(8, 16);
 
-            label.set_text(&text);
-        });
+                let text = match column {
+                    MemoryRowColumn::Address => format!("0x{:0width$x}", row.address),
+                    MemoryRowColumn::Offset => format!("+0x{:04x}", row.offset),
+                    MemoryRowColumn::Value => row.value.clone(),
+                    MemoryRowColumn::Decoded => row.decoded.clone(),
+                    MemoryRowColumn::Interpretation => row.interpretation.clone(),
+                };
+
+                label.set_text(&text);
+            },
+        );
     });
 
     components::table_column(title, width, factory)
+}
+
+fn memory_cell_equal(column: MemoryRowColumn, old: &MemoryRowData, new: &MemoryRowData) -> bool {
+    old.kind == new.kind
+        && old.changed == new.changed
+        && match column {
+            MemoryRowColumn::Address => {
+                old.address == new.address && old.pointer_bits == new.pointer_bits
+            }
+            MemoryRowColumn::Offset => old.offset == new.offset,
+            MemoryRowColumn::Value => old.value == new.value,
+            MemoryRowColumn::Decoded => old.decoded == new.decoded,
+            MemoryRowColumn::Interpretation => old.interpretation == new.interpretation,
+        }
 }
 
 fn format_memory_rows(

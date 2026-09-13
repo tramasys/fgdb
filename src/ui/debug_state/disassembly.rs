@@ -213,27 +213,11 @@ impl Ui {
             return;
         }
 
-        self.instructions
-            .view
-            .scroll_to(position, None, gtk::ListScrollFlags::FOCUS, None);
-
-        let generation = self
-            .instructions
-            .controls
-            .scroll_generation
-            .get()
-            .wrapping_add(1);
-
-        self.instructions.controls.scroll_generation.set(generation);
-        center_scroll_adjustment(&self.instructions.controls.scrolled, position, item_count);
-        let scrolled = self.instructions.controls.scrolled.clone();
-        let scroll_generation = Rc::clone(&self.instructions.controls.scroll_generation);
-
-        glib::timeout_add_local_once(Duration::from_millis(16), move || {
-            if scroll_generation.get() == generation {
-                center_scroll_adjustment(&scrolled, position, item_count);
-            }
-        });
+        self.instructions.controls.scroll.request(
+            &self.instructions.view,
+            &self.instructions.controls.scrolled,
+            position,
+        );
     }
 
     pub(super) fn update_instruction_insight(&self) {

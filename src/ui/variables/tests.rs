@@ -21,7 +21,7 @@ fn pages_require_the_original_parent_and_expected_offset() {
     assert!(!node.accepts_child_page(parent, 0));
 
     node.children
-        .append(&glib::BoxedAnyObject::new(VariableNode::load_more(
+        .append(&SnapshotRow::new(VariableNode::load_more(
             parent.clone(),
             128,
         )));
@@ -58,8 +58,7 @@ fn pages_require_the_original_parent_and_expected_offset() {
 
     let retry = VariableNode::retry_expansion(parent.clone(), "Cannot read memory");
     assert!(retry.search_text.contains("cannot read memory"));
-    node.children
-        .splice(0, 1, &[glib::BoxedAnyObject::new(retry)]);
+    node.children.splice(0, 1, &[SnapshotRow::new(retry)]);
 
     assert!(node.accepts_child_page(parent, 0));
     assert!(!node.accepts_child_page(parent, 128));
@@ -217,26 +216,22 @@ fn clearing_descendant_changes_notifies_roots_once_after_children_are_clear() {
     let root = root();
     let mut child = VariableNode::new(root.variable.clone());
     child.changed = true;
-    root.children.append(&glib::BoxedAnyObject::new(child));
-    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-    store.append(&glib::BoxedAnyObject::new(root));
-    store.append(&glib::BoxedAnyObject::new(VariableNode::placeholder(
-        "other", "",
-    )));
+    root.children.append(&SnapshotRow::new(child));
+    let store = gio::ListStore::new::<SnapshotRow>();
+    store.append(&SnapshotRow::new(root));
+    store.append(&SnapshotRow::new(VariableNode::placeholder("other", "")));
 
     let notifications = Rc::new(Cell::new(0));
     let observed = Rc::clone(&notifications);
 
-    store.connect_items_changed(move |store, position, removed, added| {
-        assert_eq!((position, removed, added), (0, 1, 1));
-        let item = store
-            .item(position)
-            .and_downcast::<glib::BoxedAnyObject>()
-            .unwrap();
-
-        assert!(!item.borrow::<VariableNode>().has_changes());
-        observed.set(observed.get() + 1);
-    });
+    store
+        .item(0)
+        .and_downcast::<SnapshotRow>()
+        .unwrap()
+        .connect_updated(move |item| {
+            assert!(!item.borrow::<VariableNode>().has_changes());
+            observed.set(observed.get() + 1);
+        });
 
     clear_variable_change_markers(&store);
     assert_eq!(notifications.get(), 1);
@@ -251,19 +246,204 @@ fn changed_filter_reacts_to_cleared_descendant_markers() {
     let root = root();
     let mut child = VariableNode::new(root.variable.clone());
     child.changed = true;
-    root.children.append(&glib::BoxedAnyObject::new(child));
-    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-    store.append(&glib::BoxedAnyObject::new(root));
+    root.children.append(&SnapshotRow::new(child));
+    let store = gio::ListStore::new::<SnapshotRow>();
+    store.append(&SnapshotRow::new(root));
 
     let filter = gtk::CustomFilter::new(|item| {
-        item.downcast_ref::<glib::BoxedAnyObject>()
+        item.downcast_ref::<SnapshotRow>()
             .unwrap()
             .borrow::<VariableNode>()
             .has_changes()
     });
 
     let filtered = gtk::FilterListModel::new(Some(store.clone()), Some(filter));
+    let selection = gtk::SingleSelection::new(Some(gtk::TreeListModel::new(
+        filtered.clone(),
+        false,
+        false,
+        |_| None,
+    )));
     assert_eq!(filtered.n_items(), 1);
     clear_variable_change_markers(&store);
+    crate::ui::views::invalidate_variable_filter(&selection);
     assert_eq!(filtered.n_items(), 0);
+}
+
+#[test]
+#[ignore = "requires a GTK display, run separately from other GTK tests"]
+fn value_updates_keep_tree_rows_selection_and_cells_and_refresh_filters() {
+    use crate::config::settings::IntegerDisplay;
+    use crate::ui::{
+        dialogs, variable_presentation::VariablePresentation,
+        variable_viewers::VariableViewerRegistry, views,
+    };
+    gtk::init().unwrap();
+    crate::theme::Theme::graphite().install();
+    let model = Rc::new(crate::model::DebuggerModel::new(None));
+    let search = gtk::Entry::new();
+    let changed = gtk::ToggleButton::new();
+    let (view, store, selection) = views::build_locals_view(
+        &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::Locals),
+        &Rc::new(std::cell::RefCell::new(None)),
+        &Rc::new(std::cell::RefCell::new(None)),
+        &Rc::new(VariableViewerRegistry::with_builtins()),
+        &VariablePresentation::new(IntegerDisplay::Automatic, Rc::clone(&model)),
+        &locations::Locations::new(false, model),
+        Some((&search, Some(&changed))),
+    );
+    let root = root();
+    let mut child = root.variable.clone();
+    child.name = "element".into();
+    child.varobj = Some("root.0".into());
+    child.value = "1".into();
+    child.type_name = Some("int".into());
+    child.num_children = 0;
+    root.children
+        .append(&SnapshotRow::new(VariableNode::new(child)));
+    root.children_loaded.set(true);
+    root.expanded.set(true);
+    store.append(&SnapshotRow::new(root));
+    let window = gtk::Window::builder()
+        .default_width(1100)
+        .default_height(300)
+        .child(&gtk::ScrolledWindow::builder().child(&view).build())
+        .build();
+    window.present();
+    let settle = || {
+        gtk::glib::MainContext::default().block_on(gtk::glib::timeout_future(
+            std::time::Duration::from_millis(50),
+        ))
+    };
+    settle();
+    assert_eq!(selection.n_items(), 2);
+    selection.set_selected(1);
+    let selected = selection.selected_item().unwrap();
+    let binds = Rc::new(Cell::new(0));
+    for column in view
+        .columns()
+        .iter::<gtk::ColumnViewColumn>()
+        .map(Result::unwrap)
+    {
+        let factory = column
+            .factory()
+            .and_downcast::<gtk::SignalListItemFactory>()
+            .unwrap();
+        let binds = Rc::clone(&binds);
+        factory.connect_bind(move |_, _| binds.set(binds.get() + 1));
+    }
+    let updates = variable_updates(
+        &parse_record(r#"^done,changelist=[{name="root.0",value="99",in_scope="true"}]"#).unwrap(),
+    );
+    assert_eq!(
+        dialogs::apply_variable_updates(&store, &updates, |_, _| {}),
+        1
+    );
+    views::invalidate_variable_filter(&selection);
+    settle();
+    assert_eq!(selection.selected_item().unwrap(), selected);
+    assert_eq!(binds.get(), 0);
+
+    fn has_text(widget: &gtk::Widget, text: &str) -> bool {
+        if widget
+            .downcast_ref::<gtk::Label>()
+            .is_some_and(|label| label.text() == text)
+        {
+            return true;
+        }
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            if has_text(&widget, text) {
+                return true;
+            }
+            child = widget.next_sibling();
+        }
+        false
+    }
+    assert!(has_text(view.upcast_ref(), "99"));
+    search.set_text("99");
+    assert_eq!(selection.n_items(), 2);
+    changed.set_active(true);
+    assert_eq!(selection.n_items(), 2);
+    dialogs::clear_variable_change_markers(&store);
+    views::invalidate_variable_filter(&selection);
+    assert_eq!(selection.n_items(), 0);
+    search.set_text("");
+    changed.set_active(false);
+    settle();
+    assert_eq!(selection.n_items(), 2);
+    window.close();
+}
+
+#[test]
+#[ignore = "GTK timing, requires a display and an otherwise idle system"]
+fn benchmark_variable_refresh() {
+    use crate::config::settings::IntegerDisplay;
+    use crate::ui::{
+        dialogs, variable_presentation::VariablePresentation,
+        variable_viewers::VariableViewerRegistry, views,
+    };
+    gtk::init().unwrap();
+    crate::theme::Theme::graphite().install();
+    let model = Rc::new(crate::model::DebuggerModel::new(None));
+    let (view, store, _) = views::build_locals_view(
+        &crate::ui::ColumnLayouts::default().table(crate::ui::TableId::Locals),
+        &Rc::new(std::cell::RefCell::new(None)),
+        &Rc::new(std::cell::RefCell::new(None)),
+        &Rc::new(VariableViewerRegistry::with_builtins()),
+        &VariablePresentation::new(IntegerDisplay::Automatic, Rc::clone(&model)),
+        &locations::Locations::new(false, model),
+        None,
+    );
+    let mut variables = (0..512)
+        .map(|index| {
+            let mut variable = root().variable;
+            variable.name = format!("local_{index}");
+            variable.value = "0".into();
+            variable.type_name = Some("int".into());
+            variable.num_children = 0;
+            variable
+        })
+        .collect::<Vec<_>>();
+    dialogs::replace_variable_roots_if_changed(&store, &variables);
+    let window = gtk::Window::builder()
+        .default_width(1100)
+        .default_height(800)
+        .child(&gtk::ScrolledWindow::builder().child(&view).build())
+        .build();
+    window.present();
+    let settle = || {
+        gtk::glib::MainContext::default().block_on(gtk::glib::timeout_future(
+            std::time::Duration::from_millis(50),
+        ))
+    };
+    settle();
+    for iteration in 0..12 {
+        for legacy in [true, false] {
+            for variable in &mut variables {
+                variable.value = format!("{}", iteration * 2 + usize::from(legacy));
+            }
+            let started = std::time::Instant::now();
+            if legacy {
+                for (position, variable) in variables.iter().enumerate() {
+                    let node = store
+                        .item(position as u32)
+                        .and_downcast::<SnapshotRow>()
+                        .unwrap()
+                        .borrow::<VariableNode>()
+                        .updated(variable.clone(), true);
+                    store.splice(position as u32, 1, &[SnapshotRow::new(node)]);
+                }
+            } else {
+                dialogs::replace_variable_roots_if_changed(&store, &variables);
+            }
+            eprintln!(
+                "locals/{} iteration={iteration} sync_us={}",
+                if legacy { "splice" } else { "retained" },
+                started.elapsed().as_micros()
+            );
+            settle();
+        }
+    }
+    window.close();
 }
