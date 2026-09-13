@@ -41,6 +41,10 @@ impl DebuggerModel {
         self.stopped.stop_refresh_generation.get()
     }
 
+    pub(crate) fn observed_stop_sequence(&self) -> u64 {
+        self.stopped.observed_stop_sequence.get()
+    }
+
     pub(crate) fn cached_register_names(&self) -> Option<Rc<Vec<String>>> {
         self.stopped.cached_register_names.borrow().clone()
     }

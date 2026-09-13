@@ -473,6 +473,12 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     });
 
     let weak_ui = Rc::downgrade(&ui);
+
+    ui.set_socket_diagnostics_handler(move || {
+        kernel::request_socket_diagnostics(weak_ui.clone());
+    });
+
+    let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
 
     ui.set_misc_refresh_handler(move || {

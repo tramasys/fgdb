@@ -180,3 +180,235 @@ fn show_kernel_error(ui: &Weak<Ui>, generation: u64, error: &str) {
         ui.show_kernel_error(generation, error);
     }
 }
+
+pub(super) fn request_socket_diagnostics(ui: Weak<Ui>) {
+    let Some(current) = ui.upgrade() else {
+        return;
+    };
+    let Some((generation, stamp, request)) = current.begin_socket_diagnostics() else {
+        return;
+    };
+
+    if ACTIVE_KERNEL_WORKERS.fetch_add(1, Ordering::Relaxed) >= MAX_KERNEL_WORKERS {
+        ACTIVE_KERNEL_WORKERS.fetch_sub(1, Ordering::Relaxed);
+        current.show_socket_diagnostics(
+            generation,
+            stamp,
+            Err("Previous procfs readers are still finishing; try again shortly".into()),
+        );
+        return;
+    }
+
+    let timeout = Duration::from_secs(3);
+    let work = crate::kernel::WorkDeadline::new(timeout);
+    let worker_work = work.clone();
+    let (sender, receiver) = futures_channel::oneshot::channel();
+
+    let worker = std::thread::Builder::new()
+        .name("fgdb-socket-diag".into())
+        .spawn(move || {
+            let result = {
+                let _guard = KernelWorkerGuard;
+                crate::kernel::sockets::diagnostics::read_on_worker(&request, &worker_work)
+            };
+
+            let _ = sender.send(result);
+        });
+
+    if let Err(error) = worker {
+        ACTIVE_KERNEL_WORKERS.fetch_sub(1, Ordering::Relaxed);
+        current.show_socket_diagnostics(generation, stamp, Err(error.to_string()));
+        return;
+    }
+
+    drop(current);
+
+    gtk::glib::MainContext::default().spawn_local(async move {
+        let result = crate::background::receive_current(receiver, timeout, || {
+            ui.upgrade()
+                .is_some_and(|ui| ui.socket_diagnostics_current(generation, stamp))
+        })
+        .await;
+
+        work.cancel();
+
+        let result = match result {
+            Ok(result) => result,
+            Err(crate::background::CompletionError::Superseded) => {
+                if let Some(ui) = ui.upgrade() {
+                    ui.cancel_socket_diagnostics(stamp);
+                }
+                return;
+            }
+            Err(crate::background::CompletionError::TimedOut) => {
+                Err("The three-second diagnostic collection limit was reached".into())
+            }
+            Err(crate::background::CompletionError::Disconnected) => {
+                Err("The diagnostic worker stopped before returning a result".into())
+            }
+        };
+
+        if let Some(ui) = ui.upgrade() {
+            ui.show_socket_diagnostics(generation, stamp, result);
+        }
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::test_support::{open_debugger_observing, request, wait_until};
+    use crate::debugger::{MiEvent, evaluated_value};
+
+    #[test]
+    #[ignore = "requires local GDB, procfs and the C networking fixture"]
+    fn live_network_snapshots_and_tcp_diagnostics_follow_fixture_phases() {
+        let stops = Rc::new(Cell::new(0));
+        let observed = Rc::clone(&stops);
+
+        let (debugger, client) = open_debugger_observing(
+            "c-network-target",
+            "c_network_checkpoint",
+            false,
+            move |event| {
+                if matches!(event, MiEvent::Stopped { .. }) {
+                    observed.set(observed.get() + 1);
+                }
+            },
+        );
+
+        let pid =
+            crate::debugger::inferior_pid_for_group(&request(&client, "-list-thread-groups"), "i1")
+                .unwrap();
+
+        for phase in 0..4 {
+            let work = crate::kernel::WorkDeadline::new(Duration::from_secs(15));
+            let snapshot = crate::kernel::read_snapshot(pid, debugger.pid(), false, &work).unwrap();
+            assert!(
+                snapshot.file_descriptors_complete,
+                "{:?}",
+                snapshot.warnings
+            );
+            let sockets = snapshot
+                .file_descriptors
+                .iter()
+                .filter(|fd| fd.kind == "socket")
+                .collect::<Vec<_>>();
+
+            if phase == 3 {
+                assert!(sockets.is_empty());
+                assert!(
+                    snapshot
+                        .file_descriptors
+                        .iter()
+                        .all(|fd| fd.kind != "epoll")
+                );
+                break;
+            }
+
+            assert!(sockets.len() >= 8, "{sockets:?}");
+            assert!(sockets.iter().all(|fd| fd.socket.is_some()), "{sockets:?}");
+            let epoll = snapshot
+                .file_descriptors
+                .iter()
+                .find(|fd| fd.kind == "epoll")
+                .unwrap();
+            assert!(epoll.watches.len() >= 3);
+
+            for watch in &epoll.watches {
+                assert!(snapshot.file_descriptors.iter().any(|fd| watch.matches(fd)));
+            }
+
+            for index in 0..5 {
+                let value = evaluated_value(&request(
+                    &client,
+                    &format!("-data-evaluate-expression fixture->pairs[{index}].server"),
+                ))
+                .unwrap();
+                let number: i32 = value.parse().unwrap();
+                if number < 0 {
+                    continue;
+                }
+                let fd = sockets
+                    .iter()
+                    .find(|fd| fd.number == number as u32)
+                    .unwrap();
+                let socket = fd.socket.as_ref().unwrap();
+
+                if let Some(queue) = socket.receive {
+                    if phase == 0 {
+                        assert!(queue.value > 0, "{socket:?}");
+                    }
+                    if phase == 1 {
+                        assert_eq!(queue.value, 0, "{socket:?}");
+                    }
+                }
+
+                if phase == 2 && socket.protocol.is_tcp() {
+                    assert_eq!(socket.state_name(), "CLOSE_WAIT");
+                }
+            }
+
+            if phase == 0 {
+                let shared_listener = evaluated_value(&request(
+                    &client,
+                    "-data-evaluate-expression fixture->shared_listener",
+                ))
+                .unwrap()
+                .parse::<u32>()
+                .unwrap();
+
+                for fd in &sockets {
+                    let socket = fd.socket.as_ref().unwrap();
+                    if !socket.protocol.is_tcp() {
+                        continue;
+                    }
+
+                    let query = crate::kernel::sockets::diagnostics::Request {
+                        pid,
+                        debugger_pid: debugger.pid(),
+                        start_time: snapshot.process_identity().unwrap().1,
+                        fd: fd.number,
+                        inode: fd.inode.unwrap(),
+                        socket: socket.clone(),
+                    };
+
+                    let result = std::thread::spawn(move || {
+                        crate::kernel::sockets::diagnostics::read_on_worker(
+                            &query,
+                            &crate::kernel::WorkDeadline::new(Duration::from_secs(3)),
+                        )
+                    })
+                    .join()
+                    .unwrap()
+                    .unwrap();
+                    let wanted = if socket.listening {
+                        "Maximum backlog"
+                    } else {
+                        "RTT"
+                    };
+                    assert!(result.iter().any(|fact| fact.label == wanted), "{result:?}");
+
+                    if socket.listening {
+                        let expected = if fd.number == shared_listener {
+                            "7"
+                        } else {
+                            "1"
+                        };
+                        assert!(
+                            result
+                                .iter()
+                                .any(|fact| fact.label == wanted && fact.value == expected),
+                            "FD {}: {result:?}",
+                            fd.number
+                        );
+                    }
+                }
+            }
+
+            let before = stops.get();
+            assert_eq!(request(&client, "-exec-continue").class, "running");
+            wait_until(|| stops.get() > before);
+        }
+    }
+}

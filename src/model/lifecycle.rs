@@ -237,6 +237,11 @@ impl DebuggerModel {
         all_stopped: bool,
         returned: Option<ReturnValue>,
     ) {
+        // Refreshing the same stop changes request generations, not this sequence.
+        self.stopped
+            .observed_stop_sequence
+            .set(self.observed_stop_sequence().wrapping_add(1));
+
         let transition = reduce_stop_transition(
             self.non_stop_mode(),
             self.thread_execution_exit_candidate().is_some(),

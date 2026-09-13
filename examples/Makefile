@@ -45,6 +45,7 @@ C_TARGETS := \
 	$(TARGET_DIR)/c-misc-locks-target \
 	$(TARGET_DIR)/c-tls-target \
 	$(TARGET_DIR)/c-thread-target \
+	$(TARGET_DIR)/c-network-target \
 	$(TARGET_DIR)/c-process-target
 CXX_TARGETS := \
 	$(TARGET_DIR)/cpp-aggregate-return-target \
@@ -235,6 +236,9 @@ $(TARGET_DIR)/c-tls-target: c_tls_target.c | $(TARGET_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -pthread -o $@
 
 $(TARGET_DIR)/c-process-target: c_process_target.c | $(TARGET_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@
+
+$(TARGET_DIR)/c-network-target: c_network_target.c | $(TARGET_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(LDFLAGS) -o $@
 
 $(TARGET_DIR)/cpp-debug-target: cpp_debug_target.cpp | $(TARGET_DIR)

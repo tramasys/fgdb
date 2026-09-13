@@ -48,6 +48,7 @@ tables! {
     PrivateMappings => "private-mappings",
     KernelMappings => "kernel-mappings",
     FileDescriptors => "file-descriptors",
+    Sockets => "sockets",
     Limits => "limits",
     Arguments => "arguments",
     Environment => "environment",

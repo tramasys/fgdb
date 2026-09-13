@@ -1007,6 +1007,7 @@ impl Ui {
 
         self.memory_search.update_state(self);
         self.update_lock_controls();
+        self.update_socket_controls();
         self.update_stop_point_group_controls();
         self.update_stack_paging();
         self.update_module_control_sensitivity();

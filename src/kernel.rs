@@ -13,6 +13,7 @@ mod process;
 mod procfs;
 mod resources;
 mod snapshot;
+pub(crate) mod sockets;
 mod startup;
 
 const MAX_PROC_TEXT_BYTES: usize = 2 * 1024 * 1024;
@@ -96,6 +97,7 @@ pub(crate) struct KernelSnapshot {
     pub mapping_changes: Vec<KernelMappingChange>,
     pub mapping_summary: Vec<KernelFact>,
     pub file_descriptors: Vec<KernelFileDescriptor>,
+    pub file_descriptors_complete: bool,
     pub limits: Vec<KernelLimit>,
     pub threads: Vec<KernelThread>,
     pub signals: Vec<KernelSignal>,
@@ -349,6 +351,25 @@ pub(crate) struct KernelFileDescriptor {
     pub position: Option<u64>,
     pub target: String,
     pub details: String,
+    pub raw_info: String,
+    pub inode: Option<u64>,
+    pub mount_id: Option<u64>,
+    pub eventfd_id: Option<u64>,
+    pub device: Option<(u32, u32)>,
+    pub socket: Option<Arc<sockets::SocketInfo>>,
+    pub watches: Vec<sockets::EpollWatch>,
+}
+
+impl KernelFileDescriptor {
+    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+        self.number == other.number
+            && self.kind == other.kind
+            && self.inode == other.inode
+            && self.mount_id == other.mount_id
+            && self.eventfd_id == other.eventfd_id
+            && self.device == other.device
+            && (self.inode.is_some_and(|inode| inode != 0) || self.target == other.target)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -420,7 +441,7 @@ struct KernelMetrics {
     read_syscalls: u64,
     write_syscalls: u64,
     mappings: u64,
-    descriptors: u64,
+    descriptors: Option<u64>,
     sched_runtime_ns: u64,
     sched_wait_ns: u64,
     sched_timeslices: u64,
@@ -446,6 +467,10 @@ struct KernelMetrics {
 }
 
 impl KernelSnapshot {
+    pub(crate) fn process_identity(&self) -> Option<(u32, u64)> {
+        self.identity.map(|identity| (self.pid, identity))
+    }
+
     #[cfg(test)]
     pub(crate) fn compare_with(&mut self, previous: Option<&Self>) {
         let baseline = previous.map(Self::baseline);
@@ -581,7 +606,6 @@ impl KernelSnapshot {
                 false,
             ),
             ("Mappings", old.mappings, new.mappings, false),
-            ("Open descriptors", old.descriptors, new.descriptors, false),
         ] {
             let delta = if bytes {
                 format_byte_delta(before, after)
@@ -592,6 +616,13 @@ impl KernelSnapshot {
             if delta != "-" {
                 self.changes.push(fact(label, delta));
             }
+        }
+
+        if let (Some(before), Some(after)) = (old.descriptors, new.descriptors)
+            && before != after
+        {
+            self.changes
+                .push(fact("Open descriptors", format_count_delta(before, after)));
         }
 
         if old.schedstat_available && new.schedstat_available {
@@ -881,15 +912,19 @@ fn populate_diagnostics(snapshot: &mut KernelSnapshot) {
 
     snapshot.diagnostics.push(fact(
         "Open-file headroom",
-        soft_fd_limit.map_or_else(
-            || format!("{open_descriptors} open  soft limit unavailable"),
-            |limit| {
-                format!(
-                    "{open_descriptors} / {limit}  {} remaining",
-                    limit.saturating_sub(open_descriptors)
-                )
-            },
-        ),
+        if !snapshot.file_descriptors_complete {
+            format!("Unavailable: partial snapshot ({open_descriptors} descriptors captured)")
+        } else {
+            soft_fd_limit.map_or_else(
+                || format!("{open_descriptors} open  soft limit unavailable"),
+                |limit| {
+                    format!(
+                        "{open_descriptors} / {limit}  {} remaining",
+                        limit.saturating_sub(open_descriptors)
+                    )
+                },
+            )
+        },
     ));
 }
 
@@ -1264,9 +1299,11 @@ mod tests {
 
         old.metrics.rss = 8192;
         old.metrics.major_faults = 3;
+        old.metrics.descriptors = Some(8);
         let mut new = old.clone();
         new.metrics.rss = 4096;
         new.metrics.major_faults = 5;
+        new.metrics.descriptors = Some(6);
         new.compare_with(Some(&old));
 
         assert_eq!(
@@ -1281,6 +1318,26 @@ mod tests {
             new.changes
                 .iter()
                 .any(|fact| fact.label == "Major page faults" && fact.value == "+2")
+        );
+
+        assert!(
+            new.changes
+                .iter()
+                .any(|fact| fact.label == "Open descriptors" && fact.value == "−2")
+        );
+        new.metrics.descriptors = None;
+        new.compare_with(Some(&old));
+        assert!(
+            new.changes
+                .iter()
+                .all(|fact| fact.label != "Open descriptors")
+        );
+        populate_diagnostics(&mut new);
+        assert!(
+            new.diagnostics
+                .iter()
+                .any(|fact| fact.label == "Open-file headroom"
+                    && fact.value.starts_with("Unavailable: partial snapshot"))
         );
     }
 

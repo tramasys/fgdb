@@ -1,6 +1,7 @@
 use super::*;
 use components::{build_subtab_navigation, update_subtab_arrows};
 
+pub(super) mod descriptors;
 mod memory_summary;
 pub(super) use memory_summary::MemorySummary;
 
@@ -109,17 +110,6 @@ enum PrivateMappingColumn {
     Referenced,
     LazyFree,
     Huge,
-}
-
-#[derive(Clone, Copy)]
-enum DescriptorColumn {
-    Number,
-    Kind,
-    Access,
-    Flags,
-    Position,
-    Target,
-    Details,
 }
 
 #[derive(Clone, Copy)]
@@ -274,9 +264,8 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
     pages.add_titled(&threads, Some("threads"), "Threads");
     let (signals, signal_store, signal_count, signals_empty) = build_signals(bindings.columns);
     pages.add_titled(&signals, Some("signals"), "Signals");
-    let (descriptors, descriptor_store, descriptor_count, descriptors_empty) =
-        build_descriptors(bindings.columns);
-    pages.add_titled(&descriptors, Some("file-descriptors"), "FDs");
+    let descriptors = descriptors::DescriptorView::build(bindings.columns);
+    pages.add_titled(&descriptors.root, Some("file-descriptors"), "FDs");
     let (limits, limit_store, limit_count, limits_empty) = build_limits(bindings.columns);
     pages.add_titled(&limits, Some("limits"), "Limits");
     let (processes, process_store, process_count, processes_empty) =
@@ -389,9 +378,7 @@ pub(super) fn build_kernel_view(bindings: &KernelViewBindings<'_>) -> KernelView
         mapping_store,
         mapping_count,
         mappings_empty,
-        descriptor_store,
-        descriptor_count,
-        descriptors_empty,
+        descriptors,
         limit_store,
         limit_count,
         limits_empty,
@@ -1630,54 +1617,6 @@ fn build_mappings(columns: &ColumnLayouts) -> (gtk::Box, gio::ListStore, gtk::La
     (page, store, count, empty)
 }
 
-fn build_descriptors(
-    columns: &ColumnLayouts,
-) -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
-    let page = gtk::Box::new(gtk::Orientation::Vertical, 3);
-    let count = gtk::Label::new(Some("No snapshot"));
-    count.add_css_class("kernel-table-summary");
-    count.add_css_class("muted");
-    count.set_halign(gtk::Align::Start);
-    make_responsive_label(&count, pango::EllipsizeMode::Middle);
-    page.append(&count);
-    let store = gio::ListStore::new::<glib::BoxedAnyObject>();
-    let selection = gtk::SingleSelection::new(Some(store.clone()));
-    selection.set_autoselect(false);
-    selection.set_can_unselect(true);
-    let view = components::column_view(selection);
-    view.add_css_class("debug-table");
-    view.set_vexpand(true);
-    view.set_reorderable(true);
-
-    let layout = columns.table(TableId::FileDescriptors);
-
-    for (key, title, width, column) in [
-        ("number", "FD", 55, DescriptorColumn::Number),
-        ("kind", "KIND", 90, DescriptorColumn::Kind),
-        ("access", "ACCESS", 100, DescriptorColumn::Access),
-        ("flags", "FLAGS", 220, DescriptorColumn::Flags),
-        ("position", "POSITION", 110, DescriptorColumn::Position),
-        ("target", "TARGET", 360, DescriptorColumn::Target),
-        ("details", "FDINFO", 280, DescriptorColumn::Details),
-    ] {
-        layout.append(&view, key, &descriptor_column(title, width, column));
-    }
-
-    let empty = empty_label("No open file descriptors available");
-    page.append(&empty);
-
-    let scrolled = gtk::ScrolledWindow::builder()
-        .child(&view)
-        .min_content_height(1)
-        .vexpand(true)
-        .build();
-
-    configure_content_scroller(&scrolled);
-    page.append(&scrolled);
-
-    (page, store, count, empty)
-}
-
 fn build_limits(columns: &ColumnLayouts) -> (gtk::Box, gio::ListStore, gtk::Label, gtk::Label) {
     let page = gtk::Box::new(gtk::Orientation::Vertical, 3);
     let count = gtk::Label::new(Some("No snapshot"));
@@ -2135,40 +2074,6 @@ fn format_signed_bytes(delta: i128) -> String {
     }
 }
 
-fn descriptor_column(title: &str, width: i32, column: DescriptorColumn) -> gtk::ColumnViewColumn {
-    table_column(title, width, move |object, label| {
-        let descriptor = object.borrow::<KernelFileDescriptor>();
-
-        label.set_text(&match column {
-            DescriptorColumn::Number => descriptor.number.to_string(),
-            DescriptorColumn::Kind => descriptor.kind.clone(),
-            DescriptorColumn::Access => descriptor.access.clone(),
-            DescriptorColumn::Flags => descriptor.flags.clone(),
-            DescriptorColumn::Position => descriptor
-                .position
-                .map_or_else(String::new, |position| position.to_string()),
-            DescriptorColumn::Target => descriptor.target.clone(),
-            DescriptorColumn::Details => descriptor.details.clone(),
-        });
-
-        label.set_xalign(
-            if matches!(
-                column,
-                DescriptorColumn::Number | DescriptorColumn::Position
-            ) {
-                1.0
-            } else {
-                0.0
-            },
-        );
-
-        label.set_tooltip_text(Some(&format!(
-            "{}  {}  {}  {}",
-            descriptor.target, descriptor.access, descriptor.flags, descriptor.details
-        )));
-    })
-}
-
 fn limit_column(title: &str, width: i32, column: LimitColumn) -> gtk::ColumnViewColumn {
     table_column(title, width, move |object, label| {
         let limit = object.borrow::<KernelLimit>();
@@ -2539,11 +2444,12 @@ fn mapping_css(mapping: &KernelMapping) -> &'static str {
 }
 
 impl KernelView {
-    fn show_snapshot(&self, mut snapshot: KernelSnapshot) {
+    fn show_snapshot(&self, mut snapshot: KernelSnapshot, stop: u64) {
         let thread_count = snapshot.threads.len();
         let signal_count = snapshot.signals.len();
         let mapping_count = snapshot.mappings.len();
-        let descriptor_count = snapshot.file_descriptors.len();
+        let descriptor_identity = snapshot.process_identity();
+        let captured_at = snapshot.captured_at_millis;
         let limit_count = snapshot.limits.len();
         let process_count = snapshot.process_tree.len();
         let mapping_change_count = snapshot.mapping_changes.len();
@@ -2669,8 +2575,11 @@ impl KernelView {
         replace_boxed_store_if_changed(&self.signal_store, std::mem::take(&mut snapshot.signals));
         replace_boxed_store_if_changed(&self.mapping_store, mapping_rows);
 
-        replace_boxed_store_if_changed(
-            &self.descriptor_store,
+        self.descriptors.show(
+            descriptor_identity,
+            captured_at,
+            stop,
+            snapshot.file_descriptors_complete,
             std::mem::take(&mut snapshot.file_descriptors),
         );
 
@@ -2703,9 +2612,6 @@ impl KernelView {
                 .set_text(&format!("{mapping_count} mappings"));
         }
 
-        self.descriptor_count
-            .set_text(&format!("{} open file descriptors", descriptor_count));
-
         self.limit_count
             .set_text(&format!("{limit_count} resource limits"));
 
@@ -2716,7 +2622,6 @@ impl KernelView {
         self.threads_empty.set_visible(thread_count == 0);
         self.signals_empty.set_visible(signal_count == 0);
         self.mappings_empty.set_visible(mapping_count == 0);
-        self.descriptors_empty.set_visible(descriptor_count == 0);
         self.limits_empty.set_visible(limit_count == 0);
         self.processes_empty.set_visible(process_count == 0);
     }
@@ -2872,7 +2777,7 @@ impl KernelView {
         self.thread_store.remove_all();
         self.signal_store.remove_all();
         self.mapping_store.remove_all();
-        self.descriptor_store.remove_all();
+        self.descriptors.clear();
         self.limit_store.remove_all();
         self.process_store.remove_all();
         self.previous_snapshot.replace(None);
@@ -2892,7 +2797,6 @@ impl KernelView {
         clear_memory_summary(&self.memory_summary);
         self.signal_count.set_text("No snapshot");
         self.mapping_count.set_text("No snapshot");
-        self.descriptor_count.set_text("No snapshot");
         self.limit_count.set_text("No snapshot");
         self.process_count.set_text("No snapshot");
         self.threads_empty.set_visible(true);
@@ -2905,7 +2809,6 @@ impl KernelView {
         self.private_mapping_empty.set_visible(true);
         self.signals_empty.set_visible(true);
         self.mappings_empty.set_visible(true);
-        self.descriptors_empty.set_visible(true);
         self.limits_empty.set_visible(true);
         self.processes_empty.set_visible(true);
         self.tls_runtime.replace(KernelTlsRuntime::default());
@@ -3435,7 +3338,9 @@ impl Ui {
 
         let baseline = snapshot.baseline();
         self.kernel_view.previous_snapshot.replace(Some(baseline));
-        self.kernel_view.show_snapshot(snapshot);
+        self.kernel_view
+            .show_snapshot(snapshot, self.model.observed_stop_sequence());
+        self.update_socket_controls();
         self.kernel_view.needs_refresh.set(needs_tls_refresh);
         self.refresh_kernel_after_stop();
     }
@@ -3481,6 +3386,7 @@ impl Ui {
 
         self.kernel_view.needs_refresh.set(true);
         self.kernel_view.metadata_only_refresh.set(false);
+        self.kernel_view.descriptors.invalidate();
     }
 
     pub fn kernel_refresh_is_current(&self, generation: u64) -> bool {

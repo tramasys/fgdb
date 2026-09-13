@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs, io,
-    net::{Ipv4Addr, Ipv6Addr},
+    os::unix::fs::MetadataExt,
     path::Path,
     time::{Duration, Instant},
 };
@@ -222,13 +222,15 @@ pub(super) fn populate_descriptors(
     root: &Path,
     work: &WorkDeadline,
 ) {
+    snapshot.file_descriptors_complete = false;
     match read_file_descriptors(root, work) {
         Ok((descriptors, truncated)) => {
             snapshot.file_descriptors = descriptors;
+            snapshot.file_descriptors_complete = !truncated;
 
             if truncated {
                 snapshot.warnings.push(String::from(
-                    "File descriptor details were truncated at 16,384 entries",
+                    "File descriptor snapshot is incomplete: an entry was unavailable or the 16,384-entry / 500 ms capture limit was reached",
                 ));
             }
         }
@@ -270,7 +272,7 @@ fn read_file_descriptors(
     let deadline = Instant::now() + Duration::from_millis(500);
     let mut descriptors = Vec::new();
 
-    for entry in fs::read_dir(root.join("fd"))?.filter_map(Result::ok) {
+    for entry in fs::read_dir(root.join("fd"))? {
         if work.should_stop() {
             return Err(io::Error::new(
                 io::ErrorKind::Interrupted,
@@ -283,6 +285,11 @@ fn read_file_descriptors(
             break;
         }
 
+        let Ok(entry) = entry else {
+            truncated = true;
+            continue;
+        };
+
         let Some(number) = entry.file_name().to_string_lossy().parse::<u32>().ok() else {
             continue;
         };
@@ -291,16 +298,30 @@ fn read_file_descriptors(
             .ok()
             .map(|target| target.to_string_lossy().into_owned())
         else {
+            truncated = true;
             continue;
         };
 
-        let info = crate::bounded::read_prefix(
+        let mut info = crate::bounded::read_prefix(
             &root.join("fdinfo").join(number.to_string()),
             MAX_FDINFO_BYTES,
         )
         .ok()
         .map(|bytes| parse_descriptor_info(&String::from_utf8_lossy(&bytes)))
         .unwrap_or_default();
+
+        info.device = socket_inode(&target).and_then(|inode| {
+            fs::metadata(root.join("fd").join(number.to_string()))
+                .ok()
+                .filter(|metadata| metadata.ino() == inode)
+                .map(|metadata| {
+                    (
+                        rustix::fs::major(metadata.dev()),
+                        rustix::fs::minor(metadata.dev()),
+                    )
+                })
+        });
+
         descriptors.push((number, target, info));
     }
 
@@ -309,7 +330,7 @@ fn read_file_descriptors(
         .filter_map(|(_, target, _)| socket_inode(target))
         .collect::<HashSet<_>>();
 
-    let sockets = read_socket_endpoints(root, &socket_inodes, work);
+    let sockets = sockets::read(root, &socket_inodes, work);
     drop(socket_inodes);
 
     let mut descriptors = descriptors
@@ -322,11 +343,11 @@ fn read_file_descriptors(
                 _ => "unknown",
             }
             .to_owned();
-            let socket = socket_inode(&target).and_then(|inode| sockets.get(inode));
+            let socket = socket_inode(&target).and_then(|inode| sockets.get(&inode));
 
             let details = match (socket, info.details.is_empty()) {
-                (Some(socket), false) => format!("{socket}  {}", info.details),
-                (Some(socket), true) => socket.clone(),
+                (Some(socket), false) => format!("{}  {}", socket.summary(), info.details),
+                (Some(socket), true) => socket.summary(),
                 (None, _) => info.details,
             };
 
@@ -336,6 +357,13 @@ fn read_file_descriptors(
                 access,
                 flags: descriptor_flags(info.flags),
                 position: info.position,
+                inode: info.inode.or_else(|| socket_inode(&target)),
+                mount_id: info.mount_id,
+                eventfd_id: info.eventfd_id,
+                device: info.device,
+                socket: socket.cloned(),
+                raw_info: info.raw,
+                watches: info.watches,
                 target,
                 details,
             }
@@ -352,11 +380,27 @@ struct DescriptorInfo {
     flags: Option<u64>,
     position: Option<u64>,
     details: String,
+    raw: String,
+    inode: Option<u64>,
+    mount_id: Option<u64>,
+    eventfd_id: Option<u64>,
+    device: Option<(u32, u32)>,
+    watches: Vec<sockets::EpollWatch>,
 }
 
 fn parse_descriptor_info(fdinfo: &str) -> DescriptorInfo {
-    let mut info = DescriptorInfo::default();
+    let mut raw = fdinfo.chars().take(4096).collect::<String>();
+
+    if raw.len() < fdinfo.len() {
+        raw.push_str("\n… FD information truncated");
+    }
+
+    let mut info = DescriptorInfo {
+        raw,
+        ..DescriptorInfo::default()
+    };
     let mut detail_count = 0_usize;
+    let mut watches_truncated = false;
 
     for line in fdinfo.lines() {
         let trimmed = line.trim();
@@ -365,38 +409,53 @@ fn parse_descriptor_info(fdinfo: &str) -> DescriptorInfo {
         match key {
             "flags" => info.flags = u64::from_str_radix(value.trim(), 8).ok(),
             "pos" => info.position = value.trim().parse().ok(),
+            "ino" => info.inode = value.trim().parse().ok(),
+            "mnt_id" => info.mount_id = value.trim().parse().ok(),
+            "eventfd-id" => info.eventfd_id = value.trim().parse().ok(),
+            "tfd" if info.watches.len() < 256 => {
+                if let Some(watch) = sockets::EpollWatch::parse(trimmed) {
+                    info.watches.push(watch);
+                }
+            }
+            "tfd" => watches_truncated = true,
             _ => {}
         }
 
-        if matches!(
-            key,
-            "mnt_id"
-                | "ino"
-                | "eventfd-count"
-                | "eventfd-id"
-                | "sigmask"
-                | "Pid"
-                | "clockid"
-                | "ticks"
-                | "settime flags"
-                | "tfd"
-                | "inotify wd"
-                | "SAME_MNT_ID"
-                | "sq_entries"
-                | "cq_entries"
-        ) {
+        if detail_count < 10
+            && matches!(
+                key,
+                "mnt_id"
+                    | "ino"
+                    | "eventfd-count"
+                    | "eventfd-id"
+                    | "sigmask"
+                    | "Pid"
+                    | "clockid"
+                    | "ticks"
+                    | "settime flags"
+                    | "tfd"
+                    | "inotify wd"
+                    | "SAME_MNT_ID"
+                    | "sq_entries"
+                    | "cq_entries"
+            )
+        {
             if !info.details.is_empty() {
                 info.details.push_str("  ");
             }
 
             push_compact_whitespace(&mut info.details, trimmed);
             detail_count += 1;
-        }
 
-        if detail_count >= 10 {
-            info.details.push_str("  …");
-            break;
+            if detail_count == 10 {
+                info.details.push_str("  …");
+            }
         }
+    }
+
+    if watches_truncated {
+        info.raw
+            .push_str("\n… Epoll navigation limited to 256 registrations");
     }
 
     info
@@ -432,113 +491,12 @@ fn descriptor_kind(target: &str) -> &'static str {
     }
 }
 
-fn socket_inode(target: &str) -> Option<&str> {
-    target.strip_prefix("socket:[")?.strip_suffix(']')
-}
-
-fn read_socket_endpoints(
-    root: &Path,
-    wanted: &HashSet<&str>,
-    work: &WorkDeadline,
-) -> HashMap<String, String> {
-    let mut endpoints = HashMap::new();
-
-    if wanted.is_empty() {
-        return endpoints;
-    }
-
-    for (entry, protocol, ipv6) in [
-        ("tcp", "TCP", false),
-        ("tcp6", "TCP6", true),
-        ("udp", "UDP", false),
-        ("udp6", "UDP6", true),
-    ] {
-        if work.should_stop() {
-            return endpoints;
-        }
-
-        let Ok(input) =
-            crate::bounded::read_string(&root.join("net").join(entry), 16 * 1024 * 1024)
-        else {
-            continue;
-        };
-
-        for (index, line) in input.lines().skip(1).enumerate() {
-            if index % 256 == 0 && work.should_stop() {
-                return endpoints;
-            }
-
-            let mut fields = line.split_whitespace();
-
-            let Some(local_field) = fields.nth(1) else {
-                continue;
-            };
-
-            let Some(remote_field) = fields.next() else {
-                continue;
-            };
-
-            let Some(state_field) = fields.next() else {
-                continue;
-            };
-
-            let Some(inode) = fields.nth(5) else {
-                continue;
-            };
-
-            if !wanted.contains(inode) {
-                continue;
-            }
-
-            let local =
-                decode_endpoint(local_field, ipv6).unwrap_or_else(|| local_field.to_owned());
-
-            let remote =
-                decode_endpoint(remote_field, ipv6).unwrap_or_else(|| remote_field.to_owned());
-
-            let state = socket_state(state_field);
-
-            endpoints.insert(
-                inode.to_owned(),
-                format!("{protocol} {local} → {remote}  {state}"),
-            );
-        }
-    }
-
-    if let Ok(input) = crate::bounded::read_string(&root.join("net/unix"), 16 * 1024 * 1024) {
-        for (index, line) in input.lines().skip(1).enumerate() {
-            if index % 256 == 0 && work.should_stop() {
-                return endpoints;
-            }
-
-            let mut fields = line.split_whitespace();
-
-            let Some(socket_type) = fields.nth(4) else {
-                continue;
-            };
-
-            let Some(state) = fields.next() else {
-                continue;
-            };
-
-            let Some(inode) = fields.next() else {
-                continue;
-            };
-
-            if !wanted.contains(inode) {
-                continue;
-            }
-
-            let path = fields.next().unwrap_or("unnamed");
-
-            endpoints.insert(
-                inode.to_owned(),
-                format!("UNIX {path}  state {state}  type {socket_type}"),
-            );
-        }
-    }
-
-    endpoints
+fn socket_inode(target: &str) -> Option<u64> {
+    target
+        .strip_prefix("socket:[")?
+        .strip_suffix(']')?
+        .parse()
+        .ok()
 }
 
 fn descriptor_flags(flags: Option<u64>) -> String {
@@ -576,49 +534,6 @@ fn descriptor_flags(flags: Option<u64>) -> String {
         format!("0{flags:o}")
     } else {
         format!("0{flags:o}  {}", names.join(" "))
-    }
-}
-
-fn decode_endpoint(value: &str, ipv6: bool) -> Option<String> {
-    let (address, port) = value.split_once(':')?;
-    let port = u16::from_str_radix(port, 16).ok()?;
-
-    if ipv6 {
-        let mut bytes = [0_u8; 16];
-        let (chunks, remainder) = address.as_bytes().as_chunks::<8>();
-
-        if !remainder.is_empty() || chunks.len() != 4 {
-            return None;
-        }
-
-        for (index, chunk) in chunks.iter().enumerate() {
-            let word = u32::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
-            bytes[index * 4..index * 4 + 4].copy_from_slice(&word.to_ne_bytes());
-        }
-
-        Some(format!("[{}]:{port}", Ipv6Addr::from(bytes)))
-    } else {
-        let word = u32::from_str_radix(address, 16).ok()?;
-
-        Some(format!("{}:{port}", Ipv4Addr::from(word.to_ne_bytes())))
-    }
-}
-
-fn socket_state(state: &str) -> &'static str {
-    match state {
-        "01" => "ESTABLISHED",
-        "02" => "SYN_SENT",
-        "03" => "SYN_RECV",
-        "04" => "FIN_WAIT1",
-        "05" => "FIN_WAIT2",
-        "06" => "TIME_WAIT",
-        "07" => "CLOSE",
-        "08" => "CLOSE_WAIT",
-        "09" => "LAST_ACK",
-        "0A" => "LISTEN",
-        "0B" => "CLOSING",
-        "0C" => "NEW_SYN_RECV",
-        _ => "UNKNOWN",
     }
 }
 
@@ -726,6 +641,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn descriptor_capture_reports_missing_entries_and_parses_identity() {
+        let root = gtk::glib::mkdtemp(std::env::temp_dir().join("fgdb-fds-XXXXXX")).unwrap();
+        fs::create_dir(root.join("fd")).unwrap();
+        fs::create_dir(root.join("fdinfo")).unwrap();
+        std::os::unix::fs::symlink("anon_inode:[eventfd]", root.join("fd/4")).unwrap();
+        fs::write(
+            root.join("fdinfo/4"),
+            "ino: 99\nmnt_id: 17\neventfd-id: 123\n",
+        )
+        .unwrap();
+        let work = WorkDeadline::new(Duration::from_secs(15));
+        let mut snapshot = KernelSnapshot::default();
+        populate_descriptors(&mut snapshot, &root, &work);
+        assert!(snapshot.file_descriptors_complete);
+        let fd = &snapshot.file_descriptors[0];
+        assert_eq!(
+            (fd.inode, fd.mount_id, fd.eventfd_id),
+            (Some(99), Some(17), Some(123))
+        );
+
+        // An unreadable FD entry is omitted, but must never imply a closed FD.
+        fs::write(root.join("fd/5"), "not a symlink").unwrap();
+        populate_descriptors(&mut snapshot, &root, &work);
+        assert!(!snapshot.file_descriptors_complete);
+        assert_eq!(snapshot.file_descriptors.len(), 1);
+        assert!(
+            snapshot
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("incomplete"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn parses_limits_and_socket_endpoints() {
         let limits = parse_limits(
             "Limit                     Soft Limit           Hard Limit           Units\n\
@@ -736,8 +686,8 @@ mod tests {
         assert_eq!(limits[0].hard, "1048576");
 
         assert_eq!(
-            decode_endpoint("0100007F:1F90", false).as_deref(),
-            Some("127.0.0.1:8080")
+            sockets::decode_endpoint("0100007F:1F90", false),
+            Some("127.0.0.1:8080".parse().unwrap())
         );
 
         assert_eq!(

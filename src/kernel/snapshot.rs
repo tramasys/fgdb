@@ -95,7 +95,9 @@ fn read_snapshot_from(
     snapshot.metrics.user_ticks = stat.user_ticks;
     snapshot.metrics.system_ticks = stat.system_ticks;
     snapshot.metrics.mappings = snapshot.mappings.len() as u64;
-    snapshot.metrics.descriptors = snapshot.file_descriptors.len() as u64;
+    snapshot.metrics.descriptors = snapshot
+        .file_descriptors_complete
+        .then_some(snapshot.file_descriptors.len() as u64);
     let after = process::read_proc_stat(&root.join("stat")).map(|stat| stat.start_time);
     ensure_snapshot_identity(pid, expected_start_time, after)?;
     work.check()?;

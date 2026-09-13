@@ -163,6 +163,7 @@ impl ProcessState {
 
 struct StoppedState {
     return_value: RefCell<return_value::ReturnHistory>,
+    observed_stop_sequence: Cell<u64>,
     stop_refresh_generation: Cell<u64>,
     active_stop_context: RefCell<Option<crate::debugger::StopContext>>,
     latest_frames: RefCell<Rc<[StackFrame]>>,
@@ -189,6 +190,7 @@ impl StoppedState {
     fn new() -> Self {
         Self {
             return_value: RefCell::default(),
+            observed_stop_sequence: Cell::new(0),
             stop_refresh_generation: Cell::new(0),
             active_stop_context: RefCell::new(None),
             latest_frames: RefCell::new(Rc::from([])),
