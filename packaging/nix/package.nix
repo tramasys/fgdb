@@ -8,7 +8,6 @@
   gtksourceview5,
   vte-gtk4,
   gdb,
-  binutils,
   clang,
   elfutils,
   zlib,
@@ -51,7 +50,7 @@ rustPlatform.buildRustPackage {
   };
 
   preFixup = ''
-    gappsWrapperArgs+=(--suffix PATH : ${lib.makeBinPath [ gdb binutils ]})
+    gappsWrapperArgs+=(--suffix PATH : ${lib.makeBinPath [ gdb ]})
   '';
 
   postInstall = ''

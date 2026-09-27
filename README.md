@@ -28,9 +28,6 @@ privileges, and the packages do not grant capabilities automatically.
 Debug symbols improve source and variable inspection. GEF, language pretty printers
 and rr are optional.
 
-Source verification uses GNU readelf and compiler-recorded DWARF checksums.
-Files without checksum evidence remain unverified.
-
 ## Features
 
 - Launch and attach to processes, open core dumps and connect to remote GDB servers

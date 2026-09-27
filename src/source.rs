@@ -9,7 +9,6 @@ use crate::config::LaunchConfig;
 
 mod breakpoints;
 mod cache;
-pub(crate) mod verification;
 pub(crate) use breakpoints::SourceBreakpointIndex;
 pub(crate) use cache::{CachedSource, SourceLine};
 

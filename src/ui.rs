@@ -1279,7 +1279,6 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 
 #[derive(Clone)]
 pub struct Ui {
-    source_verification: Rc<RefCell<Option<editor::freshness::VerificationHandler>>>,
     comparisons: Rc<RefCell<Vec<comparison::Baseline>>>,
     stop_info: stop_info::StopInfoView,
     column_layouts: ColumnLayouts,

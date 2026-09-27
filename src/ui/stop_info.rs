@@ -70,13 +70,6 @@ impl StopInfoView {
 }
 
 impl Ui {
-    pub(crate) fn connect_source_verification(
-        &self,
-        handler: impl Fn(PathBuf, Arc<String>, Rc<dyn Fn(String)>) + 'static,
-    ) {
-        self.source_verification.replace(Some(Rc::new(handler)));
-    }
-
     pub(crate) fn connect_stop_info(
         self: &Rc<Self>,
         signal: impl Fn(Rc<StopEntry>, glib::WeakRef<gtk::Box>) + 'static,

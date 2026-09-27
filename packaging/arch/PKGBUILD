@@ -8,7 +8,7 @@ url='https://github.com/tramasys/fgdb'
 license=('MIT')
 depends=('gdb' 'gtk4>=4.22' 'gtksourceview5>=5.18' 'vte4>=0.84' 'glib2' 'glibc' 'libgcc')
 makedepends=('cargo' 'git' 'glib2-devel' 'pkgconf')
-optdepends=('rr: record and replay debugging' 'binutils: source checksum verification')
+optdepends=('rr: record and replay debugging')
 provides=('fgdb')
 conflicts=('fgdb')
 source=("fgdb::git+$url.git#branch=main")

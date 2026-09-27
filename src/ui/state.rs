@@ -108,7 +108,6 @@ impl Ui {
         kernel_section_handler.replace(Some(layout.disclosure_handler()));
 
         let ui = Self {
-            source_verification: Rc::default(),
             comparisons: Rc::default(),
             stop_info,
             column_layouts,
@@ -439,10 +438,6 @@ impl Ui {
     pub(crate) fn invalidate_target_caches(&self) {
         crate::kernel::invalidate_local_target_abi_cache();
         self.source.clear_resolved_paths();
-
-        for document in self.source.documents.borrow().iter() {
-            document.freshness.invalidate_verification();
-        }
     }
 
     pub fn register_details_visible(&self) -> bool {
@@ -1044,18 +1039,6 @@ impl Ui {
 
     pub(super) fn update_control_sensitivity(&self) {
         self.render_stop_info();
-
-        if self
-            .source
-            .verification_revision
-            .replace(self.model.symbols.revision())
-            != self.model.symbols.revision()
-        {
-            for document in self.source.documents.borrow().iter() {
-                document.freshness.invalidate_verification();
-            }
-        }
-
         let (state, class) = execution_status(&self.model);
 
         set_status_widgets(

@@ -2,13 +2,7 @@
 
 use super::*;
 
-pub(in crate::ui) type VerificationHandler = Rc<dyn Fn(PathBuf, Arc<String>, Rc<dyn Fn(String)>)>;
-
 pub(in crate::ui) struct SourceFreshness {
-    verification: gtk::Box,
-    verification_status: gtk::Label,
-    verify: gtk::Button,
-    verification_epoch: Cell<u64>,
     path: PathBuf,
     contents: RefCell<Arc<String>>,
     buffer: sourceview5::Buffer,
@@ -33,18 +27,6 @@ impl SourceFreshness {
         buffer: &sourceview5::Buffer,
         scroll: &gtk::ScrolledWindow,
     ) -> Rc<Self> {
-        let verification = components::control_row();
-        verification.add_css_class("subpanel-header");
-        let verification_status = gtk::Label::new(Some("Source match unverified"));
-        verification_status.add_css_class("muted");
-        verification_status.set_xalign(0.0);
-        verification_status.set_hexpand(true);
-        verification_status.set_ellipsize(pango::EllipsizeMode::End);
-        let verify = gtk::Button::with_label("Verify source");
-        verify.add_css_class("inline-action");
-        verify.set_tooltip_text(Some("Compare displayed source with a build-ID-validated DWARF checksum. Requires readelf and a paused target."));
-        verification.append(&verification_status);
-        verification.append(&verify);
         let notice = gtk::Box::new(gtk::Orientation::Horizontal, components::CONTROL_GAP);
         notice.add_css_class("source-change-notice");
         notice.set_visible(false);
@@ -66,10 +48,6 @@ impl SourceFreshness {
         notice.append(&dismiss);
 
         let state = Rc::new(Self {
-            verification,
-            verification_status,
-            verify,
-            verification_epoch: Cell::new(0),
             path: path.to_owned(),
             contents: RefCell::new(Arc::clone(contents)),
             buffer: buffer.clone(),
@@ -101,88 +79,7 @@ impl SourceFreshness {
             }
         });
 
-        let weak = Rc::downgrade(&state);
-
-        state.verify.connect_clicked(move |_| {
-            if let Some(state) = weak.upgrade() {
-                state.verify_source();
-            }
-        });
-
         state
-    }
-
-    pub(in crate::ui) fn verification(&self) -> &gtk::Box {
-        &self.verification
-    }
-
-    pub(in crate::ui) fn invalidate_verification(&self) {
-        self.verification_epoch
-            .set(self.verification_epoch.get().wrapping_add(1));
-        self.verification_status.set_text("Source match unverified");
-        self.verification_status.set_tooltip_text(None);
-        self.verification_status.set_css_classes(&["muted"]);
-        self.verify.set_sensitive(true);
-    }
-
-    fn verification_result(&self, status: &str) {
-        let summary = match status.split_once(" — ").map(|(state, _)| state) {
-            Some("Verified") => "Source match verified",
-            Some("Mismatched") => "Source mismatch",
-            Some("Unverified") => "Source match unverified",
-            _ => status,
-        };
-
-        self.verification_status.set_text(summary);
-        self.verification_status.set_tooltip_text(Some(status));
-        self.verification_status
-            .set_css_classes(&[if summary == "Source mismatch" {
-                "local-details-error"
-            } else {
-                "muted"
-            }]);
-    }
-
-    fn verify_source(self: &Rc<Self>) {
-        let handler = self
-            .ui
-            .borrow()
-            .upgrade()
-            .and_then(|ui| ui.source_verification.borrow().clone());
-        let Some(handler) = handler else { return };
-        self.invalidate_verification();
-        let epoch = self.verification_epoch.get();
-        self.verify.set_sensitive(false);
-        self.verification_status.set_text("Checking source match…");
-        let weak = Rc::downgrade(self);
-
-        handler(
-            self.path.clone(),
-            Arc::clone(&self.contents.borrow()),
-            Rc::new(move |status| {
-                if let Some(state) = weak.upgrade()
-                    && state.verification_epoch.get() == epoch
-                {
-                    state.verification_result(&status);
-                    state.verify.set_sensitive(true);
-                }
-            }),
-        );
-
-        let weak = Rc::downgrade(self);
-
-        // Stop-bound requests may be discarded before their completion callback.
-        glib::timeout_add_local_once(Duration::from_secs(6), move || {
-            if let Some(state) = weak.upgrade()
-                && state.verification_epoch.get() == epoch
-                && !state.verify.is_sensitive()
-            {
-                state.invalidate_verification();
-                state.verification_result(
-                    "Unverified — verification expired. Retry at a stable stop",
-                );
-            }
-        });
     }
 
     pub(in crate::ui) fn notice(&self) -> &gtk::Box {
@@ -229,12 +126,11 @@ impl SourceFreshness {
         self.notice.set_visible(true);
     }
 
-    fn show_unverified(&self) {
-        self.show("Source reloaded from disk. Its match to the loaded executable is not verified");
+    fn show_reloaded(&self) {
+        self.show("Source reloaded from disk. Debug locations may no longer match");
     }
 
     fn schedule(self: &Rc<Self>) {
-        self.invalidate_verification();
         self.generation.fetch_add(1, Ordering::Relaxed);
 
         if let Some(source) = self.debounce.borrow_mut().take() {
@@ -253,7 +149,6 @@ impl SourceFreshness {
     }
 
     pub(in crate::ui) fn reload(self: &Rc<Self>) {
-        self.invalidate_verification();
         self.generation.fetch_add(1, Ordering::Relaxed);
         self.force.set(true);
         self.check();
@@ -338,7 +233,7 @@ impl SourceFreshness {
                                  The loaded executable has not been rebuilt by fgdb",
                             );
                         } else if state.changed.get() && (force || state.notice.is_visible()) {
-                            state.show_unverified();
+                            state.show_reloaded();
                         } else if !state.changed.get()
                             && (force || state.monitor.borrow().is_some())
                         {
@@ -362,7 +257,6 @@ impl SourceFreshness {
     }
 
     fn replace(self: &Rc<Self>, contents: Arc<String>) {
-        self.invalidate_verification();
         let cursor = self.buffer.iter_at_mark(&self.buffer.get_insert());
         let bound = self.buffer.iter_at_mark(&self.buffer.selection_bound());
         let positions = [
@@ -396,7 +290,7 @@ impl SourceFreshness {
             .select_range(&at(positions[0]), &at(positions[1]));
 
         self.changed.set(true);
-        self.show_unverified();
+        self.show_reloaded();
 
         if let Some(ui) = self.ui.borrow().upgrade() {
             // Gutter locations already use source line numbers. No filesystem
@@ -568,27 +462,7 @@ mod tests {
             &scroll,
         );
 
-        let mismatch = "Mismatched — displayed source differs from the compiled DWARF checksum";
-        state.verification_result(mismatch);
-        assert_eq!(state.verification_status.text(), "Source mismatch");
-        assert_eq!(
-            state.verification_status.tooltip_text().as_deref(),
-            Some(mismatch)
-        );
-        assert!(
-            state
-                .verification_status
-                .has_css_class("local-details-error")
-        );
-        state.invalidate_verification();
-        assert!(
-            !state
-                .verification_status
-                .has_css_class("local-details-error")
-        );
-        assert!(state.verification_status.has_css_class("muted"));
-        assert!(state.verification_status.tooltip_text().is_none());
-
+        assert!(!state.notice.is_visible());
         let start = buffer.iter_at_line_offset(0, 4).unwrap();
         let end = buffer.iter_at_line_offset(1, 8).unwrap();
         buffer.create_source_mark(None, EXECUTION_CATEGORY, &end);
@@ -599,6 +473,12 @@ mod tests {
         assert_eq!((cursor.line(), cursor.line_offset()), (1, 5));
         assert_eq!((bound.line(), bound.line_offset()), (0, 4));
         assert!(state.notice.is_visible());
+
+        assert_eq!(
+            state.message.text(),
+            "Source reloaded from disk. Debug locations may no longer match"
+        );
+
         assert!(!buffer.is_modified());
         assert!(
             buffer

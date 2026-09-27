@@ -9,14 +9,6 @@ use std::{
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
 pub(crate) fn output(command: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
-    output_with_limit(command, timeout, 64 * 1024)
-}
-
-pub(crate) fn output_with_limit(
-    command: &mut Command,
-    timeout: Duration,
-    limit: usize,
-) -> Option<Vec<u8>> {
     let deadline = Instant::now().checked_add(timeout)?;
 
     if timeout.is_zero() {
@@ -52,7 +44,7 @@ pub(crate) fn output_with_limit(
                 match stdout.read(&mut buffer) {
                     Ok(0) => eof = true,
                     Ok(count) => {
-                        if output.len().saturating_add(count) > limit {
+                        if output.len().saturating_add(count) > 64 * 1024 {
                             return None;
                         }
 

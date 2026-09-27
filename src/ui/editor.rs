@@ -48,7 +48,6 @@ pub(in crate::ui) struct SourceWorkspace {
     resolved_paths: RefCell<crate::performance::BoundedLruCache<String, PathBuf>>,
     pub(in crate::ui) open_generation: Arc<AtomicU64>,
     annotation_epoch: Arc<AtomicU64>,
-    pub(in crate::ui) verification_revision: Cell<u64>,
     annotation_pending: RefCell<HashMap<PathBuf, Arc<AtomicBool>>>,
     annotation_cache:
         RefCell<crate::performance::BoundedLruCache<PathBuf, (u64, Option<source::CachedSource>)>>,
@@ -101,7 +100,6 @@ impl SourceWorkspace {
             )),
             open_generation: Arc::new(AtomicU64::new(0)),
             annotation_epoch: Arc::new(AtomicU64::new(0)),
-            verification_revision: Cell::new(0),
             annotation_pending: RefCell::new(HashMap::new()),
             annotation_cache: RefCell::new(crate::performance::BoundedLruCache::new(
                 crate::performance::DISASSEMBLY_SOURCE_CACHE_BUDGET,

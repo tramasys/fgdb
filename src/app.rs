@@ -17,7 +17,6 @@ mod return_values;
 mod rr;
 mod session;
 mod source_control;
-mod source_verification;
 mod stop_info;
 mod stop_requests;
 mod symbol_resolution;
