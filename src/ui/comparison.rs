@@ -67,10 +67,48 @@ impl Origin {
 }
 
 #[derive(Clone)]
-pub(super) struct Baseline {
+struct Baseline {
     source: Source,
     origin: Origin,
     values: BTreeMap<String, String>,
+}
+
+struct Pin {
+    baseline: Baseline,
+    compared: Option<Result<Baseline, String>>,
+}
+
+#[derive(Default)]
+pub(super) struct Comparisons {
+    pins: RefCell<Vec<Pin>>,
+    window: glib::WeakRef<gtk::Window>,
+    selected: Cell<u32>,
+}
+
+impl Comparisons {
+    fn pin(&self, baseline: Baseline) -> Result<usize, &'static str> {
+        let mut pins = self.pins.borrow_mut();
+
+        let previous = pins.iter().position(|pin| {
+            pin.baseline.source == baseline.source
+                && pin.baseline.origin.compatible(&baseline.origin)
+        });
+
+        let pin = Pin {
+            baseline,
+            compared: None,
+        };
+
+        if let Some(index) = previous {
+            pins[index] = pin;
+            Ok(index)
+        } else if pins.len() < MAX_PINS {
+            pins.push(pin);
+            Ok(pins.len() - 1)
+        } else {
+            Err("Eight pins retained. Clear pins before capturing another.")
+        }
+    }
 }
 
 fn insert(
@@ -193,31 +231,51 @@ fn find_path(tree: &VariableTree, path: &[(String, bool, Option<usize>)]) -> Opt
 }
 
 struct DifferenceRow {
-    cells: [String; 3],
-    changed: bool,
+    name: String,
+    before: Option<String>,
+    after: Option<String>,
+    compared: bool,
+}
+
+impl DifferenceRow {
+    fn changed(&self) -> bool {
+        self.compared && self.before != self.after
+    }
+
+    fn cells(&self) -> [&str; 4] {
+        let status = match (&self.before, &self.after) {
+            _ if !self.compared => "Pinned",
+            (None, _) => "Newly loaded",
+            (_, None) => "Not loaded",
+            _ if self.changed() => "Changed",
+            _ => "Unchanged",
+        };
+
+        [
+            &self.name,
+            self.before.as_deref().unwrap_or("—"),
+            self.after.as_deref().unwrap_or("—"),
+            status,
+        ]
+    }
 }
 
 fn difference(
     before: &BTreeMap<String, String>,
-    after: &BTreeMap<String, String>,
+    after: Option<&BTreeMap<String, String>>,
 ) -> Vec<DifferenceRow> {
-    let names: std::collections::BTreeSet<_> = before.keys().chain(after.keys()).collect();
+    let names: std::collections::BTreeSet<_> = before
+        .keys()
+        .chain(after.into_iter().flat_map(BTreeMap::keys))
+        .collect();
 
     names
         .into_iter()
-        .map(|name| {
-            let old = before.get(name);
-            let new = after.get(name);
-
-            DifferenceRow {
-                cells: [
-                    name.clone(),
-                    old.map_or("<not captured>", String::as_str).into(),
-                    new.map_or("<not loaded or out of scope>", String::as_str)
-                        .into(),
-                ],
-                changed: old != new,
-            }
+        .map(|name| DifferenceRow {
+            name: name.clone(),
+            before: before.get(name).cloned(),
+            after: after.and_then(|values| values.get(name)).cloned(),
+            compared: after.is_some(),
         })
         .collect()
 }
@@ -375,18 +433,87 @@ impl Ui {
     }
 
     pub(super) fn open_comparisons(self: &Rc<Self>) {
-        let (window, content, actions) =
-            stop_info::inspection_window(&self.window, "Pinned comparisons");
+        if let Some(window) = self.comparisons.window.upgrade() {
+            window.present();
+            return;
+        }
 
-        let help = empty_label(
-            "Captures loaded rows only, not a full memory snapshot. Up to 8 pins, 256 rows / 64 KiB each and 4 KiB per memory range. Compare in the same target, thread, frame and function. Matching context does not prove the same call invocation.",
-        );
+        let (window, view) = ComparisonView::new(&self.window, &self.column_layouts);
+        self.layout.bind_window("comparisons", &window);
+        self.comparisons.window.set(Some(&window));
+        view.render(&self.comparisons, self.comparisons.selected.get());
 
-        let (help, revealed) =
-            build_disclosure_with_content("CAPTURE LIMITS", &help, false, "comparison-help");
+        for (button, action) in [(&view.pin, 0), (&view.compare, 1), (&view.clear, 2)] {
+            let weak = Rc::downgrade(self);
+            let target = Rc::downgrade(&view);
 
-        revealed.connect_visible_notify(stop_info::fit_inspection_window);
-        content.append(&help);
+            button.connect_clicked(move |_| {
+                let (Some(ui), Some(view)) = (weak.upgrade(), target.upgrade()) else { return };
+                let mut selected = view.pages.current_page().unwrap_or(0);
+                view.status.set_visible(false);
+
+                match action {
+                    0 => {
+                        let result = ui.comparison_source(view.source.selected())
+                            .and_then(|source| ui.capture_comparison(source))
+                            .and_then(|baseline| ui.comparisons.pin(baseline).map_err(str::to_owned));
+
+                        match result {
+                            Ok(index) => selected = index as u32,
+                            Err(error) => {
+                                view.status.set_text(&error);
+                                view.status.set_visible(true);
+                                return;
+                            }
+                        }
+                    }
+                    1 => {
+                        for pin in ui.comparisons.pins.borrow_mut().iter_mut() {
+                            pin.compared = Some(ui.capture_comparison(pin.baseline.source.clone()).and_then(|now| {
+                                if pin.baseline.origin.compatible(&now.origin) {
+                                    Ok(now)
+                                } else {
+                                    Err("Different target, thread, frame, function or symbol revision. Return to the baseline context before comparing.".into())
+                                }
+                            }));
+                        }
+                    }
+                    _ => ui.comparisons.pins.borrow_mut().clear(),
+                }
+
+                view.render(&ui.comparisons, selected);
+            });
+        }
+
+        let state = Rc::clone(&self.comparisons);
+
+        window.connect_close_request(move |_| {
+            state.selected.set(view.pages.current_page().unwrap_or(0));
+            glib::Propagation::Proceed
+        });
+
+        window.present();
+    }
+}
+
+struct ComparisonView {
+    pages: gtk::Notebook,
+    stack: gtk::Stack,
+    source: gtk::DropDown,
+    pin: gtk::Button,
+    compare: gtk::Button,
+    clear: gtk::Button,
+    changed: gtk::CheckButton,
+    filter: gtk::CustomFilter,
+    count: gtk::Label,
+    status: gtk::Label,
+    columns: TableLayout,
+}
+
+impl ComparisonView {
+    fn new(parent: &impl IsA<gtk::Window>, columns: &ColumnLayouts) -> (gtk::Window, Rc<Self>) {
+        let (window, content, actions) = stop_info::inspection_window(parent, "Pinned comparisons");
+        window.set_default_size(940, 500);
         let controls = components::control_row();
 
         let source = gtk::DropDown::from_strings(&[
@@ -397,136 +524,157 @@ impl Ui {
         ]);
 
         source.set_hexpand(true);
+        source.set_tooltip_text(Some("Choose the loaded data to capture as a baseline"));
         let pin = gtk::Button::with_label("Pin current");
+        pin.set_tooltip_text(Some(
+            "Capture loaded values. Pinning the same source and context replaces its baseline.",
+        ));
         let compare = gtk::Button::with_label("Compare current");
+        compare.set_tooltip_text(Some("Compare all pins with currently loaded data. Results stay fixed until you compare again."));
         let clear = gtk::Button::with_label("Clear pins");
+
+        let help = empty_label(
+            "Pin loaded data, step, then compare. Results are snapshots, not live values.\n\nUp to 8 pins, 256 rows / 64 KiB each and 4 KiB per memory range. Only loaded rows are captured. Comparisons require the same target, thread, frame, function and symbol revision, but do not prove the same call invocation.",
+        );
+
+        help.set_max_width_chars(54);
+        components::inset(&help, components::CONTENT_INSET);
+        let popover = gtk::Popover::builder().child(&help).build();
+
+        let info = gtk::MenuButton::builder()
+            .icon_name("dialog-information-symbolic")
+            .tooltip_text("About pinned comparisons")
+            .popover(&popover)
+            .build();
+
         controls.append(&source);
         controls.append(&pin);
+        controls.append(&compare);
+        controls.append(&clear);
+        controls.append(&info);
         content.append(&controls);
+        let status = stop_info::inspection_text("");
+        status.add_css_class("local-details-error");
+        status.set_visible(false);
+        content.append(&status);
+        let pages = gtk::Notebook::new();
+        pages.set_scrollable(true);
+        pages.set_vexpand(true);
+        let empty = gtk::Box::new(gtk::Orientation::Vertical, components::CONTENT_INSET);
+        empty.set_valign(gtk::Align::Center);
+        empty.set_halign(gtk::Align::Center);
+        empty.append(&section_title("NO PINNED SNAPSHOTS"));
+
+        empty.append(&empty_label(
+            "Select a loaded value or memory inspector, then pin it before stepping.",
+        ));
+
+        let stack = gtk::Stack::new();
+        stack.set_vexpand(true);
+        stack.add_named(&empty, Some("empty"));
+        stack.add_named(&pages, Some("pins"));
+        content.append(&stack);
         let changed = gtk::CheckButton::with_label("Changed only");
         changed.set_active(true);
         let filter = difference_filter(&changed);
+        let count = empty_label("0 / 8 pins");
+        actions.prepend(&count);
         actions.prepend(&changed);
-        actions.prepend(&clear);
-        actions.prepend(&compare);
 
-        let status = stop_info::inspection_text(
-            "Choose a loaded value or memory inspector, then pin it before stepping.",
-        );
+        let view = Rc::new(Self {
+            pages,
+            stack,
+            source,
+            pin,
+            compare,
+            clear,
+            changed,
+            filter,
+            count,
+            status,
+            columns: columns.table(TableId::Comparisons),
+        });
 
-        content.append(&status);
-        let results = gtk::Box::new(gtk::Orientation::Vertical, components::CONTENT_INSET);
-        content.append(&stop_info::inspection_scroll(&results));
-        self.render_comparisons(&results, false, &filter);
-
-        for (button, action) in [(pin, 0), (compare, 1), (clear, 2)] {
-            let weak = Rc::downgrade(self);
-            let source = source.clone();
-            let status = status.clone();
-            let results = results.clone();
-            let filter = filter.clone();
-
-            button.connect_clicked(move |_| {
-                let Some(ui) = weak.upgrade() else { return };
-
-                if action == 2 {
-                    ui.comparisons.borrow_mut().clear();
-                } else if action == 0 {
-                    let result = ui
-                        .comparison_source(source.selected())
-                        .and_then(|source| ui.capture_comparison(source));
-
-                    match result {
-                        Ok(baseline) => {
-                            let mut pins = ui.comparisons.borrow_mut();
-
-                            if let Some(previous) = pins.iter_mut().find(|pin| {
-                                pin.source == baseline.source
-                                    && pin.origin.compatible(&baseline.origin)
-                            }) {
-                                *previous = baseline;
-                            } else if pins.len() < MAX_PINS {
-                                pins.push(baseline);
-                            } else {
-                                status.set_text(
-                                    "Eight pins retained. Clear pins before capturing another.",
-                                );
-
-                                status.add_css_class("local-details-error");
-                                stop_info::fit_inspection_window(&results);
-                                return;
-                            }
-                        }
-                        Err(error) => {
-                            status.set_text(&error);
-                            status.add_css_class("local-details-error");
-                            stop_info::fit_inspection_window(&results);
-                            return;
-                        }
-                    }
-                }
-
-                let count = ui.comparisons.borrow().len();
-                status.remove_css_class("local-details-error");
-
-                status.set_text(&format!(
-                    "{count} / {MAX_PINS} pins · updated only on request"
-                ));
-
-                ui.render_comparisons(&results, action == 1, &filter);
-            });
-        }
-
-        window.present();
+        (window, view)
     }
 
-    fn render_comparisons(&self, results: &gtk::Box, compare: bool, filter: &gtk::CustomFilter) {
-        clear_box(results);
+    fn render(&self, state: &Comparisons, selected: u32) {
+        while self.pages.n_pages() > 0 {
+            self.pages.remove_page(Some(0));
+        }
 
-        for pin in self.comparisons.borrow().iter() {
-            let card = components::card();
-            let title = stop_info::inspection_text(&pin.source.description());
-            title.add_css_class("field-label");
-            title.set_lines(2);
-            title.set_ellipsize(pango::EllipsizeMode::End);
-            title.set_tooltip_text(Some(&pin.source.description()));
-            card.append(&title);
+        let pins = state.pins.borrow();
 
-            let origin = empty_label(&format!("Baseline · {}", pin.origin.description()));
+        for pin in pins.iter() {
+            let page = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
+            components::inset(&page, components::CONTENT_INSET);
+            let context = components::control_row();
+            context.set_homogeneous(true);
+            context.append(&origin_label("Baseline", Some(&pin.baseline.origin)));
 
-            origin.set_wrap_mode(pango::WrapMode::WordChar);
-            card.append(&origin);
+            let current = pin
+                .compared
+                .as_ref()
+                .and_then(|result| result.as_ref().ok());
 
-            if compare {
-                match self.capture_comparison(pin.source.clone()) {
-                    Ok(now) if pin.origin.compatible(&now.origin) => {
-                        let origin =
-                            empty_label(&format!("Current · {}", now.origin.description()));
+            context.append(&origin_label("Compared", current.map(|now| &now.origin)));
+            page.append(&context);
 
-                        origin.set_wrap_mode(pango::WrapMode::WordChar);
-                        card.append(&origin);
-
-                        card.append(&difference_table(
-                            difference(&pin.values, &now.values),
-                            filter,
-                        ));
-                    }
-                    result => {
-                        let error = result.err().unwrap_or_else(|| "Different target, thread, frame, function or symbol revision. Return to the captured context before comparing.".into());
-                        let label = stop_info::inspection_text(&error);
-                        label.add_css_class("local-details-error");
-                        card.append(&label);
-                    }
-                }
-            } else {
-                card.append(&empty_label(&format!("{} values pinned", pin.values.len())));
+            if let Some(Err(error)) = &pin.compared {
+                let error = stop_info::inspection_text(error);
+                error.add_css_class("local-details-error");
+                page.append(&error);
             }
 
-            results.append(&card);
+            page.append(&difference_table(
+                difference(&pin.baseline.values, current.map(|now| &now.values)),
+                &self.filter,
+                &self.columns,
+            ));
+
+            let name = pin.baseline.source.description();
+            let tab = gtk::Label::new(Some(&name));
+            tab.set_ellipsize(pango::EllipsizeMode::End);
+            tab.set_width_chars(name.chars().count().min(24) as i32);
+            tab.set_max_width_chars(24);
+
+            tab.set_tooltip_text(Some(&format!(
+                "{name}\n{}",
+                pin.baseline.origin.description()
+            )));
+
+            self.pages.append_page(&page, Some(&tab));
         }
 
-        stop_info::fit_inspection_window(results);
+        self.pages
+            .set_current_page(Some(selected.min(pins.len().saturating_sub(1) as u32)));
+
+        self.stack
+            .set_visible_child_name(if pins.is_empty() { "empty" } else { "pins" });
+
+        self.compare.set_sensitive(!pins.is_empty());
+        self.clear.set_sensitive(!pins.is_empty());
+
+        self.changed
+            .set_sensitive(pins.iter().any(|pin| matches!(pin.compared, Some(Ok(_)))));
+
+        self.count.set_text(&format!(
+            "{} / {MAX_PINS} pins · results update on request",
+            pins.len()
+        ));
     }
+}
+
+fn origin_label(caption: &str, origin: Option<&Origin>) -> gtk::Label {
+    let text = origin.map_or_else(|| "Not captured".into(), Origin::description);
+    let label = stop_info::inspection_text(&format!("{caption} · {text}"));
+    label.add_css_class("muted");
+    label.set_hexpand(true);
+    label.set_width_chars(1);
+    label.set_lines(2);
+    label.set_ellipsize(pango::EllipsizeMode::End);
+    label.set_tooltip_text(Some(&text));
+    label
 }
 
 fn difference_filter(changed: &gtk::CheckButton) -> gtk::CustomFilter {
@@ -536,7 +684,10 @@ fn difference_filter(changed: &gtk::CheckButton) -> gtk::CustomFilter {
         !button.upgrade().is_some_and(|button| button.is_active())
             || object
                 .downcast_ref::<glib::BoxedAnyObject>()
-                .is_some_and(|object| object.borrow::<DifferenceRow>().changed)
+                .is_some_and(|object| {
+                    let row = object.borrow::<DifferenceRow>();
+                    !row.compared || row.changed()
+                })
     });
 
     let updated = filter.clone();
@@ -544,37 +695,60 @@ fn difference_filter(changed: &gtk::CheckButton) -> gtk::CustomFilter {
     filter
 }
 
-fn difference_table(rows: Vec<DifferenceRow>, filter: &gtk::CustomFilter) -> gtk::Box {
+fn difference_table(
+    rows: Vec<DifferenceRow>,
+    filter: &gtk::CustomFilter,
+    columns: &TableLayout,
+) -> gtk::Box {
     let root = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
+    root.set_vexpand(true);
     let total = rows.len();
-    let changed = rows.iter().filter(|row| row.changed).count();
+    let changed = rows.iter().filter(|row| row.changed()).count();
+    let compared = rows.iter().any(|row| row.compared);
 
-    root.append(&empty_label(&format!(
-        "{changed} changed · {total} captured entries"
-    )));
+    let summary = if compared {
+        format!("{changed} changed · {total} captured entries")
+    } else {
+        format!("{total} values pinned · compare after stepping")
+    };
 
+    root.append(&empty_label(&summary));
     let mut store = gio::ListStore::new::<glib::BoxedAnyObject>();
     store.extend(rows.into_iter().map(glib::BoxedAnyObject::new));
     let model = gtk::FilterListModel::new(Some(store), Some(filter.clone()));
     let view = components::column_view(gtk::NoSelection::new(Some(model.clone())));
     view.add_css_class("debug-table");
 
-    for (index, title) in ["NAME / ADDRESS", "BASELINE", "CURRENT"]
-        .into_iter()
-        .enumerate()
+    for (index, (key, title, width)) in [
+        ("name", "NAME / ADDRESS", 280),
+        ("baseline", "BASELINE", 220),
+        ("compared", "COMPARED", 220),
+        ("status", "STATUS", 120),
+    ]
+    .into_iter()
+    .enumerate()
     {
-        let column = components::label_column(title, 200, move |object, label| {
+        let column = components::label_column(title, width, move |object, label| {
             let row = object.borrow::<DifferenceRow>();
-            let value = &row.cells[index];
+            let value = row.cells()[index];
             clear_label_selection(label);
             label.set_text(value);
             label.set_tooltip_text(Some(value));
             label.set_halign(gtk::Align::Fill);
             label.set_xalign(0.0);
+            label.set_wrap(true);
+            label.set_wrap_mode(pango::WrapMode::WordChar);
+            label.set_lines(3);
+            label.set_ellipsize(pango::EllipsizeMode::End);
 
             label.set_css_classes(&[
                 "debug-table-cell",
-                if row.changed && index == 2 {
+                if index == 3
+                    || (index == 1 && row.before.is_none())
+                    || (index == 2 && row.after.is_none())
+                {
+                    "muted"
+                } else if row.changed() && index == 2 {
                     "local-changed-value"
                 } else {
                     "local-value"
@@ -582,31 +756,38 @@ fn difference_table(rows: Vec<DifferenceRow>, filter: &gtk::CustomFilter) -> gtk
             ]);
         });
 
-        view.append_column(&column);
+        columns.append(&view, key, &column);
     }
 
     let scroll = gtk::ScrolledWindow::builder()
         .child(&view)
-        .propagate_natural_height(true)
-        .max_content_height(240)
+        .vexpand(true)
         .build();
 
     let empty = empty_label("No differences in captured data");
-    scroll.set_visible(model.n_items() > 0);
-    empty.set_visible(model.n_items() == 0);
-    root.append(&scroll);
-    root.append(&empty);
-    let scroll = scroll.downgrade();
-    let empty = empty.downgrade();
-    let target = root.downgrade();
+    empty.set_valign(gtk::Align::Center);
+    empty.set_halign(gtk::Align::Center);
+    let stack = gtk::Stack::new();
+    stack.set_vexpand(true);
+    stack.add_named(&scroll, Some("table"));
+    stack.add_named(&empty, Some("empty"));
+
+    stack.set_visible_child_name(if model.n_items() > 0 {
+        "table"
+    } else {
+        "empty"
+    });
+
+    root.append(&stack);
+    let target = stack.downgrade();
 
     model.connect_items_changed(move |model, _, _, _| {
-        if let (Some(scroll), Some(empty), Some(target)) =
-            (scroll.upgrade(), empty.upgrade(), target.upgrade())
-        {
-            scroll.set_visible(model.n_items() > 0);
-            empty.set_visible(model.n_items() == 0);
-            stop_info::fit_inspection_window(&target);
+        if let Some(stack) = target.upgrade() {
+            stack.set_visible_child_name(if model.n_items() > 0 {
+                "table"
+            } else {
+                "empty"
+            });
         }
     });
 
@@ -619,49 +800,60 @@ mod tests {
 
     #[test]
     #[ignore = "requires a GTK display, run separately from other GTK tests"]
-    fn comparison_filter_updates_captured_rows_and_compact_layout() {
+    fn comparison_tabs_keep_results_and_geometry_stable() {
         gtk::init().unwrap();
         Theme::graphite().install();
         let parent = gtk::Window::new();
-        let (window, content, actions) =
-            stop_info::inspection_window(&parent, "Pinned comparisons");
+        let (window, view) = ComparisonView::new(&parent, &ColumnLayouts::default());
+        let state = Comparisons::default();
+        view.render(&state, 0);
+        assert!(!view.compare.is_sensitive());
+        assert_eq!(view.stack.visible_child_name().as_deref(), Some("empty"));
 
-        let changed = gtk::CheckButton::with_label("Changed only");
-        changed.set_active(true);
-        actions.prepend(&changed);
-        let filter = difference_filter(&changed);
+        let origin = Origin {
+            context: crate::debugger::StopContext::new(1, 1, Some("i1".into()), "1".into(), 0)
+                .unwrap(),
+            sequence: 1,
+            symbols: 1,
+            function: Some("main".into()),
+        };
 
-        let before = BTreeMap::from([
-            ("pair.x [int]".into(), "1".into()),
-            ("pair.y [int]".into(), "2".into()),
-        ]);
+        let before = BTreeMap::from([("pair.x".into(), "1".into()), ("pair.y".into(), "2".into())]);
 
-        let after = BTreeMap::from([
-            ("pair.x [int]".into(), "42".into()),
-            ("pair.y [int]".into(), "2".into()),
-        ]);
+        let baseline = Baseline {
+            source: Source::Registers,
+            origin,
+            values: before.clone(),
+        };
 
-        let results = components::card();
-        content.append(&stop_info::inspection_scroll(&results));
-        let table = difference_table(difference(&before, &after), &filter);
-        results.append(&table);
-
-        let view = super::super::tests::descendants::<gtk::ColumnView>(&table)
-            .pop()
-            .unwrap();
-
-        let model = view.model().unwrap();
+        assert_eq!(state.pin(baseline.clone()), Ok(0));
+        view.render(&state, 0);
+        assert!(!view.changed.is_sensitive());
         window.present();
         let main = glib::MainContext::default();
         main.block_on(glib::timeout_future(Duration::from_millis(100)));
-        assert_eq!(model.n_items(), 1);
-        assert_eq!(view.columns().n_items(), 3);
-        assert!(window.height() < 320, "compact height {}", window.height());
-        changed.set_active(false);
-        assert_eq!(model.n_items(), 2);
-        changed.set_active(true);
-        assert_eq!(model.n_items(), 1);
+        let height = window.height();
+        let page = view.pages.nth_page(Some(0)).unwrap();
+        assert!(view.pages.tab_label(&page).unwrap().width() > 60);
+        let mut current = baseline.clone();
+        current.origin.sequence = 2;
+        current.values.insert("pair.x".into(), "42".into());
+        state.pins.borrow_mut()[0].compared = Some(Ok(current));
+        view.render(&state, 0);
         main.block_on(glib::timeout_future(Duration::from_millis(100)));
+
+        let table = super::super::tests::descendants::<gtk::ColumnView>(&view.pages)
+            .pop()
+            .unwrap();
+
+        assert_eq!(table.columns().n_items(), 4);
+        assert_eq!(table.model().unwrap().n_items(), 1);
+        view.changed.set_active(false);
+        assert_eq!(table.model().unwrap().n_items(), 2);
+        view.changed.set_active(true);
+        assert_eq!(table.model().unwrap().n_items(), 1);
+        main.block_on(glib::timeout_future(Duration::from_millis(100)));
+        assert_eq!(window.height(), height);
 
         if let Some(path) = std::env::var_os("FGDB_COMPARISON_CAPTURE") {
             let widget = window.child().unwrap();
@@ -681,42 +873,43 @@ mod tests {
                 .unwrap();
         }
 
-        clear_box(&results);
-        let unchanged = difference_table(difference(&before, &before), &filter);
-        results.append(&unchanged);
-        let empty = unchanged.last_child().unwrap();
+        let mut large = baseline.clone();
 
-        let scroll = super::super::tests::descendants::<gtk::ScrolledWindow>(&unchanged)
-            .pop()
-            .unwrap();
+        large.source = Source::Memory {
+            id: 1,
+            address: 0x1000,
+            bytes: 4096,
+        };
 
-        assert!(empty.is_visible());
-        assert!(!scroll.is_visible());
-        changed.set_active(false);
-        assert!(!empty.is_visible());
-        assert!(scroll.is_visible());
-        changed.set_active(true);
-        assert!(empty.is_visible());
-        assert!(!scroll.is_visible());
-
-        let large = (0..MAX_ROWS)
-            .map(|index| (format!("field_{index}"), "v".repeat(256)))
+        large.values = (0..MAX_ROWS)
+            .map(|index| (format!("field_{index}"), "long_value".repeat(40)))
             .collect();
 
-        clear_box(&results);
-        let table = difference_table(difference(&large, &BTreeMap::new()), &filter);
-        results.append(&table);
-        stop_info::fit_inspection_window(&results);
+        assert_eq!(state.pin(large), Ok(1));
+        assert!(state.pins.borrow()[0].compared.is_some());
+        view.render(&state, 1);
         main.block_on(glib::timeout_future(Duration::from_millis(100)));
-
-        let scroll = super::super::tests::descendants::<gtk::ScrolledWindow>(&table)
-            .pop()
-            .unwrap();
-
-        assert!(scroll.vadjustment().upper() > scroll.vadjustment().page_size());
-        assert!(window.height() <= 520, "bounded height {}", window.height());
-        assert!(window.width() <= 740, "bounded width {}", window.width());
-        assert!(actions.is_mapped());
+        assert_eq!(view.pages.n_pages(), 2);
+        assert_eq!(view.pages.current_page(), Some(1));
+        let page = view.pages.nth_page(Some(1)).unwrap();
+        let scrolls = super::super::tests::descendants::<gtk::ScrolledWindow>(&page);
+        assert_eq!(scrolls.len(), 1);
+        assert!(scrolls[0].vadjustment().upper() > scrolls[0].vadjustment().page_size());
+        assert_eq!(window.height(), height);
+        assert!(window.width() <= 960);
+        state.pin(baseline.clone()).unwrap();
+        state.pins.borrow_mut()[0].compared = Some(Ok(baseline));
+        view.render(&state, 0);
+        let page = view.pages.nth_page(Some(0)).unwrap();
+        let stacks = super::super::tests::descendants::<gtk::Stack>(&page);
+        assert_eq!(stacks[0].visible_child_name().as_deref(), Some("empty"));
+        view.changed.set_active(false);
+        assert_eq!(stacks[0].visible_child_name().as_deref(), Some("table"));
+        state.pins.borrow_mut().clear();
+        view.render(&state, 0);
+        assert!(!view.compare.is_sensitive());
+        assert!(!view.clear.is_sensitive());
+        assert_eq!(view.stack.visible_child_name().as_deref(), Some("empty"));
         window.close();
         parent.close();
     }
@@ -791,11 +984,20 @@ mod tests {
     fn comparisons_preserve_absence_and_do_not_compare_truncated_values() {
         let before = BTreeMap::from([("x".into(), "1".into()), ("gone".into(), "2".into())]);
         let after = BTreeMap::from([("x".into(), "3".into())]);
-        let rows = difference(&before, &after);
-        assert_eq!(rows[0].cells, ["gone", "2", "<not loaded or out of scope>"]);
-        assert_eq!(rows[1].cells, ["x", "1", "3"]);
-        assert!(rows.iter().all(|row| row.changed));
-        assert!(difference(&before, &before).iter().all(|row| !row.changed));
+        let rows = difference(&before, Some(&after));
+        assert_eq!(rows[0].cells(), ["gone", "2", "—", "Not loaded"]);
+        assert_eq!(rows[1].cells(), ["x", "1", "3", "Changed"]);
+        assert!(rows.iter().all(DifferenceRow::changed));
+        assert!(
+            difference(&before, Some(&before))
+                .iter()
+                .all(|row| !row.changed())
+        );
+        assert!(
+            difference(&before, None)
+                .iter()
+                .all(|row| !row.compared && row.cells()[3] == "Pinned")
+        );
         let mut values = BTreeMap::new();
         assert!(insert(&mut values, "x".into(), "x".repeat(MAX_BYTES), &mut 0).is_err());
         assert!(values.is_empty());

@@ -337,8 +337,13 @@ impl Ui {
                 }
             });
 
-            let (row, revealed) =
-                build_disclosure_with_content(&title, &body, index == 0, "stop-history-entry");
+            let (row, revealed) = build_disclosure_with_content(
+                None,
+                &title,
+                &body,
+                index == 0,
+                "stop-history-entry",
+            );
 
             revealed.connect_visible_notify(fit_inspection_window);
             list.append(&row);
@@ -583,6 +588,7 @@ mod tests {
         let fields = inspection_fields([("Expression", "long value ".repeat(500))]);
 
         let (row, revealed) = build_disclosure_with_content(
+            None,
             &"long reason ".repeat(200),
             &fields,
             true,
@@ -618,6 +624,7 @@ mod tests {
 
         let released = {
             let row = build_disclosure(
+                "history-test",
                 "History entry",
                 &gtk::Label::new(None),
                 false,

@@ -655,19 +655,21 @@ pub(super) fn build_context_legend() -> gtk::Box {
         grid.attach(&item, (index % 2) as i32, (index / 2) as i32, 1, 1);
     }
 
-    build_disclosure("LEGEND", &grid, false, "context-legend")
+    build_disclosure("context.legend", "LEGEND", &grid, false, "context-legend")
 }
 
 pub(super) fn build_disclosure(
+    key: &'static str,
     title: &str,
     child: &impl IsA<gtk::Widget>,
     expanded: bool,
     class: &str,
 ) -> gtk::Box {
-    build_disclosure_with_content(title, child, expanded, class).0
+    build_disclosure_with_content(Some(key), title, child, expanded, class).0
 }
 
 pub(super) fn build_disclosure_with_content(
+    key: Option<&'static str>,
     title: &str,
     child: &impl IsA<gtk::Widget>,
     expanded: bool,
@@ -676,6 +678,11 @@ pub(super) fn build_disclosure_with_content(
     let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
     root.add_css_class("disclosure");
     root.add_css_class(class);
+
+    if let Some(key) = key {
+        root.set_widget_name(&format!("disclosure.{key}"));
+    }
+
     let heading = gtk::Box::new(gtk::Orientation::Horizontal, 4);
     let arrow = gtk::Label::new(Some(if expanded {
         DISCLOSURE_EXPANDED_ICON
@@ -712,7 +719,7 @@ pub(super) fn build_disclosure_with_content(
     content.set_visible(expanded);
     let content_for_click = content.clone();
     button.connect_clicked(move |button| {
-        let reveal = !content_for_click.is_visible();
+        let reveal = !content_for_click.get_visible();
         content_for_click.set_visible(reveal);
         arrow.set_text(if reveal {
             DISCLOSURE_EXPANDED_ICON

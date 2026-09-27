@@ -20,6 +20,7 @@ macro_rules! tables {
 tables! {
     Locals => "locals",
     ReturnValues => "return-values",
+    Comparisons => "comparisons",
     Watches => "watches",
     Instructions => "instructions",
     GeneralRegisters => "registers-general",

@@ -825,6 +825,7 @@ fn build_tls(
     });
 
     let metadata_pages = gtk::Stack::new();
+    metadata_pages.set_widget_name("stack.kernel.tls.metadata");
     connect_stack_text_selection_cleanup(&metadata_pages);
     metadata_pages.set_vexpand(true);
     metadata_pages.set_vhomogeneous(false);

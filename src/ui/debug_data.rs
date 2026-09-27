@@ -846,13 +846,16 @@ impl Ui {
         append_debug_data_page(&notebook, &activity, "Activity");
         root.append(&notebook);
         window.set_child(Some(&root));
+        let language_support = language_support_section();
+        self.layout.bind_window("debug-data", &window);
+        self.layout.bind_controls(&language_support);
 
         self.debug_data_view.replace(Some(DebugDataView {
             window: window.clone(),
             notebook: notebook.clone(),
             refresh,
             overview,
-            language_support: language_support_section(),
+            language_support,
             modules,
             module_list,
             sources,
@@ -2632,6 +2635,7 @@ fn language_support_section() -> gtk::Box {
     ));
 
     build_disclosure(
+        "debug-data.language-support",
         "Language support",
         &rows,
         false,

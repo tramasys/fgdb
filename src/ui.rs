@@ -1279,7 +1279,7 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 
 #[derive(Clone)]
 pub struct Ui {
-    comparisons: Rc<RefCell<Vec<comparison::Baseline>>>,
+    comparisons: Rc<comparison::Comparisons>,
     stop_info: stop_info::StopInfoView,
     column_layouts: ColumnLayouts,
     investigation: Rc<investigation::Workspace>,
@@ -1579,6 +1579,7 @@ struct Inspector {
     root: workspace::ResponsiveBox,
     notebook: gtk::Notebook,
     context_split: gtk::Paned,
+    return_split: layout::Pane,
     status_detail: gtk::Label,
     locals_store: gio::ListStore,
     locals_selection: gtk::SingleSelection,

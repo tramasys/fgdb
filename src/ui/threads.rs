@@ -116,6 +116,7 @@ pub(super) fn build_thread_controls() -> ThreadControls {
     advanced.append(&compare);
 
     root.append(&build_disclosure(
+        "threads.concurrency",
         "CONCURRENCY CONTROLS",
         &advanced,
         false,

@@ -93,6 +93,7 @@ impl Ui {
         layout.bind_notebook("inspector", &workspace.inspector_navigation, &panels);
         layout.bind_stack("kernel", &workspace.kernel_view.pages);
         layout.bind_stack("misc", &workspace.misc_view.pages);
+        layout.bind_controls(&root);
 
         workspace::console::install(
             &workspace.console,

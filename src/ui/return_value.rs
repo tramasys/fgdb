@@ -40,6 +40,10 @@ struct ReturnEntry {
 }
 
 impl ReturnValueView {
+    pub(super) fn layout_pane(&self, split: &gtk::Paned) -> layout::Pane {
+        layout::Pane::new("return_values", split).with_content(&self.scrolled)
+    }
+
     pub(super) fn new(bindings: &InspectorBindings<'_>) -> Self {
         let state: Rc<RefCell<ReturnViewState>> = Rc::default();
         let filter = source_search_entry("Filter name, type, or value");
@@ -119,8 +123,13 @@ impl ReturnValueView {
         availability.set_visible(false);
         body.append(&availability);
 
-        let (root, content) =
-            build_disclosure_with_content("RETURN VALUES", &body, true, "return-values-panel");
+        let (root, content) = build_disclosure_with_content(
+            Some("return-values"),
+            "RETURN VALUES",
+            &body,
+            true,
+            "return-values-panel",
+        );
 
         root.set_visible(false);
 
@@ -185,7 +194,7 @@ impl ReturnValueView {
 
             let show_table = visible
                 .iter()
-                .all(|widget| widget.upgrade().is_some_and(|widget| widget.is_visible()));
+                .all(|widget| widget.upgrade().is_some_and(|widget| widget.get_visible()));
 
             if !show_table {
                 if expanded.replace(false) {

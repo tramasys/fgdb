@@ -1476,17 +1476,34 @@ pub(super) fn build_register_view(columns: &ColumnLayouts) -> (gtk::Box, Vec<Reg
     content.add_css_class("register-groups");
     content.set_hexpand(true);
     let mut groups = Vec::new();
-    for (title, kind) in [
-        ("GENERAL PURPOSE", RegisterGroupKind::General),
-        ("THREAD BASES", RegisterGroupKind::Bases),
-        ("FLAGS", RegisterGroupKind::Flags),
-        ("SEGMENTS", RegisterGroupKind::Segments),
-        ("SIMD / VECTOR", RegisterGroupKind::Vector),
-        ("FLOATING POINT", RegisterGroupKind::FloatingPoint),
-        ("OTHER", RegisterGroupKind::Other),
+
+    for (key, title, kind) in [
+        (
+            "registers.general",
+            "GENERAL PURPOSE",
+            RegisterGroupKind::General,
+        ),
+        ("registers.bases", "THREAD BASES", RegisterGroupKind::Bases),
+        ("registers.flags", "FLAGS", RegisterGroupKind::Flags),
+        (
+            "registers.segments",
+            "SEGMENTS",
+            RegisterGroupKind::Segments,
+        ),
+        (
+            "registers.vector",
+            "SIMD / VECTOR",
+            RegisterGroupKind::Vector,
+        ),
+        (
+            "registers.float",
+            "FLOATING POINT",
+            RegisterGroupKind::FloatingPoint,
+        ),
+        ("registers.other", "OTHER", RegisterGroupKind::Other),
     ] {
         if kind == RegisterGroupKind::Vector {
-            let group = simd::build_register_group(title);
+            let group = simd::build_register_group(key, title);
             content.append(&group.panel);
             groups.push(group);
             continue;
@@ -1511,7 +1528,7 @@ pub(super) fn build_register_view(columns: &ColumnLayouts) -> (gtk::Box, Vec<Reg
                 | RegisterGroupKind::Segments
         );
 
-        let panel = build_disclosure(title, &view, expanded, "register-disclosure");
+        let panel = build_disclosure(key, title, &view, expanded, "register-disclosure");
         panel.add_css_class("register-group-panel");
         panel.set_visible(false);
         content.append(&panel);

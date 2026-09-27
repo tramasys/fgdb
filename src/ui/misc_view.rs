@@ -485,6 +485,7 @@ fn build_allocator_page(columns: &ColumnLayouts) -> AllocatorWidgets {
     let evidence = append_allocator_detail(&details, "Evidence", Some("allocator-evidence-value"));
 
     detection.append(&build_disclosure(
+        "allocator.evidence",
         "Detection evidence",
         &details,
         false,

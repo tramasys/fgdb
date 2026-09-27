@@ -255,7 +255,7 @@ impl VectorControls {
     }
 }
 
-pub(super) fn build_register_group(title: &str) -> RegisterGroupView {
+pub(super) fn build_register_group(key: &'static str, title: &str) -> RegisterGroupView {
     let store = gio::ListStore::new::<glib::BoxedAnyObject>();
     let list = gtk::ListBox::builder()
         .selection_mode(gtk::SelectionMode::Single)
@@ -318,7 +318,7 @@ pub(super) fn build_register_group(title: &str) -> RegisterGroupView {
     header.append(&lanes);
     body.append(&header);
     body.append(&list);
-    let panel = build_disclosure(title, &body, false, "register-disclosure");
+    let panel = build_disclosure(key, title, &body, false, "register-disclosure");
     panel.add_css_class("register-group-panel");
     panel.set_visible(false);
 

@@ -47,6 +47,11 @@ pub(super) struct MemorySearchView {
 }
 
 impl MemorySearchView {
+    pub(super) fn layout_pane(&self, split: &gtk::Paned) -> layout::Pane {
+        layout::Pane::with_default_fraction("memory_inspector_map", split, 0.5)
+            .with_content(&self.mappings)
+    }
+
     pub(super) fn new(
         layout: &TableLayout,
         inspector: &gtk::Box,
@@ -65,6 +70,7 @@ impl MemorySearchView {
             .build();
 
         pages.add_titled(inspector, Some("inspect"), "Inspect");
+        pages.set_widget_name("stack.memory.view");
         let switcher = gtk::StackSwitcher::builder()
             .stack(&pages)
             .halign(gtk::Align::Start)
@@ -78,6 +84,7 @@ impl MemorySearchView {
             .build();
 
         mapping_toggle.update_property(&[gtk::accessible::Property::Label("Memory mappings")]);
+        mapping_toggle.set_widget_name("disclosure.memory.mappings");
         map_header.prepend(&mapping_toggle);
         root.append(&switcher);
         split.set_start_child(Some(&pages));
@@ -259,6 +266,7 @@ impl MemorySearchView {
             .build();
 
         let issues = gtk::Expander::builder()
+            .name("disclosure.memory.search-issues")
             .label("Unreadable / skipped ranges")
             .child(&issue_scroll)
             .visible(false)

@@ -145,6 +145,8 @@ impl DetailSection {
 
 pub(in crate::ui) struct DescriptorView {
     pub(super) root: gtk::Box,
+    split: gtk::Paned,
+    detail_panel: gtk::Box,
     store: gio::ListStore,
     rows: RefCell<Vec<Row>>,
     tables: [Table; 2],
@@ -192,6 +194,11 @@ pub(in crate::ui) struct DescriptorView {
 }
 
 impl DescriptorView {
+    pub(in crate::ui) fn layout_pane(&self) -> super::layout::Pane {
+        super::layout::Pane::with_default_fraction("kernel_descriptors", &self.split, 0.5)
+            .with_content(&self.detail_panel)
+    }
+
     pub(super) fn build(columns: &ColumnLayouts) -> Rc<Self> {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         let responsive = workspace::ResponsiveBox::new();
@@ -366,6 +373,8 @@ impl DescriptorView {
         }
 
         detail_panel.append(&detail_pages);
+        details.set_widget_name("disclosure.kernel.descriptors.details");
+        sockets.set_widget_name("disclosure.kernel.descriptors.sockets");
         detail_panel.set_visible(false);
         details
             .bind_property("active", &detail_panel, "visible")
@@ -384,6 +393,8 @@ impl DescriptorView {
 
         let view = Rc::new(Self {
             root,
+            split,
+            detail_panel,
             store,
             rows: RefCell::new(Vec::new()),
             tables,

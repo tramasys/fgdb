@@ -672,7 +672,9 @@ pub(super) fn build_workspace(
         layout::Pane::new("navigation_source", &navigation_and_editor),
         layout::Pane::new("workspace_terminal", &main_and_terminal),
         layout::Pane::new("locals_instructions", &inspector.context_split),
-        layout::Pane::with_default_fraction("memory_inspector_map", &inspector.memory_split, 0.5),
+        inspector.return_split.clone(),
+        inspector.kernel_view.descriptors.layout_pane(),
+        inspector.memory_search.layout_pane(&inspector.memory_split),
         layout::Pane::new("kernel_changes", &inspector.kernel_view.changes_split),
         layout::Pane::with_default_fraction("kernel_tls", &inspector.kernel_view.tls_split, 0.5),
         layout::Pane::with_default_fraction(
@@ -1513,6 +1515,7 @@ pub(super) fn build_inspector(
     watchpoint_controls.append(&watchpoint_add_button);
     watchpoint_section.append(&watchpoint_controls);
     breakpoints_page.append(&build_disclosure(
+        "breakpoints.add-watchpoint",
         "ADD WATCHPOINT",
         &watchpoint_section,
         false,
@@ -1577,6 +1580,7 @@ pub(super) fn build_inspector(
     };
 
     breakpoints_page.append(&build_disclosure(
+        "breakpoints.quick-catchpoints",
         "QUICK CATCHPOINTS",
         &catchpoint_section,
         false,
@@ -1628,6 +1632,7 @@ pub(super) fn build_inspector(
     signal_buttons.append(&mut more_signal_buttons);
 
     let more_signal_section = build_disclosure(
+        "signals.more",
         "MORE POSIX SIGNALS",
         &more_signal_grid,
         false,
@@ -1710,6 +1715,7 @@ pub(super) fn build_inspector(
         root,
         notebook,
         context_split: context,
+        return_split: return_value.layout_pane(&values_split),
         status_detail: detail,
         locals_store,
         locals_selection,

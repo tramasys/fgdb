@@ -27,6 +27,7 @@ const STACK_PREFIX: &str = "stack.";
 const TERMINAL_VISIBLE_KEY: &str = "terminal.visible";
 const CONSOLE_VIEW_KEY: &str = "console.view";
 const PANEL_PREFIX: &str = "panel.";
+const DIALOG_PREFIX: &str = "dialog.";
 const MAX_LAYOUT_BYTES: usize = 1024 * 1024;
 const MAX_NOTEBOOK_PAGE: u32 = 1024;
 
@@ -45,6 +46,7 @@ pub(super) struct Pane {
     key: &'static str,
     widget: gtk::Paned,
     default_fraction: Option<f64>,
+    content: gtk::Widget,
 }
 
 impl Pane {
@@ -53,6 +55,7 @@ impl Pane {
             key,
             widget: widget.clone(),
             default_fraction: None,
+            content: widget.clone().upcast(),
         }
     }
 
@@ -67,7 +70,13 @@ impl Pane {
             key,
             widget: widget.clone(),
             default_fraction: Some(default_fraction.clamp(0.0, 1.0)),
+            content: widget.clone().upcast(),
         }
+    }
+
+    pub(super) fn with_content(mut self, content: &impl IsA<gtk::Widget>) -> Self {
+        self.content = content.as_ref().clone();
+        self
     }
 }
 
@@ -134,6 +143,7 @@ impl Persistence {
         for pane in &state.panes {
             let weak_state = Rc::downgrade(&state);
             let key = pane.key;
+            let guarded = pane.content != pane.widget.clone().upcast::<gtk::Widget>();
 
             pane.widget.connect_position_notify(move |widget| {
                 let Some(state) = weak_state.upgrade() else {
@@ -141,6 +151,11 @@ impl Persistence {
                 };
 
                 if state.ready_to_save.get() && !state.restoring_position.get() {
+                    // Revealing collapsed content can reset the divider before allocation.
+                    if guarded && state.pending_pane_restores.borrow().contains_key(key) {
+                        return;
+                    }
+
                     state.cancel_pane_restore(key);
                     state.remember_position(key, widget);
                     state.schedule_save();
@@ -150,9 +165,14 @@ impl Persistence {
             let weak_state = Rc::downgrade(&state);
             let key = pane.key;
             let default_fraction = pane.default_fraction;
+            let split = pane.widget.downgrade();
 
-            pane.widget.connect_map(move |widget| {
+            pane.content.connect_map(move |_| {
                 let Some(state) = weak_state.upgrade() else {
+                    return;
+                };
+
+                let Some(widget) = split.upgrade() else {
                     return;
                 };
 
@@ -189,7 +209,7 @@ impl Persistence {
 
             let weak_state = Rc::downgrade(&state);
 
-            pane.widget.connect_unmap(move |_| {
+            pane.content.connect_unmap(move |_| {
                 if let Some(state) = weak_state.upgrade() {
                     state.cancel_pane_restore(key);
                 }
@@ -406,6 +426,32 @@ impl Persistence {
         });
     }
 
+    pub(super) fn bind_window(&self, key: &'static str, window: &gtk::Window) {
+        if let Some(geometry) = self.0.remembered.borrow().dialogs.get(key) {
+            geometry.apply(window);
+        }
+
+        for property in ["default-width", "default-height", "maximized"] {
+            let weak = Rc::downgrade(&self.0);
+
+            window.connect_notify_local(Some(property), move |window, _| {
+                let Some(state) = weak.upgrade().filter(|state| !state.finished.get()) else {
+                    return;
+                };
+
+                if let Some(geometry) = WindowGeometry::capture(window) {
+                    state
+                        .remembered
+                        .borrow_mut()
+                        .dialogs
+                        .insert(key.to_owned(), geometry);
+
+                    state.schedule_save();
+                }
+            });
+        }
+    }
+
     pub(super) fn disclosure_handler(&self) -> KernelSectionHandler {
         let weak_state = Rc::downgrade(&self.0);
 
@@ -416,7 +462,65 @@ impl Persistence {
         })
     }
 
-    pub(super) fn bind_stack(&self, key: &'static str, stack: &gtk::Stack) {
+    /// Bind only controls with explicit, stable IDs. Captured evidence has no layout identity.
+    pub(super) fn bind_controls(&self, root: &impl IsA<gtk::Widget>) {
+        let root = root.as_ref();
+        let name = root.widget_name();
+
+        if let Some(key) = name.strip_prefix(DISCLOSURE_PREFIX) {
+            let saved = self.0.remembered.borrow().disclosures.get(key).copied();
+            let weak = Rc::downgrade(&self.0);
+            let key = key.to_owned();
+
+            if let Some(toggle) = root.downcast_ref::<gtk::ToggleButton>() {
+                if let Some(saved) = saved {
+                    toggle.set_active(saved);
+                }
+
+                toggle.connect_toggled(move |toggle| {
+                    if let Some(state) = weak.upgrade() {
+                        state.set_disclosure(&key, toggle.is_active());
+                    }
+                });
+            } else if let Some(expander) = root.downcast_ref::<gtk::Expander>() {
+                if let Some(saved) = saved {
+                    expander.set_expanded(saved);
+                }
+
+                expander.connect_expanded_notify(move |expander| {
+                    if let Some(state) = weak.upgrade() {
+                        state.set_disclosure(&key, expander.is_expanded());
+                    }
+                });
+            } else if root.has_css_class("disclosure")
+                && let Some(content) = root.last_child()
+                && let Some(button) = root.first_child().and_downcast::<gtk::Button>()
+            {
+                if saved.is_some_and(|expanded| expanded != content.get_visible()) {
+                    button.emit_clicked();
+                }
+
+                content.connect_visible_notify(move |content| {
+                    if let Some(state) = weak.upgrade() {
+                        state.set_disclosure(&key, content.get_visible());
+                    }
+                });
+            }
+        } else if let Some(key) = name.strip_prefix(STACK_PREFIX)
+            && let Some(stack) = root.downcast_ref::<gtk::Stack>()
+        {
+            self.bind_stack(key, stack);
+        }
+
+        let mut child = root.first_child();
+
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            self.bind_controls(&widget);
+        }
+    }
+
+    pub(super) fn bind_stack(&self, key: &str, stack: &gtk::Stack) {
         let selected = self.0.remembered.borrow().stacks.get(key).cloned();
 
         if let Some(selected) = selected
@@ -426,6 +530,7 @@ impl Persistence {
         }
 
         let weak = Rc::downgrade(&self.0);
+        let key = key.to_owned();
 
         stack.connect_visible_child_name_notify(move |stack| {
             if let Some(state) = weak.upgrade()
@@ -435,7 +540,7 @@ impl Persistence {
                     .remembered
                     .borrow()
                     .stacks
-                    .get(key)
+                    .get(&key)
                     .map(String::as_str)
                     != Some(name.as_str());
 
@@ -489,6 +594,10 @@ impl State {
     }
 
     fn set_disclosure(self: &Rc<Self>, key: &str, expanded: bool) {
+        if self.finished.get() || self.remembered.borrow().disclosures.get(key) == Some(&expanded) {
+            return;
+        }
+
         self.remembered
             .borrow_mut()
             .disclosures
@@ -559,7 +668,10 @@ impl State {
         let maximum = widget.max_position();
         let minimum = widget.min_position();
 
-        if !pane_children_visible(widget) || !valid_pane_range(minimum, maximum) {
+        if !self.pane_content_mapped(key)
+            || !pane_children_visible(widget)
+            || !valid_pane_range(minimum, maximum)
+        {
             return;
         }
 
@@ -598,7 +710,7 @@ impl State {
     }
 
     fn remember_position(&self, key: &'static str, widget: &gtk::Paned) {
-        if !widget.is_mapped() || !pane_children_visible(widget) {
+        if !self.pane_content_mapped(key) || !widget.is_mapped() || !pane_children_visible(widget) {
             return;
         }
 
@@ -615,6 +727,12 @@ impl State {
                 },
             );
         }
+    }
+
+    fn pane_content_mapped(&self, key: &str) -> bool {
+        self.panes
+            .iter()
+            .any(|pane| pane.key == key && pane.content.is_mapped())
     }
 
     fn schedule_save(self: &Rc<Self>) {
@@ -735,6 +853,7 @@ impl State {
         for pane in &self.panes {
             if !self.ready_to_save.get()
                 || !pane.widget.is_mapped()
+                || !pane.content.is_mapped()
                 || !pane_children_visible(&pane.widget)
                 || self.pending_pane_restores.borrow().contains_key(pane.key)
             {
@@ -836,6 +955,7 @@ struct RememberedLayout {
     stacks: HashMap<String, String>,
     disclosures: HashMap<String, bool>,
     panels: HashMap<PanelId, PanelPlacement>,
+    dialogs: HashMap<String, WindowGeometry>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -924,6 +1044,16 @@ fn parse_layout(contents: &str) -> RememberedLayout {
             continue;
         }
 
+        if let Some(key) = key.trim().strip_prefix(DIALOG_PREFIX) {
+            if !key.is_empty()
+                && let Some(geometry) = WindowGeometry::parse(geometry)
+            {
+                remembered.dialogs.insert(key.to_owned(), geometry);
+            }
+
+            continue;
+        }
+
         if key.trim() == TERMINAL_VISIBLE_KEY {
             remembered.terminal_visible = parse_bool(geometry.trim());
             continue;
@@ -1002,7 +1132,7 @@ fn parse_bool(value: &str) -> Option<bool> {
 }
 
 fn serialize_layout(panes: &[Pane], remembered: &RememberedLayout) -> String {
-    let mut contents = String::from("# fgdb layout v9\n");
+    let mut contents = String::from("# fgdb layout v10\n");
     remembered.column_widths.write(&mut contents);
 
     if let Some(window) = remembered.window {
@@ -1056,6 +1186,20 @@ fn serialize_layout(panes: &[Pane], remembered: &RememberedLayout) -> String {
         .expect("writing to a String cannot fail");
     }
 
+    let mut dialogs = remembered.dialogs.iter().collect::<Vec<_>>();
+    dialogs.sort_unstable_by_key(|(key, _)| *key);
+
+    for (key, window) in dialogs {
+        writeln!(
+            contents,
+            "{DIALOG_PREFIX}{key}={},{},{}",
+            window.size.width,
+            window.size.height,
+            u8::from(window.maximized)
+        )
+        .expect("writing to a String cannot fail");
+    }
+
     let mut notebooks = remembered.notebooks.iter().collect::<Vec<_>>();
     notebooks.sort_unstable_by_key(|(key, _)| *key);
 
@@ -1088,6 +1232,185 @@ fn serialize_layout(panes: &[Pane], remembered: &RememberedLayout) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires a GTK display, run separately from other GTK tests"]
+    fn disclosures_and_guarded_panes_restore_without_saving_collapsed_sizes() {
+        gtk::init().unwrap();
+        crate::ui::Theme::graphite().install();
+
+        let application = gtk::Application::builder()
+            .application_id("dev.fgdb.DisclosureLayoutTest")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+
+        application
+            .register(None::<&gtk::gio::Cancellable>)
+            .unwrap();
+
+        let temporary =
+            glib::mkdtemp(std::env::temp_dir().join("fgdb-disclosure-layout-XXXXXX")).unwrap();
+
+        let path = temporary.join("layout.conf");
+
+        let settle = || {
+            glib::MainContext::default().block_on(glib::timeout_future(Duration::from_millis(100)));
+        };
+
+        let finish = |layout: &Persistence| {
+            layout.finish();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+
+            while !layout.final_save_done() && std::time::Instant::now() < deadline {
+                settle();
+            }
+
+            assert!(layout.final_save_done());
+        };
+
+        let mut saved = None;
+
+        for restart in [false, true] {
+            let scroll = gtk::ScrolledWindow::builder()
+                .child(&gtk::Label::new(Some("Captured values")))
+                .vexpand(true)
+                .build();
+
+            let (disclosure, content) = crate::ui::formatting::build_disclosure_with_content(
+                Some("test.values"),
+                "VALUES",
+                &scroll,
+                true,
+                "return-values-panel",
+            );
+
+            let header = disclosure
+                .first_child()
+                .and_downcast::<gtk::Button>()
+                .unwrap();
+
+            let split = gtk::Paned::new(gtk::Orientation::Vertical);
+            split.set_start_child(Some(&disclosure));
+            split.set_end_child(Some(&gtk::Label::new(Some("Locals"))));
+            split.set_resize_start_child(false);
+            split.set_resize_end_child(true);
+            split.set_position(180);
+            let weak = split.downgrade();
+
+            content.connect_visible_notify(move |content| {
+                if let Some(split) = weak.upgrade() {
+                    split.set_position(if content.get_visible() { 180 } else { 0 });
+                }
+            });
+
+            let toggle = gtk::ToggleButton::with_label("Details");
+            toggle.set_widget_name("disclosure.test.details");
+            let expander = gtk::Expander::new(Some("Issues"));
+            expander.set_widget_name("disclosure.test.issues");
+            let pages = gtk::Stack::new();
+            pages.set_widget_name("stack.test.pages");
+            pages.set_vexpand(true);
+            pages.add_named(&split, Some("values"));
+            pages.add_named(&gtk::Label::new(Some("Other page")), Some("other"));
+            let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            root.append(&toggle);
+            root.append(&expander);
+            root.append(&pages);
+
+            let window = gtk::ApplicationWindow::builder()
+                .application(&application)
+                .default_width(900)
+                .default_height(600)
+                .child(&root)
+                .build();
+
+            let layout = Persistence::install_at(
+                &window,
+                vec![Pane::new("values", &split).with_content(&scroll)],
+                path.clone(),
+                &ColumnLayouts::default(),
+            );
+
+            layout.bind_controls(&root);
+
+            let dialog = gtk::Window::builder()
+                .default_width(720)
+                .default_height(300)
+                .build();
+
+            layout.bind_window("comparison", &dialog);
+
+            if restart {
+                assert!(!content.get_visible());
+                assert!(header.has_css_class("disclosure-collapsed"));
+                assert!(toggle.is_active());
+                assert!(expander.is_expanded());
+                assert_eq!(pages.visible_child_name().as_deref(), Some("other"));
+                assert_eq!(dialog.default_size(), (980, 520));
+            }
+
+            window.present();
+            settle();
+            assert!(layout.0.ready_to_save.get());
+            pages.set_visible_child_name("values");
+            settle();
+
+            if let Some(saved) = saved {
+                header.emit_clicked();
+                settle();
+                assert!(content.get_visible() && scroll.is_mapped());
+                assert!(header.has_css_class("disclosure-expanded"));
+
+                assert_eq!(
+                    split.position(),
+                    scale_position(saved, split.min_position(), split.max_position())
+                );
+            }
+
+            split.set_position(230);
+            settle();
+
+            let expanded = PanePosition {
+                position: split.position(),
+                extent: split.max_position(),
+            };
+
+            // Empty data and hidden parents must not replace the user's expanded height.
+            scroll.set_visible(false);
+            split.set_position(40);
+            settle();
+            assert_eq!(layout.0.remembered.borrow().panes["values"], expanded);
+            scroll.set_visible(true);
+            settle();
+            assert_eq!(split.position(), expanded.position);
+            header.emit_clicked();
+            settle();
+            assert!(!content.get_visible());
+            window.set_default_size(900, 750);
+            settle();
+            toggle.set_active(true);
+            expander.set_expanded(true);
+            pages.set_visible_child_name("other");
+            dialog.set_default_size(980, 520);
+            finish(&layout);
+            let parsed = parse_layout(&std::fs::read_to_string(&path).unwrap());
+            assert_eq!(parsed.panes["values"], expanded);
+            assert!(!parsed.disclosures["test.values"]);
+
+            assert_eq!(
+                parse_layout(&serialize_layout(&layout.0.panes, &parsed)),
+                parsed
+            );
+
+            saved = Some(expanded);
+            dialog.close();
+            window.close();
+        }
+
+        std::fs::remove_file(path.with_extension("lock")).unwrap();
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_dir(temporary).unwrap();
+    }
 
     #[test]
     fn parses_valid_layout_entries_and_ignores_malformed_ones() {
