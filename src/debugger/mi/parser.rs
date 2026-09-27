@@ -255,7 +255,8 @@ impl<'a> Parser<'a> {
         bytes.extend_from_slice(&self.input[start..self.position]);
 
         loop {
-            self.expect(b'\\')?;
+            // The scanner found a quote or backslash; quotes exit above or below.
+            self.position += 1;
             self.escape(&mut bytes)?;
             let start = self.position;
 
@@ -273,6 +274,7 @@ impl<'a> Parser<'a> {
             .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned()))
     }
 
+    #[inline]
     fn escape(&mut self, output: &mut Vec<u8>) -> Result<(), String> {
         let escaped = self
             .next()

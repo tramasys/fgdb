@@ -113,9 +113,8 @@ gdb.write('FGDB_SWITCH_RERUN_OK\n')
         .arg(format!("python exec({})", crate::debugger::quote(script)))
         .arg(executable);
 
-    let output =
-        crate::language::toolchain::probe::output(&mut command, std::time::Duration::from_secs(15))
-            .expect("live inferior-switch check failed or timed out");
+    let output = crate::bounded::process::output(&mut command, std::time::Duration::from_secs(15))
+        .expect("live inferior-switch check failed or timed out");
 
     let output = String::from_utf8(output).unwrap();
     assert!(output.contains("FGDB_SWITCH_RERUN_OK"), "{output}");

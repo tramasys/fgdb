@@ -11,7 +11,7 @@ pub(super) use models::{
     SnapshotRow, replace_boxed_store, replace_boxed_store_if_changed, replace_snapshot_store,
 };
 pub(super) use subtabs::{build_subtab_navigation, update_subtab_arrows};
-pub(super) use tables::{CenteredScroll, column_view, table_column};
+pub(super) use tables::{CenteredScroll, column_view, label_column, table_column};
 
 pub(super) const CONTROL_GAP: i32 = 6;
 pub(super) const CONTENT_INSET: i32 = 8;

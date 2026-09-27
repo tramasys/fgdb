@@ -335,6 +335,7 @@ pub(in crate::ui) fn open_source_document(
     connect_breakpoint_gutter_context_click(&scroll, &view, &breakpoint_renderer);
     let freshness = super::freshness::SourceFreshness::new(&path, contents, &buffer, &scroll);
     let page = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    page.append(freshness.verification());
     page.append(freshness.notice());
     page.append(&scroll);
     let (tab, tab_label, close) = build_source_tab(&source_tab_title(&path));

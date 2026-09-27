@@ -95,7 +95,11 @@ impl Ui {
 
         if rendered.is_empty() {
             self.locals_empty.set_text(if root_count == 0 {
-                "Values appear when the target is paused"
+                if self.model.inferior_has_started() && !self.model.inferior_is_running() {
+                    "No locals or arguments in the selected frame"
+                } else {
+                    "Values appear when the target is stopped"
+                }
             } else {
                 "No locals or arguments match the filter"
             });
@@ -338,15 +342,18 @@ impl Ui {
         }
 
         let Some(varobj) = variable.varobj.as_deref() else {
-            return true;
+            return self.model.watches_are_current();
         };
 
         let Some(node) = self.find_variable_node(varobj) else {
             return false;
         };
 
-        (!node.local || self.locals_inspection_available())
-            && node.variable.has_same_children(variable)
+        (if node.local {
+            self.locals_inspection_available()
+        } else {
+            self.model.watches_are_current()
+        }) && node.variable.has_same_children(variable)
     }
 
     pub(crate) fn cancel_variable_children_request(&self, variable: &Variable) {

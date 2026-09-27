@@ -3304,6 +3304,7 @@ impl Ui {
         let generation = self.kernel_refresh_generation.get().wrapping_add(1);
         self.kernel_refresh_generation.set(generation);
         self.kernel_view.in_flight.set(true);
+        self.kernel_view.descriptors.set_refreshing(true);
 
         Some(generation)
     }
@@ -3315,6 +3316,7 @@ impl Ui {
         }
 
         self.kernel_view.in_flight.set(false);
+        self.kernel_view.descriptors.set_refreshing(false);
 
         let metadata_only = self.kernel_view.metadata_only_refresh.replace(false)
             && self.kernel_view.previous_snapshot.borrow().is_some();
@@ -3356,6 +3358,7 @@ impl Ui {
         }
 
         self.kernel_view.in_flight.set(false);
+        self.kernel_view.descriptors.invalidate();
         self.kernel_view.needs_refresh.set(true);
 
         if self.kernel_view.previous_snapshot.borrow().is_none() {
@@ -3395,6 +3398,7 @@ impl Ui {
 
     pub fn finish_stale_kernel_refresh(&self) {
         self.kernel_view.in_flight.set(false);
+        self.kernel_view.descriptors.set_refreshing(false);
         self.refresh_kernel_after_stop();
     }
 

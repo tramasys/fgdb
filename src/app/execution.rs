@@ -11,6 +11,7 @@ use crate::{
     ui::Ui,
 };
 use std::{rc::Rc, time::Duration};
+use vte4::TerminalExt;
 
 pub(super) fn handle(ui: &Rc<Ui>, client: &MiClient, action: ExecutionAction) {
     match action {
@@ -131,7 +132,9 @@ fn run(ui: &Rc<Ui>, client: &MiClient) {
 }
 
 fn pause(ui: &Rc<Ui>, client: &MiClient) {
-    if ui.model.native_until_active() {
+    if ui.model.execution().ready && ui.model.terminal_pending() {
+        ui.terminal.feed_child(b"\x03");
+    } else if ui.model.native_until_active() {
         ui.cancel_native_until();
     } else if ui.model.execution().ready
         && ui.model.execution().state.inferior_started()

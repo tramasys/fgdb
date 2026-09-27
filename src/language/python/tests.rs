@@ -73,7 +73,7 @@ def inspect(expression, axes, offset=0, count=64):
         .arg("-ex")
         .arg(format!("python exec({})", crate::debugger::quote(&wrapper)));
 
-    let output = crate::language::toolchain::probe::output(&mut command, Duration::from_secs(20))
+    let output = crate::bounded::process::output(&mut command, Duration::from_secs(20))
         .expect("GDB fixture failed or timed out");
 
     let output = String::from_utf8(output).unwrap();

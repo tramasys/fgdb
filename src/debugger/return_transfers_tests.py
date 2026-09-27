@@ -82,6 +82,41 @@ try:
 finally:
     transfers._destinations = original
 
+for architecture, instructions, origins in [
+        ("i386:x86-64", ["movq rax,xmm0", "movapd xmm0,xmm1", "mov QWORD PTR [rsp],rax", "movsd QWORD PTR [rsp+8],xmm0"],
+         tokens("xmm0")[:8] + tokens("xmm1")[:8]),
+        ("i386:x86-64", ["mov rdx,rax", "movq rax,xmm0"],
+         tokens("rax")[:8] + tokens("xmm0")[:8]),
+        ("i386:x86-64", ["mov ecx,eax", "mov eax,edx"],
+         tokens("rax")[:4] + (None,) * 4),
+        ("i386:x86-64", ["mov QWORD PTR [rsp],rax", "mov rax,rdx", "mov rcx,QWORD PTR [rsp]"],
+         tokens("rax")[:8]),
+        ("aarch64", ["fmov x2,d0", "fmov d0,d1"],
+         tokens("v0")[:8] + tokens("v1")[:8]),
+        ("aarch64", ["mov w2,w0", "mov w0,w1"],
+         tokens("x0")[:4])]:
+    actual = transfers.relocate(Frame(instructions), 100, 100 + 4 * len(instructions), origins, architecture)
+    registers, _ = transfer(architecture, instructions)
+    assert actual is not None, instructions
+    assert tuple(registers[origin[0]][origin[1]] if origin else None for origin in actual) == origins, (instructions, actual)
+
+for architecture, instructions, origins in [
+        ("i386:x86-64", ["mov rax,QWORD PTR [rsp]"], tokens("rax")[:8]),
+        ("i386:x86-64", ["mov QWORD PTR [rsp],rax", "mov rax,rcx"], tokens("rax")[:8]),
+        ("i386:x86-64", ["mov ecx,eax", "mov rax,rdx"], tokens("rax")[:8]),
+        ("i386:x86-64", ["mov rcx,rax", "mov rax,rdx", "call 0x200"], tokens("rax")[:8]),
+        ("i386:x86-64", ["mov rcx,rax", "mov rbp,rdx"], tokens("rax")[:8]),
+        ("aarch64", ["fmov d2,d0", "bl 0x200"], tokens("v0")[:8]),
+        ("aarch64", ["mov w2,w0", "mov w0,w1"], tokens("x0")[:8]),
+        ("aarch64", ["str x0,[sp], #8"], tokens("x0")[:8])]:
+    assert transfers.relocate(Frame(instructions), 100, 100 + 4 * len(instructions), origins, architecture) is None, instructions
+
+assert transfers.relocate(Frame([]), 100, 100, expected, "i386:x86-64") == expected
+
+for instructions, end in [(["nop"], 99), (["nop"], 103), (["nop"], 108),
+                          (["nop"] * 21, 184), (["nop"], 100 + transfers.MAX_CODE_BYTES + 1)]:
+    assert transfers.relocate(Frame(instructions), 100, end, tokens("rax")[:8], "i386:x86-64") is None
+
 for instruction, registers in [("mov %edx,%ecx", ("rax", "rdx")), ("movsd %xmm1,-8(%rbp)", ("xmm0", "xmm1")),
                                ("stp x0, x1, [sp, #16]", ("x0", "x1")), ("str s3, [sp]", ("v0", "v1", "v2", "v3"))]:
     assert returns._preserved_until(Frame([instruction]), 100, 104, registers), instruction

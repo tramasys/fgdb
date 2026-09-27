@@ -16,6 +16,7 @@ pub(super) struct VariableState {
     local_revision: Cell<u64>,
     watches: RefCell<Vec<Variable>>,
     watch_revision: Cell<u64>,
+    watch_generation: Cell<Option<u64>>,
     expressions: RefCell<Vec<String>>,
     pub(super) pending_locals: RefCell<HashSet<(u64, usize)>>,
 }
@@ -41,10 +42,12 @@ impl DebuggerModel {
     }
 
     pub(crate) fn locals_are_current(&self) -> bool {
-        self.variables
-            .generation
-            .get()
-            .is_some_and(|generation| self.is_stop_refresh_current(generation))
+        self.variables.local_revision.get() == self.symbols.revision()
+            && self
+                .variables
+                .generation
+                .get()
+                .is_some_and(|generation| self.is_stop_refresh_current(generation))
     }
 
     pub(crate) fn locals_inspection_available(&self) -> bool {
@@ -167,14 +170,28 @@ impl DebuggerModel {
         self.variables.watches.borrow().clone()
     }
 
+    pub(crate) fn watches_are_current(&self) -> bool {
+        self.variables.watch_revision.get() == self.symbols.revision()
+            && self
+                .variables
+                .watch_generation
+                .get()
+                .is_some_and(|generation| self.is_stop_refresh_current(generation))
+    }
+
     pub(crate) fn publish_watches(&self, generation: u64, variables: &[Variable]) -> bool {
         if !self.is_stop_refresh_current(generation) {
             return false;
         }
 
         self.variables.watch_revision.set(self.symbols.revision());
+        self.variables.watch_generation.set(Some(generation));
         variables.clone_into(&mut self.variables.watches.borrow_mut());
         true
+    }
+
+    pub(crate) fn invalidate_watch_values(&self) {
+        self.variables.watch_generation.set(None);
     }
 
     pub(crate) fn update_watch_root(
@@ -378,13 +395,12 @@ pub(crate) fn variable_search_text(variable: &Variable) -> String {
 }
 
 pub(crate) fn compact_variable_type(type_name: &str) -> String {
-    let mut compact = type_name
-        .trim()
-        .replace("std::__cxx11::", "std::")
-        .replace("std::__1::", "std::")
-        .replace("std::__debug::", "std::");
+    let mut compact = type_name.trim().to_owned();
 
     for (qualified, short) in [
+        ("std::__cxx11::", "std::"),
+        ("std::__1::", "std::"),
+        ("std::__debug::", "std::"),
         ("alloc::string::String", "String"),
         ("alloc::vec::Vec<", "Vec<"),
         ("alloc::boxed::Box<", "Box<"),
@@ -405,26 +421,24 @@ pub(crate) fn compact_variable_type(type_name: &str) -> String {
         ("alloc::collections::vec_deque::VecDeque<", "VecDeque<"),
         ("alloc::collections::btree::map::BTreeMap<", "BTreeMap<"),
         ("std::collections::hash::map::HashMap<", "HashMap<"),
+        (
+            "std::basic_string<char, std::char_traits<char>, std::allocator<char> >",
+            "std::string",
+        ),
+        (
+            "std::basic_string<char, std::char_traits<char>, std::allocator<char>>",
+            "std::string",
+        ),
+        (
+            ", std::hash::random::RandomState, alloc::alloc::Global>",
+            ">",
+        ),
+        (", alloc::alloc::Global>", ">"),
     ] {
-        compact = compact.replace(qualified, short);
+        if compact.contains(qualified) {
+            compact = compact.replace(qualified, short);
+        }
     }
-
-    compact = compact.replace(
-        "std::basic_string<char, std::char_traits<char>, std::allocator<char> >",
-        "std::string",
-    );
-
-    compact = compact.replace(
-        "std::basic_string<char, std::char_traits<char>, std::allocator<char>>",
-        "std::string",
-    );
-
-    compact = compact.replace(
-        ", std::hash::random::RandomState, alloc::alloc::Global>",
-        ">",
-    );
-
-    compact = compact.replace(", alloc::alloc::Global>", ">");
 
     while compact.contains("> >") {
         compact = compact.replace("> >", ">>");
@@ -449,6 +463,24 @@ mod tests {
             has_more: false,
             display_hint: None,
             dynamic: false,
+        }
+    }
+
+    #[test]
+    #[ignore = "manual release-mode throughput benchmark"]
+    fn benchmark_variable_type_formatting() {
+        for (name, input) in [
+            ("variables/type/scalar", "unsigned long"),
+            (
+                "variables/type/rust",
+                "alloc::vec::Vec<alloc::string::String>",
+            ),
+            (
+                "variables/type/cpp",
+                "std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >",
+            ),
+        ] {
+            crate::benchmarks::measure(name, || compact_variable_type(std::hint::black_box(input)));
         }
     }
 
@@ -554,6 +586,10 @@ mod tests {
         assert!(!model.add_watch("value"));
         assert!(!model.add_watch(" "));
         assert!(model.publish_watches(generation, &[root.clone()]));
+        assert!(model.watches_are_current());
+        model.invalidate_watch_values();
+        assert!(!model.watches_are_current());
+        assert!(model.publish_watches(generation, &[root.clone()]));
         let (reusable, retired) = model.variable_objects_for_refresh(false);
         assert_eq!(reusable, vec![root.clone()]);
         assert!(retired.is_empty());
@@ -567,6 +603,7 @@ mod tests {
         assert_eq!(model.locals().to_vec(), vec![root.clone()]);
         let next = model.start_stop_refresh();
         model.bind_stop_context(1).unwrap();
+        assert!(!model.watches_are_current());
         assert!(!model.has_local_variable_identity(&root));
         assert!(!model.claim_local_variable_object(generation, &root));
         assert_eq!(model.publish_locals(Some(generation), &[]), None);

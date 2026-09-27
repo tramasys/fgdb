@@ -3,10 +3,11 @@
 use crate::{
     config::DebugSession,
     debugger::{Breakpoint, MemoryFormat},
+    model::StopPointMetadata,
 };
 use gtk::glib;
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -38,6 +39,7 @@ pub(crate) struct SavedBreakpoint {
     pub condition: String,
     pub ignore_count: u64,
     pub commands: Vec<String>,
+    pub organization: StopPointMetadata,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -79,7 +81,11 @@ impl MemoryFormat {
 }
 
 impl Investigation {
-    pub fn capture_breakpoints(&mut self, breakpoints: &[Breakpoint]) {
+    pub fn capture_breakpoints(
+        &mut self,
+        breakpoints: &[Breakpoint],
+        metadata: &HashMap<String, StopPointMetadata>,
+    ) {
         self.breakpoints.clear();
         self.notes.clear();
         let disabled_locations: HashSet<_> = breakpoints
@@ -143,6 +149,10 @@ impl Investigation {
                 condition: breakpoint.condition.clone().unwrap_or_default(),
                 ignore_count: breakpoint.ignore_count,
                 commands: breakpoint.commands.clone(),
+                organization: metadata
+                    .get(breakpoint.command_number())
+                    .cloned()
+                    .unwrap_or_default(),
             });
         }
     }
@@ -183,6 +193,24 @@ impl Investigation {
             budget.text(&breakpoint.location)?;
             budget.text(&breakpoint.condition)?;
             budget.list(&breakpoint.commands)?;
+            budget.list(&breakpoint.organization.tags)?;
+
+            if let Some(group) = &breakpoint.organization.group {
+                budget.text(group)?;
+
+                if group.trim().is_empty() {
+                    return Err(String::from("Saved breakpoint groups must not be empty"));
+                }
+            }
+
+            if breakpoint
+                .organization
+                .tags
+                .iter()
+                .any(|tag| tag.trim().is_empty())
+            {
+                return Err(String::from("Saved breakpoint tags must not be empty"));
+            }
 
             if !reusable_location(&breakpoint.location) || breakpoint.ignore_count == u64::MAX {
                 return Err(String::from(
@@ -283,7 +311,7 @@ impl Investigation {
         // Reject oversized values before serialization allocates copies of them.
         self.validate()?;
         let file = glib::KeyFile::new();
-        file.set_integer("workspace", "version", 1);
+        file.set_integer("workspace", "version", 2);
         write_session(&file, &self.session)?;
         write_list(&file, "watches", &self.watches);
         write_list(&file, "notes", &self.notes);
@@ -300,6 +328,16 @@ impl Investigation {
             file.set_string(&group, "condition", &breakpoint.condition);
             file.set_uint64(&group, "ignore", breakpoint.ignore_count);
             write_list(&file, &format!("commands {index}"), &breakpoint.commands);
+            file.set_string(
+                &group,
+                "organization-group",
+                breakpoint.organization.group.as_deref().unwrap_or(""),
+            );
+            write_list(
+                &file,
+                &format!("tags {index}"),
+                &breakpoint.organization.tags,
+            );
         }
 
         for (index, memory) in self.memory.iter().enumerate() {
@@ -335,7 +373,9 @@ impl Investigation {
         file.load_from_data(text, glib::KeyFileFlags::NONE)
             .map_err(message)?;
 
-        if file.integer("workspace", "version").map_err(message)? != 1 {
+        let version = file.integer("workspace", "version").map_err(message)?;
+
+        if !matches!(version, 1 | 2) {
             return Err(String::from("Unsupported workspace version"));
         }
 
@@ -358,6 +398,16 @@ impl Investigation {
                 condition: text_value(&file, &group, "condition")?,
                 ignore_count,
                 commands: read_list(&file, &format!("commands {index}"))?,
+                organization: if version == 1 {
+                    StopPointMetadata::default()
+                } else {
+                    let group_name = text_value(&file, &group, "organization-group")?;
+
+                    StopPointMetadata {
+                        group: (!group_name.is_empty()).then_some(group_name),
+                        tags: read_list(&file, &format!("tags {index}"))?,
+                    }
+                },
             });
         }
 
@@ -662,6 +712,35 @@ fn read_session(file: &glib::KeyFile) -> Result<DebugSession, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn workspace_organization_roundtrips_and_old_versions_remain_readable() {
+        let mut workspace = workspace();
+        let record = crate::debugger::parse_record(r#"^done,BreakpointTable={body=[bkpt={number="9",type="breakpoint",enabled="y",original-location="worker"}]}"#).unwrap();
+        let organization = StopPointMetadata {
+            group: Some("réseau = ready".into()),
+            tags: vec!["hot path".into(), "startup;network".into()],
+        };
+
+        workspace.capture_breakpoints(
+            &crate::debugger::breakpoints(&record),
+            &HashMap::from([("9".into(), organization.clone())]),
+        );
+
+        let encoded = workspace.encode().unwrap();
+        let restored = Investigation::decode(&encoded).unwrap();
+        assert_eq!(restored.breakpoints[0].organization, organization);
+        let legacy = Investigation::decode(&encoded.replace("version=2", "version=1")).unwrap();
+        assert_eq!(
+            legacy.breakpoints[0].organization,
+            StopPointMetadata::default()
+        );
+
+        workspace.breakpoints[0].organization.tags = vec!["tag".into(); MAX_ITEMS + 1];
+        assert!(workspace.encode().is_err());
+        workspace.breakpoints[0].organization.tags = vec!["bad\ntag".into()];
+        assert!(workspace.encode().is_err());
+    }
+
     pub(super) fn workspace() -> Investigation {
         Investigation {
             session: DebugSession::Launch {
@@ -686,7 +765,7 @@ mod tests {
     fn workspace_roundtrip_preserves_definitions_and_rejects_invalid_input() {
         let mut workspace = workspace();
         let record = crate::debugger::parse_record(r#"^done,BreakpointTable={body=[bkpt={number="9",type="breakpoint",enabled="n",original-location="worker",cond="count > 3",ignore="2",script=["silent","printf \"count=%d\\n\", count","continue"]},bkpt={number="10",type="breakpoint",original-location="*0x1234"},bkpt={number="11",type="breakpoint",original-location="worker",thread="2"}]}"#).unwrap();
-        workspace.capture_breakpoints(&crate::debugger::breakpoints(&record));
+        workspace.capture_breakpoints(&crate::debugger::breakpoints(&record), &HashMap::new());
         let text = workspace.encode().unwrap();
         let restored = Investigation::decode(&text).unwrap();
         assert_eq!(restored.breakpoints, workspace.breakpoints);
@@ -694,7 +773,7 @@ mod tests {
         assert_eq!(restored.notes.len(), 2);
         assert_eq!(restored.watches, workspace.watches);
         assert_eq!(restored.memory, workspace.memory);
-        workspace.capture_breakpoints(&crate::debugger::breakpoints(&record));
+        workspace.capture_breakpoints(&crate::debugger::breakpoints(&record), &HashMap::new());
         assert_eq!(
             workspace.notes.len(),
             2,
@@ -704,7 +783,7 @@ mod tests {
             restored.session.executable().unwrap(),
             Path::new("/tmp/project with spaces/bin/program")
         );
-        assert!(Investigation::decode(&text.replace("version=1", "version=999")).is_err());
+        assert!(Investigation::decode(&text.replace("version=2", "version=999")).is_err());
         assert!(
             Investigation::decode(&text.replace("breakpoints=1", "breakpoints=999999")).is_err()
         );
@@ -727,7 +806,7 @@ mod tests {
 
         let unusual = crate::debugger::parse_record(r#"^done,BreakpointTable={body=[bkpt={number="1",type="tracepoint",enabled="y",original-location="worker"},bkpt={number="2",type="breakpoint",enabled="y",disp="dis",original-location="worker"},bkpt={number="3",type="breakpoint",enabled="y",original-location="worker",locations=[{number="3.1",enabled="n",addr="0x1234"}]}]}"#).unwrap();
         let mut omitted = workspace.clone();
-        omitted.capture_breakpoints(&crate::debugger::breakpoints(&unusual));
+        omitted.capture_breakpoints(&crate::debugger::breakpoints(&unusual), &HashMap::new());
         assert!(omitted.breakpoints.is_empty());
         assert_eq!(omitted.notes.len(), 3);
 

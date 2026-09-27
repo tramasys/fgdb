@@ -90,6 +90,17 @@ fn creates_local_pointer_objects_only_after_they_are_requested() {
 }
 
 #[test]
+fn unexpanded_pointers_keep_fresh_values_without_creating_objects() {
+    let previous = variable("pointer", "0x10", Some("Node *"), None);
+    let current = variable("pointer", "0x0", Some("Node *"), None);
+    let (reused, updates, stale) =
+        reuse_variable_objects(std::slice::from_ref(&current), vec![previous]);
+    assert_eq!(reused, [current]);
+    assert_eq!(updates, [false]);
+    assert!(stale.is_empty());
+}
+
+#[test]
 fn changed_types_retire_old_objects_instead_of_relabeling_their_layout() {
     let fallback = variable("value", "{...}", Some("New"), None);
     let previous = variable("value", "{...}", Some("Old"), Some("previous"));

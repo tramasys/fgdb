@@ -187,10 +187,7 @@ fn derive_lock_dependencies(
         // A contended address is read once, so all of its waiters share the
         // same word observation and additional waiters do not add target reads.
         let (word, mapping) = words.entry(address).or_insert_with(|| {
-            let mapping = maps
-                .iter()
-                .find(|mapping| mapping.start <= address && address < mapping.end)
-                .cloned();
+            let mapping = mapping_containing(maps, address).cloned();
 
             (
                 evidence::read_word(memory.as_ref(), address, endian),
@@ -246,7 +243,6 @@ fn find_deadlock_cycles(dependencies: &[LockDependency]) -> Vec<DeadlockCycle> {
 
     let mut starts = edges.keys().copied().collect::<Vec<_>>();
     starts.sort_unstable();
-    let mut canonical_cycles = HashSet::new();
     let mut cycles = Vec::new();
     // Each thread has at most one current wait edge. Retire complete paths
     // instead of traversing every suffix of a long chain again.
@@ -274,15 +270,13 @@ fn find_deadlock_cycles(dependencies: &[LockDependency]) -> Vec<DeadlockCycle> {
 
                 cycle.rotate_left(rotation);
 
-                if canonical_cycles.insert(cycle.clone()) {
-                    let mut chain = cycle.iter().map(u32::to_string).collect::<Vec<_>>();
-                    chain.push(cycle[0].to_string());
+                let mut chain = cycle.iter().map(u32::to_string).collect::<Vec<_>>();
+                chain.push(cycle[0].to_string());
 
-                    cycles.push(DeadlockCycle {
-                        tids: cycle,
-                        description: format!("TID {}", chain.join(" waits for TID ")),
-                    });
-                }
+                cycles.push(DeadlockCycle {
+                    tids: cycle,
+                    description: format!("TID {}", chain.join(" waits for TID ")),
+                });
 
                 break;
             }

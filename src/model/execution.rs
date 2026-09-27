@@ -255,6 +255,7 @@ impl DebuggerModel {
                 .debugger_state
                 .set(self.execution.debugger_state.get().reset_backend());
             self.execution.command_pending.set(false);
+            self.execution.terminal_pending.set(false);
             self.execution.command_operation.set(None);
             self.execution.execution_transition_generation.set(
                 self.execution
@@ -462,7 +463,28 @@ impl DebuggerModel {
     }
 
     pub(crate) fn command_pending(&self) -> bool {
-        self.execution.command_pending.get() || self.execution.command_operation.get().is_some()
+        self.execution.command_pending.get()
+            || self.execution.command_operation.get().is_some()
+            || self.terminal_pending()
+    }
+
+    pub(crate) fn terminal_pending(&self) -> bool {
+        self.execution.terminal_pending.get()
+    }
+
+    pub(crate) fn pause_available(&self) -> bool {
+        let execution = self.execution();
+
+        execution.ready
+            && (self.terminal_pending()
+                || (execution.state.inferior_started()
+                    && !execution.session_pending
+                    && (execution.native_until_active
+                        || (execution.state.inferior_running() && !execution.command_pending))))
+    }
+
+    pub(crate) fn set_terminal_pending(&self, pending: bool) -> bool {
+        self.execution.terminal_pending.replace(pending) != pending
     }
 
     pub(crate) fn begin_command_operation(&self) -> Option<CommandOperationId> {

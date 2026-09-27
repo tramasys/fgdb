@@ -7,7 +7,9 @@ pub(crate) mod location;
 mod mi;
 mod model;
 mod session;
+pub(crate) mod stop_info;
 mod target;
+pub(crate) mod type_layout;
 pub(crate) mod vector;
 
 pub(crate) use command::{CliCommandBuilder, MiCommandBuilder, console_command, gdb_cli_string};

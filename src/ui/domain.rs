@@ -4,6 +4,8 @@ use super::*;
 struct PendingTerminalSynchronization {
     generation: u64,
     last_activity: Instant,
+    started: Instant,
+    announced: bool,
 }
 
 /// Coordinates commands entered through GDB's interactive terminal with the
@@ -25,6 +27,8 @@ impl TerminalSynchronization {
         self.pending = Some(PendingTerminalSynchronization {
             generation: self.generation,
             last_activity: now,
+            started: now,
+            announced: false,
         });
 
         self.generation
@@ -60,6 +64,22 @@ impl TerminalSynchronization {
         } else {
             false
         }
+    }
+
+    pub(super) fn announce_wait(&mut self, generation: u64, now: Instant) -> bool {
+        let Some(pending) = self.pending.as_mut() else {
+            return false;
+        };
+
+        if pending.generation != generation
+            || pending.announced
+            || now.saturating_duration_since(pending.started) < Duration::from_secs(1)
+        {
+            return false;
+        }
+
+        pending.announced = true;
+        true
     }
 
     pub(super) fn cancel(&mut self) {
@@ -120,6 +140,20 @@ impl MemoryRefreshBatch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_wait_is_announced_once_and_superseded_by_new_input() {
+        let mut synchronization = TerminalSynchronization::default();
+        let now = Instant::now();
+        let first = synchronization.begin(now);
+        assert!(!synchronization.announce_wait(first, now));
+        assert!(synchronization.announce_wait(first, now + Duration::from_secs(1)));
+        assert!(!synchronization.announce_wait(first, now + Duration::from_secs(2)));
+        let second = synchronization.begin(now);
+        assert!(!synchronization.finish(first));
+        assert!(synchronization.finish(second));
+        assert!(!synchronization.announce_wait(second, now + Duration::from_secs(2)));
+    }
 
     fn variable(name: &str, varobj: &str) -> Variable {
         Variable {

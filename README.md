@@ -13,12 +13,12 @@ GDB build and server.
 
 ## Requirements
 
-| | Requirements |
-| --- | --- |
-| Runtime | GDB with Python 3 and `new-ui` support, GTK 4.22+, GtkSourceView 5.18+ and VTE for GTK4 0.84+ |
-| Build without eBPF | Rust 1.98+, a C toolchain, pkg-config, GLib resource tools and development files for the libraries above |
-| Build with eBPF | Also Clang with the BPF target, Make, libelf and zlib development files. libbpf is built from the locked Rust dependency |
-| eBPF collection | A local Linux target, kernel BTF at `/sys/kernel/btf/vmlinux`, the `sys_enter` raw tracepoint and permission to load BPF tracing programs |
+|                    | Requirements                                                                                                                              |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Runtime            | GDB with Python 3 and `new-ui` support, GTK 4.22+, GtkSourceView 5.18+ and VTE for GTK4 0.84+                                             |
+| Build without eBPF | Rust 1.98+, a C toolchain, pkg-config, GLib resource tools and development files for the libraries above                                  |
+| Build with eBPF    | Also Clang with the BPF target, Make, libelf and zlib development files. libbpf is built from the locked Rust dependency                  |
+| eBPF collection    | A local Linux target, kernel BTF at `/sys/kernel/btf/vmlinux`, the `sys_enter` raw tracepoint and permission to load BPF tracing programs |
 
 eBPF is used only for syscall counts. Normal debugging does not require it or
 additional BPF privileges. Collection normally requires `CAP_BPF` and
@@ -28,12 +28,17 @@ privileges, and the packages do not grant capabilities automatically.
 Debug symbols improve source and variable inspection. GEF, language pretty printers
 and rr are optional.
 
+Source verification uses GNU readelf and compiler-recorded DWARF checksums.
+Files without checksum evidence remain unverified.
+
 ## Features
 
 - Launch and attach to processes, open core dumps and connect to remote GDB servers
 - Source and instruction stepping, conditional breakpoints, watchpoints and signal handling
+- Stop details and bounded history, live signal inspection and explicit before/after comparisons
 - Separate return-value history with expandable scalars and verified aggregates after Finish and supported forward stepping
 - Locals, watches, value editing and storage addresses, with array and linked-list viewers
+- Compiler-described type layouts with field offsets, bitfields and padding
 - Registers and SIMD values, stack and memory inspection, memory search and control-flow graphs
 - Threads, multiple inferiors and fork control, with Linux process, mapping and file descriptor details
 - Lock waiters, ownership evidence and wait-chain navigation, with thread and memory inspection
@@ -110,15 +115,6 @@ Run `fgdb --help` for launch, attach, core dump and replay options.
 
 [MIT license](LICENSE)
 
-## Development checks
+## Contributing
 
-Run `python3 tools/check.py unit`, `gtk`, or `gdb` from the checkout. The runner
-builds the matching test binary and runs each GTK/live-GDB check separately.
-GTK checks use `xvfb-run` with a 1920x1080 display. GDB checks build the examples
-first; their language compiler requirements and Make overrides are listed in
-`tools/check.py` and `examples/Makefile`.
-
-Use `--filter NAME` for a subset, `--list` to list checks, or
-`--no-default-features` to omit eBPF. `python3 tools/check.py clippy` checks all
-targets with warnings denied. `python3 tools/check.py bench` runs the ignored
-release benchmarks; use an otherwise idle machine for timing comparisons.
+Contributions are very welcome, just send a pull request.

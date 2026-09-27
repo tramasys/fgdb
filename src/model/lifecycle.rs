@@ -105,6 +105,7 @@ impl DebuggerModel {
     }
 
     pub(crate) fn observe_backend_ready(&self, capabilities: GdbCapabilities) {
+        self.stop_info.replace(Default::default());
         self.reset_replay();
 
         self.replay
@@ -237,6 +238,25 @@ impl DebuggerModel {
         all_stopped: bool,
         returned: Option<ReturnValue>,
     ) {
+        let returned = returned.map(|mut value| {
+            if value.function.is_none()
+                && !self.terminal_pending()
+                && thread == self.current_thread_id().as_deref()
+                && self.stopped.latest_frames_generation.get()
+                    == Some(self.current_stop_refresh_generation())
+            {
+                value.function = self
+                    .stopped
+                    .latest_frames
+                    .borrow()
+                    .iter()
+                    .find(|frame| frame.level == self.processes.selected_frame_level.get())
+                    .map(|frame| frame.function.chars().take(1024).collect());
+            }
+
+            value
+        });
+
         // Refreshing the same stop changes request generations, not this sequence.
         self.stopped
             .observed_stop_sequence

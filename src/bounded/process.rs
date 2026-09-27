@@ -1,4 +1,4 @@
-//! Bounded, deadline-aware output collection for optional compiler discovery.
+//! Bounded, deadline-aware output collection for optional native tools.
 use std::{
     io::{self, Read},
     process::{Command, Stdio},
@@ -9,7 +9,14 @@ use std::{
 use nix::fcntl::{FcntlArg, OFlag, fcntl};
 
 pub(crate) fn output(command: &mut Command, timeout: Duration) -> Option<Vec<u8>> {
-    const LIMIT: usize = 64 * 1024;
+    output_with_limit(command, timeout, 64 * 1024)
+}
+
+pub(crate) fn output_with_limit(
+    command: &mut Command,
+    timeout: Duration,
+    limit: usize,
+) -> Option<Vec<u8>> {
     let deadline = Instant::now().checked_add(timeout)?;
 
     if timeout.is_zero() {
@@ -45,7 +52,7 @@ pub(crate) fn output(command: &mut Command, timeout: Duration) -> Option<Vec<u8>
                 match stdout.read(&mut buffer) {
                     Ok(0) => eof = true,
                     Ok(count) => {
-                        if output.len().saturating_add(count) > LIMIT {
+                        if output.len().saturating_add(count) > limit {
                             return None;
                         }
 

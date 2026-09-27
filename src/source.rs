@@ -9,6 +9,7 @@ use crate::config::LaunchConfig;
 
 mod breakpoints;
 mod cache;
+pub(crate) mod verification;
 pub(crate) use breakpoints::SourceBreakpointIndex;
 pub(crate) use cache::{CachedSource, SourceLine};
 
@@ -599,7 +600,6 @@ pub fn discover_source_files_while(
     }
 
     files.sort_unstable();
-    files.dedup();
 
     SourceDiscovery { files, truncated }
 }
@@ -825,7 +825,7 @@ pub fn search_source_files(
 ) -> Vec<SourceTreeMatch> {
     let query = query.trim();
 
-    if query.is_empty() {
+    if query.is_empty() || match_limit == 0 {
         return Vec::new();
     }
 
@@ -1121,6 +1121,16 @@ mod tests {
         );
 
         assert!(outside_scope.is_empty());
+
+        let no_capacity = search_source_files(
+            std::slice::from_ref(&path),
+            "SourceTreeMatch",
+            0,
+            None,
+            || panic!("zero-capacity searches must not scan"),
+        );
+
+        assert!(no_capacity.is_empty());
         let cancelled = search_source_files(&[path], "SourceTreeMatch", 10, None, || false);
         assert!(cancelled.is_empty());
     }

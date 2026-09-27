@@ -13,9 +13,27 @@ pub(crate) struct CapturedReturnValue {
     inferior: Option<String>,
     symbol_revision: u64,
     pub(crate) value: ReturnValue,
+    stop: u64,
 }
 
 impl CapturedReturnValue {
+    fn payload_bytes(&self) -> usize {
+        self.value.value.len() + self.value.function.as_ref().map_or(0, String::len)
+    }
+
+    pub(crate) fn origin(&self) -> String {
+        format!(
+            "{} · {} / thread {} · stop {}",
+            self.value
+                .function
+                .as_deref()
+                .unwrap_or("Function unavailable"),
+            self.inferior.as_deref().unwrap_or("inferior unavailable"),
+            self.thread,
+            self.stop,
+        )
+    }
+
     pub(crate) fn variable(&self) -> Variable {
         Variable {
             local_index: None,
@@ -101,6 +119,7 @@ impl DebuggerModel {
             inferior,
             symbol_revision: self.symbols.revision(),
             value,
+            stop: self.observed_stop_sequence(),
         }));
 
         history.values.truncate(MAX_RETURN_VALUES);
@@ -108,14 +127,14 @@ impl DebuggerModel {
         let mut bytes = history
             .values
             .iter()
-            .map(|entry| entry.value.value.len())
+            .map(|entry| entry.payload_bytes())
             .sum::<usize>();
 
         // Preserve one complete result even if it alone exceeds the history
         // budget. Individual payloads are already bounded by the MI transport.
         while bytes > MAX_RETURN_HISTORY_BYTES && history.values.len() > 1 {
             if let Some(retired) = history.values.pop_back() {
-                bytes -= retired.value.value.len();
+                bytes -= retired.payload_bytes();
             }
         }
     }

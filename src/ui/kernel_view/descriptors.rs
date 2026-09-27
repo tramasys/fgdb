@@ -3,7 +3,7 @@
 use super::*;
 use crate::kernel::sockets::{Protocol, Queue};
 use crate::kernel::{KernelFact, fact};
-use std::fmt::Write as _;
+use std::{borrow::Cow, collections::VecDeque, fmt::Write as _};
 
 #[cfg(test)]
 mod tests;
@@ -35,6 +35,7 @@ enum Column {
     Receive,
     Send,
     Change,
+    Endpoint,
 }
 
 struct Table {
@@ -45,11 +46,18 @@ struct Table {
     empty: gtk::Label,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Query {
     text: String,
     protocol: String,
     state: String,
+}
+
+struct NavigationEntry {
+    mode: usize,
+    query: Query,
+    search: String,
+    selected: Rc<KernelFileDescriptor>,
 }
 
 struct DetailSection {
@@ -151,6 +159,8 @@ pub(in crate::ui) struct DescriptorView {
     summary: gtk::Label,
     changes: gtk::Label,
     details: gtk::ToggleButton,
+    back: gtk::Button,
+    history: RefCell<VecDeque<NavigationEntry>>,
     detail_pages: gtk::Stack,
     detail_empty: gtk::Label,
     descriptor: DetailSection,
@@ -175,6 +185,7 @@ pub(in crate::ui) struct DescriptorView {
     previous: RefCell<HashMap<u32, Rc<KernelFileDescriptor>>>,
     updating: Cell<bool>,
     fresh: Cell<bool>,
+    refreshing: Cell<bool>,
     stamp: Cell<u64>,
     pending: Cell<bool>,
     commands_allowed: Cell<bool>,
@@ -183,6 +194,9 @@ pub(in crate::ui) struct DescriptorView {
 impl DescriptorView {
     pub(super) fn build(columns: &ColumnLayouts) -> Rc<Self> {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let responsive = workspace::ResponsiveBox::new();
+        responsive.set_vexpand(true);
+        root.append(&responsive);
         let controls = components::control_row();
         controls.add_css_class("kernel-table-controls");
         let all = gtk::ToggleButton::with_label("All FDs");
@@ -205,7 +219,7 @@ impl DescriptorView {
         details.add_css_class("inline-action");
         details.set_tooltip_text(Some("Show selected descriptor details"));
         controls.append(&details);
-        root.append(&controls);
+        responsive.append(&controls);
         let filters = components::control_row();
         filters.add_css_class("kernel-table-controls");
         let protocol = gtk::DropDown::from_strings(&[
@@ -223,17 +237,17 @@ impl DescriptorView {
         filters.append(&protocol);
         filters.append(&state);
         filters.set_visible(false);
-        root.append(&filters);
+        responsive.append(&filters);
         let summary = components::empty_label("No snapshot");
-        root.append(&summary);
+        responsive.append(&summary);
         let changes = components::empty_label("");
         changes.set_visible(false);
-        root.append(&changes);
+        responsive.append(&changes);
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         let query = Rc::new(RefCell::new(Query::default()));
         let tables = [
-            build_table(&store, &query, columns, false),
-            build_table(&store, &query, columns, true),
+            build_table(&store, &query, columns, false, &responsive),
+            build_table(&store, &query, columns, true, &responsive),
         ];
         let pages = gtk::Stack::new();
         pages.set_hhomogeneous(false);
@@ -253,6 +267,11 @@ impl DescriptorView {
         let title = section_title("SELECTED FD");
         title.set_hexpand(true);
         header.append(&title);
+        let back = gtk::Button::with_label("Back");
+        back.add_css_class("inline-action");
+        back.set_tooltip_text(Some("Return to the previous descriptor and filters"));
+        back.set_sensitive(false);
+        header.append(&back);
         let detail_pages = gtk::Stack::new();
         detail_pages.set_hhomogeneous(false);
         detail_pages.set_vhomogeneous(false);
@@ -361,7 +380,7 @@ impl DescriptorView {
         split.set_shrink_end_child(true);
         split.set_start_child(Some(&pages));
         split.set_end_child(Some(&detail_panel));
-        root.append(&split);
+        responsive.append(&split);
 
         let view = Rc::new(Self {
             root,
@@ -379,6 +398,8 @@ impl DescriptorView {
             summary,
             changes,
             details,
+            back,
+            history: RefCell::new(VecDeque::new()),
             detail_pages,
             detail_empty,
             descriptor,
@@ -403,9 +424,17 @@ impl DescriptorView {
             previous: RefCell::new(HashMap::new()),
             updating: Cell::new(false),
             fresh: Cell::new(false),
+            refreshing: Cell::new(false),
             stamp: Cell::new(0),
             pending: Cell::new(false),
             commands_allowed: Cell::new(false),
+        });
+
+        let weak = Rc::downgrade(&view);
+        view.back.connect_clicked(move |_| {
+            if let Some(view) = weak.upgrade() {
+                view.go_back();
+            }
         });
 
         let weak = Rc::downgrade(&view);
@@ -551,6 +580,8 @@ impl DescriptorView {
         self.identity.set(identity);
 
         if !same_process {
+            self.history.borrow_mut().clear();
+            self.back.set_sensitive(false);
             self.previous.borrow_mut().clear();
             self.comparison_ready.set(false);
         } else if self.comparison_stop.get() != Some(stop) {
@@ -662,6 +693,8 @@ impl DescriptorView {
 
     pub(super) fn clear(self: &Rc<Self>) {
         self.invalidate();
+        self.history.borrow_mut().clear();
+        self.back.set_sensitive(false);
         self.identity.set(None);
         self.complete.set(false);
         self.details_dirty.set(true);
@@ -678,10 +711,17 @@ impl DescriptorView {
 
     pub(super) fn invalidate(&self) {
         self.fresh.set(false);
+        self.refreshing.set(false);
         self.stamp.set(self.stamp.get().wrapping_add(1));
         self.pending.set(false);
         self.inspect.set_sensitive(false);
         self.diagnostics.set(Vec::new());
+        self.update_count();
+    }
+
+    pub(super) fn set_refreshing(&self, refreshing: bool) {
+        self.refreshing.set(refreshing);
+        self.update_count();
     }
 
     fn begin_diagnostics(&self) -> u64 {
@@ -747,7 +787,15 @@ impl DescriptorView {
         let shown = self.tables[self.mode.get()].selection.n_items();
 
         if self.identity.get().is_some() {
-            let mut summary = format!("{} FDs · {sockets} sockets", rows.len());
+            let state = if self.refreshing.get() {
+                "Refreshing"
+            } else if self.fresh.get() {
+                "Current"
+            } else {
+                "Stale snapshot"
+            };
+
+            let mut summary = format!("{state} · {} FDs · {sockets} sockets", rows.len());
             let total = if self.mode.get() == 0 {
                 rows.len()
             } else {
@@ -775,6 +823,12 @@ impl DescriptorView {
 
             self.summary.set_text(&summary);
             self.summary.set_tooltip_text(Some("Queues and states describe this snapshot. Inspect TCP captures additional diagnostics on request."));
+        } else {
+            self.summary.set_text(if self.refreshing.get() {
+                "Refreshing"
+            } else {
+                "No snapshot"
+            });
         }
 
         for (index, table) in self.tables.iter().enumerate() {
@@ -843,6 +897,10 @@ impl DescriptorView {
 
         if !row.change.is_empty() {
             facts.push(fact("Changes", &row.change));
+        }
+
+        if !fd.info_warning.is_empty() {
+            facts.push(fact("Incomplete metadata", &fd.info_warning));
         }
 
         self.descriptor.set(facts);
@@ -981,7 +1039,28 @@ impl DescriptorView {
     }
 
     fn details_text(&self) -> String {
-        let mut sections = vec![self.descriptor.text(), self.socket.text()];
+        let mut sections = vec![self.summary.text().to_string()];
+
+        if let Some((pid, start)) = self.identity.get() {
+            sections.push(format!(
+                "PID {pid} · process start {start} · captured {} ms since Unix epoch",
+                self.captured_at.get()
+            ));
+        }
+
+        sections.extend([self.descriptor.text(), self.socket.text()]);
+
+        if !self.link_entries.borrow().is_empty() {
+            sections.push(format!(
+                "EPOLL\n{}",
+                self.link_entries
+                    .borrow()
+                    .iter()
+                    .map(|(text, _)| text.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
 
         if self.socket_note.is_visible() && self.socket.root.is_visible() {
             sections.push(self.socket_note.text().to_string());
@@ -1014,12 +1093,40 @@ impl DescriptorView {
         let weak = Rc::downgrade(self);
 
         button.connect_clicked(move |_| {
-            if let Some(view) = weak.upgrade() {
+            if let Some(view) = weak.upgrade()
+                && let Some(key) = key.as_ref()
+            {
+                if !view
+                    .rows
+                    .borrow()
+                    .iter()
+                    .any(|row| row.fd.same_identity(key))
+                {
+                    return;
+                }
+
+                if let Some(row) = view.selected() {
+                    let mut history = view.history.borrow_mut();
+
+                    history.push_back(NavigationEntry {
+                        mode: view.mode.get(),
+                        query: view.query.borrow().clone(),
+                        search: view.search.text().to_string(),
+                        selected: row.fd,
+                    });
+
+                    if history.len() > 32 {
+                        history.pop_front();
+                    }
+
+                    view.back.set_sensitive(true);
+                }
+
                 view.all.set_active(true);
                 view.search.set_text("");
                 view.query.borrow_mut().text.clear();
                 view.refilter();
-                restore_selection(&view.tables[0].selection, key.as_deref());
+                restore_selection(&view.tables[0].selection, Some(key));
                 view.tables[0].view.grab_focus();
                 let position = view.tables[0].selection.selected();
 
@@ -1037,6 +1144,59 @@ impl DescriptorView {
         });
 
         self.links.append(&button);
+    }
+
+    fn go_back(self: &Rc<Self>) {
+        loop {
+            let previous = self.history.borrow_mut().pop_back();
+            self.back.set_sensitive(!self.history.borrow().is_empty());
+            let Some(previous) = previous else { return };
+
+            if !self
+                .rows
+                .borrow()
+                .iter()
+                .any(|row| row.fd.same_identity(&previous.selected))
+            {
+                continue;
+            }
+
+            self.updating.set(true);
+            self.search.set_text(&previous.search);
+
+            for (dropdown, value) in [
+                (&self.protocol, &previous.query.protocol),
+                (&self.state, &previous.query.state),
+            ] {
+                let selected = dropdown.model().and_then(|model| {
+                    (1..model.n_items()).find(|index| {
+                        model
+                            .item(*index)
+                            .and_downcast::<gtk::StringObject>()
+                            .is_some_and(|item| item.string() == *value)
+                    })
+                });
+
+                dropdown.set_selected(selected.unwrap_or(0));
+            }
+
+            self.query.replace(previous.query);
+            self.sockets.set_active(previous.mode == 1);
+
+            if previous.mode == 0 {
+                self.all.set_active(true);
+            }
+
+            self.updating.set(false);
+            self.refilter();
+            restore_selection(
+                &self.tables[previous.mode].selection,
+                Some(&previous.selected),
+            );
+            self.tables[previous.mode].view.grab_focus();
+            self.render_details();
+            return;
+        }
     }
 }
 
@@ -1082,8 +1242,8 @@ fn state_name(fd: &KernelFileDescriptor) -> &'static str {
         .map_or("Unknown", |socket| socket.state_name())
 }
 
-fn queue_text(queue: Option<Queue>) -> String {
-    queue.map_or_else(|| "Unavailable".into(), |queue| queue.to_string())
+fn queue_text(queue: Option<Queue>) -> Cow<'static, str> {
+    queue.map_or_else(|| "Unavailable".into(), |queue| queue.to_string().into())
 }
 
 fn selected_row(selection: &gtk::SingleSelection) -> Option<Row> {
@@ -1177,6 +1337,7 @@ fn build_table(
     query: &Rc<RefCell<Query>>,
     columns: &ColumnLayouts,
     sockets: bool,
+    responsive: &workspace::ResponsiveBox,
 ) -> Table {
     let query = Rc::clone(query);
     let filter = gtk::CustomFilter::new(move |object| {
@@ -1225,6 +1386,7 @@ fn build_table(
             ("send", "SEND QUEUE", 130, Column::Send),
             ("flags", "FLAGS", 180, Column::SocketFlags),
             ("change", "CHANGE", 230, Column::Change),
+            ("endpoint", "ENDPOINTS / STATE", 260, Column::Endpoint),
         ]
     } else {
         vec![
@@ -1233,7 +1395,7 @@ fn build_table(
             ("access", "ACCESS", 100, Column::Access),
             ("flags", "FLAGS", 220, Column::Flags),
             ("position", "POSITION", 110, Column::Position),
-            ("target", "TARGET", 360, Column::Target),
+            ("target", "TARGET", 260, Column::Target),
             ("details", "FDINFO", 280, Column::Details),
         ]
     };
@@ -1346,6 +1508,24 @@ fn build_table(
         })));
 
         layout.append(&view, key, &column);
+        column.set_visible(field != Column::Endpoint);
+        let weak = column.downgrade();
+
+        responsive.connect_compact_changed(move |compact| {
+            if let Some(column) = weak.upgrade() {
+                column.set_visible(if compact {
+                    field == Column::Number
+                        || field
+                            == if sockets {
+                                Column::Endpoint
+                            } else {
+                                Column::Target
+                            }
+                } else {
+                    field != Column::Endpoint
+                });
+            }
+        });
     }
 
     let empty = components::empty_label("No snapshot");
@@ -1364,34 +1544,51 @@ fn build_table(
     }
 }
 
-fn cell_text(row: &Row, column: Column) -> String {
+fn cell_text(row: &Row, column: Column) -> Cow<'_, str> {
     let fd = &row.fd;
     let socket = fd.socket.as_deref();
 
     match column {
-        Column::Number => fd.number.to_string(),
-        Column::Kind => fd.kind.clone(),
-        Column::Access => fd.access.clone(),
-        Column::Flags => fd.flags.clone(),
+        Column::Number => fd.number.to_string().into(),
+        Column::Kind => fd.kind.as_str().into(),
+        Column::Access => fd.access.as_str().into(),
+        Column::Flags => fd.flags.as_str().into(),
         Column::SocketFlags => fd
             .flags
             .split_once("  ")
             .map_or(fd.flags.as_str(), |(_, names)| names)
-            .to_owned(),
+            .into(),
         Column::Position => fd
             .position
-            .map_or_else(String::new, |value| value.to_string()),
-        Column::Target => fd.target.clone(),
-        Column::Details => fd.details.clone(),
+            .map_or_else(|| "".into(), |value| value.to_string().into()),
+        Column::Target => fd.target.as_str().into(),
+        Column::Details => fd.details.as_str().into(),
         Column::Protocol => socket
             .map_or("Unknown", |socket| socket.protocol.name())
             .into(),
         Column::State => state_name(fd).into(),
-        Column::Local => socket.map_or_else(|| "Unavailable".into(), |socket| socket.local_name()),
-        Column::Peer => socket.map_or_else(|| "Unavailable".into(), |socket| socket.peer_name()),
+        Column::Local => {
+            socket.map_or_else(|| "Unavailable".into(), |socket| socket.local_name().into())
+        }
+        Column::Peer => {
+            socket.map_or_else(|| "Unavailable".into(), |socket| socket.peer_name().into())
+        }
         Column::Receive => queue_text(socket.and_then(|socket| socket.receive)),
         Column::Send => queue_text(socket.and_then(|socket| socket.send)),
-        Column::Change => row.change.clone(),
+        Column::Change => row.change.as_str().into(),
+        Column::Endpoint => socket.map_or_else(
+            || "Details unavailable".into(),
+            |socket| {
+                format!(
+                    "{} → {}\n{} · {}",
+                    socket.local_name(),
+                    socket.peer_name(),
+                    socket.protocol.name(),
+                    socket.state_name()
+                )
+                .into()
+            },
+        ),
     }
 }
 

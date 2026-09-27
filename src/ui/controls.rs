@@ -312,6 +312,30 @@ pub(super) fn request_signal_catchpoint_toggle(ui: &Ui, signal: &str) {
     }
 }
 
+pub(super) fn execution_status(
+    model: &crate::model::DebuggerModel,
+) -> (&'static str, &'static str) {
+    let execution = model.execution();
+
+    if model.gdb_recovery_required() || (!execution.ready && model.debugger_pid().is_none()) {
+        ("Disconnected", "status-error")
+    } else if !execution.ready {
+        ("Starting GDB", "status-running")
+    } else if execution.state.inferior_running() {
+        ("Running", "status-running")
+    } else if model.terminal_pending() {
+        ("GDB busy", "status-running")
+    } else if execution.state.resynchronizing() {
+        ("Synchronizing", "status-running")
+    } else if execution.command_pending || execution.session_pending {
+        ("Busy", "status-running")
+    } else if !execution.state.inferior_started() {
+        ("Ready", "status-ready")
+    } else {
+        ("Stopped", "status-ready")
+    }
+}
+
 pub(super) fn set_status_widgets(
     status: &gtk::Label,
     detail_label: &gtk::Label,
@@ -347,6 +371,50 @@ pub(super) fn set_status_widgets(
 #[cfg(test)]
 mod tests {
     use super::{addresses_equal, execution_event_matches_thread};
+
+    #[test]
+    fn terminal_work_gates_mutations_but_keeps_interrupt_and_authoritative_status() {
+        use crate::model::{DebuggerModel, DebuggerStateDelta, TargetConnection};
+
+        let model = DebuggerModel::new(None);
+        assert_eq!(super::execution_status(&model).0, "Disconnected");
+        model.set_debugger_pid(Some(1));
+        assert_eq!(super::execution_status(&model).0, "Starting GDB");
+        model.set_controls_ready(true);
+        model.set_debug_state_stale(false);
+        assert_eq!(super::execution_status(&model).0, "Ready");
+        model.apply_debugger_state_delta(DebuggerStateDelta::establish_stopped_target(
+            TargetConnection::Local,
+        ));
+
+        model.set_terminal_pending(true);
+        model.set_controls_running(true);
+        assert_eq!(super::execution_status(&model).0, "Running");
+        model.set_controls_running(false);
+        model.set_terminal_pending(false);
+        model.set_debug_state_stale(false);
+        model.set_current_thread_id(Some("1"));
+        model.start_stop_refresh();
+        let context = model.bind_stop_context(1).unwrap();
+        assert!(model.stopped_inspection_available());
+        model.set_terminal_pending(true);
+        assert_eq!(super::execution_status(&model).0, "GDB busy");
+        assert!(!model.movement_commands_available());
+        assert!(!model.stop_point_commands_available());
+        assert!(!model.stopped_inspection_available());
+        assert!(!model.is_stop_context_current(&context));
+        assert!(model.begin_command_operation().is_none());
+        assert!(model.pause_available());
+        model.set_command_pending(true);
+        model.set_command_pending(false);
+        assert!(model.terminal_pending());
+        model.set_terminal_pending(false);
+        assert!(model.stopped_inspection_available());
+        assert_eq!(super::execution_status(&model).0, "Stopped");
+        model.set_terminal_pending(true);
+        model.set_controls_ready(false);
+        assert!(!model.terminal_pending());
+    }
 
     #[test]
     fn compares_only_valid_normalized_addresses() {

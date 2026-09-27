@@ -53,7 +53,10 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
     let misc_handler = Rc::new(RefCell::new(None));
     let disclosures = HashMap::new();
 
+    let stop_info = stop_info::StopInfoView::new();
+
     let bindings = InspectorBindings {
+        stop_info: &stop_info,
         columns: &columns,
         theme: &theme,
         variable_children_handler: &children,
@@ -75,12 +78,28 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
 
     let view = ReturnValueView::new(&bindings);
     assert!(!view.root.is_visible());
+    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    root.add_css_class("debugger-root");
+    let split = gtk::Paned::new(gtk::Orientation::Vertical);
+    let locals = gtk::Label::new(Some("Locals"));
+    locals.set_vexpand(true);
+    split.set_start_child(Some(&view.root));
+    split.set_end_child(Some(&locals));
+    split.set_resize_start_child(false);
+    split.set_resize_end_child(true);
+    split.set_shrink_start_child(false);
+    split.set_shrink_end_child(false);
+    split.set_position(180);
+    view.fit_content(&split);
+    root.append(&split);
+    assert_eq!(split.position(), 0);
 
     for (history, value) in [("$1", "42"), ("$2", "{x = 7, y = 11}")] {
         model.record_return_value(
             Some(ReturnValue {
                 value: value.into(),
                 history_variable: Some(history.into()),
+                function: None,
             }),
             Some("1"),
             None,
@@ -95,8 +114,9 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
     assert!(view.sync(model.return_values(), 1, true).is_some());
     assert_eq!(view.tree.store.n_items(), 2);
     assert_eq!(view.tree.selection.n_items(), 2);
-    assert_eq!(view.view.columns().n_items(), 4);
+    assert_eq!(view.view.columns().n_items(), 5);
     assert!(view.root.is_visible());
+    assert_eq!(split.position(), 180);
 
     let filter = view
         .root
@@ -113,10 +133,6 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
     assert_eq!(variable_at(&view.tree.selection, 0).unwrap().name, "$1");
     filter.set_text("");
     assert_eq!(view.tree.selection.n_items(), 2);
-    let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
-    root.add_css_class("debugger-root");
-    root.append(&view.root);
-
     let window = gtk::Window::builder()
         .default_width(900)
         .default_height(240)
@@ -177,6 +193,58 @@ fn return_table_reuses_variable_controls_and_retires_stop_objects() {
         view.state.borrow().entries[0].variable.type_name.as_deref(),
         Some("ReturnPair")
     );
+    let height = split.position();
+    let expanded_locals_height = locals.height();
+
+    let header = view
+        .root
+        .first_child()
+        .and_downcast::<gtk::Button>()
+        .unwrap();
+
+    header.emit_clicked();
+    main.block_on(glib::timeout_future(Duration::from_millis(100)));
+    assert!(!view.content.is_visible());
+
+    let collapsed_height = header
+        .measure(gtk::Orientation::Vertical, view.root.width())
+        .0;
+
+    assert_eq!(view.root.height(), collapsed_height);
+    assert!(locals.height() > expanded_locals_height);
+    view.sync(Vec::new(), 2, true);
+    view.sync(model.return_values(), 2, true);
+    main.block_on(glib::timeout_future(Duration::from_millis(100)));
+    assert_eq!(view.root.height(), collapsed_height);
+    header.emit_clicked();
+    main.block_on(glib::timeout_future(Duration::from_millis(100)));
+    assert_eq!(split.position(), height);
+    assert_eq!(locals.height(), expanded_locals_height);
+    split.set_position(height - 20);
+    main.block_on(glib::timeout_future(Duration::from_millis(100)));
+    let resized_height = split.position();
+    view.sync(Vec::new(), 2, true);
+    assert_eq!(split.position(), 0);
+    assert!(view.availability.is_visible());
+    assert!(!view.scrolled.is_visible());
+    main.block_on(glib::timeout_future(Duration::from_millis(100)));
+    let empty_height = view.root.height();
+    assert!(empty_height < resized_height);
+    header.emit_clicked();
+    main.block_on(glib::timeout_future(Duration::from_millis(100)));
+    assert_eq!(view.root.height(), collapsed_height);
+    header.emit_clicked();
+    main.block_on(glib::timeout_future(Duration::from_millis(100)));
+    assert_eq!(view.root.height(), empty_height);
+    view.sync(model.return_values(), 2, true);
+    main.block_on(glib::timeout_future(Duration::from_millis(100)));
+    assert_eq!(split.position(), resized_height);
+    view.root.set_visible(false);
+    main.block_on(glib::timeout_future(Duration::from_millis(100)));
+    assert_eq!(locals.height(), split.height());
+    view.root.set_visible(true);
+    main.block_on(glib::timeout_future(Duration::from_millis(100)));
+    assert_eq!(split.position(), resized_height);
     view.enabled.set(false);
     view.sync(Vec::new(), 2, true);
     assert!(!view.root.is_visible());

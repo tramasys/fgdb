@@ -1,7 +1,7 @@
 //! A distinct result table reusing the shared variable tree and inspection path.
 
 use super::*;
-use crate::model::return_value::CapturedReturnValue;
+use crate::model::{TargetConnection, return_value::CapturedReturnValue};
 
 type RefreshHandler = Rc<dyn Fn(Variable)>;
 type CaptureHandler = Rc<dyn Fn()>;
@@ -13,6 +13,11 @@ pub(super) struct ReturnValueView {
     view: gtk::ColumnView,
     summary: gtk::Label,
     clear: gtk::Button,
+    content: gtk::Box,
+    tools: gtk::Box,
+    scrolled: gtk::ScrolledWindow,
+    availability: gtk::Label,
+    capture_note: Rc<RefCell<Option<(u64, String)>>>,
     enabled: Rc<Cell<bool>>,
     state: Rc<RefCell<ReturnViewState>>,
     refresh: Rc<RefCell<Option<RefreshHandler>>>,
@@ -36,6 +41,7 @@ struct ReturnEntry {
 
 impl ReturnValueView {
     pub(super) fn new(bindings: &InspectorBindings<'_>) -> Self {
+        let state: Rc<RefCell<ReturnViewState>> = Rc::default();
         let filter = source_search_entry("Filter name, type, or value");
         filter.add_css_class("locals-filter-entry");
         filter.set_hexpand(true);
@@ -52,7 +58,7 @@ impl ReturnValueView {
 
         let summary = gtk::Label::new(None);
         summary.add_css_class("locals-summary");
-        let clear = gtk::Button::with_label("Clear");
+        let clear = gtk::Button::with_label("Clear all");
         clear.add_css_class("inline-action");
         clear.set_tooltip_text(Some("Clear return history for all threads"));
         let tools = gtk::Box::new(gtk::Orientation::Horizontal, 4);
@@ -60,6 +66,43 @@ impl ReturnValueView {
         tools.append(&filter);
         tools.append(&summary);
         tools.append(&clear);
+        let origin_factory = gtk::SignalListItemFactory::new();
+
+        origin_factory.connect_setup(|_, object| {
+            let item = object.downcast_ref::<gtk::ListItem>().unwrap();
+            let label = gtk::Label::new(None);
+            label.add_css_class("debug-table-cell");
+            label.set_xalign(0.0);
+            label.set_ellipsize(pango::EllipsizeMode::Middle);
+            enable_stable_text_selection(&label);
+            item.set_child(Some(&label));
+        });
+
+        let origin_state = Rc::clone(&state);
+
+        origin_factory.connect_bind(move |_, object| {
+            let item = object.downcast_ref::<gtk::ListItem>().unwrap();
+            let label = item.child().and_downcast::<gtk::Label>().unwrap();
+            let row = item.item().and_downcast::<gtk::TreeListRow>().unwrap();
+            let data = row.item().and_downcast::<SnapshotRow>().unwrap();
+            let id = data.borrow::<VariableNode>().variable.return_value;
+
+            let origin = origin_state.borrow().entries.iter()
+                .find(|entry| Some(entry.captured.id) == id)
+                .map(|entry| entry.captured.origin())
+                .unwrap_or_default();
+
+            clear_label_selection(&label);
+            label.set_text(if row.depth() == 0 { &origin } else { "" });
+            label.set_tooltip_text(Some(&format!("{origin}\nThe returned value is captured. Pointer targets and memory actions read the current stopped target.")));
+        });
+
+        let origin = components::table_column("ORIGIN", 280, origin_factory);
+
+        bindings
+            .columns
+            .table(TableId::ReturnValues)
+            .append(&view, "origin", &origin);
 
         let scrolled = gtk::ScrolledWindow::builder()
             .child(&view)
@@ -71,7 +114,14 @@ impl ReturnValueView {
         let body = gtk::Box::new(gtk::Orientation::Vertical, 0);
         body.append(&tools);
         body.append(&scrolled);
-        let root = build_disclosure("RETURN VALUES", &body, true, "return-values-panel");
+        let availability = empty_label("No captured return values for the selected thread");
+        availability.set_wrap(true);
+        availability.set_visible(false);
+        body.append(&availability);
+
+        let (root, content) =
+            build_disclosure_with_content("RETURN VALUES", &body, true, "return-values-panel");
+
         root.set_visible(false);
 
         Self {
@@ -80,8 +130,13 @@ impl ReturnValueView {
             view,
             summary,
             clear,
+            content,
+            tools,
+            scrolled,
+            availability,
+            capture_note: Rc::default(),
             enabled: Rc::new(Cell::new(true)),
-            state: Rc::default(),
+            state,
             refresh: Rc::default(),
             capture: Rc::default(),
             capture_setting_dirty: Rc::default(),
@@ -105,8 +160,50 @@ impl ReturnValueView {
             if variables.len() == 1 { "" } else { "s" }
         ));
 
-        self.root
-            .set_visible(self.enabled.get() && !variables.is_empty());
+        self.tools.set_visible(!variables.is_empty());
+        self.scrolled.set_visible(!variables.is_empty());
+        self.availability.set_visible(variables.is_empty());
+        self.clear.set_sensitive(!variables.is_empty());
+        self.root.set_visible(self.enabled.get());
+    }
+
+    pub(super) fn fit_content(&self, split: &gtk::Paned) {
+        let height = Cell::new(split.position());
+        let expanded = Cell::new(true);
+        let split = split.downgrade();
+
+        let widgets = [
+            self.root.clone().upcast::<gtk::Widget>(),
+            self.content.clone().upcast(),
+            self.scrolled.clone().upcast(),
+        ];
+
+        let visible = widgets.each_ref().map(|widget| widget.downgrade());
+
+        let update = Rc::new(move || {
+            let Some(split) = split.upgrade() else { return };
+
+            let show_table = visible
+                .iter()
+                .all(|widget| widget.upgrade().is_some_and(|widget| widget.is_visible()));
+
+            if !show_table {
+                if expanded.replace(false) {
+                    height.set(split.position());
+                }
+
+                split.set_position(0);
+            } else if !expanded.replace(true) {
+                split.set_position(height.get());
+            }
+        });
+
+        update();
+
+        for widget in widgets {
+            let update = Rc::clone(&update);
+            widget.connect_visible_notify(move |_| update());
+        }
     }
 
     fn sync(
@@ -284,6 +381,46 @@ impl Ui {
         {
             self.defer_variable_object_deletions(retired);
         }
+
+        let note = self.return_value.capture_note.borrow();
+
+        let detail = note
+            .as_ref()
+            .filter(|(stop, _)| *stop == generation)
+            .map(|(_, text)| text.as_str());
+
+        let default = if self.model.target_connection() != TargetConnection::Local
+            || !self.model.gdb_capabilities().language_printers
+            || !matches!(
+                self.model.target_architecture(),
+                TargetArchitecture::X86_64 | TargetArchitecture::AArch64
+            )
+            || self.model.target_endian() != Some(TargetEndian::Little)
+        {
+            "No captured values for this thread. Use Finish for GDB return values. Automatic capture requires local little-endian x86-64 or AArch64 and GDB Python."
+        } else if self.model.recording_method().is_some()
+            || self.model.execution_direction() != crate::model::replay::ExecutionDirection::Forward
+        {
+            "No captured values for this thread. Automatic return capture is disabled during recording and reverse execution."
+        } else {
+            "No captured values for this thread. Finish uses GDB return values. Ordinary stepping captures only verified return boundaries and supported types."
+        };
+
+        set_label_text(&self.return_value.availability, detail.unwrap_or(default));
+        self.return_value
+            .root
+            .set_visible(self.return_values_enabled() && self.model.inferior_has_started());
+    }
+
+    pub(crate) fn show_return_capture_error(&self, generation: u64, error: &str) {
+        if self.model.is_stop_refresh_current(generation) {
+            self.return_value.capture_note.replace(Some((
+                generation,
+                format!("Automatic return capture unavailable — {error}"),
+            )));
+
+            self.sync_return_values();
+        }
     }
 
     pub(crate) fn refresh_return_values(&self) {
@@ -315,6 +452,10 @@ impl Ui {
     pub(crate) fn acknowledge_return_value_capture_setting(&self, enabled: bool) {
         if self.return_values_enabled() == enabled {
             self.return_value.capture_setting_dirty.set(false);
+
+            if self.return_value.capture_note.borrow_mut().take().is_some() {
+                self.sync_return_values();
+            }
         }
     }
 

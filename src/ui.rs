@@ -3,6 +3,7 @@ use crate::model::lifecycle::stop_reason_label;
 mod actions;
 mod build;
 mod cfg_view;
+mod comparison;
 mod components;
 mod configuration;
 pub(crate) mod controls;
@@ -30,8 +31,10 @@ mod settings;
 mod simd;
 mod stack_view;
 mod state;
+mod stop_info;
 mod syscall_view;
 mod threads;
+mod type_layout;
 mod value;
 mod variable_presentation;
 mod variable_viewers;
@@ -79,7 +82,7 @@ pub(crate) use workspace::PanelId;
 use crate::model::DebuggerStateDelta;
 #[cfg(test)]
 use crate::model::TargetConnection;
-use crate::model::{RefreshGate, configured_target_can_start};
+use crate::model::{RefreshGate, StopPointMetadata, configured_target_can_start};
 pub(crate) use actions::*;
 
 #[cfg(test)]
@@ -306,8 +309,9 @@ type StringAssignmentHandler = Rc<dyn Fn(Variable, Vec<u8>, StringAssignmentKind
 pub(crate) type VectorWriteCompletion = Box<dyn FnOnce(Result<(), String>)>;
 type VectorAssignmentHandler =
     Rc<dyn Fn(crate::debugger::vector::VectorWrite, VectorWriteCompletion)>;
-type BreakpointConditionHandler = Rc<dyn Fn(String, Option<String>)>;
-type BreakpointEditorHandler = Rc<dyn Fn(BreakpointEditRequest)>;
+// The second argument permits retry only when created breakpoint identities are known.
+pub(crate) type BreakpointEditCompletion = Box<dyn FnOnce(Result<(), String>, bool)>;
+type BreakpointEditorHandler = Rc<dyn Fn(BreakpointEditRequest, BreakpointEditCompletion)>;
 type BreakpointEnabledHandler = Rc<dyn Fn(String, bool)>;
 type StopPointBulkHandler = Rc<dyn Fn(StopPointBulkAction, Vec<String>)>;
 type BreakpointInsertHandler = Rc<dyn Fn(PathBuf, u32)>;
@@ -348,6 +352,7 @@ struct MiscViewBindings<'a> {
 }
 
 struct InspectorBindings<'a> {
+    stop_info: &'a stop_info::StopInfoView,
     columns: &'a ColumnLayouts,
     theme: &'a Theme,
     variable_children_handler: &'a Rc<RefCell<Option<VariableChildrenHandler>>>,
@@ -533,12 +538,6 @@ pub(crate) enum StopPointBulkAction {
     Enable,
     Disable,
     Delete,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct StopPointMetadata {
-    group: Option<String>,
-    tags: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -868,6 +867,7 @@ impl WatchpointAccess {
 
 #[derive(Clone)]
 struct MemoryWatchView {
+    snapshot_generation: Rc<Cell<Option<u64>>>,
     id: u64,
     expression: String,
     byte_count: usize,
@@ -1279,6 +1279,9 @@ const INITIAL_SOURCE: &str = r#"// fgdb is connected to a real GDB terminal.
 
 #[derive(Clone)]
 pub struct Ui {
+    source_verification: Rc<RefCell<Option<editor::freshness::VerificationHandler>>>,
+    comparisons: Rc<RefCell<Vec<comparison::Baseline>>>,
+    stop_info: stop_info::StopInfoView,
     column_layouts: ColumnLayouts,
     investigation: Rc<investigation::Workspace>,
     replay_controls: replay::ReplayControls,
@@ -1456,7 +1459,6 @@ pub struct Ui {
     breakpoint_insert_handler: Rc<RefCell<Option<BreakpointInsertHandler>>>,
     source_jump_handler: Rc<RefCell<Option<SourceJumpHandler>>>,
     breakpoint_delete_handler: Rc<RefCell<Option<StringSelectionHandler>>>,
-    breakpoint_condition_handler: Rc<RefCell<Option<BreakpointConditionHandler>>>,
     breakpoint_editor_handler: Rc<RefCell<Option<BreakpointEditorHandler>>>,
     breakpoint_enabled_handler: Rc<RefCell<Option<BreakpointEnabledHandler>>>,
     stop_point_bulk_handler: Rc<RefCell<Option<StopPointBulkHandler>>>,

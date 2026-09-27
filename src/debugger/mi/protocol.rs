@@ -21,6 +21,7 @@ pub enum MiEvent {
         thread_id: Option<String>,
     },
     Stopped {
+        details: Box<crate::debugger::stop_info::StopDetails>,
         reason: Option<String>,
         return_value: Option<ReturnValue>,
         signal_name: Option<String>,
@@ -64,6 +65,7 @@ pub enum MiEvent {
 pub struct ReturnValue {
     pub value: String,
     pub history_variable: Option<String>,
+    pub function: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

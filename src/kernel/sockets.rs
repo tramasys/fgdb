@@ -2,6 +2,8 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fs::File,
+    io::{BufRead, BufReader, Read},
     net::{Ipv4Addr, Ipv6Addr, SocketAddr},
     path::Path,
     sync::Arc,
@@ -239,10 +241,6 @@ pub(super) fn read(
 ) -> HashMap<u64, Arc<SocketInfo>> {
     let mut sockets = HashMap::new();
 
-    if wanted.is_empty() {
-        return sockets;
-    }
-
     for (entry, protocol) in [
         ("tcp", Protocol::Tcp),
         ("tcp6", Protocol::Tcp6),
@@ -250,40 +248,56 @@ pub(super) fn read(
         ("udp6", Protocol::Udp6),
         ("unix", Protocol::Unix),
     ] {
-        if work.should_stop() {
+        if sockets.len() == wanted.len() || work.should_stop() {
             break;
         }
 
-        let Ok(input) =
-            crate::bounded::read_string(&root.join("net").join(entry), 16 * 1024 * 1024)
+        let Ok(file) = File::open(root.join("net").join(entry)) else {
+            continue;
+        };
+
+        read_table(file, protocol, wanted, work, &mut sockets);
+    }
+
+    sockets
+}
+
+fn read_table(
+    input: impl Read,
+    protocol: Protocol,
+    wanted: &HashSet<u64>,
+    work: &WorkDeadline,
+    sockets: &mut HashMap<u64, Arc<SocketInfo>>,
+) {
+    let mut reader = BufReader::new(input.take(16 * 1024 * 1024));
+    let mut line = String::new();
+    let inode_column = if protocol == Protocol::Unix { 6 } else { 9 };
+
+    while sockets.len() < wanted.len() && !work.should_stop() {
+        line.clear();
+
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || !line.ends_with('\n') {
+            // A byte limit or read error must not turn a partial row into a socket.
+            break;
+        }
+
+        let line = line.strip_suffix('\n').unwrap();
+        let line = line.strip_suffix('\r').unwrap_or(line);
+
+        let Some(inode) = line
+            .split_whitespace()
+            .nth(inode_column)
+            .and_then(|value| value.parse::<u64>().ok())
         else {
             continue;
         };
 
-        for (index, line) in input.lines().skip(1).enumerate() {
-            if index % 256 == 0 && work.should_stop() {
-                return sockets;
-            }
-
-            let inode_column = if protocol == Protocol::Unix { 6 } else { 9 };
-
-            let Some(inode) = line
-                .split_whitespace()
-                .nth(inode_column)
-                .and_then(|value| value.parse::<u64>().ok())
-            else {
-                continue;
-            };
-
-            if wanted.contains(&inode)
-                && let Some(socket) = parse(line, protocol)
-            {
-                sockets.insert(inode, Arc::new(socket));
-            }
+        if wanted.contains(&inode)
+            && let Some(socket) = parse(line, protocol)
+        {
+            sockets.insert(inode, Arc::new(socket));
         }
     }
-
-    sockets
 }
 
 fn parse(line: &str, protocol: Protocol) -> Option<SocketInfo> {
@@ -406,6 +420,47 @@ fn tcp_state(state: u8) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_tables_stop_at_requested_inodes_and_reject_partial_rows() {
+        let entry =
+            "0: 0100007F:1F90 0100007F:C001 01 00000004:00000015 00:00000000 00000000 1000 0 42";
+
+        let wanted = HashSet::from([42]);
+        let work = WorkDeadline::new(std::time::Duration::from_secs(15));
+        let mut sockets = HashMap::new();
+
+        for tail in [entry.to_owned(), entry.replace(" 42", " 4")] {
+            read_table(tail.as_bytes(), Protocol::Tcp, &wanted, &work, &mut sockets);
+            assert!(sockets.is_empty());
+        }
+
+        let input = format!("header\n{entry}\n{}\n", "x".repeat(32 * 1024));
+        let mut input = std::io::Cursor::new(input.as_bytes());
+        read_table(&mut input, Protocol::Tcp, &wanted, &work, &mut sockets);
+        assert_eq!(sockets.len(), 1);
+        assert_eq!(sockets[&42].receive.unwrap().value, 21);
+        assert!(input.position() < input.get_ref().len() as u64);
+        sockets.clear();
+        let prefix = format!("{entry}\n");
+
+        read_table(
+            prefix.as_bytes().chain(std::io::repeat(b' ')),
+            Protocol::Tcp,
+            &HashSet::from([42, 43]),
+            &work,
+            &mut sockets,
+        );
+
+        assert_eq!(sockets.len(), 1);
+        assert!(sockets.contains_key(&42));
+        work.cancel();
+        sockets.clear();
+        input.set_position(0);
+        read_table(&mut input, Protocol::Tcp, &wanted, &work, &mut sockets);
+        assert!(sockets.is_empty());
+        assert_eq!(input.position(), 0);
+    }
 
     #[test]
     fn decodes_socket_states_queue_units_unix_names_and_epoll_interests() {

@@ -165,6 +165,7 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
         }
 
         MiEvent::Stopped {
+            details,
             reason,
             return_value,
             signal_name,
@@ -194,6 +195,25 @@ pub(super) fn handle_mi_event(weak_ui: &Weak<Ui>, client: &MiClient, event: MiEv
                 return;
             }
 
+            ui.model
+                .stop_info
+                .borrow_mut()
+                .record(crate::model::stop_info::StopEntry {
+                    sequence: ui.model.observed_stop_sequence(),
+                    epoch: client.transport_epoch(),
+                    reason: reason
+                        .as_deref()
+                        .map(crate::debugger::stop_info::bounded)
+                        .unwrap_or_else(|| "stopped".into()),
+                    inferior: ui.model.selected_inferior_id(),
+                    thread: thread_id,
+                    address,
+                    signal: signal_name.clone(),
+                    meaning: signal_meaning.clone(),
+                    details: *details,
+                });
+
+            ui.render_stop_info();
             drop(ui);
             finish_stopped_state(weak_ui, client, reason, signal_name, signal_meaning, None);
         }

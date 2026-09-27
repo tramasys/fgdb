@@ -115,6 +115,8 @@ pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
         ..CoreDumpSnapshot::default()
     };
 
+    let mut program = vec![0_u8; usize::try_from(phentsize).unwrap_or(0)];
+
     for index in 0..phnum {
         let offset = phoff
             .checked_add(
@@ -123,8 +125,6 @@ pub(crate) fn read_core_dump(path: &Path) -> Result<CoreDumpSnapshot, String> {
                     .saturating_mul(phentsize),
             )
             .ok_or_else(|| String::from("Program-header offset overflow"))?;
-
-        let mut program = vec![0_u8; usize::try_from(phentsize).unwrap_or(0)];
 
         read_exact_at(&file, &mut program, offset)
             .map_err(|error| format!("Cannot read core program header {index}: {error}"))?;

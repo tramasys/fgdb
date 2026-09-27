@@ -59,6 +59,10 @@ fn captured_return_transport_rejects_ambiguous_and_invalid_payloads() {
 
     let verified = return_values::parse_snapshot("FGDB_RETURNS 1 i1 $2 3432 $1").unwrap();
     assert_eq!(verified.replaces, Some("$1"));
+    let named = return_values::parse_snapshot("FGDB_RETURNS 1 i1 $2 3432 - 776f726b6572").unwrap();
+    assert_eq!(named.value.function.as_deref(), Some("worker"));
+    assert!(named.replaces.is_none());
+    assert!(return_values::parse_snapshot("FGDB_RETURNS 1 i1 $2 3432 - 00").is_none());
 }
 
 #[test]
@@ -216,6 +220,12 @@ fn live_source_steps_and_instruction_step_out_capture_verified_results() {
             if let Some(ReturnSnapshot { value, .. }) =
                 return_values::parse_snapshot(&snapshot(&client))
             {
+                assert!(
+                    value
+                        .function
+                        .as_deref()
+                        .is_some_and(|name| name.starts_with("return_"))
+                );
                 returned.push(value.value);
             }
         }
@@ -234,7 +244,7 @@ fn live_source_steps_and_instruction_step_out_capture_verified_results() {
 
 #[test]
 #[ignore = "requires x86-64 GDB and the C3 return-value fixture"]
-fn live_c3_returns_use_native_types_and_skip_unproven_source_steps() {
+fn live_c3_returns_use_native_types_across_finish_and_stepping() {
     for command in ["-exec-finish", "-exec-next", "-exec-next-instruction"] {
         for (function, assertion) in [
             ("return_pair", "int(v['x']) == 7 and int(v['y']) == 11"),
@@ -267,20 +277,6 @@ fn live_c3_returns_use_native_types_and_skip_unproven_source_steps() {
                 wait_until(|| stopped.get());
                 let output = snapshot(&client);
 
-                // C3 reloads RAX through a temporary before Next stops in the
-                // caller. The capture policy must not assume it was preserved.
-                if command == "-exec-next" && function == "return_pair" {
-                    assert!(return_values::parse_snapshot(&output).is_none());
-                    assert!(native.borrow().is_none());
-
-                    console_output(
-                        &client,
-                        "python assert gdb.newest_frame().name() == 'main'; v = gdb.parse_and_eval('pair'); assert int(v['x']) == 7 and int(v['y']) == 11",
-                    );
-
-                    break;
-                }
-
                 returned = return_values::parse_snapshot(&output)
                     .map(|snapshot| snapshot.value)
                     .or_else(|| native.take());
@@ -288,10 +284,6 @@ fn live_c3_returns_use_native_types_and_skip_unproven_source_steps() {
                 if returned.is_some() {
                     break;
                 }
-            }
-
-            if command == "-exec-next" && function == "return_pair" {
-                continue;
             }
 
             let returned =
@@ -508,6 +500,76 @@ fn live_aggregate_transfers_cover_register_classes_and_reject_unproven_layouts()
             &client,
             "python r = __import__('_fgdb_languages_v1.returns', fromlist=['*']); assert r._prepare() is None, gdb.newest_frame().name()",
         );
+    }
+}
+
+#[test]
+#[ignore = "requires GDB and the C/C++ aggregate-return fixtures"]
+fn live_source_next_preserves_aggregate_returns_across_caller_register_moves() {
+    for fixture in ["c-aggregate-return-target", "cpp-aggregate-return-target"] {
+        let stopped = Rc::new(Cell::new(false));
+        let observed = Rc::clone(&stopped);
+
+        let (_debugger, client) = open_debugger_observing(fixture, "main", false, move |event| {
+            if matches!(event, MiEvent::Stopped { .. }) {
+                observed.set(true);
+            }
+        });
+
+        assert!(return_values::parse_snapshot(&snapshot(&client)).is_none());
+        let mut returned = Vec::new();
+
+        for _ in 0..6 {
+            stopped.set(false);
+            assert_eq!(request(&client, "-exec-next").class, "running");
+            wait_until(|| stopped.get());
+
+            if let Some(ReturnSnapshot { value, .. }) =
+                return_values::parse_snapshot(&snapshot(&client))
+            {
+                returned.push(value);
+            }
+        }
+
+        let expected = [
+            (
+                "return_wide",
+                "int(v['x']) == 0x1122334455667788 and int(v['y']) == 0x2233445566778899",
+            ),
+            (
+                "return_floats",
+                "float(v['x']) == 3.25 and float(v['y']) == -1.5",
+            ),
+            (
+                "return_mixed",
+                "int(v['x']) == 42 and float(v['y']) == 3.25",
+            ),
+            (
+                "return_reversed",
+                "float(v['x']) == 3.25 and int(v['y']) == 42",
+            ),
+            (
+                "return_nested",
+                "int(v['x'][0]) == 7 and int(v['x'][1]) == 11 and float(v['y'][0]) == 3.25 and float(v['y'][1]) == -1.5",
+            ),
+        ];
+
+        assert_eq!(returned.len(), expected.len(), "{fixture}: {returned:?}");
+
+        for (value, (function, assertion)) in returned.iter().zip(expected) {
+            assert!(value.function.as_deref().unwrap().starts_with(function));
+            let reference = value.history_variable.as_deref().unwrap();
+
+            console_output(
+                &client,
+                &format!(
+                    "python v = gdb.history({}); assert {assertion}, str(v)",
+                    &reference[1..]
+                ),
+            );
+        }
+
+        console_output(&client, "python assert len(gdb.breakpoints()) == 1");
     }
 }
 

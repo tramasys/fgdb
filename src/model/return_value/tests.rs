@@ -54,10 +54,29 @@ fn record(model: &DebuggerModel) {
         Some(ReturnValue {
             value: "42".into(),
             history_variable: Some("$1".into()),
+            function: None,
         }),
         Some("1"),
         Some("i1"),
     );
+}
+
+#[test]
+fn captured_origins_do_not_follow_later_thread_or_stop_selection() {
+    let model = model();
+    let captured = ReturnValue {
+        value: "42".into(),
+        history_variable: Some("$2".into()),
+        function: Some("worker".into()),
+    };
+
+    model.record_return_value(Some(captured), Some("1"), Some("i1"));
+    let value = model.return_values().remove(0);
+    let origin = value.origin();
+    assert!(origin.contains("worker"));
+    assert!(origin.contains("i1 / thread 1"));
+    model.observe_stop(Some("2"), Some("i1"), 0, None, true, None);
+    assert_eq!(value.origin(), origin);
 }
 
 #[test]
@@ -67,6 +86,7 @@ fn verified_capture_replaces_only_its_own_native_result() {
     let verified = ReturnValue {
         value: "{x = 7, y = 11}".into(),
         history_variable: Some("$2".into()),
+        function: None,
     };
 
     model.record_verified_return_value(verified.clone(), "2", "i1", Some("$1"));
@@ -109,6 +129,7 @@ fn history_is_bounded_and_deduplicates_absolute_history_references() {
             Some(ReturnValue {
                 value: index.to_string(),
                 history_variable: Some(format!("${index}")),
+                function: None,
             }),
             Some("1"),
             Some("i1"),
@@ -191,6 +212,7 @@ fn large_results_evict_older_history_without_truncating_the_latest_value() {
             Some(ReturnValue {
                 value: "x".repeat(MAX_RETURN_HISTORY_BYTES),
                 history_variable: Some(format!("${index}")),
+                function: None,
             }),
             Some("1"),
             Some("i1"),

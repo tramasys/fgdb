@@ -291,6 +291,21 @@ def _transfer(assembly, architecture, registers, memory, bases):
     return True
 
 
+def _bases(frame, architecture):
+    names = ("rbp", "rsp") if architecture == "i386:x86-64" else ("sp", "x29")
+    bases = {name: int(frame.read_register(name)) for name in names}
+
+    if architecture == "aarch64":
+        bases["fp"] = bases["x29"]
+
+    return bases
+
+
+def _registers(names):
+    return {name: tuple((name, index) for index in range(16 if name.startswith(("xmm", "v")) else 8))
+            + (None,) * (48 if name.startswith(("xmm", "v")) else 56) for name in names}
+
+
 def plan(frame, pc, value_type, architecture):
     size = int(value_type.sizeof)
 
@@ -312,16 +327,9 @@ def plan(frame, pc, value_type, architecture):
     if not addresses:
         return None
 
-    if architecture == "i386:x86-64":
-        bases = {name: int(frame.read_register(name)) for name in ("rbp", "rsp")}
-        result_registers = ("rax", "rdx", "xmm0", "xmm1")
-    else:
-        bases = {name: int(frame.read_register(name)) for name in ("sp", "x29")}
-        bases["fp"] = bases["x29"]
-        result_registers = ("x0", "x1", "v0", "v1", "v2", "v3")
-
-    registers = {name: tuple((name, index) for index in range(16 if name.startswith(("xmm", "v")) else 8))
-                 + (None,) * (48 if name.startswith(("xmm", "v")) else 56) for name in result_registers}
+    bases = _bases(frame, architecture)
+    result_registers = ("rax", "rdx", "xmm0", "xmm1") if architecture == "i386:x86-64" else ("x0", "x1", "v0", "v1", "v2", "v3")
+    registers = _registers(result_registers)
     memory = {}
     next_pc = pc
 
@@ -346,6 +354,47 @@ def plan(frame, pc, value_type, architecture):
         return matches[0] if all(match == matches[0] for match in matches) else None
 
     return None
+
+
+def relocate(frame, start, end, origins, architecture):
+    if start == end:
+        return origins
+
+    if end < start or end - start > MAX_CODE_BYTES or architecture not in ("i386:x86-64", "aarch64"):
+        return None
+
+    with gdb.with_parameter("disassembly-flavor", "intel") if architecture == "i386:x86-64" else nullcontext():
+        instructions = frame.architecture().disassemble(start, end_pc=end - 1)
+
+    if len(instructions) > MAX_INSTRUCTIONS:
+        return None
+
+    bases = _bases(frame, architecture)
+    registers = _registers({origin[0] for origin in origins if origin})
+    memory = {}
+    next_pc = start
+
+    for instruction in instructions:
+        if instruction["addr"] != next_pc or next_pc + instruction["length"] > end:
+            return None
+
+        next_pc += instruction["length"]
+
+        if not _transfer(instruction["asm"], architecture, registers, memory, bases):
+            return None
+
+    if next_pc != end:
+        return None
+
+    # NEXT may copy a result to another register and reuse the original. Only
+    # surviving register bytes count; never substitute a caller's memory value.
+    locations = {origin: (name, index) for name, data in registers.items()
+                 for index, origin in enumerate(data) if origin is not None}
+
+    if any(origin is not None and origin not in locations for origin in origins):
+        return None
+
+    return tuple(locations.get(origin) for origin in origins)
 
 
 def read(frame, origins, value_type):

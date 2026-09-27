@@ -1004,6 +1004,9 @@ impl Ui {
                     self.model.target_pointer_width(),
                     endian,
                 );
+                watch
+                    .snapshot_generation
+                    .set(Some(self.model.current_stop_refresh_generation()));
             }
             Err(error) => {
                 show_memory_watch_error(&watch, error);

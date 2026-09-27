@@ -687,7 +687,8 @@ pub(super) fn build_disclosure_with_content(
     arrow.set_xalign(0.5);
     let title = gtk::Label::new(Some(title));
     title.add_css_class("section-title");
-    title.set_halign(gtk::Align::Start);
+    title.set_halign(gtk::Align::Fill);
+    title.set_ellipsize(pango::EllipsizeMode::End);
     title.set_xalign(0.0);
     title.set_hexpand(true);
     heading.append(&arrow);
@@ -710,8 +711,7 @@ pub(super) fn build_disclosure_with_content(
     content.append(child);
     content.set_visible(expanded);
     let content_for_click = content.clone();
-    let button_for_click = button.clone();
-    button.connect_clicked(move |_| {
+    button.connect_clicked(move |button| {
         let reveal = !content_for_click.is_visible();
         content_for_click.set_visible(reveal);
         arrow.set_text(if reveal {
@@ -719,15 +719,16 @@ pub(super) fn build_disclosure_with_content(
         } else {
             DISCLOSURE_COLLAPSED_ICON
         });
+
         if reveal {
-            button_for_click.remove_css_class("disclosure-collapsed");
-            button_for_click.add_css_class("disclosure-expanded");
+            button.remove_css_class("disclosure-collapsed");
+            button.add_css_class("disclosure-expanded");
         } else {
-            button_for_click.remove_css_class("disclosure-expanded");
-            button_for_click.add_css_class("disclosure-collapsed");
+            button.remove_css_class("disclosure-expanded");
+            button.add_css_class("disclosure-collapsed");
         }
 
-        button_for_click.set_tooltip_text(Some(if reveal {
+        button.set_tooltip_text(Some(if reveal {
             "Collapse section"
         } else {
             "Expand section"

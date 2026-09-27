@@ -74,6 +74,9 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
 
     memory_search::connect(&ui, &mi_client);
     return_values::connect(&ui, &mi_client);
+    stop_info::connect(&ui, &mi_client);
+    type_layout::connect(&ui, &mi_client);
+    source_verification::connect(&ui, &mi_client);
     misc::locks::connect(&ui, &mi_client);
     connect_stack_paging(&ui, &mi_client);
     let weak = Rc::downgrade(&ui);
@@ -649,41 +652,13 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     let weak_ui = Rc::downgrade(&ui);
     let weak_client = Rc::downgrade(&mi_client);
 
-    ui.set_breakpoint_condition_handler(move |number, condition| {
+    ui.set_breakpoint_editor_handler(move |request, complete| {
         let Some(client) = weak_client.upgrade() else {
+            complete(Err(String::from("The debugger is unavailable")), false);
             return;
         };
 
-        let (command, detail) = condition.map_or_else(
-            || {
-                (
-                    format!("-break-condition {number}"),
-                    format!("Cleared condition on breakpoint #{number}"),
-                )
-            },
-            |condition| {
-                (
-                    format!(
-                        "-break-condition {number} {}",
-                        crate::debugger::quote(&condition)
-                    ),
-                    format!("Breakpoint #{number} now stops if {condition}"),
-                )
-            },
-        );
-
-        mutate_breakpoint(weak_ui.clone(), &client, command, detail);
-    });
-
-    let weak_ui = Rc::downgrade(&ui);
-    let weak_client = Rc::downgrade(&mi_client);
-
-    ui.set_breakpoint_editor_handler(move |request| {
-        let Some(client) = weak_client.upgrade() else {
-            return;
-        };
-
-        edit_breakpoint(weak_ui.clone(), &client, request);
+        edit_breakpoint(weak_ui.clone(), client, request, complete);
     });
 
     let weak_ui = Rc::downgrade(&ui);

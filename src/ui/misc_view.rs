@@ -1,5 +1,5 @@
 use super::*;
-use components::build_subtab_navigation;
+use components::{build_subtab_navigation, label_column};
 
 const MISC_PAGES: [(&str, &str); 8] = [
     ("startup-vectors", "Args / Env"),
@@ -1746,44 +1746,6 @@ fn vector_column<T: 'static>(
         bind(&data.borrow::<T>(), label);
         label.set_tooltip_text(Some(&label.text()));
     })
-}
-
-fn label_column(
-    title: &str,
-    width: i32,
-    bind: impl Fn(&glib::BoxedAnyObject, &gtk::Label) + Copy + 'static,
-) -> gtk::ColumnViewColumn {
-    let factory = gtk::SignalListItemFactory::new();
-
-    factory.connect_setup(|_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-
-        let label = gtk::Label::new(None);
-        label.add_css_class("debug-table-cell");
-        label.set_halign(gtk::Align::Start);
-        label.set_ellipsize(pango::EllipsizeMode::Middle);
-        enable_stable_text_selection(&label);
-        item.set_child(Some(&label));
-    });
-
-    factory.connect_bind(move |_, object| {
-        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
-            return;
-        };
-
-        let (Some(label), Some(data)) = (
-            item.child().and_downcast::<gtk::Label>(),
-            item.item().and_downcast::<glib::BoxedAnyObject>(),
-        ) else {
-            return;
-        };
-
-        bind(&data, &label);
-    });
-
-    components::table_column(title, width, factory)
 }
 
 fn argument_label(index: usize) -> String {

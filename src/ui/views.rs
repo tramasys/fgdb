@@ -68,6 +68,7 @@ pub(super) fn clear_label_selection(label: &gtk::Label) {
 
 #[derive(Clone)]
 struct VariableMenuContext {
+    presentation: Rc<variable_presentation::VariablePresentation>,
     selection: gtk::SingleSelection,
     handler: Rc<RefCell<Option<VariableViewerHandler>>>,
     viewers: Rc<VariableViewerRegistry>,
@@ -145,6 +146,7 @@ pub(super) fn build_locals_view(
     view.set_reorderable(true);
 
     let variable_menu = VariableMenuContext {
+        presentation: Rc::clone(presentation),
         selection: selection.clone(),
         handler: Rc::clone(viewer_handler),
         viewers: Rc::clone(viewers),
@@ -882,6 +884,23 @@ fn show_variable_context_menu(
     summary.append(&value);
     menu.append(&summary);
     locations.append_menu(&menu, &popover, variable);
+    let layout = context_menu_action("Inspect type layout");
+    let inspect = context.presentation.inspect.borrow().clone();
+    layout.set_sensitive(inspect.is_some());
+    let variable_for_layout = variable.clone();
+    let layout_popover = popover.downgrade();
+
+    layout.connect_clicked(move |_| {
+        if let Some(popover) = layout_popover.upgrade() {
+            popover.popdown();
+        }
+
+        if let Some(inspect) = &inspect {
+            inspect(variable_for_layout.clone());
+        }
+    });
+
+    menu.append(&layout);
     let matching_viewers = viewers.matching(variable);
 
     if !matching_viewers.is_empty() {

@@ -1,5 +1,8 @@
 use super::*;
 
+mod edit;
+pub(super) use edit::edit_breakpoint;
+
 pub(super) fn watchpoint_command(
     request: &WatchpointRequest,
 ) -> Result<(String, String), &'static str> {
@@ -598,324 +601,10 @@ pub(super) fn mutate_breakpoint(ui: Weak<Ui>, client: &MiClient, command: String
     }
 }
 
-pub(super) fn edit_breakpoint(ui: Weak<Ui>, client: &MiClient, request: BreakpointEditRequest) {
-    if !client.is_ready() {
-        breakpoint_failure(
-            &ui,
-            "Breakpoint unavailable",
-            "Wait for the GDB/MI channel to become ready.",
-        );
-
-        return;
-    }
-
-    if let Some(current_ui) = ui.upgrade() {
-        current_ui.set_command_pending(true);
-    }
-
-    if request.spec.regex {
-        create_regex_breakpoints(ui, client, request.spec);
-        return;
-    }
-
-    let recreate = request
-        .original
-        .as_ref()
-        .is_some_and(|original| breakpoint_needs_recreation(original, &request.spec));
-
-    if request.original.is_none() || recreate {
-        create_standard_breakpoint(ui, client, request);
-    } else if let Some(original) = request.original {
-        let number = original.command_number().to_owned();
-        let commands = mutable_breakpoint_commands(&number, &original, &request.spec);
-
-        if commands.is_empty() {
-            if let Some(current_ui) = ui.upgrade() {
-                current_ui.set_command_pending(false);
-
-                current_ui.set_status(
-                    "Paused",
-                    &format!("Breakpoint #{number} is unchanged"),
-                    Some("status-ready"),
-                );
-            }
-
-            return;
-        }
-
-        run_breakpoint_commands(
-            ui,
-            client,
-            commands.into(),
-            format!("Updated breakpoint #{number}"),
-        );
-    }
-}
-
-fn create_standard_breakpoint(ui: Weak<Ui>, client: &MiClient, request: BreakpointEditRequest) {
-    let command = breakpoint_insert_command(&request.spec);
-    let ui_for_response = ui.clone();
-
-    let old_number = request
-        .original
-        .as_ref()
-        .map(|breakpoint| breakpoint.command_number().to_owned());
-
-    let commands = request.spec.effective_commands();
-
-    if let Err(error) = client.request(&command, move |client, record| {
-        if !record.is_done() {
-            breakpoint_failure(
-                &ui_for_response,
-                "Breakpoint creation failed",
-                record
-                    .error_message()
-                    .unwrap_or("GDB rejected the breakpoint location or options"),
-            );
-
-            refresh_breakpoints(&ui_for_response, client);
-            return;
-        }
-
-        let mut numbers = crate::debugger::inserted_breakpoints(&record)
-            .into_iter()
-            .map(|breakpoint| breakpoint.command_number().to_owned())
-            .collect::<Vec<_>>();
-
-        numbers.sort();
-        numbers.dedup();
-
-        let Some(number) = numbers.into_iter().next() else {
-            breakpoint_failure(
-                &ui_for_response,
-                "Breakpoint creation failed",
-                "GDB did not report the newly created breakpoint number",
-            );
-
-            refresh_breakpoints(&ui_for_response, client);
-            return;
-        };
-
-        if let (Some(current_ui), Some(old_number)) =
-            (ui_for_response.upgrade(), old_number.as_deref())
-        {
-            current_ui.move_stop_point_metadata(old_number, &number);
-        }
-
-        let mut follow_up = VecDeque::new();
-
-        if !commands.is_empty() {
-            follow_up.push_back(breakpoint_commands_command(&number, &commands));
-        }
-
-        if let Some(old_number) = old_number.as_deref() {
-            follow_up.push_back(format!("-break-delete {old_number}"));
-        }
-
-        run_breakpoint_commands(
-            ui_for_response,
-            client,
-            follow_up,
-            old_number.map_or_else(
-                || format!("Added breakpoint #{number}"),
-                |_| format!("Replaced breakpoint with #{number}"),
-            ),
-        );
-    }) {
-        breakpoint_failure(&ui, "Breakpoint creation failed", &error.to_string());
-    }
-}
-
-fn create_regex_breakpoints(ui: Weak<Ui>, client: &MiClient, spec: BreakpointSpec) {
-    let ui_for_list = ui.clone();
-
-    if let Err(error) = client.request("-break-list", move |client, record| {
-        if !record.is_done() {
-            breakpoint_failure(
-                &ui_for_list,
-                "Regex breakpoint failed",
-                record
-                    .error_message()
-                    .unwrap_or("Could not read existing breakpoints"),
-            );
-
-            return;
-        }
-
-        let before = crate::debugger::breakpoints(&record)
-            .into_iter()
-            .filter(|breakpoint| !breakpoint.is_location())
-            .map(|breakpoint| breakpoint.number)
-            .collect::<HashSet<_>>();
-
-        let Ok(command) = crate::debugger::CliCommandBuilder::new("rbreak")
-            .verbatim_tail(&spec.location)
-            .map(crate::debugger::CliCommandBuilder::finish)
-        else {
-            breakpoint_failure(
-                &ui_for_list,
-                "Regex breakpoint failed",
-                "Function regular expressions cannot contain NUL or line breaks",
-            );
-
-            return;
-        };
-
-        let ui_for_regex = ui_for_list.clone();
-
-        if let Err(error) = client.request(&command, move |client, record| {
-            if !record.is_done() {
-                breakpoint_failure(
-                    &ui_for_regex,
-                    "Regex breakpoint failed",
-                    record
-                        .error_message()
-                        .unwrap_or("GDB rejected the function regex"),
-                );
-
-                refresh_breakpoints(&ui_for_regex, client);
-                return;
-            }
-
-            configure_regex_breakpoints(ui_for_regex, client, before, spec);
-        }) {
-            breakpoint_failure(&ui_for_list, "Regex breakpoint failed", &error.to_string());
-        }
-    }) {
-        breakpoint_failure(&ui, "Regex breakpoint failed", &error.to_string());
-    }
-}
-
-fn configure_regex_breakpoints(
-    ui: Weak<Ui>,
-    client: &MiClient,
-    before: HashSet<String>,
-    spec: BreakpointSpec,
-) {
-    let ui_for_response = ui.clone();
-
-    if let Err(error) = client.request("-break-list", move |client, record| {
-        if !record.is_done() {
-            breakpoint_failure(
-                &ui_for_response,
-                "Regex breakpoint failed",
-                record
-                    .error_message()
-                    .unwrap_or("Could not inspect regex matches"),
-            );
-
-            return;
-        }
-
-        let mut numbers = crate::debugger::breakpoints(&record)
-            .into_iter()
-            .filter(|breakpoint| !breakpoint.is_location() && !before.contains(&breakpoint.number))
-            .map(|breakpoint| breakpoint.number)
-            .collect::<Vec<_>>();
-
-        numbers.sort_by_key(|number| number.parse::<u64>().map_or((1, 0), |number| (0, number)));
-
-        if numbers.is_empty() {
-            breakpoint_failure(
-                &ui_for_response,
-                "No breakpoint added",
-                "No currently loaded function matched that regular expression",
-            );
-
-            refresh_breakpoints(&ui_for_response, client);
-            return;
-        }
-
-        let mut commands = VecDeque::new();
-
-        if spec.temporary {
-            let console = format!("enable delete {}", numbers.join(" "));
-            commands.push_back(crate::debugger::console_command(&console));
-        }
-
-        let effective_commands = spec.effective_commands();
-
-        for number in &numbers {
-            if let Some(condition) = spec.condition.as_deref() {
-                commands.push_back(format!(
-                    "-break-condition {number} {}",
-                    crate::debugger::quote(condition)
-                ));
-            }
-
-            let ignore = spec.stop_after.saturating_sub(1);
-
-            if ignore > 0 {
-                commands.push_back(format!("-break-after {number} {ignore}"));
-            }
-
-            if !effective_commands.is_empty() {
-                commands.push_back(breakpoint_commands_command(number, &effective_commands));
-            }
-        }
-
-        if !spec.enabled {
-            commands.push_back(format!("-break-disable {}", numbers.join(" ")));
-        }
-
-        let count = numbers.len();
-
-        run_breakpoint_commands(
-            ui_for_response,
-            client,
-            commands,
-            format!(
-                "Added {count} regex breakpoint{}",
-                if count == 1 { "" } else { "s" }
-            ),
-        );
-    }) {
-        breakpoint_failure(&ui, "Regex breakpoint failed", &error.to_string());
-    }
-}
-
-fn run_breakpoint_commands(
-    ui: Weak<Ui>,
-    client: &MiClient,
-    mut commands: VecDeque<String>,
-    success: String,
-) {
-    let Some(command) = commands.pop_front() else {
-        if let Some(current_ui) = ui.upgrade() {
-            current_ui.set_command_pending(false);
-            current_ui.set_status("Paused", &success, Some("status-ready"));
-        }
-
-        refresh_breakpoints(&ui, client);
-        return;
-    };
-
-    let ui_for_response = ui.clone();
-
-    if let Err(error) = client.request(&command, move |client, record| {
-        if record.is_done() {
-            run_breakpoint_commands(ui_for_response, client, commands, success);
-        } else {
-            breakpoint_failure(
-                &ui_for_response,
-                "Breakpoint update failed",
-                record
-                    .error_message()
-                    .unwrap_or("GDB rejected a breakpoint setting"),
-            );
-
-            refresh_breakpoints(&ui_for_response, client);
-        }
-    }) {
-        breakpoint_failure(&ui, "Breakpoint update failed", &error.to_string());
-        refresh_breakpoints(&ui, client);
-    }
-}
-
 fn breakpoint_failure(ui: &Weak<Ui>, title: &str, detail: &str) {
-    if let Some(current_ui) = ui.upgrade() {
-        current_ui.set_command_pending(false);
-        current_ui.set_status(title, detail, Some("status-error"));
+    if let Some(ui) = ui.upgrade() {
+        ui.set_command_pending(false);
+        ui.set_status(title, detail, Some("status-error"));
     }
 }
 
@@ -1013,22 +702,10 @@ fn mutable_breakpoint_commands(
 ) -> Vec<String> {
     let mut commands = Vec::new();
 
-    if original.enabled != spec.enabled {
-        commands.push(format!(
-            "-break-{} {number}",
-            if spec.enabled { "enable" } else { "disable" }
-        ));
-    }
-
     if original.condition != spec.condition {
-        commands.push(spec.condition.as_deref().map_or_else(
-            || format!("-break-condition {number}"),
-            |condition| {
-                format!(
-                    "-break-condition {number} {}",
-                    crate::debugger::quote(condition)
-                )
-            },
+        commands.push(breakpoint_condition_command(
+            number,
+            spec.condition.as_deref(),
         ));
     }
 
@@ -1044,7 +721,26 @@ fn mutable_breakpoint_commands(
         commands.push(breakpoint_commands_command(number, &effective_commands));
     }
 
+    if original.enabled != spec.enabled {
+        commands.push(format!(
+            "-break-{} {number}",
+            if spec.enabled { "enable" } else { "disable" }
+        ));
+    }
+
     commands
+}
+
+fn breakpoint_condition_command(number: &str, condition: Option<&str>) -> String {
+    condition.map_or_else(
+        || format!("-break-condition {number}"),
+        |condition| {
+            format!(
+                "-break-condition {number} {}",
+                crate::debugger::quote(condition)
+            )
+        },
+    )
 }
 
 pub(super) fn breakpoint_commands_command(number: &str, commands: &[String]) -> String {
@@ -1459,6 +1155,50 @@ mod tests {
             commands: Vec::new(),
             logpoint: false,
         }
+    }
+
+    #[test]
+    fn breakpoint_enablement_is_applied_only_after_fallible_settings() {
+        let original = source_breakpoint("/tmp/main.c", 1);
+        let mut spec = breakpoint_spec(original.original_location.as_deref().unwrap());
+        spec.enabled = false;
+        spec.condition = Some("missing_symbol == 1".into());
+        let commands = super::mutable_breakpoint_commands("1", &original, &spec);
+        assert!(commands[0].starts_with("-break-condition "));
+        assert_eq!(commands[1], "-break-disable 1");
+    }
+
+    #[test]
+    #[ignore = "requires GDB and the C networking fixture, run separately"]
+    fn rejected_breakpoint_condition_does_not_disable_the_breakpoint() {
+        use crate::app::test_support::{open_debugger, request};
+
+        let (_debugger, client) = open_debugger("c-network-target", "c_network_checkpoint");
+        let original = crate::debugger::breakpoints(&request(&client, "-break-list")).remove(0);
+        let mut spec = breakpoint_spec(original.original_location.as_deref().unwrap());
+        spec.enabled = false;
+        spec.condition = Some("definitely_missing_symbol == 1".into());
+
+        for command in super::mutable_breakpoint_commands(&original.number, &original, &spec) {
+            if !request(&client, &command).is_done() {
+                break;
+            }
+        }
+
+        let current = crate::debugger::breakpoints(&request(&client, "-break-list"));
+        assert!(current[0].enabled);
+        assert!(current[0].condition.is_none());
+
+        spec.enabled = true;
+        spec.condition = None;
+        spec.stop_after = 2147483648;
+
+        for command in super::mutable_breakpoint_commands(&original.number, &original, &spec) {
+            assert!(request(&client, &command).is_done());
+        }
+
+        let current = crate::debugger::breakpoints(&request(&client, "-break-list"));
+        assert_eq!(current[0].ignore_count, 2147483647);
     }
 
     fn source_breakpoint(path: &str, line: u32) -> Breakpoint {

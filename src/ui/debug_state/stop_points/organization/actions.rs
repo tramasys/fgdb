@@ -185,13 +185,7 @@ impl Ui {
             )
         });
 
-        let handler = self.stop_point_bulk_handler.borrow().clone();
-
-        if !numbers.is_empty()
-            && let Some(handler) = handler
-        {
-            handler(action, numbers);
-        }
+        self.request_stop_point_bulk_action(action, numbers);
     }
 }
 

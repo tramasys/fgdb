@@ -5,6 +5,7 @@ use std::{
 };
 
 mod file;
+pub(crate) mod process;
 pub(crate) use file::{FileIdentity, open_regular_file};
 
 pub(crate) fn read_bytes(path: &Path, maximum: usize) -> io::Result<Vec<u8>> {

@@ -11,6 +11,7 @@ fn descriptor(number: u32, kind: &str) -> KernelFileDescriptor {
         target: format!("target {number}"),
         details: "mnt_id: 1".into(),
         raw_info: "pos: 123\nflags: 02000002\nmnt_id: 1\nino: 42\n".into(),
+        info_warning: String::new(),
         inode: Some(42),
         mount_id: Some(1),
         eventfd_id: None,
@@ -43,6 +44,62 @@ fn socket(number: u32, queue: u64) -> KernelFileDescriptor {
 
     fd.details = fd.socket.as_ref().unwrap().summary();
     fd
+}
+
+#[test]
+#[ignore = "requires a GTK display, run separately from other GTK tests"]
+fn descriptor_history_restores_filters_and_exposes_partial_stale_evidence() {
+    gtk::init().unwrap();
+    let view = DescriptorView::build(&ColumnLayouts::default());
+    let mut epoll = descriptor(12, "epoll");
+    epoll.info_warning =
+        "256 epoll registrations shown. Additional registrations were not captured.".into();
+    epoll.watches.push(EpollWatch {
+        fd: 5,
+        inode: Some(42),
+        device: Some((0, 1)),
+        events: 1,
+        data: 5,
+    });
+
+    view.show(Some((100, 1)), 1000, 1, true, vec![socket(5, 1), epoll]);
+    view.details.set_active(true);
+    view.sockets.set_active(true);
+    view.protocol.set_selected(1);
+    view.search.set_text("127.0.0.1");
+    view.query.borrow_mut().text = "127.0.0.1".into();
+    view.refilter();
+    view.tables[1].selection.set_selected(0);
+    let link = crate::ui::tests::descendants::<gtk::Button>(&view.links)
+        .into_iter()
+        .find(|button| {
+            button
+                .label()
+                .is_some_and(|text| text.starts_with("Watched by FD 12"))
+        })
+        .unwrap();
+    link.emit_clicked();
+    assert_eq!(view.mode.get(), 0);
+    assert_eq!(view.selected().unwrap().fd.number, 12);
+    assert!(view.search.text().is_empty());
+    assert!(view.details_text().contains("Additional registrations"));
+    assert!(view.details_text().contains("PID 100"));
+    assert!(view.back.is_sensitive());
+    view.back.emit_clicked();
+    assert_eq!(view.mode.get(), 1);
+    assert_eq!(view.selected().unwrap().fd.number, 5);
+    assert_eq!(view.search.text(), "127.0.0.1");
+    assert_eq!(view.protocol.selected(), 1);
+    assert!(!view.back.is_sensitive());
+    view.invalidate();
+    assert!(view.summary.text().contains("Stale snapshot"));
+    assert!(view.copy.is_sensitive());
+    assert!(!view.inspect.is_sensitive());
+    view.set_refreshing(true);
+    assert!(view.summary.text().contains("Refreshing"));
+    view.clear();
+    assert!(!view.back.is_sensitive());
+    assert_eq!(view.summary.text(), "No snapshot");
 }
 
 #[test]
@@ -82,6 +139,22 @@ fn descriptor_identity_survives_renames_and_rejects_ambiguous_epoll_targets() {
     assert!(!watch.matches(&other_device));
     assert!(!watch.matches(&descriptor(4, "pipe")));
     assert!(!watch.matches(&socket(5, 0)));
+
+    let row = make_row(before, None, false);
+
+    for column in [
+        Column::Kind,
+        Column::Access,
+        Column::Flags,
+        Column::SocketFlags,
+        Column::Target,
+        Column::Details,
+        Column::State,
+        Column::Protocol,
+        Column::Change,
+    ] {
+        assert!(matches!(cell_text(&row, column), Cow::Borrowed(_)));
+    }
 }
 
 #[test]

@@ -167,17 +167,14 @@ impl SourceFileCache {
             return;
         }
 
-        let mut index = 0;
-
-        while index < self.entries.len() {
-            if self.entries[index].identity.path == identity.path {
-                if let Some(entry) = self.entries.remove(index) {
-                    self.bytes = self.bytes.saturating_sub(entry.weight);
-                }
-            } else {
-                index += 1;
+        self.entries.retain(|entry| {
+            if entry.identity.path == identity.path {
+                self.bytes = self.bytes.saturating_sub(entry.weight);
+                return false;
             }
-        }
+
+            true
+        });
 
         self.bytes = self.bytes.saturating_add(weight);
 
@@ -483,6 +480,14 @@ mod tests {
         assert_eq!(cache.entries.len(), 2);
         assert!(cache.get(&identity("a")).is_none());
         assert!(cache.get(&identity("bb")).is_some());
+        cache.insert(identity("bb"), source("replacement"));
+        assert_eq!(cache.entries.len(), 2);
+
+        assert_eq!(
+            cache.bytes,
+            source("replacement").weight() + source("c").weight()
+        );
+
         let mut tiny = SourceFileCache::new(4, 1);
         tiny.insert(identity("large"), source("too large"));
         assert!(tiny.entries.is_empty());

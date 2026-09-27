@@ -43,7 +43,10 @@ impl Ui {
             Rc::clone(&model),
         );
 
+        let stop_info = stop_info::StopInfoView::new();
+
         let inspector_bindings = InspectorBindings {
+            stop_info: &stop_info,
             columns: &column_layouts,
             theme,
             variable_children_handler: &variable_children_handler,
@@ -105,6 +108,9 @@ impl Ui {
         kernel_section_handler.replace(Some(layout.disclosure_handler()));
 
         let ui = Self {
+            source_verification: Rc::default(),
+            comparisons: Rc::default(),
+            stop_info,
             column_layouts,
             investigation: Rc::new(investigation::Workspace::default()),
             replay_controls: topbar.replay_controls,
@@ -300,7 +306,6 @@ impl Ui {
             breakpoint_insert_handler: Rc::new(RefCell::new(None)),
             source_jump_handler: Rc::new(RefCell::new(None)),
             breakpoint_delete_handler: Rc::new(RefCell::new(None)),
-            breakpoint_condition_handler: Rc::new(RefCell::new(None)),
             breakpoint_editor_handler: Rc::new(RefCell::new(None)),
             breakpoint_enabled_handler: Rc::new(RefCell::new(None)),
             stop_point_bulk_handler: Rc::new(RefCell::new(None)),
@@ -434,6 +439,10 @@ impl Ui {
     pub(crate) fn invalidate_target_caches(&self) {
         crate::kernel::invalidate_local_target_abi_cache();
         self.source.clear_resolved_paths();
+
+        for document in self.source.documents.borrow().iter() {
+            document.freshness.invalidate_verification();
+        }
     }
 
     pub fn register_details_visible(&self) -> bool {
@@ -654,6 +663,16 @@ impl Ui {
         const QUIET_PERIOD: Duration = Duration::from_millis(250);
         const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+        if self.model.execution().ready {
+            if self.model.set_terminal_pending(true) {
+                self.invalidate_kernel_refresh();
+                self.invalidate_misc_refresh();
+            }
+
+            self.update_control_sensitivity();
+            self.update_thread_control_sensitivity();
+        }
+
         let generation = self
             .terminal_synchronization
             .borrow_mut()
@@ -678,14 +697,32 @@ impl Ui {
 
             if !ui.model.execution().ready || ui.model.gdb_recovery_required() {
                 ui.terminal_synchronization.borrow_mut().finish(generation);
+                ui.model.set_terminal_pending(false);
+                ui.update_control_sensitivity();
                 return glib::ControlFlow::Break;
             }
 
             if !ui.terminal_waiting_at_prompt() {
+                if ui
+                    .terminal_synchronization
+                    .borrow_mut()
+                    .announce_wait(generation, Instant::now())
+                {
+                    ui.terminal_toggle_button.set_active(true);
+                    ui.set_transient_status(
+                        "GDB busy",
+                        "GDB is executing a terminal command or awaiting input. Respond in the terminal or use Pause to interrupt.",
+                        None,
+                    );
+                }
+
                 return glib::ControlFlow::Continue;
             }
 
+            ui.model.set_terminal_pending(false);
+
             if !ui.model.debugger_synchronization_available() {
+                ui.update_control_sensitivity();
                 return glib::ControlFlow::Continue;
             }
 
@@ -733,10 +770,25 @@ impl Ui {
         self.status_visual_generation
             .set(self.status_visual_generation.get().wrapping_add(1));
 
-        set_status_widgets(&self.status_label, &self.status_detail, text, detail, class);
+        let (state, state_class) = execution_status(&self.model);
+        set_status_widgets(
+            &self.status_label,
+            &self.status_detail,
+            state,
+            detail,
+            Some(state_class),
+        );
+        self.status_detail
+            .set_tooltip_text(Some(&format!("{text}\n{detail}")));
+
+        if class == Some("status-error") {
+            self.status_detail.add_css_class("status-error");
+        } else {
+            self.status_detail.remove_css_class("status-error");
+        }
     }
 
-    pub fn set_execution_status(&self, text: &str, detail: &str) {
+    pub fn set_execution_status(&self, _text: &str, detail: &str) {
         // Execution progress stays in the status strip. Stops and failures own
         // the log entries so ordinary stepping does not flood the history.
         const VISUAL_DELAY: Duration = Duration::from_millis(150);
@@ -745,18 +797,14 @@ impl Ui {
         let current_generation = Rc::clone(&self.status_visual_generation);
         let status = self.status_label.clone();
         let detail_label = self.status_detail.clone();
-        let text = text.to_owned();
         let detail = detail.to_owned();
+        let model = Rc::clone(&self.model);
 
         gtk::glib::timeout_add_local_once(VISUAL_DELAY, move || {
             if current_generation.get() == generation {
-                set_status_widgets(
-                    &status,
-                    &detail_label,
-                    &text,
-                    &detail,
-                    Some("status-running"),
-                );
+                let (text, class) = execution_status(&model);
+
+                set_status_widgets(&status, &detail_label, text, &detail, Some(class));
             }
         });
     }
@@ -995,6 +1043,29 @@ impl Ui {
     }
 
     pub(super) fn update_control_sensitivity(&self) {
+        self.render_stop_info();
+
+        if self
+            .source
+            .verification_revision
+            .replace(self.model.symbols.revision())
+            != self.model.symbols.revision()
+        {
+            for document in self.source.documents.borrow().iter() {
+                document.freshness.invalidate_verification();
+            }
+        }
+
+        let (state, class) = execution_status(&self.model);
+
+        set_status_widgets(
+            &self.status_label,
+            &self.status_detail,
+            state,
+            &self.status_detail.text(),
+            Some(class),
+        );
+
         self.sync_return_values();
 
         self.variable_locations
@@ -1073,10 +1144,7 @@ impl Ui {
                 && !execution_blocked
                 && ((started && supports_execution)
                     || (!started && (can_start || rr_replay) && !stale)),
-            pause: ready
-                && started
-                && !self.model.execution().session_pending
-                && (until_active || (running && !self.model.execution().command_pending)),
+            pause: self.model.pause_available(),
             move_target: can_move,
             until: can_move && self.model.directional_command("-exec-until").is_ok(),
             inspect: can_inspect,
@@ -1355,12 +1423,7 @@ impl Ui {
             let model = Rc::clone(&self.model);
 
             gtk::glib::timeout_add_local_once(VISUAL_DELAY, move || {
-                let still_available = model.execution().ready
-                    && model.execution().state.inferior_started()
-                    && !model.execution().session_pending
-                    && (model.execution().native_until_active
-                        || (model.execution().state.inferior_running()
-                            && !model.execution().command_pending));
+                let still_available = model.pause_available();
 
                 if current_generation.get() == generation
                     && still_available
@@ -1563,15 +1626,10 @@ impl Ui {
             .replace(Some(Rc::new(handler)));
     }
 
-    pub fn set_breakpoint_condition_handler(
+    pub fn set_breakpoint_editor_handler(
         &self,
-        handler: impl Fn(String, Option<String>) + 'static,
+        handler: impl Fn(BreakpointEditRequest, BreakpointEditCompletion) + 'static,
     ) {
-        self.breakpoint_condition_handler
-            .replace(Some(Rc::new(handler)));
-    }
-
-    pub fn set_breakpoint_editor_handler(&self, handler: impl Fn(BreakpointEditRequest) + 'static) {
         self.breakpoint_editor_handler
             .replace(Some(Rc::new(handler)));
     }
@@ -1629,6 +1687,12 @@ impl Ui {
                 .borrow_mut()
                 .insert(to.to_owned(), metadata);
         }
+    }
+
+    pub(crate) fn restore_stop_point_metadata(&self, number: String, metadata: StopPointMetadata) {
+        self.stop_point_metadata
+            .borrow_mut()
+            .insert(number, metadata);
     }
 
     pub fn set_source_symbol_handler(&self, handler: impl Fn(String) + 'static) {

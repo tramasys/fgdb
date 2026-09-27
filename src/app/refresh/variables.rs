@@ -164,6 +164,8 @@ fn refresh_persistent_variable_objects(
         && let Some(ui) = ui.upgrade()
     {
         show_variable_refresh(&ui, generation, &target, &variables);
+        // Reused roots are provisional until the shared var-update completes.
+        ui.model.invalidate_watch_values();
     }
 
     let automatic_creation_indices = match &target {
@@ -297,9 +299,11 @@ fn reuse_variable_objects(
                 return (fallback.clone(), false);
             }
 
-            let needs_update = variable.varobj.is_some();
+            if variable.varobj.is_none() {
+                return (fallback.clone(), false);
+            }
 
-            (variable, needs_update)
+            (variable, true)
         })
         .unzip();
 

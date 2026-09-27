@@ -1,6 +1,6 @@
 //! Shared table centering and column sizing with draggable header dividers.
 
-use gtk::prelude::*;
+use gtk::{glib, pango, prelude::*};
 use std::{cell::Cell, rc::Rc};
 
 #[cfg(test)]
@@ -180,4 +180,42 @@ fn update_expanding_column(view: &gtk::ColumnView) {
             column.set_expand(expand);
         }
     }
+}
+
+pub(in crate::ui) fn label_column(
+    title: &str,
+    width: i32,
+    bind: impl Fn(&glib::BoxedAnyObject, &gtk::Label) + Copy + 'static,
+) -> gtk::ColumnViewColumn {
+    let factory = gtk::SignalListItemFactory::new();
+
+    factory.connect_setup(|_, object| {
+        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+
+        let label = gtk::Label::new(None);
+        label.add_css_class("debug-table-cell");
+        label.set_halign(gtk::Align::Start);
+        label.set_ellipsize(pango::EllipsizeMode::Middle);
+        super::super::views::enable_stable_text_selection(&label);
+        item.set_child(Some(&label));
+    });
+
+    factory.connect_bind(move |_, object| {
+        let Some(item) = object.downcast_ref::<gtk::ListItem>() else {
+            return;
+        };
+
+        let (Some(label), Some(data)) = (
+            item.child().and_downcast::<gtk::Label>(),
+            item.item().and_downcast::<glib::BoxedAnyObject>(),
+        ) else {
+            return;
+        };
+
+        bind(&data, &label);
+    });
+
+    table_column(title, width, factory)
 }

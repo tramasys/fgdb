@@ -333,6 +333,13 @@ fn separates_raw_variable_values_from_gdb_details() {
 
 #[test]
 fn compacts_cpp_and_rust_debug_types_without_losing_user_types() {
+    assert_eq!(compact_variable_type(" unsigned long "), "unsigned long");
+
+    assert_eq!(
+        compact_variable_type("app::Node<app::Node<int> >"),
+        "app::Node<app::Node<int>>"
+    );
+
     assert_eq!(
         compact_variable_type(
             "const std::__cxx11::basic_string<char, std::char_traits<char>, std::allocator<char> >"

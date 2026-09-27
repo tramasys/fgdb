@@ -202,6 +202,7 @@ fn create_memory_watch(
         selection: selection.clone(),
         follow_button: follow.clone(),
         previous_begin: Rc::new(Cell::new(None)),
+        snapshot_generation: Rc::new(Cell::new(None)),
         previous_bytes: Rc::new(RefCell::new(Vec::new())),
     };
 
@@ -414,6 +415,7 @@ pub(super) fn request_memory_watch(
 }
 
 pub(super) fn set_memory_watch_reading(watch: &MemoryWatchView) {
+    watch.snapshot_generation.set(None);
     watch.status.remove_css_class("memory-watch-error");
     watch.status.set_text("reading…");
 }
@@ -506,6 +508,7 @@ pub(super) fn show_memory_watch_data(
 }
 
 pub(super) fn show_memory_watch_error(watch: &MemoryWatchView, error: &str) {
+    watch.snapshot_generation.set(None);
     watch.status.add_css_class("memory-watch-error");
     watch.status.set_text(error);
     watch.status.set_tooltip_text(Some(error));

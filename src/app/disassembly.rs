@@ -1056,9 +1056,8 @@ gdb.write('FGDB_SHOW_PC_OK\n')
                 .args(["-ex", "set debuginfod enabled off", "-ex"])
                 .arg(format!("python exec({})", crate::debugger::quote(&script)));
 
-            let output =
-                crate::language::toolchain::probe::output(&mut command, Duration::from_secs(15))
-                    .expect("live Show PC check failed or timed out");
+            let output = crate::bounded::process::output(&mut command, Duration::from_secs(15))
+                .expect("live Show PC check failed or timed out");
 
             let output = String::from_utf8(output).unwrap();
             assert!(output.contains("FGDB_SHOW_PC_OK"), "{fixture}: {output}");

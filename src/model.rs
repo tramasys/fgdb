@@ -26,6 +26,7 @@ pub(crate) mod replay;
 pub(crate) mod return_value;
 pub(crate) mod stack;
 mod state;
+pub(crate) mod stop_info;
 mod stopped;
 mod target;
 pub(crate) mod variables;
@@ -37,11 +38,18 @@ pub(crate) struct DebuggerModel {
     pub(crate) symbols: Rc<crate::symbols::SymbolState>,
     pub(crate) printer_scripts: RefCell<printers::PrinterScripts>,
     pub(crate) replay: RefCell<replay::ReplayState>,
+    pub(crate) stop_info: RefCell<stop_info::StopHistory>,
     execution: ExecutionState,
     processes: ProcessState,
     stopped: StoppedState,
     target: Cell<target::TargetAbi>,
     variables: variables::VariableState,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StopPointMetadata {
+    pub(crate) group: Option<String>,
+    pub(crate) tags: Vec<String>,
 }
 
 impl DebuggerModel {
@@ -50,6 +58,7 @@ impl DebuggerModel {
             symbols: Rc::new(crate::symbols::SymbolState::default()),
             printer_scripts: RefCell::new(printers::PrinterScripts::default()),
             replay: RefCell::new(replay::ReplayState::default()),
+            stop_info: RefCell::default(),
             execution: ExecutionState::new(initial_session),
             processes: ProcessState::new(),
             stopped: StoppedState::new(),
@@ -68,6 +77,7 @@ struct ExecutionState {
     debugger_ready: Cell<bool>,
     debugger_state: Cell<DebuggerState>,
     command_pending: Cell<bool>,
+    terminal_pending: Cell<bool>,
     command_operation: Cell<Option<CommandOperationId>>,
     next_command_operation: Cell<u64>,
     session_pending: Cell<bool>,
@@ -93,6 +103,7 @@ impl ExecutionState {
             debugger_ready: Cell::new(false),
             debugger_state: Cell::new(DebuggerState::default()),
             command_pending: Cell::new(false),
+            terminal_pending: Cell::new(false),
             command_operation: Cell::new(None),
             next_command_operation: Cell::new(0),
             session_pending: Cell::new(false),

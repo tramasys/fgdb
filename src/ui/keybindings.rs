@@ -6,24 +6,33 @@ use crate::config::keybindings::{Action, Bindings, Scope, ShortcutMatch};
 enum Target {
     Button(gtk::Button),
     Toggle(gtk::ToggleButton),
+    Panel(Rc<workspace::Panels>, PanelId, Option<gtk::Stack>),
 }
 
 impl Target {
-    fn button(&self) -> &gtk::Button {
+    fn button(&self) -> Option<&gtk::Button> {
         match self {
-            Self::Button(button) => button,
-            Self::Toggle(button) => button.upcast_ref(),
+            Self::Button(button) => Some(button),
+            Self::Toggle(button) => Some(button.upcast_ref()),
+            Self::Panel(..) => None,
         }
     }
 
     fn activate(&self) -> bool {
-        if !self.button().is_sensitive() {
+        if self.button().is_some_and(|button| !button.is_sensitive()) {
             return false;
         }
 
         match self {
             Self::Button(button) => button.emit_clicked(),
             Self::Toggle(button) => button.set_active(!button.is_active()),
+            Self::Panel(panels, panel, locks) => {
+                if let Some(pages) = locks {
+                    pages.set_visible_child_name("locks");
+                }
+
+                panels.reveal(*panel);
+            }
         }
 
         true
@@ -35,6 +44,30 @@ impl Ui {
         Action::ALL
             .iter()
             .map(|&action| {
+                let panel = match action {
+                    Action::Context => Some(PanelId::Context),
+                    Action::Watches => Some(PanelId::Watches),
+                    Action::Registers => Some(PanelId::Registers),
+                    Action::Memory => Some(PanelId::Memory),
+                    Action::Breakpoints => Some(PanelId::Breakpoints),
+                    Action::CallStack => Some(PanelId::CallStack),
+                    Action::Threads => Some(PanelId::Threads),
+                    Action::Kernel => Some(PanelId::Kernel),
+                    Action::Locks => Some(PanelId::Misc),
+                    _ => None,
+                };
+
+                if let Some(panel) = panel {
+                    return (
+                        action,
+                        Target::Panel(
+                            Rc::clone(&self.panels),
+                            panel,
+                            (action == Action::Locks).then(|| self.misc_view.pages.clone()),
+                        ),
+                    );
+                }
+
                 let button = match action {
                     Action::Run => &self.run_button,
                     Action::Pause => &self.pause_button,
@@ -60,6 +93,15 @@ impl Ui {
                         return (action, Target::Toggle(self.terminal_toggle_button.clone()));
                     }
                     Action::Log => return (action, Target::Toggle(self.log_toggle_button.clone())),
+                    Action::Context
+                    | Action::Watches
+                    | Action::Registers
+                    | Action::Memory
+                    | Action::Breakpoints
+                    | Action::CallStack
+                    | Action::Threads
+                    | Action::Kernel
+                    | Action::Locks => unreachable!(),
                 };
 
                 (action, Target::Button(button.clone()))
@@ -77,8 +119,10 @@ impl Ui {
                 format!("{}\n{detail}", action.help())
             };
 
-            target.button().set_tooltip_text(Some(&tooltip));
-            components::set_menu_action_detail(target.button(), detail);
+            if let Some(button) = target.button() {
+                button.set_tooltip_text(Some(&tooltip));
+                components::set_menu_action_detail(button, detail);
+            }
         }
     }
 
@@ -160,8 +204,9 @@ impl Ui {
             let target = &targets[action as usize].1;
 
             if action.scope() == Scope::Source
-                && target.button().is_sensitive()
-                && let Some(window) = workspace::host_window(target.button())
+                && let Some(button) = target.button()
+                && button.is_sensitive()
+                && let Some(window) = workspace::host_window(button)
                 && Some(&window) != host.as_ref()
             {
                 window.present();

@@ -383,6 +383,10 @@ impl Restore {
 
             let mut commands = VecDeque::new();
 
+            if let Some(ui) = response.ui.upgrade() {
+                ui.restore_stop_point_metadata(number.clone(), breakpoint.organization);
+            }
+
             if !breakpoint.commands.is_empty() {
                 commands.push_back(breakpoint_commands_command(&number, &breakpoint.commands));
             }

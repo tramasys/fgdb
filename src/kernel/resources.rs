@@ -304,11 +304,33 @@ fn read_file_descriptors(
 
         let mut info = crate::bounded::read_prefix(
             &root.join("fdinfo").join(number.to_string()),
-            MAX_FDINFO_BYTES,
+            MAX_FDINFO_BYTES + 1,
         )
-        .ok()
-        .map(|bytes| parse_descriptor_info(&String::from_utf8_lossy(&bytes)))
-        .unwrap_or_default();
+        .map(|mut bytes| {
+            let truncated = bytes.len() > MAX_FDINFO_BYTES;
+
+            if truncated {
+                bytes.truncate(MAX_FDINFO_BYTES);
+
+                if let Some(newline) = bytes.iter().rposition(|byte| *byte == b'\n') {
+                    bytes.truncate(newline + 1);
+                } else {
+                    bytes.clear();
+                }
+            }
+
+            let mut info = parse_descriptor_info(&String::from_utf8_lossy(&bytes));
+
+            if truncated {
+                info.warning.push_str("\nFD information exceeds the 64 KiB read limit. Additional metadata was not captured.");
+            }
+
+            info
+        })
+        .unwrap_or_else(|error| DescriptorInfo {
+            warning: format!("FD information unavailable — {error}"),
+            ..DescriptorInfo::default()
+        });
 
         info.device = socket_inode(&target).and_then(|inode| {
             fs::metadata(root.join("fd").join(number.to_string()))
@@ -363,6 +385,7 @@ fn read_file_descriptors(
                 device: info.device,
                 socket: socket.cloned(),
                 raw_info: info.raw,
+                info_warning: info.warning.trim().to_owned(),
                 watches: info.watches,
                 target,
                 details,
@@ -381,6 +404,7 @@ struct DescriptorInfo {
     position: Option<u64>,
     details: String,
     raw: String,
+    warning: String,
     inode: Option<u64>,
     mount_id: Option<u64>,
     eventfd_id: Option<u64>,
@@ -456,33 +480,34 @@ fn parse_descriptor_info(fdinfo: &str) -> DescriptorInfo {
     if watches_truncated {
         info.raw
             .push_str("\n… Epoll navigation limited to 256 registrations");
+        info.warning = format!(
+            "{} epoll registrations shown. Additional registrations were not captured (limit 256).",
+            info.watches.len()
+        );
     }
 
     info
 }
 
 fn descriptor_kind(target: &str) -> &'static str {
+    if let Some(kind) = target.strip_prefix("anon_inode:") {
+        return match kind {
+            "[eventpoll]" => "epoll",
+            "[eventfd]" => "eventfd",
+            "inotify" | "[inotify]" | "[fanotify]" => "filesystem notify",
+            "[io_uring]" => "io_uring",
+            "[signalfd]" => "signalfd",
+            "[timerfd]" => "timerfd",
+            "[pidfd]" => "pidfd",
+            _ => "anon inode",
+        };
+    }
+
     if target.starts_with("socket:") {
         "socket"
     } else if target.starts_with("pipe:") {
         "pipe"
-    } else if target.contains("eventpoll") {
-        "epoll"
-    } else if target.contains("eventfd") {
-        "eventfd"
-    } else if target.contains("inotify") || target.contains("fanotify") {
-        "filesystem notify"
-    } else if target.contains("io_uring") {
-        "io_uring"
-    } else if target.contains("signalfd") {
-        "signalfd"
-    } else if target.contains("timerfd") {
-        "timerfd"
-    } else if target.contains("pidfd") {
-        "pidfd"
-    } else if target.starts_with("anon_inode:") {
-        "anon inode"
-    } else if target.starts_with("memfd:") || target.contains("/memfd:") {
+    } else if target.starts_with("memfd:") || target.starts_with("/memfd:") {
         "memfd"
     } else if target.starts_with('/') {
         "file"
@@ -639,6 +664,41 @@ fn psi_total(input: &str, scope: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn epoll_navigation_limits_are_exposed_as_snapshot_metadata() {
+        let input = (0..300)
+            .map(|fd| format!("tfd: {fd} events: 19 data: {fd:x} pos: 0 ino: 2a sdev: 1\n"))
+            .collect::<String>();
+        let info = parse_descriptor_info(&input);
+        assert_eq!(info.watches.len(), 256);
+        assert!(info.warning.contains("256 epoll registrations shown"));
+        assert!(info.warning.contains("Additional registrations"));
+    }
+
+    #[test]
+    fn descriptor_kinds_do_not_interpret_file_names_as_kernel_types() {
+        for (name, kind) in [
+            ("eventpoll", "epoll"),
+            ("eventfd", "eventfd"),
+            ("inotify", "filesystem notify"),
+            ("fanotify", "filesystem notify"),
+            ("io_uring", "io_uring"),
+            ("signalfd", "signalfd"),
+            ("timerfd", "timerfd"),
+            ("pidfd", "pidfd"),
+            ("unknown", "anon inode"),
+        ] {
+            assert_eq!(descriptor_kind(&format!("anon_inode:[{name}]")), kind);
+            assert_eq!(descriptor_kind(&format!("/tmp/{name}.log")), "file");
+        }
+
+        assert_eq!(descriptor_kind("anon_inode:inotify"), "filesystem notify");
+        assert_eq!(descriptor_kind("/tmp/memfd:notes"), "file");
+        assert_eq!(descriptor_kind("/memfd:eventfd (deleted)"), "memfd");
+        assert_eq!(descriptor_kind("socket:[42]"), "socket");
+        assert_eq!(descriptor_kind("pipe:[42]"), "pipe");
+    }
 
     #[test]
     fn descriptor_capture_reports_missing_entries_and_parses_identity() {

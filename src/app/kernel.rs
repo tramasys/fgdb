@@ -15,6 +15,35 @@ impl Drop for KernelWorkerGuard {
     }
 }
 
+fn spawn_kernel_worker<T: Send + 'static>(
+    name: &str,
+    read: impl FnOnce() -> T + Send + 'static,
+) -> Result<futures_channel::oneshot::Receiver<T>, String> {
+    ACTIVE_KERNEL_WORKERS
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |active| {
+            (active < MAX_KERNEL_WORKERS).then_some(active + 1)
+        })
+        .map_err(|_| "Previous procfs readers are still finishing. Try again shortly".to_owned())?;
+
+    let guard = KernelWorkerGuard;
+    let (sender, receiver) = futures_channel::oneshot::channel();
+
+    // Diagnostics can change network namespaces. Never reuse these threads.
+    std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || {
+            let result = {
+                let _guard = guard;
+                read()
+            };
+
+            let _ = sender.send(result);
+        })
+        .map_err(|error| format!("Cannot start kernel inspection worker: {error}"))?;
+
+    Ok(receiver)
+}
+
 pub(super) fn request_kernel_refresh(ui: Weak<Ui>, client: Rc<MiClient>) {
     let Some(current_ui) = ui.upgrade() else {
         return;
@@ -101,44 +130,18 @@ fn read_kernel_snapshot(
 ) {
     const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(15);
 
-    if ACTIVE_KERNEL_WORKERS.fetch_add(1, Ordering::Relaxed) >= MAX_KERNEL_WORKERS {
-        ACTIVE_KERNEL_WORKERS.fetch_sub(1, Ordering::Relaxed);
-
-        show_kernel_error(
-            &ui,
-            generation,
-            "Previous procfs readers are still finishing. Try the refresh again shortly",
-        );
-
-        return;
-    }
-
-    let (sender, receiver) = futures_channel::oneshot::channel();
     let work = crate::kernel::WorkDeadline::new(SNAPSHOT_TIMEOUT);
     let worker_work = work.clone();
 
-    let worker = std::thread::Builder::new()
-        .name(String::from("fgdb-procfs"))
-        .spawn(move || {
-            let result = {
-                let _guard = KernelWorkerGuard;
-                crate::kernel::read_snapshot(pid, debugger_pid, include_tls_metadata, &worker_work)
-            };
-
-            let _ = sender.send(result);
-        });
-
-    if let Err(error) = worker {
-        ACTIVE_KERNEL_WORKERS.fetch_sub(1, Ordering::Relaxed);
-
-        show_kernel_error(
-            &ui,
-            generation,
-            &format!("Cannot start procfs reader: {error}"),
-        );
-
-        return;
-    }
+    let receiver = match spawn_kernel_worker("fgdb-procfs", move || {
+        crate::kernel::read_snapshot(pid, debugger_pid, include_tls_metadata, &worker_work)
+    }) {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            show_kernel_error(&ui, generation, &error);
+            return;
+        }
+    };
 
     gtk::glib::MainContext::default().spawn_local(async move {
         let result = crate::background::receive_current(receiver, SNAPSHOT_TIMEOUT, || {
@@ -189,37 +192,19 @@ pub(super) fn request_socket_diagnostics(ui: Weak<Ui>) {
         return;
     };
 
-    if ACTIVE_KERNEL_WORKERS.fetch_add(1, Ordering::Relaxed) >= MAX_KERNEL_WORKERS {
-        ACTIVE_KERNEL_WORKERS.fetch_sub(1, Ordering::Relaxed);
-        current.show_socket_diagnostics(
-            generation,
-            stamp,
-            Err("Previous procfs readers are still finishing; try again shortly".into()),
-        );
-        return;
-    }
-
     let timeout = Duration::from_secs(3);
     let work = crate::kernel::WorkDeadline::new(timeout);
     let worker_work = work.clone();
-    let (sender, receiver) = futures_channel::oneshot::channel();
 
-    let worker = std::thread::Builder::new()
-        .name("fgdb-socket-diag".into())
-        .spawn(move || {
-            let result = {
-                let _guard = KernelWorkerGuard;
-                crate::kernel::sockets::diagnostics::read_on_worker(&request, &worker_work)
-            };
-
-            let _ = sender.send(result);
-        });
-
-    if let Err(error) = worker {
-        ACTIVE_KERNEL_WORKERS.fetch_sub(1, Ordering::Relaxed);
-        current.show_socket_diagnostics(generation, stamp, Err(error.to_string()));
-        return;
-    }
+    let receiver = match spawn_kernel_worker("fgdb-socket-diag", move || {
+        crate::kernel::sockets::diagnostics::read_on_worker(&request, &worker_work)
+    }) {
+        Ok(receiver) => receiver,
+        Err(error) => {
+            current.show_socket_diagnostics(generation, stamp, Err(error));
+            return;
+        }
+    };
 
     drop(current);
 
@@ -259,6 +244,41 @@ mod tests {
     use super::*;
     use crate::app::test_support::{open_debugger_observing, request, wait_until};
     use crate::debugger::{MiEvent, evaluated_value};
+
+    #[test]
+    fn kernel_worker_slots_are_bounded_and_released_on_completion_and_panic() {
+        let context = gtk::glib::MainContext::new();
+
+        context.block_on(async {
+            let mut releases = Vec::new();
+            let mut results = Vec::new();
+
+            for _ in 0..MAX_KERNEL_WORKERS {
+                let (release, wait) = std::sync::mpsc::channel::<()>();
+                releases.push(release);
+
+                results.push(
+                    spawn_kernel_worker("fgdb-test", move || {
+                        let _ = wait.recv();
+                        42
+                    })
+                    .unwrap(),
+                );
+            }
+
+            assert!(spawn_kernel_worker("fgdb-test", || ()).is_err());
+            drop(releases);
+
+            for result in results {
+                assert_eq!(result.await.unwrap(), 42);
+            }
+
+            assert_eq!(ACTIVE_KERNEL_WORKERS.load(Ordering::Relaxed), 0);
+            let panic = spawn_kernel_worker("fgdb-test", || panic!("test lost reply")).unwrap();
+            assert!(panic.await.is_err());
+            assert_eq!(ACTIVE_KERNEL_WORKERS.load(Ordering::Relaxed), 0);
+        });
+    }
 
     #[test]
     #[ignore = "requires local GDB, procfs and the C networking fixture"]

@@ -88,6 +88,8 @@ impl Ui {
             self.model.current_stop_refresh_generation(),
             &variables,
         );
+
+        self.model.invalidate_watch_values();
     }
 
     pub(super) fn connect_expression_watch_controls(&self) {

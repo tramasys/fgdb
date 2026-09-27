@@ -17,6 +17,17 @@ pub(super) fn breakpoint_layout_matches(current: &[Breakpoint], incoming: &[Brea
         })
 }
 
+fn deletion_targets_unchanged(current: &[Breakpoint], expected: &[Breakpoint]) -> bool {
+    let current = current
+        .iter()
+        .map(|point| (point.number.as_str(), point))
+        .collect::<HashMap<_, _>>();
+
+    expected
+        .iter()
+        .all(|point| current.get(point.number.as_str()).copied() == Some(point))
+}
+
 pub(super) fn breakpoint_status_text(breakpoint: &Breakpoint) -> String {
     let mut status = Vec::new();
 
@@ -81,6 +92,106 @@ pub(super) fn breakpoint_status_text(breakpoint: &Breakpoint) -> String {
 }
 
 impl Ui {
+    pub(in crate::ui) fn request_stop_point_bulk_action(
+        &self,
+        action: StopPointBulkAction,
+        numbers: Vec<String>,
+    ) {
+        if numbers.is_empty() || !stop_point_actions_available(&self.model) {
+            return;
+        }
+
+        let Some(handler) = self.stop_point_bulk_handler.borrow().clone() else {
+            return;
+        };
+
+        if action != StopPointBulkAction::Delete {
+            handler(action, numbers);
+            return;
+        }
+
+        let shown = self.stop_point_filter_rows.borrow();
+
+        let visible = shown
+            .iter()
+            .filter(|row| row.status.parent().is_some_and(|row| row.is_mapped()))
+            .map(|row| row.number.as_str())
+            .collect::<HashSet<_>>();
+
+        let hidden = numbers
+            .iter()
+            .filter(|number| !visible.contains(number.as_str()))
+            .count();
+
+        let message = format!(
+            "Delete {} stop point{}?",
+            numbers.len(),
+            if numbers.len() == 1 { "" } else { "s" }
+        );
+
+        let detail = format!(
+            "{hidden} hidden in the breakpoint list. Deletion cannot be undone. Empty groups will also be removed."
+        );
+
+        drop(shown);
+
+        let dialog = gtk::AlertDialog::builder()
+            .message(&message)
+            .detail(&detail)
+            .buttons(["Cancel", "Delete"])
+            .cancel_button(0)
+            .default_button(0)
+            .modal(true)
+            .build();
+
+        let snapshot = self.with_latest_source_breakpoints(|points| {
+            let targets = numbers.iter().collect::<HashSet<_>>();
+
+            points
+                .iter()
+                .filter(|point| targets.contains(&point.number))
+                .cloned()
+                .collect::<Vec<_>>()
+        });
+
+        let pid = self.model.debugger_pid();
+        let organization = self.stop_point_metadata.borrow().clone();
+        let weak = self.self_weak.borrow().clone();
+        let window = self.action_window();
+
+        glib::spawn_future_local(async move {
+            if dialog.choose_future(Some(&window)).await != Ok(1) {
+                return;
+            }
+
+            let Some(ui) = weak.upgrade() else { return };
+
+            let unchanged = ui.with_latest_source_breakpoints(|points| {
+                snapshot.len() == numbers.len() && deletion_targets_unchanged(points, &snapshot)
+            });
+
+            let same_organization = numbers.iter().all(|number| {
+                ui.stop_point_metadata.borrow().get(number) == organization.get(number)
+            });
+
+            if pid != ui.model.debugger_pid()
+                || !unchanged
+                || !same_organization
+                || !stop_point_actions_available(&ui.model)
+            {
+                ui.set_status(
+                    "Deletion cancelled",
+                    "The debugger or stop points changed. Review the list and try again.",
+                    Some("status-error"),
+                );
+
+                return;
+            }
+
+            handler(action, numbers);
+        });
+    }
+
     pub(in crate::ui) fn connect_watchpoint_controls(&self) {
         let expression = self.watchpoint_expression.clone();
         let access = self.watchpoint_access.clone();
@@ -197,75 +308,35 @@ impl Ui {
             panels.track_dialog(PanelId::Breakpoints, &editor);
         });
 
-        let breakpoints = Rc::clone(&self.breakpoints);
-        let handler = Rc::clone(&self.stop_point_bulk_handler);
+        for (button, targets) in [
+            (
+                &self.delete_all_breakpoints_button,
+                (|points: &[Breakpoint]| breakpoint_command_numbers(points, false))
+                    as fn(&[Breakpoint]) -> Vec<String>,
+            ),
+            (
+                &self.delete_all_watchpoints_button,
+                (|points: &[Breakpoint]| breakpoint_command_numbers(points, true))
+                    as fn(&[Breakpoint]) -> Vec<String>,
+            ),
+            (
+                &self.delete_all_catchpoints_button,
+                event_catchpoint_command_numbers as fn(&[Breakpoint]) -> Vec<String>,
+            ),
+            (
+                &self.delete_all_signal_catchpoints_button,
+                signal_catchpoint_command_numbers as fn(&[Breakpoint]) -> Vec<String>,
+            ),
+        ] {
+            let weak = Rc::clone(&self.self_weak);
 
-        self.delete_all_breakpoints_button
-            .connect_clicked(move |_| {
-                let numbers = breakpoint_command_numbers(&breakpoints.borrow(), false);
-                let handler = handler.borrow().clone();
-
-                if !numbers.is_empty()
-                    && let Some(handler) = handler
-                {
-                    handler(StopPointBulkAction::Delete, numbers);
+            button.connect_clicked(move |_| {
+                if let Some(ui) = weak.borrow().upgrade() {
+                    let numbers = ui.with_latest_source_breakpoints(targets);
+                    ui.request_stop_point_bulk_action(StopPointBulkAction::Delete, numbers);
                 }
             });
-
-        let breakpoints = Rc::clone(&self.breakpoints);
-        let handler = Rc::clone(&self.stop_point_bulk_handler);
-
-        self.delete_all_watchpoints_button
-            .connect_clicked(move |_| {
-                let numbers = breakpoint_command_numbers(&breakpoints.borrow(), true);
-                let handler = handler.borrow().clone();
-
-                if !numbers.is_empty()
-                    && let Some(handler) = handler
-                {
-                    handler(StopPointBulkAction::Delete, numbers);
-                }
-            });
-
-        let breakpoints = Rc::clone(&self.breakpoints);
-        let handler = Rc::clone(&self.stop_point_bulk_handler);
-
-        self.delete_all_catchpoints_button
-            .connect_clicked(move |_| {
-                let numbers = event_catchpoint_command_numbers(&breakpoints.borrow());
-                let handler = handler.borrow().clone();
-
-                if !numbers.is_empty()
-                    && let Some(handler) = handler
-                {
-                    handler(StopPointBulkAction::Delete, numbers);
-                }
-            });
-
-        let breakpoints = Rc::clone(&self.breakpoints);
-        let handler = Rc::clone(&self.stop_point_bulk_handler);
-        let model = Rc::clone(&self.model);
-
-        self.delete_all_signal_catchpoints_button
-            .connect_clicked(move |_| {
-                if !model.execution().ready
-                    || model.execution().state.inferior_running()
-                    || model.execution().command_pending
-                    || model.execution().session_pending
-                    || model.execution().native_until_active
-                {
-                    return;
-                }
-
-                let numbers = signal_catchpoint_command_numbers(&breakpoints.borrow());
-                let handler = handler.borrow().clone();
-
-                if !numbers.is_empty()
-                    && let Some(handler) = handler
-                {
-                    handler(StopPointBulkAction::Delete, numbers);
-                }
-            });
+        }
     }
 
     pub(in crate::ui) fn connect_event_catchpoint_controls(&self) {
@@ -635,7 +706,7 @@ impl Ui {
                     "Enable this stop point"
                 }));
 
-                let heading_text = format!("{kind}  {}", compact_function_name(name));
+                let heading_text = format!("{}  {kind}", compact_function_name(name));
                 let heading = gtk::Label::new(Some(&heading_text));
                 heading.set_halign(gtk::Align::Start);
                 heading.set_ellipsize(pango::EllipsizeMode::End);
@@ -678,8 +749,28 @@ impl Ui {
                 heading_row.append(&badge);
                 heading_row.append(&heading);
                 heading_row.append(&condition_button);
-                heading_row.append(&organize_button);
-                heading_row.append(&delete_button);
+                let (popover, menu) = build_context_menu();
+                menu.append(&organize_button);
+                menu.append(&delete_button);
+
+                for button in [&organize_button, &delete_button] {
+                    let popover = popover.downgrade();
+
+                    button.connect_clicked(move |_| {
+                        if let Some(popover) = popover.upgrade() {
+                            popover.popdown();
+                        }
+                    });
+                }
+
+                let more = gtk::MenuButton::builder()
+                    .icon_name("view-more-symbolic")
+                    .popover(&popover)
+                    .tooltip_text("Organize or delete this stop point")
+                    .valign(gtk::Align::Center)
+                    .build();
+
+                heading_row.append(&more);
                 let location_text = location;
                 let location = gtk::Label::new(Some(&location_text));
                 location.add_css_class("muted");
@@ -730,7 +821,6 @@ impl Ui {
                 }
 
                 let breakpoint_for_condition = breakpoint.clone();
-                let condition_handler = Rc::clone(&self.breakpoint_condition_handler);
                 let editor_handler = Rc::clone(&self.breakpoint_editor_handler);
                 let panels = Rc::clone(&self.panels);
 
@@ -745,7 +835,7 @@ impl Ui {
                         open_breakpoint_condition_editor(
                             &parent,
                             breakpoint_for_condition.clone(),
-                            Rc::clone(&condition_handler),
+                            Rc::clone(&editor_handler),
                         )
                     } else {
                         open_breakpoint_editor(
@@ -1044,5 +1134,31 @@ impl Ui {
 
     pub fn breakpoint_number_at_address(&self, address: &str) -> Option<String> {
         breakpoint_command_number_at_address(&self.breakpoints.borrow(), address)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deletion_confirmation_rejects_removed_or_changed_targets_but_not_unrelated_additions() {
+        let breakpoint = |number: &str| {
+            let record = crate::debugger::parse_record(&format!(
+                r#"^done,bkpt={{number="{number}",type="breakpoint",enabled="y",addr="0x1000"}}"#,
+            ))
+            .unwrap();
+
+            crate::debugger::inserted_breakpoints(&record).remove(0)
+        };
+
+        let expected = [breakpoint("1"), breakpoint("2")];
+        assert!(deletion_targets_unchanged(&expected, &expected));
+        assert!(!deletion_targets_unchanged(&expected[..1], &expected));
+        let mut current = expected.to_vec();
+        current.push(breakpoint("3"));
+        assert!(deletion_targets_unchanged(&current, &expected));
+        current[0].enabled = false;
+        assert!(!deletion_targets_unchanged(&current, &expected));
     }
 }

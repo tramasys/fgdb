@@ -821,6 +821,7 @@ pub(super) fn build_inspector(
     notebook.set_scrollable(true);
     notebook.add_css_class("panel");
     let state = components::panel();
+    state.append(&bindings.stop_info.root);
     let detail = gtk::Label::new(Some("Waiting for the MI channel"));
     detail.add_css_class("status-detail");
     detail.set_halign(gtk::Align::Start);
@@ -1091,6 +1092,7 @@ pub(super) fn build_inspector(
     values_split.set_shrink_start_child(false);
     values_split.set_shrink_end_child(false);
     values_split.set_position(210);
+    return_value.fit_content(&values_split);
     context.set_start_child(Some(&values_split));
     context.set_end_child(Some(&instructions_panel));
     state.append(&context);
@@ -1405,7 +1407,7 @@ pub(super) fn build_inspector(
         .hscrollbar_policy(gtk::PolicyType::Never)
         .build();
 
-    let breakpoint_bulk_actions = components::action_flow();
+    let breakpoint_bulk_actions = components::control_row();
     let add_breakpoint_button = gtk::Button::with_label("Add breakpoint");
     add_breakpoint_button.add_css_class("inline-action");
     add_breakpoint_button.add_css_class("primary-control");
@@ -1440,19 +1442,35 @@ pub(super) fn build_inspector(
     ));
 
     delete_all_catchpoints_button.set_sensitive(false);
+    breakpoint_bulk_actions.append(&add_breakpoint_button);
+    let (bulk_popover, bulk_menu) = build_context_menu();
+
     for button in [
-        &add_breakpoint_button,
         &delete_all_breakpoints_button,
         &delete_all_watchpoints_button,
         &delete_all_catchpoints_button,
     ] {
-        breakpoint_bulk_actions.insert(button, -1);
+        bulk_menu.append(button);
+        let popover = bulk_popover.downgrade();
+
+        button.connect_clicked(move |_| {
+            if let Some(popover) = popover.upgrade() {
+                popover.popdown();
+            }
+        });
     }
+
+    let bulk_menu_button = gtk::MenuButton::builder()
+        .icon_name("view-more-symbolic")
+        .popover(&bulk_popover)
+        .tooltip_text("Delete stop points by kind")
+        .build();
+
+    breakpoint_bulk_actions.append(&bulk_menu_button);
     breakpoints_page.append(&breakpoint_bulk_actions);
     breakpoints_page.append(&breakpoints_scrolled);
     let watchpoint_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
     watchpoint_section.add_css_class("breakpoint-tool-section");
-    watchpoint_section.append(&section_title("ADD WATCHPOINT"));
     let watchpoint_controls = components::control_row();
     watchpoint_controls.add_css_class("watchpoint-controls");
 
@@ -1494,10 +1512,14 @@ pub(super) fn build_inspector(
     watchpoint_controls.append(&watchpoint_mask);
     watchpoint_controls.append(&watchpoint_add_button);
     watchpoint_section.append(&watchpoint_controls);
-    breakpoints_page.append(&watchpoint_section);
+    breakpoints_page.append(&build_disclosure(
+        "ADD WATCHPOINT",
+        &watchpoint_section,
+        false,
+        "breakpoint-tools",
+    ));
     let catchpoint_section = gtk::Box::new(gtk::Orientation::Vertical, 4);
     catchpoint_section.add_css_class("breakpoint-tool-section");
-    catchpoint_section.append(&section_title("QUICK CATCHPOINTS"));
 
     let event_catchpoint_grid = gtk::Grid::builder()
         .column_spacing(3)
@@ -1554,7 +1576,12 @@ pub(super) fn build_inspector(
         add: filtered_catchpoint_add,
     };
 
-    breakpoints_page.append(&catchpoint_section);
+    breakpoints_page.append(&build_disclosure(
+        "QUICK CATCHPOINTS",
+        &catchpoint_section,
+        false,
+        "breakpoint-tools",
+    ));
     let signals_content = gtk::Box::new(gtk::Orientation::Vertical, 4);
     signals_content.add_css_class("panel-content");
     let current_signal_section = gtk::Box::new(gtk::Orientation::Vertical, 4);

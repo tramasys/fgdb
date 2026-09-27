@@ -17,7 +17,7 @@ impl DebuggerModel {
     }
 
     pub(crate) fn is_stop_refresh_current(&self, generation: u64) -> bool {
-        if self.stopped.stop_refresh_generation.get() != generation {
+        if self.terminal_pending() || self.stopped.stop_refresh_generation.get() != generation {
             return false;
         }
 

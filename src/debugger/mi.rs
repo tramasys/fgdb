@@ -2371,6 +2371,7 @@ impl MiClient {
                             .and_then(MiValue::as_const)
                             .map(|value| ReturnValue {
                                 value: value.to_owned(),
+                                function: None,
                                 history_variable: record
                                     .field("gdb-result-var")
                                     .and_then(MiValue::as_const)
@@ -2426,6 +2427,9 @@ impl MiClient {
                 (self.event_handler)(
                     self,
                     MiEvent::Stopped {
+                        details: Box::new(crate::debugger::stop_info::StopDetails::from_record(
+                            &record,
+                        )),
                         reason,
                         return_value,
                         signal_name,

@@ -5,7 +5,7 @@ import re
 from collections import namedtuple
 from . import return_transfers
 
-Candidate = namedtuple("Candidate", "inferior thread pc sp caller return_type registers origins callee history_count")
+Candidate = namedtuple("Candidate", "inferior thread pc sp caller return_type registers origins callee history_count function")
 _candidate = None
 _completed = None
 
@@ -117,7 +117,7 @@ def _prepare():
 
     return Candidate(inferior.num, thread.global_num, expected_pc, expected_sp, expected_function,
                      return_type, registers, origins, int(symbol.value().address),
-                     getattr(gdb, "history_count", lambda: None)())
+                     getattr(gdb, "history_count", lambda: None)(), symbol.print_name[:1024])
 
 
 def _at_return(candidate, frame):
@@ -250,14 +250,23 @@ def _stopped(event):
 
             return
 
-        if int(frame.read_register("sp")) != candidate.sp or not _preserved_until(frame, candidate.pc, int(frame.pc()), candidate.registers):
+        if int(frame.read_register("sp")) != candidate.sp:
             return
 
         if candidate.origins is None:
+            if not _preserved_until(frame, candidate.pc, int(frame.pc()), candidate.registers):
+                return
+
             raw = frame.read_register(candidate.registers[0]).bytes
             value = gdb.Value(raw[:int(candidate.return_type.sizeof)], candidate.return_type)
         else:
-            value = return_transfers.read(frame, candidate.origins, candidate.return_type)
+            origins = return_transfers.relocate(frame, candidate.pc, int(frame.pc()),
+                                               candidate.origins, frame.architecture().name())
+
+            if origins is None:
+                return
+
+            value = return_transfers.read(frame, origins, candidate.return_type)
 
         if replaces is not None:
             native = gdb.history(int(replaces[1:])).bytes
@@ -269,7 +278,7 @@ def _stopped(event):
         reference = gdb.add_history(value)
         _completed = {"thread": str(candidate.thread), "inferior": "i" + str(candidate.inferior),
                       "history": "$" + str(reference), "value": value.format_string(max_elements=128),
-                      "replaces": replaces}
+                      "replaces": replaces, "function": candidate.function}
     except (gdb.error, RuntimeError, ValueError, TypeError, AttributeError, KeyError, IndexError):
         _completed = None
 
@@ -297,8 +306,7 @@ def snapshot(enabled=True, discard=False):
     else:
         fields = [result["thread"], result["inferior"], result["history"], result["value"].encode("utf-8").hex()]
 
-        if result["replaces"] is not None:
-            fields.append(result["replaces"])
+        fields.extend([result["replaces"] or "-", result["function"].encode("utf-8").hex()])
 
         print("FGDB_RETURNS " + " ".join(fields))
 

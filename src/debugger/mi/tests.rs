@@ -449,8 +449,8 @@ fn finished_events_preserve_return_values_without_inventing_void_results() {
         client.process_line(r#"*stopped,reason="function-finished",return-value={},thread-id="1""#);
 
         assert_eq!(*returns.borrow(), [
-            Some(super::ReturnValue { value: "42".into(), history_variable: Some("$1".into()) }),
-            Some(super::ReturnValue { value: "{x = 7, y = 11}".into(), history_variable: None }),
+            Some(super::ReturnValue { value: "42".into(), history_variable: Some("$1".into()), function: None }),
+            Some(super::ReturnValue { value: "{x = 7, y = 11}".into(), history_variable: None, function: None }),
             None,
             None,
             None,
@@ -526,6 +526,7 @@ fn publishes_process_scoped_async_events() {
                         thread_id: Some(String::from("all")),
                     },
                     super::MiEvent::Stopped {
+                        details: Default::default(),
                         reason: Some(String::from("fork")),
                         return_value: None,
                         signal_name: None,

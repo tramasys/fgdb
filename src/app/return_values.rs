@@ -43,6 +43,17 @@ pub(super) fn refresh(ui: &Weak<Ui>, client: &MiClient, generation: u64) {
         })
         .capture(move |_, record, output| {
             if !record.is_done() || record.field("fgdb-output-truncated").is_some() {
+                if !record.is_superseded()
+                    && let Some(ui) = response.upgrade()
+                {
+                    ui.show_return_capture_error(
+                        generation,
+                        record
+                            .error_message()
+                            .unwrap_or("GDB did not provide a complete capture result"),
+                    );
+                }
+
                 return;
             }
 
@@ -89,7 +100,7 @@ pub(super) fn parse_snapshot(output: &str) -> Option<ReturnSnapshot<'_>> {
         return None;
     }
 
-    let mut fields = fields.splitn(5, ' ');
+    let mut fields = fields.split_whitespace();
     let thread = fields.next()?;
     let inferior = fields.next()?;
     let history = fields.next()?;
@@ -109,7 +120,18 @@ pub(super) fn parse_snapshot(output: &str) -> Option<ReturnSnapshot<'_>> {
     }
 
     let value = String::from_utf8(super::type_metadata::decode_hex(fields.next()?)?).ok()?;
-    let replaces = fields.next();
+    let replaces = fields.next().filter(|field| *field != "-");
+    let function = fields.next().map(|hex| {
+        (hex.len() <= 8192)
+            .then(|| super::type_metadata::decode_hex(hex))
+            .flatten()
+            .and_then(|bytes| String::from_utf8(bytes).ok())
+            .filter(|name| !name.is_empty() && !name.contains(['\0', '\n', '\r']))
+    });
+
+    if function.as_ref().is_some_and(Option::is_none) || fields.next().is_some() {
+        return None;
+    }
 
     if replaces.is_some_and(|reference| !absolute_reference(reference) || reference == history) {
         return None;
@@ -121,6 +143,7 @@ pub(super) fn parse_snapshot(output: &str) -> Option<ReturnSnapshot<'_>> {
         value: crate::debugger::ReturnValue {
             value,
             history_variable: Some(history.into()),
+            function: function.flatten(),
         },
         replaces,
     })

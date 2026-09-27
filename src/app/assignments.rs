@@ -510,9 +510,8 @@ assert bytes(gdb.selected_inferior().read_memory(local._data_ptr,local._length))
 assert bytes(gdb.selected_inferior().read_memory(argument._data_ptr,argument._length)) == bytes.fromhex("{}")
 assert "fgdb_rs_string" not in gdb.execute("show convenience",to_string=True)
 gdb.write("FGDB_EDIT_ROUNDTRIP_OK\n")"#, crate::hex::encode(&local_bytes), crate::hex::encode(&argument_bytes))));
-        let output =
-            crate::language::toolchain::probe::output(&mut command, Duration::from_secs(15))
-                .expect("live GDB smoke test failed or timed out");
+        let output = crate::bounded::process::output(&mut command, Duration::from_secs(15))
+            .expect("live GDB smoke test failed or timed out");
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("FGDB_EDIT_ROUNDTRIP_OK"), "{output}");
         assert!(!output.contains("^error"), "{output}");

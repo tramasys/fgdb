@@ -413,7 +413,12 @@ impl Workspace {
                     }
                 };
 
-                workspace.capture_breakpoints(&breakpoints);
+                let Some(ui) = state.ui.borrow().upgrade() else {
+                    state.busy.set(false);
+                    return;
+                };
+
+                workspace.capture_breakpoints(&breakpoints, &ui.stop_point_metadata.borrow());
                 glib::spawn_future_local(async move {
                     let includes_environment = matches!(
                         &workspace.session,

@@ -230,9 +230,7 @@ fn read_process_address_space_at(root: &Path) -> Result<ProcessAddressSpace, Str
                 .and_then(|bytes| auxv_value(&bytes, abi, 7))
         })
         .and_then(|base| {
-            mappings
-                .iter()
-                .find(|mapping| mapping.start <= base && base < mapping.end)
+            mapping_containing(&mappings, base)
                 .map(|mapping| mapping.path.clone())
                 .filter(|path| !path.is_empty())
         });

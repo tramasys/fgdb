@@ -352,6 +352,7 @@ pub(crate) struct KernelFileDescriptor {
     pub target: String,
     pub details: String,
     pub raw_info: String,
+    pub info_warning: String,
     pub inode: Option<u64>,
     pub mount_id: Option<u64>,
     pub eventfd_id: Option<u64>,

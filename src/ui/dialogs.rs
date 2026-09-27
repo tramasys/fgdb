@@ -1287,7 +1287,7 @@ pub(super) fn open_flag_editor(
 pub(super) fn open_breakpoint_condition_editor(
     parent: &impl IsA<gtk::Window>,
     breakpoint: Breakpoint,
-    handler: Rc<RefCell<Option<BreakpointConditionHandler>>>,
+    handler: Rc<RefCell<Option<BreakpointEditorHandler>>>,
 ) -> gtk::Window {
     let editor = gtk::Window::builder()
         .title(format!("Breakpoint #{} condition", breakpoint.number))
@@ -1327,6 +1327,9 @@ pub(super) fn open_breakpoint_condition_editor(
     entry.set_hexpand(true);
     entry.set_tooltip_text(Some("Examples: count == 4, ptr != 0, $rax == 0x10"));
     content.append(&entry);
+    let validation = empty_label("");
+    validation.set_wrap(true);
+    content.append(&validation);
     let actions = components::control_row();
     actions.set_halign(gtk::Align::End);
     let cancel = gtk::Button::with_label("Cancel");
@@ -1340,20 +1343,81 @@ pub(super) fn open_breakpoint_condition_editor(
     content.append(&actions);
     editor.set_child(Some(&content));
     connect_escape_to_close(&editor);
-    let number = breakpoint.command_number().to_owned();
-    let original_condition = breakpoint.condition;
-    let editor_for_submit = editor.clone();
+    let editor_for_submit = editor.downgrade();
+    let busy = Rc::new(Cell::new(false));
+    let busy_for_close = Rc::clone(&busy);
+
+    editor.connect_close_request(move |_| {
+        if busy_for_close.get() {
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+
+    let retryable = Rc::new(Cell::new(true));
+    let entry_for_submit = entry.clone();
+    let apply_for_submit = apply.clone();
+    let clear_for_submit = clear.clone();
 
     let submit = Rc::new(move |condition: Option<String>| {
-        if condition != original_condition {
-            let handler = handler.borrow().clone();
-
-            if let Some(handler) = handler {
-                handler(number.clone(), condition);
-            }
+        if busy.get() || !retryable.get() {
+            return;
         }
 
-        editor_for_submit.close();
+        if condition == breakpoint.condition {
+            if let Some(editor) = editor_for_submit.upgrade() {
+                editor.close();
+            }
+
+            return;
+        }
+
+        let Some(handler) = handler.borrow().clone() else {
+            validation.set_text("Breakpoint editing is unavailable");
+            return;
+        };
+
+        let mut spec = BreakpointSpec::from_breakpoint(&breakpoint);
+        spec.condition = condition;
+        busy.set(true);
+        entry_for_submit.set_sensitive(false);
+        actions.set_sensitive(false);
+        validation.set_text("Applying condition…");
+        let busy = Rc::clone(&busy);
+        let retryable = Rc::clone(&retryable);
+        let editor = editor_for_submit.clone();
+        let entry = entry_for_submit.clone();
+        let actions = actions.clone();
+        let apply = apply_for_submit.clone();
+        let clear = clear_for_submit.clone();
+        let validation = validation.clone();
+
+        handler(
+            BreakpointEditRequest {
+                original: Some(breakpoint.clone()),
+                spec,
+            },
+            Box::new(move |result, can_retry| {
+                busy.set(false);
+                retryable.set(can_retry);
+
+                match result {
+                    Ok(()) => {
+                        if let Some(editor) = editor.upgrade() {
+                            editor.close();
+                        }
+                    }
+                    Err(error) => {
+                        entry.set_sensitive(true);
+                        actions.set_sensitive(true);
+                        apply.set_sensitive(can_retry);
+                        clear.set_sensitive(can_retry);
+                        validation.set_text(&error);
+                    }
+                }
+            }),
+        );
     });
 
     let entry_for_apply = entry.clone();
@@ -1489,9 +1553,13 @@ pub(super) fn open_breakpoint_editor(
     condition.set_text(spec.condition.as_deref().unwrap_or(""));
     grid.attach(&field_label("Condition"), 0, 2, 1, 1);
     grid.attach(&condition, 1, 2, 3, 1);
-    let stop_after = gtk::SpinButton::with_range(1.0, f64::from(u32::MAX), 1.0);
-    stop_after.set_value(spec.stop_after.max(1) as f64);
-    stop_after.set_width_chars(9);
+    let stop_after = gtk::Entry::builder()
+        .input_purpose(gtk::InputPurpose::Digits)
+        .width_chars(10)
+        .tooltip_text("Stop on hit from 1 to 2147483648")
+        .text(spec.stop_after.max(1).to_string())
+        .build();
+
     grid.attach(&field_label("Stop on hit"), 0, 3, 1, 1);
     grid.attach(&stop_after, 1, 3, 1, 1);
 
@@ -1613,8 +1681,24 @@ pub(super) fn open_breakpoint_editor(
     location.connect_activate(move |_| apply_for_location.emit_clicked());
     let apply_for_condition = apply.clone();
     condition.connect_activate(move |_| apply_for_condition.emit_clicked());
+    let busy = Rc::new(Cell::new(false));
+    let busy_for_close = Rc::clone(&busy);
 
-    apply.connect_clicked(move |_| {
+    editor.connect_close_request(move |_| {
+        if busy_for_close.get() {
+            glib::Propagation::Stop
+        } else {
+            glib::Propagation::Proceed
+        }
+    });
+
+    let cancel_for_apply = cancel.clone();
+
+    apply.connect_clicked(move |apply| {
+        if busy.get() || !apply.is_sensitive() {
+            return;
+        }
+
         let location_text = location_for_apply.text().trim().to_owned();
 
         if location_text.is_empty() {
@@ -1625,6 +1709,12 @@ pub(super) fn open_breakpoint_editor(
 
         let regex_active = regex.is_active();
         let buffer = commands.buffer();
+
+        let Some(hit_count) = parse_stop_after(&stop_after.text()) else {
+            validation.set_text("Stop on hit must be a whole number from 1 to 2147483648.");
+            stop_after.grab_focus();
+            return;
+        };
 
         let command_lines = buffer
             .text(&buffer.start_iter(), &buffer.end_iter(), false)
@@ -1650,7 +1740,7 @@ pub(super) fn open_breakpoint_editor(
                 temporary: temporary.is_active(),
                 allow_pending: !regex_active && pending.is_active(),
                 condition: optional(condition.text()),
-                stop_after: u64::try_from(stop_after.value_as_int()).unwrap_or(1).max(1),
+                stop_after: hit_count,
                 thread: (!regex_active).then(|| optional(thread.text())).flatten(),
                 inferior: (!regex_active).then(|| optional(inferior.text())).flatten(),
                 commands: command_lines,
@@ -1660,11 +1750,49 @@ pub(super) fn open_breakpoint_editor(
 
         let handler = handler.borrow().clone();
 
-        if let Some(handler) = handler {
-            handler(request);
-        }
+        let Some(handler) = handler else {
+            validation.set_text("Breakpoint editing is unavailable");
+            return;
+        };
 
-        editor_for_apply.close();
+        busy.set(true);
+        grid.set_sensitive(false);
+        command_header.set_sensitive(false);
+        commands_scrolled.set_sensitive(false);
+        apply.set_sensitive(false);
+        cancel_for_apply.set_sensitive(false);
+        validation.set_text("Applying breakpoint settings…");
+        let busy = Rc::clone(&busy);
+        let editor = editor_for_apply.downgrade();
+        let grid = grid.clone();
+        let command_header = command_header.clone();
+        let commands_scrolled = commands_scrolled.clone();
+        let apply = apply.clone();
+        let cancel = cancel_for_apply.clone();
+        let validation = validation.clone();
+
+        handler(
+            request,
+            Box::new(move |result, retryable| {
+                busy.set(false);
+
+                match result {
+                    Ok(()) => {
+                        if let Some(editor) = editor.upgrade() {
+                            editor.close();
+                        }
+                    }
+                    Err(error) => {
+                        grid.set_sensitive(true);
+                        command_header.set_sensitive(true);
+                        commands_scrolled.set_sensitive(true);
+                        apply.set_sensitive(retryable);
+                        cancel.set_sensitive(true);
+                        validation.set_text(&error);
+                    }
+                }
+            }),
+        );
     });
 
     let editor_for_cancel = editor.clone();
@@ -1677,6 +1805,15 @@ pub(super) fn open_breakpoint_editor(
     }
 
     editor
+}
+
+fn parse_stop_after(text: &str) -> Option<u64> {
+    // GDB accepts a signed 32-bit ignore count. The displayed hit is ignore + 1.
+    text.trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|value| (1..=2147483648).contains(value))
+        .map(u64::from)
 }
 
 pub(super) fn open_stop_point_metadata_editor(
@@ -1704,7 +1841,7 @@ pub(super) fn open_stop_point_metadata_editor(
     content.append(&title);
 
     let hint = gtk::Label::new(Some(
-        "Groups and tags are kept for this debugger session and are included in stop-point search.",
+        "Groups and tags are included in search and saved with reusable breakpoints in workspaces.",
     ));
 
     hint.add_css_class("muted");
@@ -1784,6 +1921,105 @@ pub(super) fn connect_escape_to_close(window: &gtk::Window) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hit_counts_are_unsigned_and_never_silently_default() {
+        for value in [1, i32::MAX as u64, i32::MAX as u64 + 1] {
+            assert_eq!(parse_stop_after(&value.to_string()), Some(value));
+        }
+
+        for invalid in ["0", "-1", "1.5", "2147483649", "4294967296", "", "one"] {
+            assert_eq!(parse_stop_after(invalid), None);
+        }
+    }
+
+    #[test]
+    #[ignore = "requires a GTK display, run separately from other GTK tests"]
+    fn breakpoint_editor_preserves_failed_drafts_until_acknowledged() {
+        use crate::ui::tests::descendants;
+
+        gtk::init().unwrap();
+        let parent = gtk::Window::new();
+        let pending: Rc<RefCell<Option<BreakpointEditCompletion>>> = Rc::default();
+        let received = Rc::clone(&pending);
+        let handler: BreakpointEditorHandler = Rc::new(move |request, complete| {
+            assert_eq!(request.spec.location, "worker");
+            assert_eq!(request.spec.stop_after, 2147483648);
+            received.replace(Some(complete));
+        });
+
+        let editor =
+            open_breakpoint_editor(&parent, None, true, Rc::new(RefCell::new(Some(handler))));
+        let location = descendants::<gtk::Entry>(&editor)
+            .into_iter()
+            .find(|entry| {
+                entry.placeholder_text().as_deref() == Some("function, *0xaddress, or file:line")
+            })
+            .unwrap();
+        let hits = descendants::<gtk::Entry>(&editor)
+            .into_iter()
+            .find(|entry| entry.input_purpose() == gtk::InputPurpose::Digits)
+            .unwrap();
+
+        let apply = descendants::<gtk::Button>(&editor)
+            .into_iter()
+            .find(|button| button.label().as_deref() == Some("Add breakpoint"))
+            .unwrap();
+        location.set_text("worker");
+        hits.set_text("4294967296");
+        apply.emit_clicked();
+        assert!(pending.borrow().is_none());
+        assert_eq!(hits.text(), "4294967296");
+        hits.set_text("2147483648");
+        apply.emit_clicked();
+        assert!(editor.is_visible());
+        assert!(!apply.is_sensitive());
+        pending.take().unwrap()(Err("Invalid condition".into()), true);
+        assert!(editor.is_visible());
+        assert!(apply.is_sensitive());
+        assert_eq!(location.text(), "worker");
+        assert_eq!(hits.text(), "2147483648");
+        apply.emit_clicked();
+        pending.take().unwrap()(Err("Context changed".into()), false);
+        assert!(!apply.is_sensitive());
+        location.emit_activate();
+        assert!(pending.borrow().is_none());
+        apply.set_sensitive(true);
+        apply.emit_clicked();
+        pending.take().unwrap()(Ok(()), true);
+        assert!(!editor.is_visible());
+
+        let record = crate::debugger::parse_record(
+            r#"^done,bkpt={number="2",type="hw watchpoint",enabled="y",original-location="counter"}"#,
+        )
+        .unwrap();
+
+        let breakpoint = crate::debugger::inserted_breakpoints(&record).remove(0);
+        let received = Rc::clone(&pending);
+        let handler: BreakpointEditorHandler = Rc::new(move |request, complete| {
+            assert_eq!(request.spec.condition.as_deref(), Some("missing"));
+            received.replace(Some(complete));
+        });
+
+        let editor = open_breakpoint_condition_editor(
+            &parent,
+            breakpoint,
+            Rc::new(RefCell::new(Some(handler))),
+        );
+
+        let condition = descendants::<gtk::Entry>(&editor).remove(0);
+        condition.set_text("missing");
+        condition.emit_activate();
+        editor.close();
+        assert!(editor.is_visible());
+        pending.take().unwrap()(Err("Invalid condition".into()), true);
+        assert!(editor.is_visible());
+        assert_eq!(condition.text(), "missing");
+        condition.emit_activate();
+        pending.take().unwrap()(Ok(()), true);
+        assert!(!editor.is_visible());
+        parent.close();
+    }
 
     #[test]
     fn assignment_handlers_reject_changed_context_and_release_borrows() {

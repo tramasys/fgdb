@@ -1,7 +1,10 @@
 use super::*;
 use crate::config::settings::IntegerDisplay;
 
+type InspectHandler = Rc<dyn Fn(Variable)>;
+
 pub(super) struct VariablePresentation {
+    pub(super) inspect: RefCell<Option<InspectHandler>>,
     format: Cell<IntegerDisplay>,
     model: Rc<crate::model::DebuggerModel>,
     items: RefCell<Vec<glib::WeakRef<gtk::ListItem>>>,
@@ -10,6 +13,7 @@ pub(super) struct VariablePresentation {
 impl VariablePresentation {
     pub fn new(format: IntegerDisplay, model: Rc<crate::model::DebuggerModel>) -> Rc<Self> {
         Rc::new(Self {
+            inspect: RefCell::default(),
             format: Cell::new(format),
             model,
             items: RefCell::new(Vec::new()),
