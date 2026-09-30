@@ -9,7 +9,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) struct Debugger(Child);
+pub(crate) struct Debugger(Child);
 
 impl Debugger {
     pub(super) fn pid(&self) -> u32 {
@@ -34,7 +34,7 @@ pub(super) fn wait_until(mut done: impl FnMut() -> bool) {
     }
 }
 
-pub(super) fn request(client: &MiClient, command: &str) -> MiRecord {
+pub(crate) fn request(client: &MiClient, command: &str) -> MiRecord {
     let result = Rc::new(RefCell::new(None));
     let response = Rc::clone(&result);
     client
@@ -47,7 +47,7 @@ pub(super) fn request(client: &MiClient, command: &str) -> MiRecord {
     result.take().unwrap()
 }
 
-pub(super) fn open_debugger(fixture: &str, checkpoint: &str) -> (Debugger, Rc<MiClient>) {
+pub(crate) fn open_debugger(fixture: &str, checkpoint: &str) -> (Debugger, Rc<MiClient>) {
     open_debugger_with_printers(fixture, checkpoint, false)
 }
 

@@ -1,5 +1,6 @@
 pub(crate) mod array;
 mod command;
+pub(crate) mod comparison;
 pub(crate) mod context;
 pub(crate) mod instruction;
 pub(crate) mod linked;

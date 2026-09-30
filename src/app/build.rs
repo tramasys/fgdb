@@ -76,6 +76,7 @@ pub fn build(application: &gtk::Application, launch_config: LaunchConfig) {
     return_values::connect(&ui, &mi_client);
     stop_info::connect(&ui, &mi_client);
     type_layout::connect(&ui, &mi_client);
+    comparison::connect(&ui, &mi_client);
     misc::locks::connect(&ui, &mi_client);
     connect_stack_paging(&ui, &mi_client);
     let weak = Rc::downgrade(&ui);

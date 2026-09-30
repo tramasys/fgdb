@@ -32,6 +32,27 @@ impl VectorValue {
             return None;
         }
 
+        if let Some(hex) = value.trim().strip_prefix("0x") {
+            if hex.is_empty()
+                || hex.len() > bytes * 2
+                || !hex.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return None;
+            }
+
+            let mut result = Self {
+                words: [0; 8],
+                bytes,
+            };
+
+            for (index, chunk) in hex.as_bytes().rchunks(16).enumerate() {
+                result.words[index] =
+                    u64::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
+            }
+
+            return Some(result);
+        }
+
         let field = format!("v{}_int64", bytes / 8);
         let start = value.match_indices(&field).find_map(|(index, _)| {
             let before = value[..index].chars().next_back()?;
@@ -84,6 +105,17 @@ impl VectorValue {
 
     pub(crate) fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    pub(crate) fn hex(&self) -> String {
+        let mut text = String::with_capacity(2 + self.bytes * 2);
+        text.push_str("0x");
+
+        for word in self.words[..self.bytes / 8].iter().rev() {
+            let _ = write!(text, "{word:016x}");
+        }
+
+        text
     }
 
     pub(crate) fn lane(&self, index: usize, bytes: usize) -> Option<u64> {
@@ -200,6 +232,25 @@ mod tests {
         }
 
         assert!(VectorValue::parse("xmm0;quit", "{v2_int64 = {0,0}}").is_none());
+
+        for name in ["xmm0", "ymm31", "zmm17"] {
+            let mut vector = VectorValue::parse(name, "0x1234").unwrap();
+            assert!(vector.set_lane(vector.bytes() - 1, 1, 0xab));
+            let hex = vector.hex();
+            assert!(hex.starts_with("0xab"));
+            assert!(hex.ends_with("1234"));
+            assert_eq!(VectorValue::parse(name, &hex), Some(vector));
+        }
+
+        for invalid in [
+            "0x",
+            "0xgg",
+            "0x-1",
+            "0x1 trailing",
+            "0x100000000000000000000000000000000",
+        ] {
+            assert!(VectorValue::parse("xmm0", invalid).is_none());
+        }
 
         let original = VectorValue::parse("xmm0", "{v2_int64 = {0, 0x8000000000000000}}").unwrap();
         let mut edited = original.clone();

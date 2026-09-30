@@ -45,7 +45,7 @@ impl VectorBase {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct VectorDisplay {
-    format: VectorLaneFormat,
+    pub(super) format: VectorLaneFormat,
     base: VectorBase,
 }
 
@@ -77,7 +77,7 @@ impl VectorDisplay {
         (format, radix)
     }
 
-    fn text(self, raw: u64) -> String {
+    pub(super) fn text(self, raw: u64) -> String {
         if self.format.is_float() {
             let bytes = raw.to_be_bytes();
             let width = self.format.lane_bytes();
@@ -201,7 +201,7 @@ impl VectorControls {
         }
     }
 
-    fn set_display(&self, display: VectorDisplay) {
+    pub(super) fn set_display(&self, display: VectorDisplay) {
         self.interpretation.set_selected(
             VectorLaneFormat::ALL
                 .iter()
@@ -219,16 +219,16 @@ impl VectorControls {
         self.base.set_sensitive(!display.format.is_float());
     }
 
-    fn connect_table(&self, store: &gio::ListStore, list: &VectorRegisterList) {
+    pub(super) fn connect_changed(&self, changed: impl Fn(VectorDisplay) + 'static) {
+        let changed = Rc::new(changed);
+
         for control in [&self.interpretation, &self.base] {
-            let store = store.downgrade();
-            let list = list.clone();
             let interpretation = self.interpretation.downgrade();
             let base = self.base.downgrade();
+            let changed = Rc::clone(&changed);
 
             control.connect_selected_notify(move |_| {
-                let (Some(store), Some(interpretation), Some(base)) =
-                    (store.upgrade(), interpretation.upgrade(), base.upgrade())
+                let (Some(interpretation), Some(base)) = (interpretation.upgrade(), base.upgrade())
                 else {
                     return;
                 };
@@ -239,19 +239,29 @@ impl VectorControls {
                 };
 
                 base.set_sensitive(!display.format.is_float());
-
-                let rows = (0..store.n_items())
-                    .filter_map(|index| {
-                        let object = store.item(index)?.downcast::<glib::BoxedAnyObject>().ok()?;
-                        let mut row = object.borrow::<RegisterRowData>().clone();
-                        row.vector_display = display;
-                        Some(row)
-                    })
-                    .collect::<Vec<_>>();
-
-                replace_rows(&store, &list, rows);
+                changed(display);
             });
         }
+    }
+
+    fn connect_table(&self, store: &gio::ListStore, list: &VectorRegisterList) {
+        let store = store.downgrade();
+        let list = list.clone();
+
+        self.connect_changed(move |display| {
+            let Some(store) = store.upgrade() else { return };
+
+            let rows = (0..store.n_items())
+                .filter_map(|index| {
+                    let object = store.item(index)?.downcast::<glib::BoxedAnyObject>().ok()?;
+                    let mut row = object.borrow::<RegisterRowData>().clone();
+                    row.vector_display = display;
+                    Some(row)
+                })
+                .collect::<Vec<_>>();
+
+            replace_rows(&store, &list, rows);
+        });
     }
 }
 

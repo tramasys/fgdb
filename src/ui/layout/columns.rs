@@ -83,6 +83,7 @@ struct Binding {
     default_width: i32,
 }
 
+#[derive(Clone)]
 pub(in crate::ui) struct TableLayout {
     layouts: ColumnLayouts,
     id: TableId,

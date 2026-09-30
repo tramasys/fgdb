@@ -15,6 +15,7 @@ const MODULES: &[(&str, &str)] = &[
     ("zig", include_str!("printers/zig.py")),
     ("odin", include_str!("printers/odin.py")),
     ("array", include_str!("printers/array.py")),
+    ("comparison", include_str!("../debugger/comparison.py")),
     ("printers", include_str!("printers/printers.py")),
     (
         "return_transfers",
@@ -70,6 +71,16 @@ pub(crate) fn native_value_expression(expression: &str, members: &str) -> String
         crate::debugger::quote(expression),
         crate::debugger::quote(members),
     )
+}
+
+pub(crate) fn comparison_command(expression: &str, members: &str, name: &str) -> String {
+    crate::debugger::console_command(&format!(
+        "python {}.snapshot({}, {}, {})",
+        module("comparison"),
+        crate::debugger::quote(expression),
+        crate::debugger::quote(members),
+        crate::debugger::quote(name),
+    ))
 }
 
 pub(crate) fn array_description_command(expression: &str, members: &str) -> String {

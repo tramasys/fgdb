@@ -1,11 +1,15 @@
-//! Explicit, bounded comparisons of accepted UI data. No debugger polling.
+//! Explicit, bounded snapshots. Variable capture is on demand, never stop polling.
 
 use super::*;
+use crate::debugger::comparison::{
+    CapturedValue, MAX_BYTES, MAX_ROWS, SnapshotReply, ValueSnapshot,
+};
+use crate::debugger::vector::VectorValue;
 use std::collections::BTreeMap;
 
 const MAX_PINS: usize = 8;
-const MAX_ROWS: usize = 256;
-const MAX_BYTES: usize = 64 * 1024;
+type CaptureHandler = Rc<dyn Fn(Variable, Rc<dyn Fn() -> bool>, SnapshotReply)>;
+type CaptureReply = Box<dyn FnOnce(Result<Baseline, String>)>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Source {
@@ -70,12 +74,14 @@ impl Origin {
 struct Baseline {
     source: Source,
     origin: Origin,
-    values: BTreeMap<String, String>,
+    values: BTreeMap<String, CapturedValue>,
+    complete: bool,
 }
 
 struct Pin {
     baseline: Baseline,
     compared: Option<Result<Baseline, String>>,
+    vector_display: Rc<Cell<VectorDisplay>>,
 }
 
 #[derive(Default)]
@@ -83,6 +89,8 @@ pub(super) struct Comparisons {
     pins: RefCell<Vec<Pin>>,
     window: glib::WeakRef<gtk::Window>,
     selected: Cell<u32>,
+    request: Cell<u64>,
+    capture: RefCell<Option<CaptureHandler>>,
 }
 
 impl Comparisons {
@@ -97,6 +105,7 @@ impl Comparisons {
         let pin = Pin {
             baseline,
             compared: None,
+            vector_display: Rc::default(),
         };
 
         if let Some(index) = previous {
@@ -112,12 +121,14 @@ impl Comparisons {
 }
 
 fn insert(
-    values: &mut BTreeMap<String, String>,
+    values: &mut BTreeMap<String, CapturedValue>,
     name: String,
-    value: String,
+    value: CapturedValue,
     bytes: &mut usize,
 ) -> Result<(), String> {
-    *bytes = bytes.saturating_add(name.len()).saturating_add(value.len());
+    *bytes = bytes
+        .saturating_add(name.len())
+        .saturating_add(value.text.len());
 
     if values.len() >= MAX_ROWS || *bytes > MAX_BYTES {
         return Err(
@@ -132,43 +143,50 @@ fn insert(
     Ok(())
 }
 
-fn variable_values(
-    node: &VariableNode,
-    values: &mut BTreeMap<String, String>,
-    prefix: &str,
-    bytes: &mut usize,
-    depth: usize,
-) -> Result<(), String> {
-    if node.placeholder || depth > 16 {
-        return Err("Expand a shallower, fully loaded value before capturing".into());
+fn register_snapshot(
+    registers: Vec<Register>,
+    architecture: TargetArchitecture,
+    endian: Option<TargetEndian>,
+    pointer_width: PointerWidth,
+) -> Result<ValueSnapshot, String> {
+    let mut values = BTreeMap::new();
+    let mut bytes = 0;
+
+    for register in registers {
+        let value = if let Some(vector) = VectorValue::parse(&register.name, &register.value) {
+            // Retain exact bits, not GDB's redundant union interpretations.
+            vector.hex().into()
+        } else {
+            let complete = !register.value.trim().is_empty()
+                && crate::debugger::vector::register_bytes(&register.name).is_none()
+                && !register.value.contains(['{', '…'])
+                && !["...", "<unavailable", "<not available", "<optimized out"]
+                    .iter()
+                    .any(|marker| register.value.contains(marker));
+
+            let text = if complete {
+                format_register_value_for_target(
+                    &register.name,
+                    &register.value,
+                    false,
+                    architecture,
+                    endian,
+                    pointer_width,
+                )
+            } else {
+                register.value
+            };
+
+            CapturedValue { text, complete }
+        };
+
+        insert(&mut values, register.name, value, &mut bytes)?;
     }
 
-    let variable = &node.variable;
-    let name = format!(
-        "{prefix}{} [{}]",
-        variable.name,
-        variable.type_name.as_deref().unwrap_or("?")
-    );
-
-    insert(values, name.clone(), variable.value.clone(), bytes)?;
-
-    if node.children_loaded.get() && node.children.n_items() > 0 {
-        for position in 0..node.children.n_items() {
-            let item = node
-                .children
-                .item(position)
-                .and_downcast::<SnapshotRow>()
-                .ok_or("Variable row unavailable")?;
-
-            let child = item.borrow::<VariableNode>();
-
-            if !child.placeholder {
-                variable_values(&child, values, &format!("{name} / "), bytes, depth + 1)?;
-            }
-        }
-    }
-
-    Ok(())
+    Ok(ValueSnapshot {
+        complete: values.values().all(|value| value.complete),
+        values,
+    })
 }
 
 fn selection_path(tree: &VariableTree) -> Option<Vec<(String, bool, Option<usize>)>> {
@@ -232,37 +250,53 @@ fn find_path(tree: &VariableTree, path: &[(String, bool, Option<usize>)]) -> Opt
 
 struct DifferenceRow {
     name: String,
-    before: Option<String>,
-    after: Option<String>,
+    before: Option<CapturedValue>,
+    after: Option<CapturedValue>,
     compared: bool,
+    bits: Option<[Option<u64>; 2]>,
 }
 
 impl DifferenceRow {
     fn changed(&self) -> bool {
-        self.compared && self.before != self.after
+        self.compared
+            && !self.uncertain()
+            && self.bits.map_or_else(
+                || self.before != self.after,
+                |[before, after]| before != after,
+            )
+    }
+
+    fn uncertain(&self) -> bool {
+        self.before
+            .iter()
+            .chain(self.after.iter())
+            .any(|value| !value.complete)
     }
 
     fn cells(&self) -> [&str; 4] {
         let status = match (&self.before, &self.after) {
+            _ if self.uncertain() => "Incomplete",
             _ if !self.compared => "Pinned",
-            (None, _) => "Newly loaded",
-            (_, None) => "Not loaded",
+            (None, _) => "Newly captured",
+            (_, None) => "Not captured",
             _ if self.changed() => "Changed",
             _ => "Unchanged",
         };
 
         [
             &self.name,
-            self.before.as_deref().unwrap_or("—"),
-            self.after.as_deref().unwrap_or("—"),
+            self.before
+                .as_ref()
+                .map_or("—", |value| value.text.as_str()),
+            self.after.as_ref().map_or("—", |value| value.text.as_str()),
             status,
         ]
     }
 }
 
 fn difference(
-    before: &BTreeMap<String, String>,
-    after: Option<&BTreeMap<String, String>>,
+    before: &BTreeMap<String, CapturedValue>,
+    after: Option<&BTreeMap<String, CapturedValue>>,
 ) -> Vec<DifferenceRow> {
     let names: std::collections::BTreeSet<_> = before
         .keys()
@@ -276,11 +310,91 @@ fn difference(
             before: before.get(name).cloned(),
             after: after.and_then(|values| values.get(name)).cloned(),
             compared: after.is_some(),
+            bits: None,
         })
         .collect()
 }
 
+fn register_difference(
+    before: &BTreeMap<String, CapturedValue>,
+    after: Option<&BTreeMap<String, CapturedValue>>,
+    display: VectorDisplay,
+) -> Vec<DifferenceRow> {
+    let mut result = Vec::new();
+    let width = display.format.lane_bytes();
+    let mut registers = difference(before, after);
+
+    registers.sort_by(|left, right| {
+        let key = |name: &str| {
+            let prefix = name.trim_end_matches(|ch: char| ch.is_ascii_digit());
+            (
+                prefix.len(),
+                name[prefix.len()..].parse::<u32>().unwrap_or(0),
+            )
+        };
+
+        let (left_prefix, left_index) = key(&left.name);
+        let (right_prefix, right_index) = key(&right.name);
+        left.name[..left_prefix]
+            .cmp(&right.name[..right_prefix])
+            .then(left_index.cmp(&right_index))
+    });
+
+    for mut row in registers {
+        let values = [row.before.as_ref(), row.after.as_ref()];
+
+        let vectors = values.map(|value| {
+            value
+                .filter(|value| value.complete)
+                .and_then(|value| VectorValue::parse(&row.name, &value.text))
+        });
+
+        let count = vectors
+            .iter()
+            .flatten()
+            .map(|value| value.bytes() / width)
+            .max();
+
+        let Some(count) = count else {
+            row.name.insert(0, '$');
+            result.push(row);
+            continue;
+        };
+
+        for index in 0..count {
+            let bits = vectors
+                .each_ref()
+                .map(|value| value.as_ref().and_then(|value| value.lane(index, width)));
+
+            let cells = std::array::from_fn::<_, 2, _>(|side| {
+                bits[side]
+                    .map(|raw| display.text(raw).into())
+                    .or_else(|| values[side].cloned())
+            });
+
+            let [before, after] = cells;
+
+            result.push(DifferenceRow {
+                name: format!("${} [{index}]", row.name),
+                before,
+                after,
+                compared: row.compared,
+                bits: Some(bits),
+            });
+        }
+    }
+
+    result
+}
+
 impl Ui {
+    pub(crate) fn connect_comparisons(
+        &self,
+        capture: impl Fn(Variable, Rc<dyn Fn() -> bool>, SnapshotReply) + 'static,
+    ) {
+        self.comparisons.capture.replace(Some(Rc::new(capture)));
+    }
+
     fn comparison_origin(&self) -> Result<Origin, String> {
         let generation = self.model.current_stop_refresh_generation();
 
@@ -347,31 +461,16 @@ impl Ui {
         }
     }
 
-    fn capture_comparison(&self, source: Source) -> Result<Baseline, String> {
+    fn capture_loaded_comparison(&self, source: Source) -> Result<Baseline, String> {
         let origin = self.comparison_origin()?;
         let generation = origin.context.generation();
         let mut values = BTreeMap::new();
         let mut bytes = 0;
+        let mut complete = true;
 
         match &source {
-            Source::Local(path) | Source::Watch(path) => {
-                if matches!(source, Source::Watch(_)) && !self.model.watches_are_current() {
-                    return Err("Current watch values have not loaded".into());
-                }
-
-                let tree = if matches!(source, Source::Local(_)) {
-                    &self.locals_tree
-                } else {
-                    &self.watches_tree
-                };
-                let node = find_path(tree, path)
-                    .ok_or("Pinned variable is not loaded or is out of scope")?;
-
-                if !self.variable_action_is_current(&node.variable) {
-                    return Err("Variable data is stale or unavailable".into());
-                }
-
-                variable_values(&node, &mut values, "", &mut bytes, 0)?;
+            Source::Local(_) | Source::Watch(_) => {
+                return Err("Variable snapshots require on-demand capture".into());
             }
             Source::Registers => {
                 let registers = self
@@ -379,9 +478,15 @@ impl Ui {
                     .registers_for_details(generation)
                     .ok_or("Current register values have not loaded")?;
 
-                for register in registers {
-                    insert(&mut values, register.name, register.value, &mut bytes)?;
-                }
+                let snapshot = register_snapshot(
+                    registers,
+                    self.model.target_architecture(),
+                    self.model.target_endian(),
+                    self.model.target_pointer_width(),
+                )?;
+
+                values = snapshot.values;
+                complete = snapshot.complete;
             }
             Source::Memory {
                 id,
@@ -414,7 +519,7 @@ impl Ui {
                     insert(
                         &mut values,
                         format!("0x{address:x}"),
-                        crate::hex::encode(row),
+                        crate::hex::encode(row).into(),
                         &mut bytes,
                     )?;
                 }
@@ -429,7 +534,81 @@ impl Ui {
             source,
             origin,
             values,
+            complete,
         })
+    }
+
+    fn capture_comparison(
+        self: &Rc<Self>,
+        source: Source,
+        current: Rc<dyn Fn() -> bool>,
+        reply: CaptureReply,
+    ) {
+        let (path, tree) = match &source {
+            Source::Local(path) => (path, &self.locals_tree),
+            Source::Watch(path) => (path, &self.watches_tree),
+            _ => {
+                reply(self.capture_loaded_comparison(source));
+                return;
+            }
+        };
+
+        let prepared = self.comparison_origin().and_then(|origin| {
+            let node =
+                find_path(tree, path).ok_or("Pinned variable is not loaded or is out of scope")?;
+
+            if !self.variable_action_is_current(&node.variable) {
+                return Err("Variable data is stale or unavailable".into());
+            }
+
+            Ok((origin, node.variable))
+        });
+
+        let (origin, variable) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                reply(Err(error));
+                return;
+            }
+        };
+
+        let Some(capture) = self.comparisons.capture.borrow().clone() else {
+            reply(Err("Variable snapshot capture is unavailable".into()));
+            return;
+        };
+
+        let weak = Rc::downgrade(self);
+        let context = origin.context.clone();
+        let symbols = origin.symbols;
+        let target = variable.clone();
+
+        let guard: Rc<dyn Fn() -> bool> = Rc::new(move || {
+            current()
+                && weak.upgrade().is_some_and(|ui| {
+                    ui.model.is_stop_context_current(&context)
+                        && ui.model.symbols.revision() == symbols
+                        && ui.variable_action_is_current(&target)
+                })
+        });
+
+        let response = Rc::clone(&guard);
+
+        capture(
+            variable,
+            guard,
+            Box::new(move |result| {
+                reply(if response() {
+                    result.map(|snapshot| Baseline {
+                        source,
+                        origin,
+                        values: snapshot.values,
+                        complete: snapshot.complete,
+                    })
+                } else {
+                    Err("Snapshot cancelled because the stop or selection changed".into())
+                });
+            }),
+        );
     }
 
     pub(super) fn open_comparisons(self: &Rc<Self>) {
@@ -449,45 +628,97 @@ impl Ui {
 
             button.connect_clicked(move |_| {
                 let (Some(ui), Some(view)) = (weak.upgrade(), target.upgrade()) else { return };
-                let mut selected = view.pages.current_page().unwrap_or(0);
-                view.status.set_visible(false);
 
-                match action {
-                    0 => {
-                        let result = ui.comparison_source(view.source.selected())
-                            .and_then(|source| ui.capture_comparison(source))
-                            .and_then(|baseline| ui.comparisons.pin(baseline).map_err(str::to_owned));
-
-                        match result {
-                            Ok(index) => selected = index as u32,
-                            Err(error) => {
-                                view.status.set_text(&error);
-                                view.status.set_visible(true);
-                                return;
-                            }
-                        }
-                    }
-                    1 => {
-                        for pin in ui.comparisons.pins.borrow_mut().iter_mut() {
-                            pin.compared = Some(ui.capture_comparison(pin.baseline.source.clone()).and_then(|now| {
-                                if pin.baseline.origin.compatible(&now.origin) {
-                                    Ok(now)
-                                } else {
-                                    Err("Different target, thread, frame, function or symbol revision. Return to the baseline context before comparing.".into())
-                                }
-                            }));
-                        }
-                    }
-                    _ => ui.comparisons.pins.borrow_mut().clear(),
+                if view.pending.get() != 0 {
+                    return;
                 }
 
-                view.render(&ui.comparisons, selected);
+                view.status.set_visible(false);
+
+                let sources = match action {
+                    0 => match ui.comparison_source(view.source.selected()) {
+                        Ok(source) => vec![(None, source)],
+                        Err(error) => {
+                            view.status.set_text(&error);
+                            view.status.set_visible(true);
+                            return;
+                        }
+                    },
+                    1 => ui.comparisons.pins.borrow().iter().enumerate()
+                        .map(|(index, pin)| (Some(index), pin.baseline.source.clone())).collect(),
+                    _ => {
+                        ui.comparisons.pins.borrow_mut().clear();
+                        view.render(&ui.comparisons, 0);
+                        return;
+                    }
+                };
+
+                let request = ui.comparisons.request.get().wrapping_add(1);
+                ui.comparisons.request.set(request);
+                view.pending.set(sources.len());
+                view.update_actions(&ui.comparisons);
+                view.status.set_text("Capturing fields and elements…");
+                view.status.set_visible(true);
+
+                for (index, source) in sources {
+                    let weak = Rc::downgrade(&ui);
+                    let target = Rc::downgrade(&view);
+
+                    let current: Rc<dyn Fn() -> bool> = Rc::new(move || {
+                        target.upgrade().is_some() && weak.upgrade().is_some_and(|ui| ui.comparisons.request.get() == request)
+                    });
+
+                    let weak = Rc::downgrade(&ui);
+                    let target = Rc::downgrade(&view);
+
+                    let reply: CaptureReply = Box::new(move |result| {
+                        let (Some(ui), Some(view)) = (weak.upgrade(), target.upgrade()) else { return };
+
+                        if ui.comparisons.request.get() != request {
+                            return;
+                        }
+
+                        let mut selected = view.pages.current_page().unwrap_or(0);
+                        view.pending.set(view.pending.get().saturating_sub(1));
+
+                        if view.pending.get() == 0 {
+                            view.status.set_visible(false);
+                        }
+
+                        if let Some(index) = index {
+                            ui.comparisons.pins.borrow_mut()[index].compared = Some(result);
+                        } else {
+                            match result.and_then(|baseline| ui.comparisons.pin(baseline).map_err(str::to_owned)) {
+                                Ok(index) => selected = index as u32,
+                                Err(error) => {
+                                    view.status.set_text(&error);
+                                    view.status.set_visible(true);
+                                }
+                            }
+                        }
+
+                        if view.pending.get() == 0 {
+                            view.render(&ui.comparisons, selected);
+                        }
+                    });
+
+                    let compatible = index.is_none_or(|index| {
+                        ui.comparison_origin().is_ok_and(|origin| ui.comparisons.pins.borrow()[index].baseline.origin.compatible(&origin))
+                    });
+
+                    if compatible {
+                        ui.capture_comparison(source, current, reply);
+                    } else {
+                        reply(Err("Different target, thread, frame, function or symbol revision. Return to the baseline context before comparing.".into()));
+                    }
+                }
             });
         }
 
         let state = Rc::clone(&self.comparisons);
 
         window.connect_close_request(move |_| {
+            state.request.set(state.request.get().wrapping_add(1));
             state.selected.set(view.pages.current_page().unwrap_or(0));
             glib::Propagation::Proceed
         });
@@ -508,6 +739,7 @@ struct ComparisonView {
     count: gtk::Label,
     status: gtk::Label,
     columns: TableLayout,
+    pending: Cell<usize>,
 }
 
 impl ComparisonView {
@@ -524,17 +756,19 @@ impl ComparisonView {
         ]);
 
         source.set_hexpand(true);
-        source.set_tooltip_text(Some("Choose the loaded data to capture as a baseline"));
+        source.set_tooltip_text(Some(
+            "Choose a variable, registers, or memory range to capture",
+        ));
         let pin = gtk::Button::with_label("Pin current");
         pin.set_tooltip_text(Some(
-            "Capture loaded values. Pinning the same source and context replaces its baseline.",
+            "Capture fields and collection elements. Pinning the same source and context replaces its baseline.",
         ));
         let compare = gtk::Button::with_label("Compare current");
-        compare.set_tooltip_text(Some("Compare all pins with currently loaded data. Results stay fixed until you compare again."));
+        compare.set_tooltip_text(Some("Capture all pinned variables again and compare. Results stay fixed until you compare again."));
         let clear = gtk::Button::with_label("Clear pins");
 
         let help = empty_label(
-            "Pin loaded data, step, then compare. Results are snapshots, not live values.\n\nUp to 8 pins, 256 rows / 64 KiB each and 4 KiB per memory range. Only loaded rows are captured. Comparisons require the same target, thread, frame, function and symbol revision, but do not prove the same call invocation.",
+            "Pin a value, step, then compare. Fields and collection elements are captured on demand, even when collapsed. Pointers retain their addresses without following object graphs. Raw union members do not identify the active member.\n\nUp to 8 pins, 256 captured values / 64 KiB each and 8 nested levels. Partial captures are labelled. Registers and memory use loaded data, with up to 4 KiB per memory range. Supported SIMD values are shown by lane and compared bit for bit, independently of their display format. Comparisons require the same target, thread, frame, function and symbol revision, but do not prove the same call invocation.",
         );
 
         help.set_max_width_chars(54);
@@ -593,6 +827,7 @@ impl ComparisonView {
             count,
             status,
             columns: columns.table(TableId::Comparisons),
+            pending: Cell::new(0),
         });
 
         (window, view)
@@ -626,11 +861,24 @@ impl ComparisonView {
                 page.append(&error);
             }
 
-            page.append(&difference_table(
-                difference(&pin.baseline.values, current.map(|now| &now.values)),
-                &self.filter,
-                &self.columns,
-            ));
+            if !pin.baseline.complete || current.is_some_and(|now| !now.complete) {
+                page.append(&empty_label("Partial snapshot · unreadable values, abbreviated printers or capture limits. Matching captured fields do not establish equality of the entire object."));
+            }
+
+            if pin.baseline.source == Source::Registers {
+                page.append(&register_difference_table(
+                    pin,
+                    current,
+                    &self.filter,
+                    &self.columns,
+                ));
+            } else {
+                page.append(&difference_table(
+                    difference(&pin.baseline.values, current.map(|now| &now.values)),
+                    &self.filter,
+                    &self.columns,
+                ));
+            }
 
             let name = pin.baseline.source.description();
             let tab = gtk::Label::new(Some(&name));
@@ -652,8 +900,17 @@ impl ComparisonView {
         self.stack
             .set_visible_child_name(if pins.is_empty() { "empty" } else { "pins" });
 
-        self.compare.set_sensitive(!pins.is_empty());
-        self.clear.set_sensitive(!pins.is_empty());
+        drop(pins);
+        self.update_actions(state);
+    }
+
+    fn update_actions(&self, state: &Comparisons) {
+        let pins = state.pins.borrow();
+        let idle = self.pending.get() == 0;
+        self.pin.set_sensitive(idle);
+        self.source.set_sensitive(idle);
+        self.compare.set_sensitive(idle && !pins.is_empty());
+        self.clear.set_sensitive(idle && !pins.is_empty());
 
         self.changed
             .set_sensitive(pins.iter().any(|pin| matches!(pin.compared, Some(Ok(_)))));
@@ -686,13 +943,71 @@ fn difference_filter(changed: &gtk::CheckButton) -> gtk::CustomFilter {
                 .downcast_ref::<glib::BoxedAnyObject>()
                 .is_some_and(|object| {
                     let row = object.borrow::<DifferenceRow>();
-                    !row.compared || row.changed()
+                    !row.compared || row.changed() || row.uncertain()
                 })
     });
 
     let updated = filter.clone();
     changed.connect_toggled(move |_| updated.changed(gtk::FilterChange::Different));
     filter
+}
+
+fn register_difference_table(
+    pin: &Pin,
+    current: Option<&Baseline>,
+    filter: &gtk::CustomFilter,
+    columns: &TableLayout,
+) -> gtk::Box {
+    let display = Rc::clone(&pin.vector_display);
+    let before = pin.baseline.values.clone();
+    let after = current.map(|now| now.values.clone());
+    let root = gtk::Box::new(gtk::Orientation::Vertical, components::CONTROL_GAP);
+    root.set_vexpand(true);
+    let table = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    table.set_vexpand(true);
+
+    table.append(&difference_table(
+        register_difference(&before, after.as_ref(), display.get()),
+        filter,
+        columns,
+    ));
+
+    let has_vectors = before
+        .iter()
+        .chain(after.iter().flat_map(|values| values.iter()))
+        .any(|(name, value)| value.complete && VectorValue::parse(name, &value.text).is_some());
+
+    if has_vectors {
+        let controls = VectorControls::new();
+        controls.set_display(display.get());
+        controls.root.prepend(&empty_label("SIMD lanes"));
+        controls
+            .root
+            .append(&empty_label("Low → high · changes compare bits"));
+        root.append(&controls.root);
+        let target = table.downgrade();
+        let filter = filter.clone();
+        let columns = columns.clone();
+
+        controls.connect_changed(move |selected| {
+            display.set(selected);
+
+            if let Some(table) = target.upgrade() {
+                while let Some(child) = table.first_child() {
+                    table.remove(&child);
+                }
+
+                table.append(&difference_table(
+                    register_difference(&before, after.as_ref(), selected),
+                    &filter,
+                    &columns,
+                ));
+            }
+        });
+    }
+
+    root.append(&table);
+    root
 }
 
 fn difference_table(
@@ -704,10 +1019,11 @@ fn difference_table(
     root.set_vexpand(true);
     let total = rows.len();
     let changed = rows.iter().filter(|row| row.changed()).count();
+    let uncertain = rows.iter().filter(|row| row.uncertain()).count();
     let compared = rows.iter().any(|row| row.compared);
 
     let summary = if compared {
-        format!("{changed} changed · {total} captured entries")
+        format!("{changed} changed · {uncertain} incomplete · {total} captured entries")
     } else {
         format!("{total} values pinned · compare after stepping")
     };
@@ -732,8 +1048,28 @@ fn difference_table(
             let row = object.borrow::<DifferenceRow>();
             let value = row.cells()[index];
             clear_label_selection(label);
-            label.set_text(value);
-            label.set_tooltip_text(Some(value));
+
+            let bits = row.bits.and_then(|bits| {
+                index
+                    .checked_sub(1)
+                    .and_then(|side| bits.get(side).copied().flatten())
+            });
+
+            if let Some(raw) = bits
+                && row.changed()
+                && row.before.as_ref().map(|value| &value.text)
+                    == row.after.as_ref().map(|value| &value.text)
+            {
+                // Equal float text can hide a different NaN payload or rounding.
+                label.set_text(&format!("{value}\n0x{raw:x}"));
+            } else {
+                label.set_text(value);
+            }
+
+            label.set_tooltip_text(Some(&bits.map_or_else(
+                || value.to_owned(),
+                |raw| format!("{value}\nBits 0x{raw:x}"),
+            )));
             label.set_halign(gtk::Align::Fill);
             label.set_xalign(0.0);
             label.set_wrap(true);
@@ -764,7 +1100,12 @@ fn difference_table(
         .vexpand(true)
         .build();
 
-    let empty = empty_label("No differences in captured data");
+    let empty = empty_label(if total == 0 {
+        "No captured values"
+    } else {
+        "No differences in captured data"
+    });
+
     empty.set_valign(gtk::Align::Center);
     empty.set_halign(gtk::Align::Center);
     let stack = gtk::Stack::new();
@@ -824,6 +1165,7 @@ mod tests {
             source: Source::Registers,
             origin,
             values: before.clone(),
+            complete: true,
         };
 
         assert_eq!(state.pin(baseline.clone()), Ok(0));
@@ -840,6 +1182,20 @@ mod tests {
         current.values.insert("pair.x".into(), "42".into());
         state.pins.borrow_mut()[0].compared = Some(Ok(current));
         view.render(&state, 0);
+        view.pending.set(1);
+        view.update_actions(&state);
+
+        assert!(
+            !view.pin.is_sensitive() && !view.compare.is_sensitive() && !view.clear.is_sensitive()
+        );
+
+        view.pending.set(0);
+        view.update_actions(&state);
+
+        assert!(
+            view.pin.is_sensitive() && view.compare.is_sensitive() && view.clear.is_sensitive()
+        );
+
         main.block_on(glib::timeout_future(Duration::from_millis(100)));
 
         let table = super::super::tests::descendants::<gtk::ColumnView>(&view.pages)
@@ -855,24 +1211,6 @@ mod tests {
         main.block_on(glib::timeout_future(Duration::from_millis(100)));
         assert_eq!(window.height(), height);
 
-        if let Some(path) = std::env::var_os("FGDB_COMPARISON_CAPTURE") {
-            let widget = window.child().unwrap();
-            let snapshot = gtk::Snapshot::new();
-
-            gtk::WidgetPaintable::new(Some(&widget)).snapshot(
-                &snapshot,
-                f64::from(widget.width()),
-                f64::from(widget.height()),
-            );
-
-            window
-                .renderer()
-                .unwrap()
-                .render_texture(snapshot.to_node().unwrap(), None)
-                .save_to_png(path)
-                .unwrap();
-        }
-
         let mut large = baseline.clone();
 
         large.source = Source::Memory {
@@ -882,7 +1220,7 @@ mod tests {
         };
 
         large.values = (0..MAX_ROWS)
-            .map(|index| (format!("field_{index}"), "long_value".repeat(40)))
+            .map(|index| (format!("field_{index}"), "long_value".repeat(40).into()))
             .collect();
 
         assert_eq!(state.pin(large), Ok(1));
@@ -905,6 +1243,118 @@ mod tests {
         assert_eq!(stacks[0].visible_child_name().as_deref(), Some("empty"));
         view.changed.set_active(false);
         assert_eq!(stacks[0].visible_child_name().as_deref(), Some("table"));
+        let mut partial = state.pins.borrow()[0].baseline.clone();
+        partial.complete = false;
+        partial.values.values_mut().next().unwrap().complete = false;
+        state.pins.borrow_mut()[0].compared = Some(Ok(partial));
+        view.changed.set_active(true);
+        view.render(&state, 0);
+        let page = view.pages.nth_page(Some(0)).unwrap();
+
+        let table = super::super::tests::descendants::<gtk::ColumnView>(&page)
+            .pop()
+            .unwrap();
+
+        assert_eq!(
+            table.model().unwrap().n_items(),
+            1,
+            "incomplete rows must remain visible under Changed only"
+        );
+
+        let mut registers = state.pins.borrow()[0].baseline.clone();
+
+        registers.values = BTreeMap::from([
+            ("rax".into(), "0x0000000000000001".into()),
+            ("xmm0".into(), "0x7fc0004280000000c02000003f800000".into()),
+            ("zmm2".into(), "0x0".into()),
+        ]);
+
+        state.pin(registers.clone()).unwrap();
+        registers
+            .values
+            .insert("rax".into(), "0x0000000000000002".into());
+
+        registers
+            .values
+            .insert("xmm0".into(), "0x7fc0004380000000c02000003fc00000".into());
+
+        state.pins.borrow_mut()[0].compared = Some(Ok(registers));
+        view.render(&state, 0);
+        let page = view.pages.nth_page(Some(0)).unwrap();
+        let controls = super::super::tests::descendants::<gtk::DropDown>(&page);
+        assert_eq!(controls.len(), 2);
+        controls[0].set_selected(4);
+        assert!(!controls[1].is_sensitive());
+
+        let table = super::super::tests::descendants::<gtk::ColumnView>(&page)
+            .pop()
+            .unwrap();
+
+        let model = table.model().unwrap();
+        assert_eq!(model.n_items(), 3);
+
+        let nan = model
+            .item(2)
+            .and_downcast::<glib::BoxedAnyObject>()
+            .unwrap();
+
+        assert_eq!(nan.borrow::<DifferenceRow>().name, "$xmm0 [3]");
+        assert!(nan.borrow::<DifferenceRow>().changed());
+        let previous = table.downgrade();
+        drop(table);
+        controls[0].set_selected(0);
+        main.block_on(glib::timeout_future(Duration::from_millis(100)));
+
+        assert!(
+            previous.upgrade().is_none(),
+            "reformatting must release the old table"
+        );
+
+        assert!(controls[1].is_sensitive());
+        controls[1].set_selected(2);
+        view.changed.set_active(false);
+        main.block_on(glib::timeout_future(Duration::from_millis(100)));
+        assert_eq!(window.height(), height);
+        assert!(window.width() <= 960);
+        controls[0].set_selected(4);
+        view.changed.set_active(true);
+        view.render(&state, 0);
+        let page = view.pages.nth_page(Some(0)).unwrap();
+        let controls = super::super::tests::descendants::<gtk::DropDown>(&page);
+
+        assert_eq!(
+            controls[0].selected(),
+            4,
+            "comparison refresh retains the lane format"
+        );
+
+        view.source.set_selected(2);
+        main.block_on(glib::timeout_future(Duration::from_millis(100)));
+
+        assert!(
+            super::super::tests::descendants::<gtk::Label>(&page)
+                .iter()
+                .any(|label| label.text().contains("0x7fc00043"))
+        );
+
+        if let Some(path) = std::env::var_os("FGDB_COMPARISON_CAPTURE") {
+            let widget = window.child().unwrap();
+            let snapshot = gtk::Snapshot::new();
+
+            gtk::WidgetPaintable::new(Some(&widget)).snapshot(
+                &snapshot,
+                f64::from(widget.width()),
+                f64::from(widget.height()),
+            );
+
+            window
+                .renderer()
+                .unwrap()
+                .render_texture(snapshot.to_node().unwrap(), None)
+                .save_to_png(path)
+                .unwrap();
+        }
+
         state.pins.borrow_mut().clear();
         view.render(&state, 0);
         assert!(!view.compare.is_sensitive());
@@ -956,28 +1406,19 @@ mod tests {
     }
 
     #[test]
-    fn variable_capture_only_includes_loaded_children() {
-        let record = crate::debugger::parse_record(
-            r#"^done,name="root",numchild="2",value="{...}",type="Pair""#,
-        )
-        .unwrap();
-        let node = VariableNode::new(crate::debugger::variable_object(&record, "pair").unwrap());
-        let mut values = BTreeMap::new();
-        variable_values(&node, &mut values, "", &mut 0, 0).unwrap();
-        assert_eq!(values.len(), 1);
-        let child_record = crate::debugger::parse_record(
-            r#"^done,name="root.x",numchild="0",value="7",type="int""#,
-        )
-        .unwrap();
-        let child = node.child(crate::debugger::variable_object(&child_record, "x").unwrap());
-        node.children.append(&SnapshotRow::new(child));
-        node.children_loaded.set(true);
-        values.clear();
-        variable_values(&node, &mut values, "", &mut 0, 0).unwrap();
-        assert_eq!(
-            values.get("pair [Pair] / x [int]").map(String::as_str),
-            Some("7")
-        );
+    fn incomplete_values_never_establish_equality() {
+        let values = BTreeMap::from([(
+            "pair".into(),
+            CapturedValue {
+                text: "{...}".into(),
+                complete: false,
+            },
+        )]);
+
+        let rows = difference(&values, Some(&values));
+        assert!(rows[0].uncertain());
+        assert!(!rows[0].changed());
+        assert_eq!(rows[0].cells()[3], "Incomplete");
     }
 
     #[test]
@@ -985,7 +1426,7 @@ mod tests {
         let before = BTreeMap::from([("x".into(), "1".into()), ("gone".into(), "2".into())]);
         let after = BTreeMap::from([("x".into(), "3".into())]);
         let rows = difference(&before, Some(&after));
-        assert_eq!(rows[0].cells(), ["gone", "2", "—", "Not loaded"]);
+        assert_eq!(rows[0].cells(), ["gone", "2", "—", "Not captured"]);
         assert_eq!(rows[1].cells(), ["x", "1", "3", "Changed"]);
         assert!(rows.iter().all(DifferenceRow::changed));
         assert!(
@@ -999,7 +1440,173 @@ mod tests {
                 .all(|row| !row.compared && row.cells()[3] == "Pinned")
         );
         let mut values = BTreeMap::new();
-        assert!(insert(&mut values, "x".into(), "x".repeat(MAX_BYTES), &mut 0).is_err());
+        assert!(
+            insert(
+                &mut values,
+                "x".into(),
+                "x".repeat(MAX_BYTES).into(),
+                &mut 0
+            )
+            .is_err()
+        );
         assert!(values.is_empty());
+    }
+
+    #[test]
+    fn register_snapshots_compare_exact_lanes_not_printer_or_float_text() {
+        let capture = |entries: &[(&str, &str)]| {
+            register_snapshot(
+                entries
+                    .iter()
+                    .map(|(name, value)| Register {
+                        name: (*name).into(),
+                        value: (*value).into(),
+                        pointer_chain: Vec::new(),
+                    })
+                    .collect(),
+                TargetArchitecture::X86_64,
+                Some(TargetEndian::Little),
+                PointerWidth::Bits64,
+            )
+            .unwrap()
+        };
+
+        let before = capture(&[
+            ("rax", "0x1"),
+            (
+                "xmm0",
+                "{v4_float = {1, -2.5, -0, nan}, v2_int64 = {0xc02000003f800000, 0x7fc0004280000000}}",
+            ),
+            ("xmm2", "{v2_int64 = {0 <repeats 2 times>}}"),
+            ("xmm10", "0x0"),
+        ]);
+
+        assert!(before.complete);
+        assert_eq!(before.values["rax"].text, "0x0000000000000001");
+
+        assert_eq!(
+            before.values["xmm0"].text,
+            "0x7fc0004280000000c02000003f800000"
+        );
+
+        let mut display = VectorDisplay::default();
+        display.format = VectorLaneFormat::Float32;
+        let mut after = before.values.clone();
+        after.insert("xmm0".into(), "0x7fc0004380000000c02000003f800000".into());
+        let rows = register_difference(&before.values, Some(&after), display);
+        let changed = rows.iter().filter(|row| row.changed()).collect::<Vec<_>>();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].name, "$xmm0 [3]");
+
+        assert_eq!(
+            changed[0].before, changed[0].after,
+            "NaN payload changes must survive identical displayed text"
+        );
+
+        assert_eq!(changed[0].bits, Some([Some(0x7fc00042), Some(0x7fc00043)]));
+        assert_eq!(rows[5].name, "$xmm2 [0]");
+        assert_eq!(rows[9].name, "$xmm10 [0]");
+
+        assert!(
+            rows.iter()
+                .any(|row| row.before.as_ref().is_some_and(|value| value.text == "1"))
+        );
+
+        after.insert("xmm0".into(), "0x7fc0004200000000c02000003f800000".into());
+        let zeros = register_difference(&before.values, Some(&after), display);
+        assert_eq!(zeros.iter().filter(|row| row.changed()).count(), 1);
+        assert!(zeros[3].changed(), "negative zero has different bits");
+        let unavailable = capture(&[("xmm0", "<unavailable>")]);
+        assert!(!unavailable.complete);
+        assert!(!capture(&[("xmm0", "0xinvalid")]).complete);
+        let rows = register_difference(&before.values, Some(&unavailable.values), display);
+        assert!(rows[1..5].iter().all(DifferenceRow::uncertain));
+
+        let large = (0..32)
+            .map(|index| Register {
+                name: format!("zmm{index}"),
+                value: format!(
+                    "{{ignored = {{{}}}, v8_int64 = {{0 <repeats 8 times>}}}}",
+                    "0, ".repeat(1024)
+                ),
+                pointer_chain: Vec::new(),
+            })
+            .collect();
+
+        let snapshot = register_snapshot(
+            large,
+            TargetArchitecture::X86_64,
+            Some(TargetEndian::Little),
+            PointerWidth::Bits64,
+        )
+        .unwrap();
+
+        assert!(snapshot.complete);
+        assert_eq!(snapshot.values.len(), 32);
+
+        assert!(
+            snapshot
+                .values
+                .values()
+                .all(|value| value.text.len() == 130)
+        );
+
+        display.format = VectorLaneFormat::Int8;
+
+        assert_eq!(
+            register_difference(&snapshot.values, None, display).len(),
+            2048
+        );
+    }
+
+    #[test]
+    #[ignore = "requires GDB, an x86 host and the c-simd-target fixture"]
+    fn live_register_comparisons_detect_changed_simd_lanes() {
+        use crate::app::test_support::{open_debugger, request};
+
+        let (_debugger, client) = open_debugger("c-simd-target", "simd_sse_checkpoint");
+        let names = crate::debugger::register_names(&request(&client, "-data-list-register-names"));
+        let numbers = crate::debugger::compact_register_numbers(&names, TargetArchitecture::X86_64);
+
+        let command = format!(
+            "-data-list-register-values x {}",
+            numbers
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+
+        let capture = || {
+            register_snapshot(
+                crate::debugger::registers(&request(&client, &command), &names),
+                TargetArchitecture::X86_64,
+                Some(TargetEndian::Little),
+                PointerWidth::Bits64,
+            )
+            .unwrap()
+        };
+
+        let before = capture();
+        assert!(before.complete, "{before:?}");
+
+        assert!(
+            request(
+                &client,
+                "-data-evaluate-expression \"$xmm0.v4_int32[3] = 0x7fc00043\""
+            )
+            .is_done()
+        );
+
+        let after = capture();
+        assert!(after.complete);
+        let mut display = VectorDisplay::default();
+        display.format = VectorLaneFormat::Float32;
+        let rows = register_difference(&before.values, Some(&after.values), display);
+        let changed = rows.iter().filter(|row| row.changed()).collect::<Vec<_>>();
+        assert_eq!(changed.len(), 1);
+        assert!(changed[0].name.ends_with("0 [3]"));
+        assert_eq!(changed[0].bits, Some([Some(0x7fc00042), Some(0x7fc00043)]));
+        assert_eq!(changed[0].before, changed[0].after);
     }
 }
